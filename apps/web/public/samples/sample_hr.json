@@ -1,0 +1,7 @@
+[
+  {"emp_id": "E001", "full_name": "Jane Smith", "dept_code": "ENG", "hire_dt": "2020-03-15", "salary_amt": "95000"},
+  {"emp_id": "E002", "full_name": "John Doe", "dept_code": "FIN", "hire_dt": "2019-07-01", "salary_amt": "82000"},
+  {"emp_id": "E003", "full_name": "Maria Garcia", "dept_code": "HR", "hire_dt": "2021-11-20", "salary_amt": "71000"},
+  {"emp_id": "E004", "full_name": "Alex Chen", "dept_code": "ENG", "hire_dt": "2022-01-10", "salary_amt": "105000"},
+  {"emp_id": "E005", "full_name": "Sam Wilson", "dept_code": "OPS", "hire_dt": "2018-05-05", "salary_amt": "68000"}
+]

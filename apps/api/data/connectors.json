@@ -1,0 +1,58 @@
+{
+  "connectors": [
+    {
+      "id": "demo-pg-source",
+      "name": "PostgreSQL \u00b7 Source (demo)",
+      "type": "postgresql",
+      "role": "source",
+      "host": "",
+      "port": 5432,
+      "database": "",
+      "username": "",
+      "password": "",
+      "schema": "public",
+      "connection_string": "postgresql://readonly:pass@localhost:5432/source_db",
+      "ssl": true,
+      "warehouse": "",
+      "last_tested_at": "2026-06-13T00:01:17.454563+00:00",
+      "last_test_ok": false,
+      "created_at": "2026-06-12T23:56:00.958633+00:00"
+    },
+    {
+      "id": "demo-snowflake-dest",
+      "name": "Snowflake \u00b7 Warehouse (demo)",
+      "type": "snowflake",
+      "role": "destination",
+      "host": "",
+      "port": 5432,
+      "database": "",
+      "username": "",
+      "password": "",
+      "schema": "public",
+      "connection_string": "snowflake://user:pass@account.snowflakecomputing.com/warehouse_db",
+      "ssl": true,
+      "warehouse": "COMPUTE_WH",
+      "last_tested_at": "2026-06-13T00:01:22.941495+00:00",
+      "last_test_ok": true,
+      "created_at": "2026-06-12T23:56:00.958633+00:00"
+    },
+    {
+      "id": "demo-mongo-dest",
+      "name": "MongoDB \u00b7 Analytics (demo)",
+      "type": "mongodb",
+      "role": "destination",
+      "host": "",
+      "port": 5432,
+      "database": "",
+      "username": "",
+      "password": "",
+      "schema": "public",
+      "connection_string": "mongodb://user:pass@localhost:27017/analytics",
+      "ssl": true,
+      "warehouse": "",
+      "last_tested_at": "2026-06-13T00:01:23.975529+00:00",
+      "last_test_ok": true,
+      "created_at": "2026-06-12T23:56:00.958633+00:00"
+    }
+  ]
+}

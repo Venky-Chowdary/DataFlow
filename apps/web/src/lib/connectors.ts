@@ -1,0 +1,88 @@
+import type { ConnectorItem } from "@dataflow/design-system";
+
+export const CONNECTOR_CATALOG: ConnectorItem[] = [
+  {
+    id: "postgresql",
+    name: "PostgreSQL",
+    category: "database",
+    status: "live",
+    description: "Full read/write with live schema probe and DDL evolution",
+  },
+  {
+    id: "snowflake",
+    name: "Snowflake",
+    category: "warehouse",
+    status: "live",
+    description: "Warehouse upload with live probe and batched INSERT load",
+  },
+  {
+    id: "sqlserver",
+    name: "SQL Server",
+    category: "database",
+    status: "planned",
+    description: "Enterprise OLTP source and destination with CDC",
+  },
+  {
+    id: "mongodb",
+    name: "MongoDB",
+    category: "database",
+    status: "planned",
+    description: "Document store migration with nested schema inference",
+  },
+  {
+    id: "bigquery",
+    name: "BigQuery",
+    category: "warehouse",
+    status: "planned",
+    description: "Analytics warehouse with partitioned load",
+  },
+  {
+    id: "csv",
+    name: "CSV / TSV",
+    category: "file",
+    status: "live",
+    description: "Upload, parse, infer schema, semantic column mapping",
+  },
+  {
+    id: "excel",
+    name: "Excel",
+    category: "file",
+    status: "beta",
+    description: "Multi-sheet workbooks with type detection",
+  },
+  {
+    id: "json",
+    name: "JSON",
+    category: "file",
+    status: "live",
+    description: "Nested document flattening and array expansion",
+  },
+  {
+    id: "parquet",
+    name: "Parquet",
+    category: "file",
+    status: "planned",
+    description: "Columnar ingest with schema evolution",
+  },
+  {
+    id: "openapi",
+    name: "OpenAPI / REST",
+    category: "api",
+    status: "ai",
+    description: "AI Connector Factory generates adapter from spec",
+  },
+  {
+    id: "graphql",
+    name: "GraphQL",
+    category: "api",
+    status: "ai",
+    description: "Introspection-driven schema and paginated fetch",
+  },
+  {
+    id: "oracle",
+    name: "Oracle",
+    category: "database",
+    status: "planned",
+    description: "Legacy ERP and financial system migration",
+  },
+];

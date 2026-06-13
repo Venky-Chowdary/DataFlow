@@ -1,0 +1,4346 @@
+{
+  "version": 1,
+  "total": 620,
+  "connectors": [
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "category": "database",
+      "status": "live",
+      "description": "Full read/write with live schema probe"
+    },
+    {
+      "id": "snowflake",
+      "name": "Snowflake",
+      "category": "warehouse",
+      "status": "live",
+      "description": "Cloud data warehouse with batched load"
+    },
+    {
+      "id": "csv___tsv",
+      "name": "CSV / TSV",
+      "category": "file",
+      "status": "live",
+      "description": "Upload, parse, infer schema, semantic mapping"
+    },
+    {
+      "id": "json",
+      "name": "JSON",
+      "category": "file",
+      "status": "live",
+      "description": "Nested document flattening and array expansion"
+    },
+    {
+      "id": "excel",
+      "name": "Excel",
+      "category": "file",
+      "status": "beta",
+      "description": "Multi-sheet workbooks with type detection"
+    },
+    {
+      "id": "mysql",
+      "name": "MySQL",
+      "category": "database",
+      "status": "beta",
+      "description": "Popular open-source OLTP database"
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "category": "database",
+      "status": "beta",
+      "description": "Document store with nested schema inference"
+    },
+    {
+      "id": "sql_server",
+      "name": "SQL Server",
+      "category": "database",
+      "status": "planned",
+      "description": "SQL Server source and destination connector"
+    },
+    {
+      "id": "oracle",
+      "name": "Oracle",
+      "category": "database",
+      "status": "planned",
+      "description": "Oracle source and destination connector"
+    },
+    {
+      "id": "db2",
+      "name": "DB2",
+      "category": "database",
+      "status": "planned",
+      "description": "DB2 source and destination connector"
+    },
+    {
+      "id": "sybase_ase",
+      "name": "Sybase ASE",
+      "category": "database",
+      "status": "planned",
+      "description": "Sybase ASE source and destination connector"
+    },
+    {
+      "id": "informix",
+      "name": "Informix",
+      "category": "database",
+      "status": "planned",
+      "description": "Informix source and destination connector"
+    },
+    {
+      "id": "teradata",
+      "name": "Teradata",
+      "category": "database",
+      "status": "planned",
+      "description": "Teradata source and destination connector"
+    },
+    {
+      "id": "netezza",
+      "name": "Netezza",
+      "category": "database",
+      "status": "planned",
+      "description": "Netezza source and destination connector"
+    },
+    {
+      "id": "greenplum",
+      "name": "Greenplum",
+      "category": "database",
+      "status": "planned",
+      "description": "Greenplum source and destination connector"
+    },
+    {
+      "id": "vertica",
+      "name": "Vertica",
+      "category": "database",
+      "status": "planned",
+      "description": "Vertica source and destination connector"
+    },
+    {
+      "id": "singlestore",
+      "name": "SingleStore",
+      "category": "database",
+      "status": "planned",
+      "description": "SingleStore source and destination connector"
+    },
+    {
+      "id": "cockroachdb",
+      "name": "CockroachDB",
+      "category": "database",
+      "status": "planned",
+      "description": "CockroachDB source and destination connector"
+    },
+    {
+      "id": "mariadb",
+      "name": "MariaDB",
+      "category": "database",
+      "status": "planned",
+      "description": "MariaDB source and destination connector"
+    },
+    {
+      "id": "amazon_aurora",
+      "name": "Amazon Aurora",
+      "category": "database",
+      "status": "planned",
+      "description": "Amazon Aurora source and destination connector"
+    },
+    {
+      "id": "amazon_rds_postgresql",
+      "name": "Amazon RDS PostgreSQL",
+      "category": "database",
+      "status": "planned",
+      "description": "Amazon RDS PostgreSQL source and destination connector"
+    },
+    {
+      "id": "amazon_rds_mysql",
+      "name": "Amazon RDS MySQL",
+      "category": "database",
+      "status": "planned",
+      "description": "Amazon RDS MySQL source and destination connector"
+    },
+    {
+      "id": "amazon_rds_sql_server",
+      "name": "Amazon RDS SQL Server",
+      "category": "database",
+      "status": "planned",
+      "description": "Amazon RDS SQL Server source and destination connector"
+    },
+    {
+      "id": "amazon_rds_oracle",
+      "name": "Amazon RDS Oracle",
+      "category": "database",
+      "status": "planned",
+      "description": "Amazon RDS Oracle source and destination connector"
+    },
+    {
+      "id": "azure_sql_database",
+      "name": "Azure SQL Database",
+      "category": "database",
+      "status": "planned",
+      "description": "Azure SQL Database source and destination connector"
+    },
+    {
+      "id": "azure_database_for_postgresql",
+      "name": "Azure Database for PostgreSQL",
+      "category": "database",
+      "status": "planned",
+      "description": "Azure Database for PostgreSQL source and destination connector"
+    },
+    {
+      "id": "azure_database_for_mysql",
+      "name": "Azure Database for MySQL",
+      "category": "database",
+      "status": "planned",
+      "description": "Azure Database for MySQL source and destination connector"
+    },
+    {
+      "id": "google_cloud_sql_postgresql",
+      "name": "Google Cloud SQL PostgreSQL",
+      "category": "database",
+      "status": "planned",
+      "description": "Google Cloud SQL PostgreSQL source and destination connector"
+    },
+    {
+      "id": "google_cloud_sql_mysql",
+      "name": "Google Cloud SQL MySQL",
+      "category": "database",
+      "status": "planned",
+      "description": "Google Cloud SQL MySQL source and destination connector"
+    },
+    {
+      "id": "google_cloud_sql_sql_server",
+      "name": "Google Cloud SQL SQL Server",
+      "category": "database",
+      "status": "planned",
+      "description": "Google Cloud SQL SQL Server source and destination connector"
+    },
+    {
+      "id": "alloydb",
+      "name": "AlloyDB",
+      "category": "database",
+      "status": "planned",
+      "description": "AlloyDB source and destination connector"
+    },
+    {
+      "id": "timescaledb",
+      "name": "TimescaleDB",
+      "category": "database",
+      "status": "planned",
+      "description": "TimescaleDB source and destination connector"
+    },
+    {
+      "id": "influxdb",
+      "name": "InfluxDB",
+      "category": "database",
+      "status": "planned",
+      "description": "InfluxDB source and destination connector"
+    },
+    {
+      "id": "cassandra",
+      "name": "Cassandra",
+      "category": "database",
+      "status": "planned",
+      "description": "Cassandra source and destination connector"
+    },
+    {
+      "id": "scylladb",
+      "name": "ScyllaDB",
+      "category": "database",
+      "status": "planned",
+      "description": "ScyllaDB source and destination connector"
+    },
+    {
+      "id": "couchbase",
+      "name": "Couchbase",
+      "category": "database",
+      "status": "planned",
+      "description": "Couchbase source and destination connector"
+    },
+    {
+      "id": "firebase_realtime_db",
+      "name": "Firebase Realtime DB",
+      "category": "database",
+      "status": "planned",
+      "description": "Firebase Realtime DB source and destination connector"
+    },
+    {
+      "id": "dynamodb",
+      "name": "DynamoDB",
+      "category": "database",
+      "status": "planned",
+      "description": "DynamoDB source and destination connector"
+    },
+    {
+      "id": "documentdb",
+      "name": "DocumentDB",
+      "category": "database",
+      "status": "planned",
+      "description": "DocumentDB source and destination connector"
+    },
+    {
+      "id": "neptune",
+      "name": "Neptune",
+      "category": "database",
+      "status": "planned",
+      "description": "Neptune source and destination connector"
+    },
+    {
+      "id": "sap_hana",
+      "name": "SAP HANA",
+      "category": "database",
+      "status": "planned",
+      "description": "SAP HANA source and destination connector"
+    },
+    {
+      "id": "sap_ase",
+      "name": "SAP ASE",
+      "category": "database",
+      "status": "planned",
+      "description": "SAP ASE source and destination connector"
+    },
+    {
+      "id": "sap_iq",
+      "name": "SAP IQ",
+      "category": "database",
+      "status": "planned",
+      "description": "SAP IQ source and destination connector"
+    },
+    {
+      "id": "exasol",
+      "name": "Exasol",
+      "category": "database",
+      "status": "planned",
+      "description": "Exasol source and destination connector"
+    },
+    {
+      "id": "firebird",
+      "name": "Firebird",
+      "category": "database",
+      "status": "planned",
+      "description": "Firebird source and destination connector"
+    },
+    {
+      "id": "h2",
+      "name": "H2",
+      "category": "database",
+      "status": "planned",
+      "description": "H2 source and destination connector"
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "category": "database",
+      "status": "planned",
+      "description": "SQLite source and destination connector"
+    },
+    {
+      "id": "clickhouse",
+      "name": "ClickHouse",
+      "category": "database",
+      "status": "planned",
+      "description": "ClickHouse source and destination connector"
+    },
+    {
+      "id": "druid",
+      "name": "Druid",
+      "category": "database",
+      "status": "planned",
+      "description": "Druid source and destination connector"
+    },
+    {
+      "id": "pinot",
+      "name": "Pinot",
+      "category": "database",
+      "status": "planned",
+      "description": "Pinot source and destination connector"
+    },
+    {
+      "id": "questdb",
+      "name": "QuestDB",
+      "category": "database",
+      "status": "planned",
+      "description": "QuestDB source and destination connector"
+    },
+    {
+      "id": "risingwave",
+      "name": "RisingWave",
+      "category": "database",
+      "status": "planned",
+      "description": "RisingWave source and destination connector"
+    },
+    {
+      "id": "materialize",
+      "name": "Materialize",
+      "category": "database",
+      "status": "planned",
+      "description": "Materialize source and destination connector"
+    },
+    {
+      "id": "yugabytedb",
+      "name": "YugabyteDB",
+      "category": "database",
+      "status": "planned",
+      "description": "YugabyteDB source and destination connector"
+    },
+    {
+      "id": "vitess",
+      "name": "Vitess",
+      "category": "database",
+      "status": "planned",
+      "description": "Vitess source and destination connector"
+    },
+    {
+      "id": "tidb",
+      "name": "TiDB",
+      "category": "database",
+      "status": "planned",
+      "description": "TiDB source and destination connector"
+    },
+    {
+      "id": "oceanbase",
+      "name": "OceanBase",
+      "category": "database",
+      "status": "planned",
+      "description": "OceanBase source and destination connector"
+    },
+    {
+      "id": "polardb",
+      "name": "PolarDB",
+      "category": "database",
+      "status": "planned",
+      "description": "PolarDB source and destination connector"
+    },
+    {
+      "id": "gaussdb",
+      "name": "GaussDB",
+      "category": "database",
+      "status": "planned",
+      "description": "GaussDB source and destination connector"
+    },
+    {
+      "id": "goldendb",
+      "name": "GoldenDB",
+      "category": "database",
+      "status": "planned",
+      "description": "GoldenDB source and destination connector"
+    },
+    {
+      "id": "bigquery",
+      "name": "BigQuery",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "BigQuery analytics warehouse connector"
+    },
+    {
+      "id": "redshift",
+      "name": "Redshift",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Redshift analytics warehouse connector"
+    },
+    {
+      "id": "databricks",
+      "name": "Databricks",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Databricks analytics warehouse connector"
+    },
+    {
+      "id": "synapse_analytics",
+      "name": "Synapse Analytics",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Synapse Analytics analytics warehouse connector"
+    },
+    {
+      "id": "snowflake_b1fcb2",
+      "name": "Snowflake",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Snowflake analytics warehouse connector"
+    },
+    {
+      "id": "firebolt",
+      "name": "Firebolt",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Firebolt analytics warehouse connector"
+    },
+    {
+      "id": "dremio",
+      "name": "Dremio",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Dremio analytics warehouse connector"
+    },
+    {
+      "id": "presto",
+      "name": "Presto",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Presto analytics warehouse connector"
+    },
+    {
+      "id": "trino",
+      "name": "Trino",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Trino analytics warehouse connector"
+    },
+    {
+      "id": "apache_hive",
+      "name": "Apache Hive",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Apache Hive analytics warehouse connector"
+    },
+    {
+      "id": "apache_impala",
+      "name": "Apache Impala",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Apache Impala analytics warehouse connector"
+    },
+    {
+      "id": "google_biglake",
+      "name": "Google BigLake",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Google BigLake analytics warehouse connector"
+    },
+    {
+      "id": "azure_synapse_dedicated",
+      "name": "Azure Synapse Dedicated",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Azure Synapse Dedicated analytics warehouse connector"
+    },
+    {
+      "id": "azure_synapse_serverless",
+      "name": "Azure Synapse Serverless",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Azure Synapse Serverless analytics warehouse connector"
+    },
+    {
+      "id": "amazon_athena",
+      "name": "Amazon Athena",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Amazon Athena analytics warehouse connector"
+    },
+    {
+      "id": "amazon_emr",
+      "name": "Amazon EMR",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Amazon EMR analytics warehouse connector"
+    },
+    {
+      "id": "cloudera_data_platform",
+      "name": "Cloudera Data Platform",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Cloudera Data Platform analytics warehouse connector"
+    },
+    {
+      "id": "ibm_db2_warehouse",
+      "name": "IBM Db2 Warehouse",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "IBM Db2 Warehouse analytics warehouse connector"
+    },
+    {
+      "id": "oracle_autonomous_warehouse",
+      "name": "Oracle Autonomous Warehouse",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Oracle Autonomous Warehouse analytics warehouse connector"
+    },
+    {
+      "id": "sap_bw_4hana",
+      "name": "SAP BW/4HANA",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "SAP BW/4HANA analytics warehouse connector"
+    },
+    {
+      "id": "yellowbrick",
+      "name": "Yellowbrick",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Yellowbrick analytics warehouse connector"
+    },
+    {
+      "id": "actian_avalanche",
+      "name": "Actian Avalanche",
+      "category": "warehouse",
+      "status": "planned",
+      "description": "Actian Avalanche analytics warehouse connector"
+    },
+    {
+      "id": "salesforce",
+      "name": "Salesforce",
+      "category": "saas",
+      "status": "planned",
+      "description": "Salesforce SaaS application sync"
+    },
+    {
+      "id": "hubspot",
+      "name": "HubSpot",
+      "category": "saas",
+      "status": "planned",
+      "description": "HubSpot SaaS application sync"
+    },
+    {
+      "id": "marketo",
+      "name": "Marketo",
+      "category": "saas",
+      "status": "planned",
+      "description": "Marketo SaaS application sync"
+    },
+    {
+      "id": "pardot",
+      "name": "Pardot",
+      "category": "saas",
+      "status": "planned",
+      "description": "Pardot SaaS application sync"
+    },
+    {
+      "id": "zendesk",
+      "name": "Zendesk",
+      "category": "saas",
+      "status": "planned",
+      "description": "Zendesk SaaS application sync"
+    },
+    {
+      "id": "intercom",
+      "name": "Intercom",
+      "category": "saas",
+      "status": "planned",
+      "description": "Intercom SaaS application sync"
+    },
+    {
+      "id": "freshdesk",
+      "name": "Freshdesk",
+      "category": "saas",
+      "status": "planned",
+      "description": "Freshdesk SaaS application sync"
+    },
+    {
+      "id": "servicenow",
+      "name": "ServiceNow",
+      "category": "saas",
+      "status": "planned",
+      "description": "ServiceNow SaaS application sync"
+    },
+    {
+      "id": "jira",
+      "name": "Jira",
+      "category": "saas",
+      "status": "planned",
+      "description": "Jira SaaS application sync"
+    },
+    {
+      "id": "confluence",
+      "name": "Confluence",
+      "category": "saas",
+      "status": "planned",
+      "description": "Confluence SaaS application sync"
+    },
+    {
+      "id": "asana",
+      "name": "Asana",
+      "category": "saas",
+      "status": "planned",
+      "description": "Asana SaaS application sync"
+    },
+    {
+      "id": "mondaycom",
+      "name": "Monday.com",
+      "category": "saas",
+      "status": "planned",
+      "description": "Monday.com SaaS application sync"
+    },
+    {
+      "id": "trello",
+      "name": "Trello",
+      "category": "saas",
+      "status": "planned",
+      "description": "Trello SaaS application sync"
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "category": "saas",
+      "status": "planned",
+      "description": "Notion SaaS application sync"
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "category": "saas",
+      "status": "planned",
+      "description": "Slack SaaS application sync"
+    },
+    {
+      "id": "microsoft_teams",
+      "name": "Microsoft Teams",
+      "category": "saas",
+      "status": "planned",
+      "description": "Microsoft Teams SaaS application sync"
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom",
+      "category": "saas",
+      "status": "planned",
+      "description": "Zoom SaaS application sync"
+    },
+    {
+      "id": "google_analytics",
+      "name": "Google Analytics",
+      "category": "saas",
+      "status": "planned",
+      "description": "Google Analytics SaaS application sync"
+    },
+    {
+      "id": "google_ads",
+      "name": "Google Ads",
+      "category": "saas",
+      "status": "planned",
+      "description": "Google Ads SaaS application sync"
+    },
+    {
+      "id": "facebook_ads",
+      "name": "Facebook Ads",
+      "category": "saas",
+      "status": "planned",
+      "description": "Facebook Ads SaaS application sync"
+    },
+    {
+      "id": "linkedin_ads",
+      "name": "LinkedIn Ads",
+      "category": "saas",
+      "status": "planned",
+      "description": "LinkedIn Ads SaaS application sync"
+    },
+    {
+      "id": "twitter_ads",
+      "name": "Twitter Ads",
+      "category": "saas",
+      "status": "planned",
+      "description": "Twitter Ads SaaS application sync"
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "category": "saas",
+      "status": "planned",
+      "description": "Stripe SaaS application sync"
+    },
+    {
+      "id": "paypal",
+      "name": "PayPal",
+      "category": "saas",
+      "status": "planned",
+      "description": "PayPal SaaS application sync"
+    },
+    {
+      "id": "square",
+      "name": "Square",
+      "category": "saas",
+      "status": "planned",
+      "description": "Square SaaS application sync"
+    },
+    {
+      "id": "quickbooks",
+      "name": "QuickBooks",
+      "category": "saas",
+      "status": "planned",
+      "description": "QuickBooks SaaS application sync"
+    },
+    {
+      "id": "xero",
+      "name": "Xero",
+      "category": "saas",
+      "status": "planned",
+      "description": "Xero SaaS application sync"
+    },
+    {
+      "id": "netsuite",
+      "name": "NetSuite",
+      "category": "saas",
+      "status": "planned",
+      "description": "NetSuite SaaS application sync"
+    },
+    {
+      "id": "workday",
+      "name": "Workday",
+      "category": "saas",
+      "status": "planned",
+      "description": "Workday SaaS application sync"
+    },
+    {
+      "id": "bamboohr",
+      "name": "BambooHR",
+      "category": "saas",
+      "status": "planned",
+      "description": "BambooHR SaaS application sync"
+    },
+    {
+      "id": "greenhouse",
+      "name": "Greenhouse",
+      "category": "saas",
+      "status": "planned",
+      "description": "Greenhouse SaaS application sync"
+    },
+    {
+      "id": "lever",
+      "name": "Lever",
+      "category": "saas",
+      "status": "planned",
+      "description": "Lever SaaS application sync"
+    },
+    {
+      "id": "adp",
+      "name": "ADP",
+      "category": "saas",
+      "status": "planned",
+      "description": "ADP SaaS application sync"
+    },
+    {
+      "id": "shopify",
+      "name": "Shopify",
+      "category": "saas",
+      "status": "planned",
+      "description": "Shopify SaaS application sync"
+    },
+    {
+      "id": "magento",
+      "name": "Magento",
+      "category": "saas",
+      "status": "planned",
+      "description": "Magento SaaS application sync"
+    },
+    {
+      "id": "woocommerce",
+      "name": "WooCommerce",
+      "category": "saas",
+      "status": "planned",
+      "description": "WooCommerce SaaS application sync"
+    },
+    {
+      "id": "bigcommerce",
+      "name": "BigCommerce",
+      "category": "saas",
+      "status": "planned",
+      "description": "BigCommerce SaaS application sync"
+    },
+    {
+      "id": "amazon_seller_central",
+      "name": "Amazon Seller Central",
+      "category": "saas",
+      "status": "planned",
+      "description": "Amazon Seller Central SaaS application sync"
+    },
+    {
+      "id": "shipstation",
+      "name": "ShipStation",
+      "category": "saas",
+      "status": "planned",
+      "description": "ShipStation SaaS application sync"
+    },
+    {
+      "id": "fedex",
+      "name": "FedEx",
+      "category": "saas",
+      "status": "planned",
+      "description": "FedEx SaaS application sync"
+    },
+    {
+      "id": "ups",
+      "name": "UPS",
+      "category": "saas",
+      "status": "planned",
+      "description": "UPS SaaS application sync"
+    },
+    {
+      "id": "dhl",
+      "name": "DHL",
+      "category": "saas",
+      "status": "planned",
+      "description": "DHL SaaS application sync"
+    },
+    {
+      "id": "twilio",
+      "name": "Twilio",
+      "category": "saas",
+      "status": "planned",
+      "description": "Twilio SaaS application sync"
+    },
+    {
+      "id": "sendgrid",
+      "name": "SendGrid",
+      "category": "saas",
+      "status": "planned",
+      "description": "SendGrid SaaS application sync"
+    },
+    {
+      "id": "mailchimp",
+      "name": "Mailchimp",
+      "category": "saas",
+      "status": "planned",
+      "description": "Mailchimp SaaS application sync"
+    },
+    {
+      "id": "klaviyo",
+      "name": "Klaviyo",
+      "category": "saas",
+      "status": "planned",
+      "description": "Klaviyo SaaS application sync"
+    },
+    {
+      "id": "segment",
+      "name": "Segment",
+      "category": "saas",
+      "status": "planned",
+      "description": "Segment SaaS application sync"
+    },
+    {
+      "id": "mixpanel",
+      "name": "Mixpanel",
+      "category": "saas",
+      "status": "planned",
+      "description": "Mixpanel SaaS application sync"
+    },
+    {
+      "id": "amplitude",
+      "name": "Amplitude",
+      "category": "saas",
+      "status": "planned",
+      "description": "Amplitude SaaS application sync"
+    },
+    {
+      "id": "pendo",
+      "name": "Pendo",
+      "category": "saas",
+      "status": "planned",
+      "description": "Pendo SaaS application sync"
+    },
+    {
+      "id": "looker",
+      "name": "Looker",
+      "category": "saas",
+      "status": "planned",
+      "description": "Looker SaaS application sync"
+    },
+    {
+      "id": "tableau",
+      "name": "Tableau",
+      "category": "saas",
+      "status": "planned",
+      "description": "Tableau SaaS application sync"
+    },
+    {
+      "id": "power_bi",
+      "name": "Power BI",
+      "category": "saas",
+      "status": "planned",
+      "description": "Power BI SaaS application sync"
+    },
+    {
+      "id": "mode_analytics",
+      "name": "Mode Analytics",
+      "category": "saas",
+      "status": "planned",
+      "description": "Mode Analytics SaaS application sync"
+    },
+    {
+      "id": "datadog",
+      "name": "Datadog",
+      "category": "saas",
+      "status": "planned",
+      "description": "Datadog SaaS application sync"
+    },
+    {
+      "id": "new_relic",
+      "name": "New Relic",
+      "category": "saas",
+      "status": "planned",
+      "description": "New Relic SaaS application sync"
+    },
+    {
+      "id": "splunk",
+      "name": "Splunk",
+      "category": "saas",
+      "status": "planned",
+      "description": "Splunk SaaS application sync"
+    },
+    {
+      "id": "pagerduty",
+      "name": "PagerDuty",
+      "category": "saas",
+      "status": "planned",
+      "description": "PagerDuty SaaS application sync"
+    },
+    {
+      "id": "okta",
+      "name": "Okta",
+      "category": "saas",
+      "status": "planned",
+      "description": "Okta SaaS application sync"
+    },
+    {
+      "id": "auth0",
+      "name": "Auth0",
+      "category": "saas",
+      "status": "planned",
+      "description": "Auth0 SaaS application sync"
+    },
+    {
+      "id": "onelogin",
+      "name": "OneLogin",
+      "category": "saas",
+      "status": "planned",
+      "description": "OneLogin SaaS application sync"
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "category": "saas",
+      "status": "planned",
+      "description": "GitHub SaaS application sync"
+    },
+    {
+      "id": "gitlab",
+      "name": "GitLab",
+      "category": "saas",
+      "status": "planned",
+      "description": "GitLab SaaS application sync"
+    },
+    {
+      "id": "bitbucket",
+      "name": "Bitbucket",
+      "category": "saas",
+      "status": "planned",
+      "description": "Bitbucket SaaS application sync"
+    },
+    {
+      "id": "circleci",
+      "name": "CircleCI",
+      "category": "saas",
+      "status": "planned",
+      "description": "CircleCI SaaS application sync"
+    },
+    {
+      "id": "jenkins",
+      "name": "Jenkins",
+      "category": "saas",
+      "status": "planned",
+      "description": "Jenkins SaaS application sync"
+    },
+    {
+      "id": "pagerduty_72810f",
+      "name": "PagerDuty",
+      "category": "saas",
+      "status": "planned",
+      "description": "PagerDuty SaaS application sync"
+    },
+    {
+      "id": "statuspage",
+      "name": "Statuspage",
+      "category": "saas",
+      "status": "planned",
+      "description": "Statuspage SaaS application sync"
+    },
+    {
+      "id": "chargebee",
+      "name": "Chargebee",
+      "category": "saas",
+      "status": "planned",
+      "description": "Chargebee SaaS application sync"
+    },
+    {
+      "id": "recurly",
+      "name": "Recurly",
+      "category": "saas",
+      "status": "planned",
+      "description": "Recurly SaaS application sync"
+    },
+    {
+      "id": "zuora",
+      "name": "Zuora",
+      "category": "saas",
+      "status": "planned",
+      "description": "Zuora SaaS application sync"
+    },
+    {
+      "id": "docusign",
+      "name": "DocuSign",
+      "category": "saas",
+      "status": "planned",
+      "description": "DocuSign SaaS application sync"
+    },
+    {
+      "id": "adobe_sign",
+      "name": "Adobe Sign",
+      "category": "saas",
+      "status": "planned",
+      "description": "Adobe Sign SaaS application sync"
+    },
+    {
+      "id": "box",
+      "name": "Box",
+      "category": "saas",
+      "status": "planned",
+      "description": "Box SaaS application sync"
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "category": "saas",
+      "status": "planned",
+      "description": "Dropbox SaaS application sync"
+    },
+    {
+      "id": "google_drive",
+      "name": "Google Drive",
+      "category": "saas",
+      "status": "planned",
+      "description": "Google Drive SaaS application sync"
+    },
+    {
+      "id": "onedrive",
+      "name": "OneDrive",
+      "category": "saas",
+      "status": "planned",
+      "description": "OneDrive SaaS application sync"
+    },
+    {
+      "id": "sharepoint",
+      "name": "SharePoint",
+      "category": "saas",
+      "status": "planned",
+      "description": "SharePoint SaaS application sync"
+    },
+    {
+      "id": "airtable",
+      "name": "Airtable",
+      "category": "saas",
+      "status": "planned",
+      "description": "Airtable SaaS application sync"
+    },
+    {
+      "id": "smartsheet",
+      "name": "Smartsheet",
+      "category": "saas",
+      "status": "planned",
+      "description": "Smartsheet SaaS application sync"
+    },
+    {
+      "id": "typeform",
+      "name": "Typeform",
+      "category": "saas",
+      "status": "planned",
+      "description": "Typeform SaaS application sync"
+    },
+    {
+      "id": "surveymonkey",
+      "name": "SurveyMonkey",
+      "category": "saas",
+      "status": "planned",
+      "description": "SurveyMonkey SaaS application sync"
+    },
+    {
+      "id": "qualtrics",
+      "name": "Qualtrics",
+      "category": "saas",
+      "status": "planned",
+      "description": "Qualtrics SaaS application sync"
+    },
+    {
+      "id": "braze",
+      "name": "Braze",
+      "category": "saas",
+      "status": "planned",
+      "description": "Braze SaaS application sync"
+    },
+    {
+      "id": "iterable",
+      "name": "Iterable",
+      "category": "saas",
+      "status": "planned",
+      "description": "Iterable SaaS application sync"
+    },
+    {
+      "id": "customerio",
+      "name": "Customer.io",
+      "category": "saas",
+      "status": "planned",
+      "description": "Customer.io SaaS application sync"
+    },
+    {
+      "id": "delighted",
+      "name": "Delighted",
+      "category": "saas",
+      "status": "planned",
+      "description": "Delighted SaaS application sync"
+    },
+    {
+      "id": "gainsight",
+      "name": "Gainsight",
+      "category": "saas",
+      "status": "planned",
+      "description": "Gainsight SaaS application sync"
+    },
+    {
+      "id": "gong",
+      "name": "Gong",
+      "category": "saas",
+      "status": "planned",
+      "description": "Gong SaaS application sync"
+    },
+    {
+      "id": "outreach",
+      "name": "Outreach",
+      "category": "saas",
+      "status": "planned",
+      "description": "Outreach SaaS application sync"
+    },
+    {
+      "id": "salesloft",
+      "name": "Salesloft",
+      "category": "saas",
+      "status": "planned",
+      "description": "Salesloft SaaS application sync"
+    },
+    {
+      "id": "clari",
+      "name": "Clari",
+      "category": "saas",
+      "status": "planned",
+      "description": "Clari SaaS application sync"
+    },
+    {
+      "id": "copper_crm",
+      "name": "Copper CRM",
+      "category": "saas",
+      "status": "planned",
+      "description": "Copper CRM SaaS application sync"
+    },
+    {
+      "id": "pipedrive",
+      "name": "Pipedrive",
+      "category": "saas",
+      "status": "planned",
+      "description": "Pipedrive SaaS application sync"
+    },
+    {
+      "id": "zoho_crm",
+      "name": "Zoho CRM",
+      "category": "saas",
+      "status": "planned",
+      "description": "Zoho CRM SaaS application sync"
+    },
+    {
+      "id": "dynamics_365",
+      "name": "Dynamics 365",
+      "category": "saas",
+      "status": "planned",
+      "description": "Dynamics 365 SaaS application sync"
+    },
+    {
+      "id": "sap_successfactors",
+      "name": "SAP SuccessFactors",
+      "category": "saas",
+      "status": "planned",
+      "description": "SAP SuccessFactors SaaS application sync"
+    },
+    {
+      "id": "oracle_hcm",
+      "name": "Oracle HCM",
+      "category": "saas",
+      "status": "planned",
+      "description": "Oracle HCM SaaS application sync"
+    },
+    {
+      "id": "ukg_pro",
+      "name": "UKG Pro",
+      "category": "saas",
+      "status": "planned",
+      "description": "UKG Pro SaaS application sync"
+    },
+    {
+      "id": "ceridian_dayforce",
+      "name": "Ceridian Dayforce",
+      "category": "saas",
+      "status": "planned",
+      "description": "Ceridian Dayforce SaaS application sync"
+    },
+    {
+      "id": "rippling",
+      "name": "Rippling",
+      "category": "saas",
+      "status": "planned",
+      "description": "Rippling SaaS application sync"
+    },
+    {
+      "id": "gusto",
+      "name": "Gusto",
+      "category": "saas",
+      "status": "planned",
+      "description": "Gusto SaaS application sync"
+    },
+    {
+      "id": "deel",
+      "name": "Deel",
+      "category": "saas",
+      "status": "planned",
+      "description": "Deel SaaS application sync"
+    },
+    {
+      "id": "remotecom",
+      "name": "Remote.com",
+      "category": "saas",
+      "status": "planned",
+      "description": "Remote.com SaaS application sync"
+    },
+    {
+      "id": "lattice",
+      "name": "Lattice",
+      "category": "saas",
+      "status": "planned",
+      "description": "Lattice SaaS application sync"
+    },
+    {
+      "id": "culture_amp",
+      "name": "Culture Amp",
+      "category": "saas",
+      "status": "planned",
+      "description": "Culture Amp SaaS application sync"
+    },
+    {
+      "id": "15five",
+      "name": "15Five",
+      "category": "saas",
+      "status": "planned",
+      "description": "15Five SaaS application sync"
+    },
+    {
+      "id": "amazon_s3",
+      "name": "Amazon S3",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Amazon S3 object storage ingest and export"
+    },
+    {
+      "id": "google_cloud_storage",
+      "name": "Google Cloud Storage",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Google Cloud Storage object storage ingest and export"
+    },
+    {
+      "id": "azure_blob_storage",
+      "name": "Azure Blob Storage",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Azure Blob Storage object storage ingest and export"
+    },
+    {
+      "id": "azure_data_lake",
+      "name": "Azure Data Lake",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Azure Data Lake object storage ingest and export"
+    },
+    {
+      "id": "wasabi",
+      "name": "Wasabi",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Wasabi object storage ingest and export"
+    },
+    {
+      "id": "backblaze_b2",
+      "name": "Backblaze B2",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Backblaze B2 object storage ingest and export"
+    },
+    {
+      "id": "minio",
+      "name": "MinIO",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "MinIO object storage ingest and export"
+    },
+    {
+      "id": "digitalocean_spaces",
+      "name": "DigitalOcean Spaces",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "DigitalOcean Spaces object storage ingest and export"
+    },
+    {
+      "id": "ibm_cloud_object_storage",
+      "name": "IBM Cloud Object Storage",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "IBM Cloud Object Storage object storage ingest and export"
+    },
+    {
+      "id": "oracle_cloud_object_storage",
+      "name": "Oracle Cloud Object Storage",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Oracle Cloud Object Storage object storage ingest and export"
+    },
+    {
+      "id": "alibaba_oss",
+      "name": "Alibaba OSS",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Alibaba OSS object storage ingest and export"
+    },
+    {
+      "id": "cloudflare_r2",
+      "name": "Cloudflare R2",
+      "category": "cloud_storage",
+      "status": "planned",
+      "description": "Cloudflare R2 object storage ingest and export"
+    },
+    {
+      "id": "rest_openapi",
+      "name": "REST OpenAPI",
+      "category": "api",
+      "status": "ai",
+      "description": "REST OpenAPI integration adapter"
+    },
+    {
+      "id": "graphql",
+      "name": "GraphQL",
+      "category": "api",
+      "status": "ai",
+      "description": "GraphQL integration adapter"
+    },
+    {
+      "id": "soap",
+      "name": "SOAP",
+      "category": "api",
+      "status": "planned",
+      "description": "SOAP integration adapter"
+    },
+    {
+      "id": "odata",
+      "name": "OData",
+      "category": "api",
+      "status": "planned",
+      "description": "OData integration adapter"
+    },
+    {
+      "id": "grpc",
+      "name": "gRPC",
+      "category": "api",
+      "status": "planned",
+      "description": "gRPC integration adapter"
+    },
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "category": "api",
+      "status": "planned",
+      "description": "Webhook integration adapter"
+    },
+    {
+      "id": "sftp",
+      "name": "SFTP",
+      "category": "api",
+      "status": "planned",
+      "description": "SFTP integration adapter"
+    },
+    {
+      "id": "ftp",
+      "name": "FTP",
+      "category": "api",
+      "status": "planned",
+      "description": "FTP integration adapter"
+    },
+    {
+      "id": "kafka",
+      "name": "Kafka",
+      "category": "api",
+      "status": "planned",
+      "description": "Kafka integration adapter"
+    },
+    {
+      "id": "amazon_kinesis",
+      "name": "Amazon Kinesis",
+      "category": "api",
+      "status": "planned",
+      "description": "Amazon Kinesis integration adapter"
+    },
+    {
+      "id": "google_pub_sub",
+      "name": "Google Pub/Sub",
+      "category": "api",
+      "status": "planned",
+      "description": "Google Pub/Sub integration adapter"
+    },
+    {
+      "id": "azure_event_hubs",
+      "name": "Azure Event Hubs",
+      "category": "api",
+      "status": "planned",
+      "description": "Azure Event Hubs integration adapter"
+    },
+    {
+      "id": "rabbitmq",
+      "name": "RabbitMQ",
+      "category": "api",
+      "status": "planned",
+      "description": "RabbitMQ integration adapter"
+    },
+    {
+      "id": "apache_pulsar",
+      "name": "Apache Pulsar",
+      "category": "api",
+      "status": "planned",
+      "description": "Apache Pulsar integration adapter"
+    },
+    {
+      "id": "mqtt",
+      "name": "MQTT",
+      "category": "api",
+      "status": "planned",
+      "description": "MQTT integration adapter"
+    },
+    {
+      "id": "apache_nifi",
+      "name": "Apache NiFi",
+      "category": "api",
+      "status": "planned",
+      "description": "Apache NiFi integration adapter"
+    },
+    {
+      "id": "google_search_console",
+      "name": "Google Search Console",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Google Search Console marketing analytics connector"
+    },
+    {
+      "id": "bing_webmaster",
+      "name": "Bing Webmaster",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Bing Webmaster marketing analytics connector"
+    },
+    {
+      "id": "semrush",
+      "name": "Semrush",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Semrush marketing analytics connector"
+    },
+    {
+      "id": "ahrefs",
+      "name": "Ahrefs",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Ahrefs marketing analytics connector"
+    },
+    {
+      "id": "moz",
+      "name": "Moz",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Moz marketing analytics connector"
+    },
+    {
+      "id": "sprout_social",
+      "name": "Sprout Social",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Sprout Social marketing analytics connector"
+    },
+    {
+      "id": "hootsuite",
+      "name": "Hootsuite",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Hootsuite marketing analytics connector"
+    },
+    {
+      "id": "buffer",
+      "name": "Buffer",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Buffer marketing analytics connector"
+    },
+    {
+      "id": "canva",
+      "name": "Canva",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Canva marketing analytics connector"
+    },
+    {
+      "id": "figma",
+      "name": "Figma",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Figma marketing analytics connector"
+    },
+    {
+      "id": "adobe_analytics",
+      "name": "Adobe Analytics",
+      "category": "marketing",
+      "status": "planned",
+      "description": "Adobe Analytics marketing analytics connector"
+    },
+    {
+      "id": "bloomberg",
+      "name": "Bloomberg",
+      "category": "finance",
+      "status": "planned",
+      "description": "Bloomberg financial data connector"
+    },
+    {
+      "id": "refinitiv",
+      "name": "Refinitiv",
+      "category": "finance",
+      "status": "planned",
+      "description": "Refinitiv financial data connector"
+    },
+    {
+      "id": "factset",
+      "name": "FactSet",
+      "category": "finance",
+      "status": "planned",
+      "description": "FactSet financial data connector"
+    },
+    {
+      "id": "morningstar",
+      "name": "Morningstar",
+      "category": "finance",
+      "status": "planned",
+      "description": "Morningstar financial data connector"
+    },
+    {
+      "id": "plaid",
+      "name": "Plaid",
+      "category": "finance",
+      "status": "planned",
+      "description": "Plaid financial data connector"
+    },
+    {
+      "id": "yodlee",
+      "name": "Yodlee",
+      "category": "finance",
+      "status": "planned",
+      "description": "Yodlee financial data connector"
+    },
+    {
+      "id": "finicity",
+      "name": "Finicity",
+      "category": "finance",
+      "status": "planned",
+      "description": "Finicity financial data connector"
+    },
+    {
+      "id": "adyen",
+      "name": "Adyen",
+      "category": "finance",
+      "status": "planned",
+      "description": "Adyen financial data connector"
+    },
+    {
+      "id": "braintree",
+      "name": "Braintree",
+      "category": "finance",
+      "status": "planned",
+      "description": "Braintree financial data connector"
+    },
+    {
+      "id": "worldpay",
+      "name": "Worldpay",
+      "category": "finance",
+      "status": "planned",
+      "description": "Worldpay financial data connector"
+    },
+    {
+      "id": "fiserv",
+      "name": "Fiserv",
+      "category": "finance",
+      "status": "planned",
+      "description": "Fiserv financial data connector"
+    },
+    {
+      "id": "fis",
+      "name": "FIS",
+      "category": "finance",
+      "status": "planned",
+      "description": "FIS financial data connector"
+    },
+    {
+      "id": "jack_henry",
+      "name": "Jack Henry",
+      "category": "finance",
+      "status": "planned",
+      "description": "Jack Henry financial data connector"
+    },
+    {
+      "id": "epic",
+      "name": "Epic",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Epic healthcare data connector"
+    },
+    {
+      "id": "cerner",
+      "name": "Cerner",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Cerner healthcare data connector"
+    },
+    {
+      "id": "athenahealth",
+      "name": "Athenahealth",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Athenahealth healthcare data connector"
+    },
+    {
+      "id": "allscripts",
+      "name": "Allscripts",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Allscripts healthcare data connector"
+    },
+    {
+      "id": "meditech",
+      "name": "Meditech",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Meditech healthcare data connector"
+    },
+    {
+      "id": "nextgen",
+      "name": "NextGen",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "NextGen healthcare data connector"
+    },
+    {
+      "id": "hl7_fhir",
+      "name": "HL7 FHIR",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "HL7 FHIR healthcare data connector"
+    },
+    {
+      "id": "dicom",
+      "name": "DICOM",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "DICOM healthcare data connector"
+    },
+    {
+      "id": "redox",
+      "name": "Redox",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Redox healthcare data connector"
+    },
+    {
+      "id": "health_gorilla",
+      "name": "Health Gorilla",
+      "category": "healthcare",
+      "status": "planned",
+      "description": "Health Gorilla healthcare data connector"
+    },
+    {
+      "id": "flexport",
+      "name": "Flexport",
+      "category": "logistics",
+      "status": "planned",
+      "description": "Flexport logistics and shipment data connector"
+    },
+    {
+      "id": "project44",
+      "name": "Project44",
+      "category": "logistics",
+      "status": "planned",
+      "description": "Project44 logistics and shipment data connector"
+    },
+    {
+      "id": "fourkites",
+      "name": "FourKites",
+      "category": "logistics",
+      "status": "planned",
+      "description": "FourKites logistics and shipment data connector"
+    },
+    {
+      "id": "convoy",
+      "name": "Convoy",
+      "category": "logistics",
+      "status": "planned",
+      "description": "Convoy logistics and shipment data connector"
+    },
+    {
+      "id": "uber_freight",
+      "name": "Uber Freight",
+      "category": "logistics",
+      "status": "planned",
+      "description": "Uber Freight logistics and shipment data connector"
+    },
+    {
+      "id": "ch_robinson",
+      "name": "C.H. Robinson",
+      "category": "logistics",
+      "status": "planned",
+      "description": "C.H. Robinson logistics and shipment data connector"
+    },
+    {
+      "id": "maersk",
+      "name": "Maersk",
+      "category": "logistics",
+      "status": "planned",
+      "description": "Maersk logistics and shipment data connector"
+    },
+    {
+      "id": "fedex_tracking",
+      "name": "FedEx Tracking",
+      "category": "logistics",
+      "status": "planned",
+      "description": "FedEx Tracking logistics and shipment data connector"
+    },
+    {
+      "id": "ups_quantum_view",
+      "name": "UPS Quantum View",
+      "category": "logistics",
+      "status": "planned",
+      "description": "UPS Quantum View logistics and shipment data connector"
+    },
+    {
+      "id": "xpo_logistics",
+      "name": "XPO Logistics",
+      "category": "logistics",
+      "status": "planned",
+      "description": "XPO Logistics logistics and shipment data connector"
+    },
+    {
+      "id": "salesforce_(us_retail)",
+      "name": "Salesforce (US Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_manufacturing)",
+      "name": "HubSpot (EU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_energy)",
+      "name": "Marketo (APAC Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_telecom)",
+      "name": "Pardot (UK Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_insurance)",
+      "name": "Zendesk (CA Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_banking)",
+      "name": "Intercom (AU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_government)",
+      "name": "Freshdesk (JP Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_retail)",
+      "name": "ServiceNow (DE Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_manufacturing)",
+      "name": "Jira (FR Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_energy)",
+      "name": "Confluence (IN Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_telecom)",
+      "name": "Asana (US Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_insurance)",
+      "name": "Monday.com (EU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_banking)",
+      "name": "Trello (APAC Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_government)",
+      "name": "Notion (UK Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_retail)",
+      "name": "Slack (CA Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_manufacturing)",
+      "name": "Microsoft Teams (AU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_energy)",
+      "name": "Zoom (JP Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_telecom)",
+      "name": "Google Analytics (DE Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_insurance)",
+      "name": "Google Ads (FR Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_banking)",
+      "name": "Facebook Ads (IN Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_government)",
+      "name": "LinkedIn Ads (US Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_retail)",
+      "name": "Twitter Ads (EU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_manufacturing)",
+      "name": "Stripe (APAC Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_energy)",
+      "name": "PayPal (UK Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_telecom)",
+      "name": "Square (CA Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_insurance)",
+      "name": "QuickBooks (AU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_banking)",
+      "name": "Xero (JP Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_government)",
+      "name": "NetSuite (DE Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_retail)",
+      "name": "Workday (FR Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_manufacturing)",
+      "name": "BambooHR (IN Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_energy)",
+      "name": "Greenhouse (US Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_telecom)",
+      "name": "Lever (EU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_insurance)",
+      "name": "ADP (APAC Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_banking)",
+      "name": "Shopify (UK Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_government)",
+      "name": "Magento (CA Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_retail)",
+      "name": "WooCommerce (AU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_manufacturing)",
+      "name": "BigCommerce (JP Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_energy)",
+      "name": "Amazon Seller Central (DE Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_telecom)",
+      "name": "ShipStation (FR Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_insurance)",
+      "name": "FedEx (IN Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_banking)",
+      "name": "Salesforce (US Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_government)",
+      "name": "HubSpot (EU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_retail)",
+      "name": "Marketo (APAC Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_manufacturing)",
+      "name": "Pardot (UK Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_energy)",
+      "name": "Zendesk (CA Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_telecom)",
+      "name": "Intercom (AU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_insurance)",
+      "name": "Freshdesk (JP Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_banking)",
+      "name": "ServiceNow (DE Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_government)",
+      "name": "Jira (FR Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_retail)",
+      "name": "Confluence (IN Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_manufacturing)",
+      "name": "Asana (US Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_energy)",
+      "name": "Monday.com (EU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_telecom)",
+      "name": "Trello (APAC Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_insurance)",
+      "name": "Notion (UK Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_banking)",
+      "name": "Slack (CA Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_government)",
+      "name": "Microsoft Teams (AU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_retail)",
+      "name": "Zoom (JP Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_manufacturing)",
+      "name": "Google Analytics (DE Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_energy)",
+      "name": "Google Ads (FR Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_telecom)",
+      "name": "Facebook Ads (IN Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_insurance)",
+      "name": "LinkedIn Ads (US Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_banking)",
+      "name": "Twitter Ads (EU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_government)",
+      "name": "Stripe (APAC Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_retail)",
+      "name": "PayPal (UK Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_manufacturing)",
+      "name": "Square (CA Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_energy)",
+      "name": "QuickBooks (AU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_telecom)",
+      "name": "Xero (JP Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_insurance)",
+      "name": "NetSuite (DE Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_banking)",
+      "name": "Workday (FR Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_government)",
+      "name": "BambooHR (IN Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_retail)",
+      "name": "Greenhouse (US Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_manufacturing)",
+      "name": "Lever (EU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_energy)",
+      "name": "ADP (APAC Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_telecom)",
+      "name": "Shopify (UK Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_insurance)",
+      "name": "Magento (CA Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_banking)",
+      "name": "WooCommerce (AU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_government)",
+      "name": "BigCommerce (JP Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_retail)",
+      "name": "Amazon Seller Central (DE Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_manufacturing)",
+      "name": "ShipStation (FR Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_energy)",
+      "name": "FedEx (IN Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_telecom)",
+      "name": "Salesforce (US Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_insurance)",
+      "name": "HubSpot (EU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_banking)",
+      "name": "Marketo (APAC Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_government)",
+      "name": "Pardot (UK Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_retail)",
+      "name": "Zendesk (CA Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_manufacturing)",
+      "name": "Intercom (AU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_energy)",
+      "name": "Freshdesk (JP Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_telecom)",
+      "name": "ServiceNow (DE Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_insurance)",
+      "name": "Jira (FR Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_banking)",
+      "name": "Confluence (IN Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_government)",
+      "name": "Asana (US Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_retail)",
+      "name": "Monday.com (EU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_manufacturing)",
+      "name": "Trello (APAC Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_energy)",
+      "name": "Notion (UK Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_telecom)",
+      "name": "Slack (CA Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_insurance)",
+      "name": "Microsoft Teams (AU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_banking)",
+      "name": "Zoom (JP Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_government)",
+      "name": "Google Analytics (DE Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_retail)",
+      "name": "Google Ads (FR Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_manufacturing)",
+      "name": "Facebook Ads (IN Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_energy)",
+      "name": "LinkedIn Ads (US Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_telecom)",
+      "name": "Twitter Ads (EU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_insurance)",
+      "name": "Stripe (APAC Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_banking)",
+      "name": "PayPal (UK Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_government)",
+      "name": "Square (CA Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_retail)",
+      "name": "QuickBooks (AU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_manufacturing)",
+      "name": "Xero (JP Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_energy)",
+      "name": "NetSuite (DE Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_telecom)",
+      "name": "Workday (FR Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_insurance)",
+      "name": "BambooHR (IN Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_banking)",
+      "name": "Greenhouse (US Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_government)",
+      "name": "Lever (EU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_retail)",
+      "name": "ADP (APAC Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_manufacturing)",
+      "name": "Shopify (UK Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_energy)",
+      "name": "Magento (CA Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_telecom)",
+      "name": "WooCommerce (AU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_insurance)",
+      "name": "BigCommerce (JP Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_banking)",
+      "name": "Amazon Seller Central (DE Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_government)",
+      "name": "ShipStation (FR Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_retail)",
+      "name": "FedEx (IN Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_manufacturing)",
+      "name": "Salesforce (US Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_energy)",
+      "name": "HubSpot (EU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_telecom)",
+      "name": "Marketo (APAC Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_insurance)",
+      "name": "Pardot (UK Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_banking)",
+      "name": "Zendesk (CA Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_government)",
+      "name": "Intercom (AU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_retail)",
+      "name": "Freshdesk (JP Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_manufacturing)",
+      "name": "ServiceNow (DE Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_energy)",
+      "name": "Jira (FR Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_telecom)",
+      "name": "Confluence (IN Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_insurance)",
+      "name": "Asana (US Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_banking)",
+      "name": "Monday.com (EU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_government)",
+      "name": "Trello (APAC Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_retail)",
+      "name": "Notion (UK Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_manufacturing)",
+      "name": "Slack (CA Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_energy)",
+      "name": "Microsoft Teams (AU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_telecom)",
+      "name": "Zoom (JP Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_insurance)",
+      "name": "Google Analytics (DE Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_banking)",
+      "name": "Google Ads (FR Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_government)",
+      "name": "Facebook Ads (IN Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_retail)",
+      "name": "LinkedIn Ads (US Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_manufacturing)",
+      "name": "Twitter Ads (EU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_energy)",
+      "name": "Stripe (APAC Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_telecom)",
+      "name": "PayPal (UK Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_insurance)",
+      "name": "Square (CA Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_banking)",
+      "name": "QuickBooks (AU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_government)",
+      "name": "Xero (JP Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_retail)",
+      "name": "NetSuite (DE Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_manufacturing)",
+      "name": "Workday (FR Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_energy)",
+      "name": "BambooHR (IN Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_telecom)",
+      "name": "Greenhouse (US Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_insurance)",
+      "name": "Lever (EU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_banking)",
+      "name": "ADP (APAC Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_government)",
+      "name": "Shopify (UK Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_retail)",
+      "name": "Magento (CA Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_manufacturing)",
+      "name": "WooCommerce (AU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_energy)",
+      "name": "BigCommerce (JP Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_telecom)",
+      "name": "Amazon Seller Central (DE Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_insurance)",
+      "name": "ShipStation (FR Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_banking)",
+      "name": "FedEx (IN Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_government)",
+      "name": "Salesforce (US Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_retail)",
+      "name": "HubSpot (EU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_manufacturing)",
+      "name": "Marketo (APAC Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_energy)",
+      "name": "Pardot (UK Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_telecom)",
+      "name": "Zendesk (CA Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_insurance)",
+      "name": "Intercom (AU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_banking)",
+      "name": "Freshdesk (JP Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_government)",
+      "name": "ServiceNow (DE Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_retail)",
+      "name": "Jira (FR Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_manufacturing)",
+      "name": "Confluence (IN Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_energy)",
+      "name": "Asana (US Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_telecom)",
+      "name": "Monday.com (EU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_insurance)",
+      "name": "Trello (APAC Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_banking)",
+      "name": "Notion (UK Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_government)",
+      "name": "Slack (CA Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_retail)",
+      "name": "Microsoft Teams (AU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_manufacturing)",
+      "name": "Zoom (JP Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_energy)",
+      "name": "Google Analytics (DE Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_telecom)",
+      "name": "Google Ads (FR Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_insurance)",
+      "name": "Facebook Ads (IN Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_banking)",
+      "name": "LinkedIn Ads (US Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_government)",
+      "name": "Twitter Ads (EU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_retail)",
+      "name": "Stripe (APAC Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_manufacturing)",
+      "name": "PayPal (UK Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_energy)",
+      "name": "Square (CA Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_telecom)",
+      "name": "QuickBooks (AU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_insurance)",
+      "name": "Xero (JP Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_banking)",
+      "name": "NetSuite (DE Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_government)",
+      "name": "Workday (FR Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_retail)",
+      "name": "BambooHR (IN Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_manufacturing)",
+      "name": "Greenhouse (US Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_energy)",
+      "name": "Lever (EU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_telecom)",
+      "name": "ADP (APAC Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_insurance)",
+      "name": "Shopify (UK Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_banking)",
+      "name": "Magento (CA Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_government)",
+      "name": "WooCommerce (AU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_retail)",
+      "name": "BigCommerce (JP Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_manufacturing)",
+      "name": "Amazon Seller Central (DE Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_energy)",
+      "name": "ShipStation (FR Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_telecom)",
+      "name": "FedEx (IN Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_insurance)",
+      "name": "Salesforce (US Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_banking)",
+      "name": "HubSpot (EU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_government)",
+      "name": "Marketo (APAC Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_retail)",
+      "name": "Pardot (UK Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_manufacturing)",
+      "name": "Zendesk (CA Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_energy)",
+      "name": "Intercom (AU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_telecom)",
+      "name": "Freshdesk (JP Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_insurance)",
+      "name": "ServiceNow (DE Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_banking)",
+      "name": "Jira (FR Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_government)",
+      "name": "Confluence (IN Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_retail)",
+      "name": "Asana (US Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_manufacturing)",
+      "name": "Monday.com (EU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_energy)",
+      "name": "Trello (APAC Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_telecom)",
+      "name": "Notion (UK Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_insurance)",
+      "name": "Slack (CA Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_banking)",
+      "name": "Microsoft Teams (AU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_government)",
+      "name": "Zoom (JP Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_retail)",
+      "name": "Google Analytics (DE Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_manufacturing)",
+      "name": "Google Ads (FR Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_energy)",
+      "name": "Facebook Ads (IN Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_telecom)",
+      "name": "LinkedIn Ads (US Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_insurance)",
+      "name": "Twitter Ads (EU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_banking)",
+      "name": "Stripe (APAC Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_government)",
+      "name": "PayPal (UK Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_retail)",
+      "name": "Square (CA Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_manufacturing)",
+      "name": "QuickBooks (AU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_energy)",
+      "name": "Xero (JP Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_telecom)",
+      "name": "NetSuite (DE Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_insurance)",
+      "name": "Workday (FR Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_banking)",
+      "name": "BambooHR (IN Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_government)",
+      "name": "Greenhouse (US Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_retail)",
+      "name": "Lever (EU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_manufacturing)",
+      "name": "ADP (APAC Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_energy)",
+      "name": "Shopify (UK Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_telecom)",
+      "name": "Magento (CA Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_insurance)",
+      "name": "WooCommerce (AU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_banking)",
+      "name": "BigCommerce (JP Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_government)",
+      "name": "Amazon Seller Central (DE Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_retail)",
+      "name": "ShipStation (FR Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_manufacturing)",
+      "name": "FedEx (IN Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_energy)",
+      "name": "Salesforce (US Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_telecom)",
+      "name": "HubSpot (EU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_insurance)",
+      "name": "Marketo (APAC Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_banking)",
+      "name": "Pardot (UK Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_government)",
+      "name": "Zendesk (CA Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_retail)",
+      "name": "Intercom (AU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_manufacturing)",
+      "name": "Freshdesk (JP Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_energy)",
+      "name": "ServiceNow (DE Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_telecom)",
+      "name": "Jira (FR Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_insurance)",
+      "name": "Confluence (IN Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_banking)",
+      "name": "Asana (US Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_government)",
+      "name": "Monday.com (EU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_retail)",
+      "name": "Trello (APAC Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_manufacturing)",
+      "name": "Notion (UK Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_energy)",
+      "name": "Slack (CA Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_telecom)",
+      "name": "Microsoft Teams (AU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_insurance)",
+      "name": "Zoom (JP Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_banking)",
+      "name": "Google Analytics (DE Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_government)",
+      "name": "Google Ads (FR Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_retail)",
+      "name": "Facebook Ads (IN Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_manufacturing)",
+      "name": "LinkedIn Ads (US Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_energy)",
+      "name": "Twitter Ads (EU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_telecom)",
+      "name": "Stripe (APAC Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_insurance)",
+      "name": "PayPal (UK Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_banking)",
+      "name": "Square (CA Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_government)",
+      "name": "QuickBooks (AU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_retail)",
+      "name": "Xero (JP Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_manufacturing)",
+      "name": "NetSuite (DE Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_energy)",
+      "name": "Workday (FR Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_telecom)",
+      "name": "BambooHR (IN Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_insurance)",
+      "name": "Greenhouse (US Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_banking)",
+      "name": "Lever (EU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_government)",
+      "name": "ADP (APAC Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_retail)",
+      "name": "Shopify (UK Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_manufacturing)",
+      "name": "Magento (CA Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_energy)",
+      "name": "WooCommerce (AU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_telecom)",
+      "name": "BigCommerce (JP Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_insurance)",
+      "name": "Amazon Seller Central (DE Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_banking)",
+      "name": "ShipStation (FR Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_government)",
+      "name": "FedEx (IN Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_retail)_20927c",
+      "name": "Salesforce (US Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_manufacturing)_108806",
+      "name": "HubSpot (EU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_energy)_b3b7c0",
+      "name": "Marketo (APAC Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_telecom)_ee2d06",
+      "name": "Pardot (UK Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_insurance)_01b785",
+      "name": "Zendesk (CA Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_banking)_e2700f",
+      "name": "Intercom (AU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_government)_c6c249",
+      "name": "Freshdesk (JP Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_retail)_9f573b",
+      "name": "ServiceNow (DE Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_manufacturing)_2cb458",
+      "name": "Jira (FR Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_energy)_ec237c",
+      "name": "Confluence (IN Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_telecom)_7ee5ca",
+      "name": "Asana (US Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_insurance)_a31c03",
+      "name": "Monday.com (EU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_banking)_74ffbf",
+      "name": "Trello (APAC Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_government)_7c7db7",
+      "name": "Notion (UK Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_retail)_5c3c6a",
+      "name": "Slack (CA Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_manufacturing)_9e8579",
+      "name": "Microsoft Teams (AU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_energy)_cd32bf",
+      "name": "Zoom (JP Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_telecom)_65bb2d",
+      "name": "Google Analytics (DE Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_insurance)_9e2196",
+      "name": "Google Ads (FR Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_banking)_7b0d23",
+      "name": "Facebook Ads (IN Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_government)_399c29",
+      "name": "LinkedIn Ads (US Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_retail)_d33984",
+      "name": "Twitter Ads (EU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_manufacturing)_764a54",
+      "name": "Stripe (APAC Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_energy)_925a9d",
+      "name": "PayPal (UK Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_telecom)_2027da",
+      "name": "Square (CA Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_insurance)_4f6eb6",
+      "name": "QuickBooks (AU Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_banking)_1d9ceb",
+      "name": "Xero (JP Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_government)_8e40b0",
+      "name": "NetSuite (DE Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_retail)_e5b2b3",
+      "name": "Workday (FR Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_manufacturing)_0e8eda",
+      "name": "BambooHR (IN Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_energy)_748cb2",
+      "name": "Greenhouse (US Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_telecom)_60f466",
+      "name": "Lever (EU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_insurance)_880e2b",
+      "name": "ADP (APAC Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_banking)_db4e9c",
+      "name": "Shopify (UK Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_government)_b87ab8",
+      "name": "Magento (CA Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_retail)_d6a7e8",
+      "name": "WooCommerce (AU Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_manufacturing)_13cb8b",
+      "name": "BigCommerce (JP Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_energy)_4cce3b",
+      "name": "Amazon Seller Central (DE Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_telecom)_2868e8",
+      "name": "ShipStation (FR Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for ShipStation"
+    },
+    {
+      "id": "fedex_(in_insurance)_d6625c",
+      "name": "FedEx (IN Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for FedEx"
+    },
+    {
+      "id": "salesforce_(us_banking)_81ebef",
+      "name": "Salesforce (US Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Salesforce"
+    },
+    {
+      "id": "hubspot_(eu_government)_ddddfa",
+      "name": "HubSpot (EU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for HubSpot"
+    },
+    {
+      "id": "marketo_(apac_retail)_83cf47",
+      "name": "Marketo (APAC Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Marketo"
+    },
+    {
+      "id": "pardot_(uk_manufacturing)_1ce902",
+      "name": "Pardot (UK Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Pardot"
+    },
+    {
+      "id": "zendesk_(ca_energy)_cbbde3",
+      "name": "Zendesk (CA Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Zendesk"
+    },
+    {
+      "id": "intercom_(au_telecom)_cae958",
+      "name": "Intercom (AU Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Intercom"
+    },
+    {
+      "id": "freshdesk_(jp_insurance)_b8f897",
+      "name": "Freshdesk (JP Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Freshdesk"
+    },
+    {
+      "id": "servicenow_(de_banking)_d9e28d",
+      "name": "ServiceNow (DE Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for ServiceNow"
+    },
+    {
+      "id": "jira_(fr_government)_d4a9a5",
+      "name": "Jira (FR Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Jira"
+    },
+    {
+      "id": "confluence_(in_retail)_91fecb",
+      "name": "Confluence (IN Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Confluence"
+    },
+    {
+      "id": "asana_(us_manufacturing)_225ee9",
+      "name": "Asana (US Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Asana"
+    },
+    {
+      "id": "mondaycom_(eu_energy)_a68ea8",
+      "name": "Monday.com (EU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Monday.com"
+    },
+    {
+      "id": "trello_(apac_telecom)_d64871",
+      "name": "Trello (APAC Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Trello"
+    },
+    {
+      "id": "notion_(uk_insurance)_6c53cd",
+      "name": "Notion (UK Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Notion"
+    },
+    {
+      "id": "slack_(ca_banking)_58c8ab",
+      "name": "Slack (CA Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Slack"
+    },
+    {
+      "id": "microsoft_teams_(au_government)_12dfb7",
+      "name": "Microsoft Teams (AU Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Microsoft Teams"
+    },
+    {
+      "id": "zoom_(jp_retail)_574d25",
+      "name": "Zoom (JP Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Zoom"
+    },
+    {
+      "id": "google_analytics_(de_manufacturing)_288edf",
+      "name": "Google Analytics (DE Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Google Analytics"
+    },
+    {
+      "id": "google_ads_(fr_energy)_27f627",
+      "name": "Google Ads (FR Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for Google Ads"
+    },
+    {
+      "id": "facebook_ads_(in_telecom)_b9ef8f",
+      "name": "Facebook Ads (IN Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Facebook Ads"
+    },
+    {
+      "id": "linkedin_ads_(us_insurance)_78ecd5",
+      "name": "LinkedIn Ads (US Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for LinkedIn Ads"
+    },
+    {
+      "id": "twitter_ads_(eu_banking)_bf6546",
+      "name": "Twitter Ads (EU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Twitter Ads"
+    },
+    {
+      "id": "stripe_(apac_government)_b1d3f0",
+      "name": "Stripe (APAC Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for Stripe"
+    },
+    {
+      "id": "paypal_(uk_retail)_93cb6b",
+      "name": "PayPal (UK Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for PayPal"
+    },
+    {
+      "id": "square_(ca_manufacturing)_31ba34",
+      "name": "Square (CA Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Square"
+    },
+    {
+      "id": "quickbooks_(au_energy)_526e4f",
+      "name": "QuickBooks (AU Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for QuickBooks"
+    },
+    {
+      "id": "xero_(jp_telecom)_38acf9",
+      "name": "Xero (JP Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Xero"
+    },
+    {
+      "id": "netsuite_(de_insurance)_8819c6",
+      "name": "NetSuite (DE Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for NetSuite"
+    },
+    {
+      "id": "workday_(fr_banking)_4191c9",
+      "name": "Workday (FR Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for Workday"
+    },
+    {
+      "id": "bamboohr_(in_government)_52fbc6",
+      "name": "BambooHR (IN Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for BambooHR"
+    },
+    {
+      "id": "greenhouse_(us_retail)_f947cd",
+      "name": "Greenhouse (US Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Greenhouse"
+    },
+    {
+      "id": "lever_(eu_manufacturing)_4fed41",
+      "name": "Lever (EU Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for Lever"
+    },
+    {
+      "id": "adp_(apac_energy)_98bc0b",
+      "name": "ADP (APAC Energy)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional energy deployment for ADP"
+    },
+    {
+      "id": "shopify_(uk_telecom)_469c34",
+      "name": "Shopify (UK Telecom)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional telecom deployment for Shopify"
+    },
+    {
+      "id": "magento_(ca_insurance)_a1a4de",
+      "name": "Magento (CA Insurance)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional insurance deployment for Magento"
+    },
+    {
+      "id": "woocommerce_(au_banking)_74ae71",
+      "name": "WooCommerce (AU Banking)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional banking deployment for WooCommerce"
+    },
+    {
+      "id": "bigcommerce_(jp_government)_72b030",
+      "name": "BigCommerce (JP Government)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional government deployment for BigCommerce"
+    },
+    {
+      "id": "amazon_seller_central_(de_retail)_2484b4",
+      "name": "Amazon Seller Central (DE Retail)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional retail deployment for Amazon Seller Central"
+    },
+    {
+      "id": "shipstation_(fr_manufacturing)_2a90d6",
+      "name": "ShipStation (FR Manufacturing)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Regional manufacturing deployment for ShipStation"
+    }
+  ]
+}

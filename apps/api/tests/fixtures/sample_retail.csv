@@ -1,0 +1,6 @@
+cust_id,order_total,order_dt,SKU,qty,status
+4421,99.99,2025-01-15,SKU-A100,2,shipped
+4422,1250.50,2025-01-16,SKU-B220,1,pending
+4423,42.00,2025-01-17,SKU-C330,5,shipped
+4424,890.00,2025-01-18,SKU-D440,3,returned
+4425,15.75,2025-01-19,SKU-E550,1,shipped
