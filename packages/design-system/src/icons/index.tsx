@@ -36,6 +36,27 @@ export function IconOverview({ size = 18 }: { size?: number }) {
   );
 }
 
+export function IconHome({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="none" aria-hidden>
+      <path 
+        d="M3 7.5L9 3L15 7.5V14.5C15 15.05 14.55 15.5 14 15.5H4C3.45 15.5 3 15.05 3 14.5V7.5Z" 
+        stroke="currentColor" 
+        strokeWidth="1.5" 
+        strokeLinecap="round" 
+        strokeLinejoin="round"
+      />
+      <path 
+        d="M7 15.5V9.5H11V15.5" 
+        stroke="currentColor" 
+        strokeWidth="1.5" 
+        strokeLinecap="round" 
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function IconTransfer({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" fill="none" aria-hidden>

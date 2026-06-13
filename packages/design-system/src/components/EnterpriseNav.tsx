@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { IconConnector, IconJobs, IconTransfer } from "../icons";
+import { IconConnector, IconHome, IconJobs, IconTransfer } from "../icons";
 
-export type NavItemId = "transfer" | "connectors" | "jobs";
+export type NavItemId = "home" | "transfer" | "connectors" | "jobs";
 
 export interface NavItem {
   id: NavItemId;
@@ -16,12 +16,14 @@ interface EnterpriseNavProps {
 }
 
 const NAV_ITEMS: NavItem[] = [
+  { id: "home", label: "Home" },
   { id: "transfer", label: "Transfer" },
   { id: "jobs", label: "Operations" },
   { id: "connectors", label: "Connectors" },
 ];
 
 const NAV_ICONS: Record<NavItemId, ReactNode> = {
+  home: <IconHome />,
   transfer: <IconTransfer />,
   connectors: <IconConnector />,
   jobs: <IconJobs />,

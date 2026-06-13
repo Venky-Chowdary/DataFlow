@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconConnector, IconJobs, IconTransfer } from "../icons";
+import { IconConnector, IconHome, IconJobs, IconTransfer } from "../icons";
 import type { NavItemId } from "./EnterpriseNav";
 
 interface NavPaneProps {
@@ -8,6 +8,7 @@ interface NavPaneProps {
 }
 
 const ITEMS: { id: NavItemId; label: string; icon: ReactNode }[] = [
+  { id: "home", label: "Home", icon: <IconHome size={20} /> },
   { id: "transfer", label: "Transfer", icon: <IconTransfer size={20} /> },
   { id: "jobs", label: "Operations", icon: <IconJobs size={20} /> },
   { id: "connectors", label: "Connectors", icon: <IconConnector size={20} /> },

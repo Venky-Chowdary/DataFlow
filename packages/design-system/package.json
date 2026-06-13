@@ -8,7 +8,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./styles.css": "./src/styles.css",
-    "./dataflow-ui.css": "./src/dataflow-ui.css"
+    "./dataflow-ui.css": "./src/dataflow-ui.css",
+    "./datatransfer-space.css": "./src/datatransfer-space.css",
+    "./enterprise.css": "./src/enterprise.css"
   },
   "scripts": {
     "storybook": "storybook dev -p 6006",

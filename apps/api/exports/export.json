@@ -1,0 +1,52 @@
+[
+  {
+    "CUST_ID": "C-1001",
+    "ORIG_CITY": "Chicago",
+    "DEST_CITY": "Dallas",
+    "WT_KG": "12.5",
+    "AMT": "450.00",
+    "TRACK_NO": "TRK-8821",
+    "TXN_DT": "2025-06-01",
+    "STS": "IN_TRANSIT"
+  },
+  {
+    "CUST_ID": "C-1002",
+    "ORIG_CITY": "Mumbai",
+    "DEST_CITY": "London",
+    "WT_KG": "450.0",
+    "AMT": "8900.00",
+    "TRACK_NO": "AWB991023",
+    "TXN_DT": "2025-06-02",
+    "STS": "DELIVERED"
+  },
+  {
+    "CUST_ID": "C-1003",
+    "ORIG_CITY": "Berlin",
+    "DEST_CITY": "Paris",
+    "WT_KG": "0.8",
+    "AMT": "18.75",
+    "TRACK_NO": "CONS-4412",
+    "TXN_DT": "2025-06-03",
+    "STS": "PICKED_UP"
+  },
+  {
+    "CUST_ID": "C-1004",
+    "ORIG_CITY": "Seattle",
+    "DEST_CITY": "Portland",
+    "WT_KG": "1200.0",
+    "AMT": "125000.00",
+    "TRACK_NO": "TRK-9901",
+    "TXN_DT": "2025-06-04",
+    "STS": "IN_TRANSIT"
+  },
+  {
+    "CUST_ID": "C-1005",
+    "ORIG_CITY": "Tokyo",
+    "DEST_CITY": "Osaka",
+    "WT_KG": "22.3",
+    "AMT": "330.50",
+    "TRACK_NO": "TRK-7712",
+    "TXN_DT": "2025-06-05",
+    "STS": "DELIVERED"
+  }
+]

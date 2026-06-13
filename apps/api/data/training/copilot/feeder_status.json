@@ -1,0 +1,141 @@
+{
+  "upload_dirs": [
+    "C:\\Users\\venka\\source\\Repos\\Data\\apps\\api\\uploads",
+    "C:\\Users\\venka\\source\\Repos\\Data\\apps\\api\\src\\uploads",
+    "C:\\Users\\venka\\source\\Repos\\Data\\apps\\api\\tests\\fixtures",
+    "C:\\Users\\venka\\source\\Repos\\Data\\apps\\api\\uploads"
+  ],
+  "total_schemas": 1361,
+  "from_uploads": 111,
+  "from_industry": 10,
+  "from_catalog": 1240,
+  "total_columns": 16653,
+  "registry": {
+    "connector_sources": 620,
+    "industry_templates": 10,
+    "estimated_schema_profiles": 1870,
+    "description": "620+ connectors \u00d7 variants + industry templates"
+  },
+  "schemas": [
+    {
+      "name": "00a1d039e065422d_sample_synonyms",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "0253d14b772b4c45_sample_logistics",
+      "source": "upload",
+      "columns": 8,
+      "rows": 5
+    },
+    {
+      "name": "04baae17b1c54beb_sample_payments",
+      "source": "upload",
+      "columns": 5,
+      "rows": 3
+    },
+    {
+      "name": "0881f259e15f4ed6_sample_retail",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "0ce62bd5b51644a2_sample_payments",
+      "source": "upload",
+      "columns": 8,
+      "rows": 10
+    },
+    {
+      "name": "0d03bc82291f4288_sample_synonyms",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "13bfbf7add9344f6_sample_synonyms",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "150d94ffc43e4c7a_sample_retail",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "1b18abe445ff4b93_sample_logistics",
+      "source": "upload",
+      "columns": 8,
+      "rows": 5
+    },
+    {
+      "name": "223ee3d943c4498b_sample_hr",
+      "source": "upload",
+      "columns": 5,
+      "rows": 5
+    },
+    {
+      "name": "24d2379b1c2f4f95_sample_payments",
+      "source": "upload",
+      "columns": 5,
+      "rows": 3
+    },
+    {
+      "name": "25eb39d5e8bd47b1_sample_logistics",
+      "source": "upload",
+      "columns": 8,
+      "rows": 5
+    },
+    {
+      "name": "2712de5085354fb6_sample_logistics",
+      "source": "upload",
+      "columns": 8,
+      "rows": 5
+    },
+    {
+      "name": "2ace8732b91c4752_sample_retail",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "2b99bf30ddbb4abd_sample_payments",
+      "source": "upload",
+      "columns": 8,
+      "rows": 10
+    },
+    {
+      "name": "2c281822f3764bc8_sample_logistics",
+      "source": "upload",
+      "columns": 8,
+      "rows": 5
+    },
+    {
+      "name": "2c53d0be3f554508_sample_retail",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "2d59ce3df70446a4_sample_synonyms",
+      "source": "upload",
+      "columns": 6,
+      "rows": 5
+    },
+    {
+      "name": "317c915cf5bf4c22_sample_payments",
+      "source": "upload",
+      "columns": 8,
+      "rows": 10
+    },
+    {
+      "name": "333dd37f56f24b16_sample_logistics",
+      "source": "upload",
+      "columns": 8,
+      "rows": 5
+    }
+  ]
+}

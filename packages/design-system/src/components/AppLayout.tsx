@@ -5,6 +5,7 @@ import { PipelineSteps, type PipelineStepItem } from "./PipelineSteps";
 import { ThemeToggle } from "./ThemeToggle";
 
 const PAGE_TITLES: Record<NavItemId, string> = {
+  home: "Home",
   transfer: "Transfer",
   jobs: "Operations",
   connectors: "Connectors",

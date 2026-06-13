@@ -4,8 +4,37 @@ export { AppLayout } from "./components/AppLayout";
 export { AppShell } from "./components/AppShell";
 export { BrandLogo } from "./components/BrandLogo";
 export { Button } from "./components/Button";
+export {
+  Dashboard,
+  DashboardHero,
+  MetricCard,
+  QuickActionCard,
+} from "./components/Dashboard";
+export {
+  DatabaseIcon,
+  PostgresIcon,
+  SnowflakeIcon,
+  MongoIcon,
+  MySQLIcon,
+  BigQueryIcon,
+  RedisIcon,
+  DatabricksIcon,
+  FileIcon,
+  ApiIcon,
+  TransferIcon,
+} from "./components/DatabaseIcons";
+
+// DataTransfer.space Enterprise Components
+export { HeroLanding, HeroLandingStyles, DataUniverseVisualization } from "./components/HeroLanding";
+export { ConnectorMarketplace, ConnectorMarketplaceStyles } from "./components/ConnectorMarketplace";
+export { AISchemaStudio, AISchemaStudioStyles } from "./components/AISchemaStudio";
+export { MigrationControl, MigrationControlStyles } from "./components/MigrationControl";
+export { AICopilot, AICopilotStyles } from "./components/AICopilot";
+export { GovernanceCenter, GovernanceCenterStyles } from "./components/GovernanceCenter";
+export { ConnectionWizard, ConnectionWizardStyles } from "./components/ConnectionWizard";
 export { CheckpointTimeline } from "./components/CheckpointTimeline";
 export type { CheckpointItem } from "./components/CheckpointTimeline";
+export { ConfidenceBar } from "./components/ConfidenceBar";
 export { LoadingState, MetricSkeleton, SkeletonBlock } from "./components/LoadingState";
 export { ProgressBar } from "./components/ProgressBar";
 export { JobDetailPanel } from "./components/JobDetailPanel";

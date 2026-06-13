@@ -11,6 +11,8 @@
   "dependencies": {
     "@dataflow/design-system": "*",
     "@fontsource/ibm-plex-mono": "^5.1.0",
+    "@fontsource/inter": "^5.1.0",
+    "@fontsource/jetbrains-mono": "^5.1.0",
     "@fontsource/plus-jakarta-sans": "^5.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
