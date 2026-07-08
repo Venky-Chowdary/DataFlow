@@ -17,8 +17,9 @@ from .embedding_service import get_embedding_service
 
 _vector_store: Optional["DataTransferVectorStore"] = None
 
-DEFAULT_PERSIST_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "data", "vector_store"
+DEFAULT_PERSIST_DIR = os.environ.get(
+    "DATAFLOW_VECTOR_STORE_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "vector_store"),
 )
 
 

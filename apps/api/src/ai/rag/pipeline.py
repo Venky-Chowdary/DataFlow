@@ -7,6 +7,7 @@ End-to-end RAG pipeline orchestrating ingestion, retrieval, and generation.
 from __future__ import annotations
 from typing import Optional
 
+from .bootstrap import rebuild_vector_store
 from .document_ingestion import DataTransferDocumentIngestion
 from .retriever import DataTransferRetriever
 from .generator import DataTransferRAGGenerator, RAGResponse
@@ -30,7 +31,10 @@ class DataTransferRAGPipeline:
     def initialize(self) -> dict:
         """Initialize the pipeline with knowledge base."""
         if not self._initialized:
-            result = self.ingestion.ingest_knowledge_base()
+            if self.vector_store.document_count == 0:
+                result = rebuild_vector_store()
+            else:
+                result = self.ingestion.ingest_knowledge_base()
             self._initialized = True
             return result
         return {"status": "already_initialized", "documents": self.vector_store.document_count}
