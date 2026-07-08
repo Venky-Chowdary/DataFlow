@@ -1,0 +1,401 @@
+/**
+ * Enterprise motion — Skiper / premium SaaS patterns (CSS-only, no extra deps)
+ * Smooth ease-out curves, stagger reveals, micro-interactions, unified surfaces
+ */
+
+:root {
+  --df-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --df-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --df-ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+  --df-duration-fast: 140ms;
+  --df-duration-base: 220ms;
+  --df-duration-slow: 420ms;
+  --df-duration-page: 520ms;
+  --df-blur-glass: 12px;
+}
+
+/* ─── Keyframes ─── */
+
+@keyframes df-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes df-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes df-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes df-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes df-shimmer-line {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes df-pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+/* ─── Page enter (screen transition) ─── */
+
+.dt-screen-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: df-fade-up var(--df-duration-page) var(--df-ease-out) both;
+}
+
+.dt-page-enter {
+  animation: df-fade-in var(--df-duration-base) var(--df-ease-out) both;
+}
+
+/* Stagger children — header, stats, cards */
+.dt-stagger > * {
+  animation: df-fade-up var(--df-duration-slow) var(--df-ease-out) both;
+}
+
+.dt-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.dt-stagger > *:nth-child(2) { animation-delay: 50ms; }
+.dt-stagger > *:nth-child(3) { animation-delay: 100ms; }
+.dt-stagger > *:nth-child(4) { animation-delay: 150ms; }
+.dt-stagger > *:nth-child(5) { animation-delay: 200ms; }
+.dt-stagger > *:nth-child(6) { animation-delay: 250ms; }
+.dt-stagger > *:nth-child(7) { animation-delay: 300ms; }
+.dt-stagger > *:nth-child(8) { animation-delay: 350ms; }
+
+/* ─── Single-scroll architecture (fewer nested scrollers) ─── */
+
+.dt-main-body {
+  overflow: hidden;
+}
+
+.dt-page-stack-viewport > .dt-page-body,
+.dt-page-stack-viewport > .dt-command-grid,
+.dt-page-stack-viewport > .dt-jobs-layout,
+.dt-page-stack-viewport > .dt-transfer-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dt-page:not(.dt-page-flush):not(.dt-page-viewport) {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.dt-page-viewport {
+  overflow: hidden !important;
+  height: 100%;
+}
+
+.dt-page {
+  flex: 1;
+  min-height: 0;
+}
+
+.dt-page-flush .dt-page-stack {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Pilot: one scroll region inside main chat area only */
+.dt-pilot-main {
+  overflow: hidden;
+}
+
+.dt-pilot-main-inner {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.dt-pilot-main-chat .dt-pilot-thread {
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Wizard steps wrap instead of horizontal scroll */
+.dt-wizard-steps-premium {
+  flex-wrap: wrap;
+  overflow-x: visible;
+  justify-content: flex-start;
+  gap: var(--df-space-2);
+}
+
+@media (max-width: 640px) {
+  .dt-wizard-steps-premium {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--df-space-2);
+  }
+
+  .dt-wizard-step-wrap {
+    width: 100%;
+  }
+
+  .dt-wizard-divider {
+    display: none;
+  }
+}
+
+/* Job phases: grid on mobile, no horizontal scroll */
+@media (max-width: 640px) {
+  .dt-job-phases {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    overflow-x: visible;
+    gap: var(--df-space-2);
+  }
+}
+
+/* Settings / connector tabs wrap */
+.dt-tabs,
+.dt-settings-tabs {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+/* Tables → card rows on phone (no horizontal scroll) */
+@media (max-width: 640px) {
+  .dt-table-scroll .dt-table thead {
+    display: none;
+  }
+
+  .dt-table-scroll .dt-table,
+  .dt-table-scroll .dt-table tbody,
+  .dt-table-scroll .dt-table tr,
+  .dt-table-scroll .dt-table td {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .dt-table-scroll .dt-table tr {
+    margin-bottom: var(--df-space-3);
+    padding: var(--df-space-4);
+    border: 1px solid var(--df-border);
+    border-radius: var(--df-radius-lg);
+    background: var(--df-surface);
+    box-shadow: var(--df-shadow-xs);
+  }
+
+  .dt-table-scroll .dt-table td {
+    padding: var(--df-space-1) 0;
+    border: none;
+    text-align: left;
+  }
+
+  .dt-table-scroll .dt-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--df-text-tertiary);
+    margin-bottom: 2px;
+  }
+
+  .dt-table-scroll {
+    overflow-x: visible;
+  }
+
+  .dt-table-scroll .dt-table {
+    min-width: 0;
+  }
+}
+
+/* ─── Unified surfaces (glass + elevation) ─── */
+
+.dt-glass {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(var(--df-blur-glass));
+  -webkit-backdrop-filter: blur(var(--df-blur-glass));
+}
+
+.dt-header-slim,
+.dt-sidebar,
+.landing-nav {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(var(--df-blur-glass));
+  -webkit-backdrop-filter: blur(var(--df-blur-glass));
+}
+
+.dt-card {
+  transition:
+    box-shadow var(--df-duration-base) var(--df-ease-out),
+    border-color var(--df-duration-base) var(--df-ease-out),
+    transform var(--df-duration-base) var(--df-ease-out);
+}
+
+.dt-card:hover {
+  box-shadow: var(--df-shadow-md);
+  border-color: var(--df-border-strong);
+}
+
+.dt-stat,
+.dt-schedule-stat,
+.dt-connector-card {
+  transition:
+    transform var(--df-duration-base) var(--df-ease-out),
+    box-shadow var(--df-duration-base) var(--df-ease-out);
+}
+
+.dt-stat:hover,
+.dt-schedule-stat:hover,
+.dt-connector-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--df-shadow-sm);
+}
+
+/* ─── Buttons — consistent press / hover ─── */
+
+.dt-btn {
+  transition:
+    background var(--df-duration-fast) var(--df-ease-smooth),
+    border-color var(--df-duration-fast) var(--df-ease-smooth),
+    box-shadow var(--df-duration-fast) var(--df-ease-smooth),
+    transform var(--df-duration-fast) var(--df-ease-spring);
+}
+
+.dt-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.dt-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28);
+}
+
+.dt-nav-item {
+  transition:
+    background var(--df-duration-fast) var(--df-ease-smooth),
+    color var(--df-duration-fast) var(--df-ease-smooth),
+    transform var(--df-duration-fast) var(--df-ease-out);
+}
+
+.dt-nav-item:active {
+  transform: scale(0.98);
+}
+
+/* ─── Modals & overlay ─── */
+
+.dt-modal-overlay {
+  animation: df-fade-in var(--df-duration-base) var(--df-ease-out) both;
+}
+
+.dt-modal {
+  animation: df-scale-in var(--df-duration-slow) var(--df-ease-out) both;
+}
+
+.dt-mobile-overlay {
+  animation: df-fade-in var(--df-duration-base) var(--df-ease-out) both;
+}
+
+.dt-sidebar {
+  transition: transform var(--df-duration-slow) var(--df-ease-out);
+}
+
+/* ─── Landing page motion ─── */
+
+.landing-hero h1,
+.landing-hero-lead,
+.landing-hero-actions,
+.landing-metrics {
+  animation: df-fade-up var(--df-duration-slow) var(--df-ease-out) both;
+}
+
+.landing-hero-lead { animation-delay: 80ms; }
+.landing-hero-actions { animation-delay: 160ms; }
+.landing-metrics { animation-delay: 240ms; }
+
+.landing-feature {
+  animation: df-fade-up var(--df-duration-slow) var(--df-ease-out) both;
+}
+
+.landing-features .landing-feature:nth-child(1) { animation-delay: 100ms; }
+.landing-features .landing-feature:nth-child(2) { animation-delay: 180ms; }
+.landing-features .landing-feature:nth-child(3) { animation-delay: 260ms; }
+
+/* ─── Copilot rail slide ─── */
+
+.dt-copilot-rail {
+  animation: df-slide-in-right var(--df-duration-slow) var(--df-ease-out) both;
+}
+
+/* ─── Focus rings consistent ─── */
+
+.dt-btn:focus-visible,
+.dt-nav-item:focus-visible,
+.dt-tab:focus-visible,
+.dt-input:focus-visible,
+.dt-select:focus-visible {
+  outline: 2px solid var(--df-brand);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--df-brand-ring);
+}
+
+/* ─── Typography rhythm ─── */
+
+.dt-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.dt-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--df-text-secondary);
+}
+
+.dt-input,
+.dt-select,
+textarea.dt-input {
+  border-radius: var(--df-radius-md);
+  transition:
+    border-color var(--df-duration-fast) var(--df-ease-smooth),
+    box-shadow var(--df-duration-fast) var(--df-ease-smooth);
+}
+
+.dt-input:focus,
+.dt-select:focus,
+textarea.dt-input:focus {
+  border-color: var(--df-brand);
+  box-shadow: 0 0 0 3px var(--df-brand-ring);
+}

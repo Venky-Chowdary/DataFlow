@@ -7,12 +7,14 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=@dataflow/web",
-    "dev:api": "cd apps/api && uvicorn main:app --reload --port 8000",
+    "dev:api": "cd apps/api && python3 -m uvicorn src.main:app --reload --host 127.0.0.1 --port 8001",
     "build": "npm run build --workspace=@dataflow/web",
     "storybook": "npm run storybook --workspace=@dataflow/design-system",
     "test": "npm run test:api && npm run test:preflight",
     "test:preflight": "cd packages/preflight && python -m pytest tests -v",
-    "test:api": "cd apps/api && python -m pytest tests -v",
+    "test:api": "cd apps/api && python3 -m pytest tests -v",
+    "test:e2e": "cd apps/api && python3 -m pytest tests/test_e2e_pipeline.py tests/test_schema_inference.py tests/test_sample_files.py tests/test_catalog_api.py tests/test_connectors_flow.py -v",
+    "loop:enterprise": "while true; do npm run test:e2e && npm run build && echo 'ENTERPRISE_LOOP_OK' || echo 'ENTERPRISE_LOOP_FAIL'; sleep 300; done",
     "generate:catalog": "cd apps/api && python scripts/generate_connector_catalog.py",
     "generate:training": "cd packages/ml/src/ml/synthetic && python factory.py --count 10000"
   }

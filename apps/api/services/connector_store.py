@@ -64,12 +64,20 @@ def _now() -> str:
 
 def _load_all() -> list[SavedConnector]:
     if not STORE_PATH.exists():
-        return _seed_defaults()
+        return _seed_defaults() if _seed_enabled() else []
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        return [SavedConnector.from_dict(c) for c in raw.get("connectors", [])]
+        items = [SavedConnector.from_dict(c) for c in raw.get("connectors", [])]
     except Exception:
-        return _seed_defaults()
+        return _seed_defaults() if _seed_enabled() else []
+    if not _seed_enabled():
+        items = [c for c in items if not c.id.startswith("demo-")]
+    return items
+
+
+def _seed_enabled() -> bool:
+    import os
+    return os.getenv("DATAFLOW_SEED_DEMO", "").lower() in ("1", "true", "yes")
 
 
 def _save_all(connectors: list[SavedConnector]) -> None:

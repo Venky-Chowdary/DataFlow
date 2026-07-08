@@ -44,6 +44,23 @@ class CopilotChatResponse(BaseModel):
     tools_used: list[dict] = []
 
 
+class ToolRegistryResponse(BaseModel):
+    tool_count: int
+    generated_action_count: int
+    total_routable_actions: int
+    families: list[dict] = []
+    tools: list[dict] = []
+
+
+class ModelCapabilitiesResponse(BaseModel):
+    active_provider: str
+    active_model: str
+    agent_mode: str
+    fallback_order: list[str]
+    providers: list[dict]
+    guarantees: list[str]
+
+
 class TrainRequest(BaseModel):
     include_embedding_tune: bool = Field(False, description="Also fine-tune embedding model")
     force: bool = Field(False, description="Force full retrain")
@@ -97,6 +114,20 @@ async def copilot_prompts():
     return {"prompts": get_copilot_agent().get_suggested_prompts()}
 
 
+@router.get("/tools", response_model=ToolRegistryResponse)
+async def copilot_tools():
+    """Expose Data Pilot tool registry and generated connector actions."""
+    from ..ai.copilot.tools import get_tool_registry
+    return get_tool_registry()
+
+
+@router.get("/models", response_model=ModelCapabilitiesResponse)
+async def copilot_models():
+    """Expose cloud/local AI model capabilities and safe fallback order."""
+    from ..ai.llm.provider import get_model_capabilities
+    return get_model_capabilities()
+
+
 @router.post("/train", response_model=TrainResponse)
 async def train_copilot(request: TrainRequest):
     """
@@ -137,16 +168,16 @@ async def copilot_status():
 
     rag = get_rag_pipeline()
     training = get_training_agent()
+    from ..ai.copilot.tools import get_tool_registry
+    from ..ai.llm.provider import get_model_capabilities
+    model_capabilities = get_model_capabilities()
     return {
         "copilot": "ready",
         "data_pilot": "ready",
-        "agent_mode": (
-            "anthropic_tools" if get_pilot_agent().anthropic.is_available()
-            else "openai_tools" if _openai_available()
-            else "ollama_tools" if _ollama_available()
-            else "local_tools"
-        ),
+        "agent_mode": model_capabilities["agent_mode"],
         "suggested_prompts": get_copilot_agent().get_suggested_prompts(),
+        "tool_registry": get_tool_registry(),
+        "model_capabilities": model_capabilities,
         "rag": rag.get_status(),
         "training_agent": training.get_status(),
     }

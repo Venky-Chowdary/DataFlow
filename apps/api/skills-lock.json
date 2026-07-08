@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "ui-design-brain-cursor-skill": {
+      "source": "aradotso/design-skills",
+      "sourceType": "github",
+      "skillPath": "skills/ui-design-brain-cursor-skill/SKILL.md",
+      "computedHash": "fd09d37265203dc04979ec2fd253e7b5d2217604f9329116f0aa8aed16efc717"
+    }
+  }
+}

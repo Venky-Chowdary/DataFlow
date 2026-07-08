@@ -47,24 +47,37 @@ def test_database_connection(
             warehouse=warehouse,
         )
 
-    if connection_string.strip():
-        return ConnectResult(
-            ok=True,
-            tables=["information_schema.tables"],
-            message=f"{db_type} connection string accepted (driver pending)",
-            driver="stub",
+    if db_type == "mysql":
+        from connectors.mysql import test_mysql
+
+        return test_mysql(
+            host=host,
+            port=port or 3306,
+            database=database,
+            username=username,
+            password=password,
+            schema=schema,
+            connection_string=connection_string,
+            ssl=ssl,
         )
 
-    if not host or not database or not username:
-        return ConnectResult(
-            ok=False,
-            tables=[],
-            error="Provide connection string or host + database + username",
+    if db_type == "bigquery":
+        from connectors.bigquery import test_bigquery
+
+        return test_bigquery(
+            host=host,
+            port=port or 443,
+            database=database,
+            username=username,
+            password=password,
+            schema=schema or "dataflow",
+            connection_string=connection_string,
+            ssl=ssl,
         )
 
     return ConnectResult(
-        ok=True,
-        tables=["sample_table", "orders", "customers"],
-        message=f"Connection validated for {db_type} (driver integration pending)",
-        driver="stub",
+        ok=False,
+        tables=[],
+        error=f"Unsupported database type: {db_type}",
+        driver="none",
     )

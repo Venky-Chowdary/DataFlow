@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Legacy connectors live under apps/api/
 _API_ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +18,16 @@ from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
 from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
+
+
+def _writer_diagnostics(result: Any) -> dict[str, Any]:
+    rejected = int(getattr(result, "rejected_rows", 0) or 0)
+    warnings = list(getattr(result, "warnings", []) or [])
+    return {
+        "rejected_rows": rejected,
+        "warnings": warnings[:10],
+        "error_policy": "quarantine" if rejected else "none",
+    }
 
 
 def parse_file_content(content: bytes, filename: str) -> tuple[list[dict], list[str], dict[str, str]]:
@@ -49,20 +59,72 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         "type": endpoint.format,
     }
     if endpoint.connector_id:
-        mongo = get_mongodb_service()
-        conn = mongo.get_connector(endpoint.connector_id)
-        if not conn:
+        conn_dict = _lookup_saved_connector(endpoint.connector_id)
+        if not conn_dict:
             raise ValueError(f"Connector {endpoint.connector_id} not found")
         cfg.update({
-            "host": conn.get("host", cfg["host"]),
-            "port": conn.get("port", cfg["port"]),
-            "database": conn.get("database", cfg["database"]),
-            "username": conn.get("username", cfg["username"]),
-            "password": conn.get("password", cfg["password"]),
-            "connection_string": conn.get("connection_string", cfg["connection_string"]),
-            "type": conn.get("type", endpoint.format),
+            "host": conn_dict.get("host") or cfg["host"],
+            "port": conn_dict.get("port") or cfg["port"],
+            "database": conn_dict.get("database") or cfg["database"],
+            "schema": conn_dict.get("schema") or cfg["schema"],
+            "username": conn_dict.get("username") or cfg["username"],
+            "password": conn_dict.get("password") or cfg["password"],
+            "connection_string": conn_dict.get("connection_string") or cfg["connection_string"],
+            "warehouse": conn_dict.get("warehouse") or cfg["warehouse"],
+            "ssl": conn_dict.get("ssl", cfg["ssl"]),
+            "type": conn_dict.get("type") or endpoint.format,
         })
     return cfg
+
+
+def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
+    """Find a saved connector in the file-backed store, falling back to MongoDB."""
+    try:
+        from services.connector_store import get_connector as fs_get
+
+        conn = fs_get(connector_id)
+        if conn:
+            return {
+                "host": conn.host,
+                "port": conn.port,
+                "database": conn.database,
+                "schema": conn.schema,
+                "username": conn.username,
+                "password": conn.password,
+                "connection_string": conn.connection_string,
+                "warehouse": conn.warehouse,
+                "ssl": conn.ssl,
+                "type": conn.type,
+            }
+    except Exception:
+        pass
+    try:
+        mongo = get_mongodb_service()
+        return mongo.get_connector(connector_id)
+    except Exception:
+        return None
+
+
+def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, headers: list[str]) -> dict[str, str]:
+    """Load column types from INFORMATION_SCHEMA when the driver is available."""
+    from services.schema_introspect import introspect_schema
+
+    info = introspect_schema(
+        db_type,
+        host=cfg.get("host", ""),
+        port=int(cfg.get("port", 5432) or 5432),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        schema=cfg.get("schema", "public"),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=cfg.get("ssl", False),
+        warehouse=cfg.get("warehouse", ""),
+        table=table,
+    )
+    if info.get("ok") and info.get("columns"):
+        return {c["name"]: c["inferred_type"] for c in info["columns"]}
+    return {h: "TEXT" for h in headers}
 
 
 def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str], dict[str, str]]:
@@ -83,35 +145,82 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             password=cfg.get("password", ""),
             schema=cfg.get("schema", "public"),
             connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", True),
+            ssl=cfg.get("ssl", False),
             table=table,
             limit=100_000,
         )
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {h: "string" for h in batch.headers}
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
 
     if db_type == "mongodb":
-        mongo_svc = get_mongodb_service()
-        if endpoint.connector_id:
-            client, _ = mongo_svc.get_client_for_connector(endpoint.connector_id)
+        from pymongo import MongoClient
+
+        if cfg.get("connection_string"):
+            conn_str = cfg["connection_string"]
+        elif cfg.get("username") and cfg.get("password"):
+            conn_str = f"mongodb://{cfg['username']}:{cfg['password']}@{cfg['host']}:{cfg['port'] or 27017}/"
         else:
-            mongo_svc.connect()
-            client = mongo_svc.client
-        if not client:
-            raise ValueError("MongoDB connection failed")
+            conn_str = f"mongodb://{cfg['host']}:{cfg['port'] or 27017}/"
+        client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
         db = client[endpoint.database or cfg["database"] or "test"]
         coll_name = endpoint.collection
         if not coll_name:
             raise ValueError("Source MongoDB collection name required")
         coll = db[coll_name]
         records = list(coll.find().limit(100_000))
+        client.close()
         for r in records:
             if "_id" in r:
                 r["_id"] = str(r["_id"])
         columns = list(records[0].keys()) if records else []
         schema = {c: "string" for c in columns}
         return records, columns, schema
+
+    if db_type == "mysql":
+        from connectors.mysql_reader import read_table_batch
+
+        table = endpoint.table
+        if not table:
+            raise ValueError("Source MySQL table name required")
+        batch = read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"] or 3306,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            table=table,
+            limit=100_000,
+        )
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        return records, batch.headers, schema
+
+    if db_type == "bigquery":
+        from connectors.bigquery_reader import read_table_batch
+
+        table = endpoint.table
+        if not table:
+            raise ValueError("Source BigQuery table name required")
+        batch = read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"] or 443,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", "dataflow"),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            warehouse=cfg.get("warehouse", ""),
+            table=table,
+            limit=100_000,
+        )
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        return records, batch.headers, schema
 
     if db_type == "snowflake":
         from connectors.snowflake_reader import read_table_batch
@@ -132,7 +241,7 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             limit=100_000,
         )
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {h: "string" for h in batch.headers}
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
 
     raise ValueError(f"Database source '{db_type}' read not implemented")
@@ -144,26 +253,13 @@ def write_destination_database(
     columns: list[str],
     schema: dict[str, str],
     mappings: list[dict],
+    on_checkpoint: Callable[[int, int, int], None] | None = None,
 ) -> tuple[int, list[str], dict]:
     db_type = endpoint.format.lower()
     cfg = resolve_connector_config(endpoint)
     ddl_log: list[str] = []
 
-    if db_type == "mongodb":
-        mongo = get_mongodb_service()
-        client, _ = mongo.get_client_for_connector(endpoint.connector_id) if endpoint.connector_id else (None, None)
-        db_name = endpoint.database or cfg["database"] or "test_db"
-        coll_name = endpoint.collection or endpoint.table or "imported_data"
-        ddl_log.append(f"CREATE COLLECTION {db_name}.{coll_name} (if not exists)")
-        create = mongo.create_collection_from_schema(db_name, coll_name, schema, client=client)
-        if create.get("message"):
-            ddl_log.append(create["message"])
-        insert = mongo.insert_data(db_name, coll_name, records, client=client)
-        if client:
-            client.close()
-        if not insert["success"]:
-            raise RuntimeError(insert.get("error", "MongoDB insert failed"))
-        return insert["inserted_count"], ddl_log, {"database": db_name, "collection": coll_name, "type": "mongodb"}
+
 
     headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
@@ -175,19 +271,22 @@ def write_destination_database(
 
     common = {
         "host": cfg["host"],
-        "port": cfg["port"] or (5432 if db_type == "postgresql" else 443),
+        "port": cfg["port"] or (
+            5432 if db_type == "postgresql" else
+            3306 if db_type == "mysql" else 443
+        ),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
         "schema": cfg.get("schema", "public"),
         "connection_string": cfg.get("connection_string", ""),
-        "ssl": cfg.get("ssl", True),
+        "ssl": cfg.get("ssl", False),
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
         "mappings": mappings,
         "column_types": column_types,
-        "on_checkpoint": None,
+        "on_checkpoint": on_checkpoint,
     }
 
     if db_type == "snowflake":
@@ -202,10 +301,13 @@ def write_destination_database(
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
         return result.rows_written, ddl_log, {
             "type": "snowflake", "schema": result.target_schema, "table": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
         }
 
     if db_type == "postgresql":
         from connectors.postgresql_writer import write_mapped_rows
+        common["schema"] = cfg.get("schema", "public")
         for col in columns:
             ddl_log.append(f"PG COLUMN {col} {ddl_type('postgresql', schema.get(col, 'string'))}")
         result = write_mapped_rows(**common)
@@ -214,6 +316,52 @@ def write_destination_database(
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
         return result.rows_written, ddl_log, {
             "type": "postgresql", "schema": result.target_schema, "table": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "mysql":
+        from connectors.mysql_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"MYSQL COLUMN {col} {ddl_type('mysql', schema.get(col, 'string'))}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "MySQL write failed")
+        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "mysql", "database": cfg["database"], "table": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "bigquery":
+        from connectors.bigquery_writer import write_mapped_rows
+        common["schema"] = cfg.get("schema", "dataflow")
+        for col in columns:
+            ddl_log.append(f"BQ COLUMN {col} {ddl_type('bigquery', schema.get(col, 'string'))}")
+        result = write_mapped_rows(**common, warehouse=cfg.get("warehouse", ""))
+        if not result.ok:
+            raise RuntimeError(result.error or "BigQuery write failed")
+        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {cfg['database']}.{result.target_schema}.{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "bigquery", "project": cfg["database"], "dataset": result.target_schema, "table": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "mongodb":
+        from connectors.mongodb_writer import write_mapped_rows
+        common["schema"] = cfg.get("schema", "db")
+        for col in columns:
+            ddl_log.append(f"MONGODB FIELD {col} string")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "MongoDB write failed")
+        ddl_log.insert(0, f"CREATE COLLECTION IF NOT EXISTS {result.target_schema}.{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "mongodb", "database": result.target_schema, "collection": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
         }
 
     raise ValueError(f"Database destination '{db_type}' write not implemented")

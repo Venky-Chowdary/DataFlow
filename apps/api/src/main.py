@@ -20,13 +20,18 @@ from .routers.transfer_router import router as transfer_router
 from .routers.mcp_router import router as mcp_router
 from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
+from .routers.schedules_router import router as schedules_router
+from .routers.saved_connectors_router import router as saved_connectors_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management"""
+    import os
+
     print("[*] DataTransfer.space API starting...")
     print("[+] AI Semantic Engine initialized")
+    training_enabled = os.getenv("DATAFLOW_TRAINING", "on").lower() not in ("off", "0", "false")
     try:
         from .ai.rag.pipeline import get_rag_pipeline
         from .ai.knowledge.semantic_patterns import get_pattern_count
@@ -39,6 +44,8 @@ async def lifespan(app: FastAPI):
         print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
         async def _background_training():
+            # Defer heavy training so the API is responsive immediately after boot
+            await asyncio.sleep(120)
             try:
                 from .ai.training.training_agent import get_training_agent
                 training = get_training_agent()
@@ -49,10 +56,16 @@ async def lifespan(app: FastAPI):
             except Exception as te:
                 print(f"[!] Copilot training warning: {te}")
 
-        app.state.training_task = asyncio.create_task(_background_training())
-        print("[+] Training Agent started in background (620+ sources → RAG)")
-        asyncio.create_task(run_training_loop())
-        print("[+] Training Agent scheduler started (retrain every 30 min)")
+        if training_enabled:
+            app.state.training_task = asyncio.create_task(_background_training())
+            print("[+] Training Agent scheduled (starts 120s after boot; set DATAFLOW_TRAINING=off to disable)")
+            asyncio.create_task(run_training_loop())
+            print("[+] Training Agent scheduler started (retrain every 30 min)")
+        else:
+            print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
+        from .services.schedule_runner import run_schedule_loop
+        asyncio.create_task(run_schedule_loop())
+        print("[+] Pipeline scheduler started (recurring syncs every 60s)")
     except Exception as e:
         print(f"[!] RAG initialization warning: {e}")
     yield
@@ -122,6 +135,8 @@ app.include_router(transfer_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
 app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
+app.include_router(schedules_router, prefix="/api/v1")
+app.include_router(saved_connectors_router, prefix="/api/v1")
 
 
 @app.get("/")

@@ -1,0 +1,410 @@
+/**
+ * Jarvis Command Center + 3D Connection Hub
+ */
+
+/* ─── Connection Hub (3D glass topology) ─── */
+
+.dt-connection-hub {
+  position: relative;
+  width: 100%;
+  min-height: clamp(320px, 42vh, 520px);
+  border-radius: var(--df-radius-xl, 16px);
+  overflow: visible;
+  perspective: 1200px;
+}
+
+.dt-connection-hub-hero {
+  min-height: clamp(380px, 50vh, 560px);
+}
+
+.dt-connection-hub-glow {
+  position: absolute;
+  inset: -20% -10%;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 40%, rgba(59, 130, 246, 0.18), transparent 70%),
+    radial-gradient(ellipse 40% 30% at 80% 70%, rgba(34, 211, 238, 0.12), transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dt-connection-hub-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: inherit;
+  padding: 48px 32px;
+  box-sizing: border-box;
+}
+
+.dt-connection-hub-svg {
+  position: absolute;
+  inset: 48px 32px;
+  width: calc(100% - 64px);
+  height: calc(100% - 96px);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.dt-connection-hub-orbit {
+  fill: none;
+  stroke: rgba(96, 165, 250, 0.12);
+  stroke-width: 1;
+  animation: hub-orbit-pulse 4s ease-in-out infinite;
+}
+
+@keyframes hub-orbit-pulse {
+  0%, 100% { opacity: 0.35; stroke-width: 1; }
+  50% { opacity: 0.75; stroke-width: 1.5; }
+}
+
+.dt-connection-hub-path {
+  stroke-dasharray: 10 8;
+  opacity: 0.85;
+  animation: hub-dash 1.4s linear infinite;
+}
+
+@keyframes hub-dash {
+  to { stroke-dashoffset: -36; }
+}
+
+.dt-connection-hub-core-ring {
+  stroke: rgba(96, 165, 250, 0.45);
+  stroke-width: 2;
+  animation: hub-core-pulse 2.5s ease-in-out infinite;
+}
+
+@keyframes hub-core-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.dt-connection-hub-center {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  pointer-events: none;
+}
+
+.dt-connection-hub-center-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  box-shadow:
+    0 8px 32px rgba(37, 99, 235, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--df-brand, #2563eb);
+}
+
+.dt-connection-hub-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 3;
+  animation: hub-node-in 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  max-width: 100px;
+}
+
+@keyframes hub-node-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.8) translateY(12px); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.dt-connection-hub-node-glass {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(255,255,255,0.95), rgba(241,245,249,0.85));
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow:
+    0 12px 28px rgba(15, 23, 42, 0.12),
+    0 2px 0 rgba(255, 255, 255, 0.9) inset;
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.dt-connection-hub-node:hover .dt-connection-hub-node-glass {
+  transform: translateY(-4px) scale(1.05);
+  box-shadow: 0 16px 40px rgba(37, 99, 235, 0.22);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+.dt-connection-hub-node-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-text-secondary, #64748b);
+  text-align: center;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dt-connection-hub-empty {
+  fill: var(--df-text-muted, #94a3b8);
+  font-size: 13px;
+}
+
+/* Topology cards must not clip nodes */
+.dt-topology-card,
+.dt-flow-card {
+  overflow: visible !important;
+}
+
+.dt-topology-card .dt-card-body,
+.dt-flow-card .dt-card-body {
+  overflow: visible !important;
+  min-height: clamp(320px, 40vh, 480px);
+}
+
+/* ─── Jarvis Command Center ─── */
+
+.dt-jarvis-center {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-5);
+  height: 100%;
+  min-height: 0;
+}
+
+.dt-jarvis-hero {
+  position: relative;
+  border-radius: var(--df-radius-xl);
+  padding: var(--df-space-6) var(--df-space-8);
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.97) 0%, rgba(30, 58, 138, 0.92) 50%, rgba(15, 23, 42, 0.97) 100%);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.dt-jarvis-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(59, 130, 246, 0.25), transparent 45%),
+    radial-gradient(circle at 80% 60%, rgba(34, 211, 238, 0.15), transparent 40%);
+  pointer-events: none;
+}
+
+.dt-jarvis-hero-inner {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--df-space-6);
+  align-items: center;
+}
+
+.dt-jarvis-greeting {
+  font-size: 28px;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+.dt-jarvis-sub {
+  color: rgba(148, 163, 184, 0.95);
+  font-size: 15px;
+  margin: 0 0 var(--df-space-4);
+  max-width: 520px;
+}
+
+.dt-jarvis-prompt-bar {
+  display: flex;
+  gap: var(--df-space-3);
+  max-width: 560px;
+}
+
+.dt-jarvis-prompt-input {
+  flex: 1;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(15, 23, 42, 0.6);
+  color: #e2e8f0;
+  font-size: 14px;
+}
+
+.dt-jarvis-prompt-input::placeholder {
+  color: rgba(148, 163, 184, 0.7);
+}
+
+.dt-jarvis-orb-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.dt-jarvis-orb {
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+  min-width: 120px;
+}
+
+.dt-jarvis-orb-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(148, 163, 184, 0.9);
+  margin-bottom: 4px;
+}
+
+.dt-jarvis-orb-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.dt-jarvis-orb-value.success { color: #4ade80; }
+.dt-jarvis-orb-value.gold { color: #fbbf24; }
+
+.dt-jarvis-grid {
+  display: grid;
+  grid-template-columns: 1fr minmax(280px, 320px);
+  gap: var(--df-space-4);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dt-jarvis-main-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-4);
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Compact connector rows */
+.dt-connector-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dt-connector-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: var(--df-space-3);
+  padding: 10px 14px;
+  border-radius: var(--df-radius-lg);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.dt-connector-row:hover {
+  border-color: rgba(59, 130, 246, 0.4);
+  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.08);
+}
+
+.dt-connector-row-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--df-surface-muted, #f1f5f9);
+}
+
+.dt-connector-row-info {
+  min-width: 0;
+}
+
+.dt-connector-row-name {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dt-connector-row-meta {
+  font-size: 12px;
+  color: var(--df-text-muted);
+  font-family: var(--df-font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dt-connector-row-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Catalog one-click tiles */
+.dt-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--df-space-3);
+}
+
+.dt-catalog-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 12px;
+  border-radius: var(--df-radius-lg);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.dt-catalog-tile:hover {
+  border-color: var(--df-brand);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.12);
+}
+
+.dt-catalog-tile.live {
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.dt-catalog-tile-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dt-catalog-tile-status {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--df-text-muted);
+}
+
+@media (max-width: 1024px) {
+  .dt-jarvis-hero-inner {
+    grid-template-columns: 1fr;
+  }
+  .dt-jarvis-grid {
+    grid-template-columns: 1fr;
+  }
+}

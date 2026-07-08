@@ -273,3 +273,101 @@ class DataTransferLocalProvider(DataTransferLLMProvider):
             model="local_knowledge",
             reasoning="\n".join(reasoning_steps),
         )
+
+
+MODEL_CAPABILITY_MATRIX = [
+    {
+        "provider": "anthropic",
+        "label": "Anthropic Claude",
+        "default_model": "claude-sonnet-4-20250514",
+        "env_key": "ANTHROPIC_API_KEY",
+        "package": "anthropic",
+        "tier": "cloud",
+        "roles": ["agent_tool_use", "schema_reasoning", "migration_planning", "policy_explanation"],
+        "best_for": "Long-horizon Data Pilot agent runs, tool use, schema-policy reasoning, and migration plan review.",
+    },
+    {
+        "provider": "openai",
+        "label": "OpenAI",
+        "default_model": "gpt-4o-mini",
+        "env_key": "OPENAI_API_KEY",
+        "package": "openai",
+        "tier": "cloud",
+        "roles": ["copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
+        "best_for": "Fast grounded chat, mapping explanation, RAG answers, and second-line cloud fallback.",
+    },
+    {
+        "provider": "ollama",
+        "label": "Ollama",
+        "default_model": "llama3.2",
+        "env_key": "",
+        "package": "httpx",
+        "tier": "local",
+        "roles": ["private_local_generation", "offline_assist", "fallback_generation"],
+        "best_for": "Private/local assistant mode when cloud credentials are unavailable.",
+    },
+    {
+        "provider": "local",
+        "label": "Local deterministic engine",
+        "default_model": "local_knowledge",
+        "env_key": "",
+        "package": "",
+        "tier": "deterministic",
+        "roles": ["semantic_rules", "rag_retrieval", "preflight_gates", "mapping_assignment"],
+        "best_for": "Always-on fail-closed semantic analysis, RAG retrieval, preflight, and deterministic mapping safeguards.",
+    },
+]
+
+
+def _package_available(package: str) -> bool:
+    if not package:
+        return True
+    try:
+        __import__(package)
+        return True
+    except Exception:
+        return False
+
+
+def get_model_capabilities() -> dict:
+    """Expose model/provider readiness without making network calls to cloud APIs."""
+    providers = {
+        "anthropic": DataTransferAnthropicProvider(),
+        "openai": DataTransferOpenAIProvider(),
+        "ollama": DataTransferOllamaProvider(),
+        "local": DataTransferLocalProvider(),
+    }
+    rows = []
+    for item in MODEL_CAPABILITY_MATRIX:
+        provider = providers[item["provider"]]
+        env_key = item.get("env_key") or ""
+        configured = bool(os.environ.get(env_key)) if env_key else item["provider"] in {"ollama", "local"}
+        installed = _package_available(item.get("package", ""))
+        available = provider.is_available()
+        rows.append({
+            **item,
+            "configured": configured,
+            "package_installed": installed,
+            "available": available,
+            "status": "ready" if available else "configure" if item["tier"] == "cloud" else "offline",
+        })
+
+    active = next((p for p in rows if p["available"]), rows[-1])
+    return {
+        "active_provider": active["provider"],
+        "active_model": active["default_model"],
+        "agent_mode": (
+            "anthropic_tools" if providers["anthropic"].is_available()
+            else "openai_tools" if providers["openai"].is_available()
+            else "ollama_tools" if providers["ollama"].is_available()
+            else "local_tools"
+        ),
+        "fallback_order": ["anthropic", "openai", "ollama", "rag", "local"],
+        "providers": rows,
+        "guarantees": [
+            "Cloud models are used only when their API key and SDK are configured.",
+            "RAG and deterministic mapping continue when cloud providers are unavailable.",
+            "Preflight gates and schema-policy blockers do not depend on probabilistic model output.",
+            "Ambiguous mappings remain reviewable instead of being silently auto-applied.",
+        ],
+    }

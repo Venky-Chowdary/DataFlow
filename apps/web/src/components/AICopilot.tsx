@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import { DtIcon } from "./DtIcon";
-import { copilotChat, fetchCopilotPrompts, CopilotAction, CopilotChatMessage } from "../lib/api";
+import {
+  copilotChat,
+  fetchCopilotPrompts,
+  fetchPilotTools,
+  CopilotAction,
+  CopilotChatMessage,
+  PilotToolRegistry,
+} from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { Screen } from "../lib/types";
 
@@ -16,10 +23,13 @@ interface Message {
     pii_count: number;
     quality_score: number;
   };
+  toolsUsed?: { name: string; success: boolean; summary: string }[];
 }
 
 interface AICopilotProps {
   onNavigate?: (screen: Screen) => void;
+  variant?: "fab" | "rail";
+  onClose?: () => void;
 }
 
 function renderMarkdown(text: string) {
@@ -30,34 +40,52 @@ function renderMarkdown(text: string) {
 }
 
 const SCREEN_LABELS: Record<string, string> = {
-  dashboard: "Dashboard",
+  dashboard: "Overview",
   pilot: "Data Pilot",
-  transfer: "New Transfer",
+  transfer: "Transfer Studio",
   connectors: "Connectors",
   jobs: "Jobs",
   settings: "Settings",
 };
 
-export function AICopilot({ onNavigate }: AICopilotProps) {
+const FALLBACK_TOOL_REGISTRY: PilotToolRegistry = {
+  tool_count: 15,
+  generated_action_count: 1740,
+  total_routable_actions: 1755,
+  families: [
+    { id: "discover", label: "Discover", tools: ["list_datasets", "search_data", "search_connectors"], tool_count: 3, generated_actions: 620 },
+    { id: "profile", label: "Profile", tools: ["analyze_dataset", "compare_datasets", "profile_quality_rules"], tool_count: 3, generated_actions: 180 },
+    { id: "move", label: "Move", tools: ["plan_transfer_route", "get_transfer_capabilities", "recommend_sync_mode"], tool_count: 3, generated_actions: 720 },
+    { id: "govern", label: "Govern", tools: ["explain_mapping_assurance", "inspect_schema_policy"], tool_count: 2, generated_actions: 140 },
+    { id: "operate", label: "Operate", tools: ["list_jobs", "navigate"], tool_count: 2, generated_actions: 80 },
+  ],
+  tools: [],
+};
+
+export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [prompts, setPrompts] = useState<string[]>([]);
   const [history, setHistory] = useState<CopilotChatMessage[]>([]);
+  const [toolRegistry, setToolRegistry] = useState<PilotToolRegistry | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      text: "I'm **Data Pilot** — your AI agent. Ask me anything about your data, or tell me what to do: analyze datasets, show jobs, start transfers, open connectors.",
+      text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace.",
     },
   ]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (open && prompts.length === 0) {
+    if ((open || variant === "rail") && prompts.length === 0) {
       fetchCopilotPrompts().then(setPrompts).catch(() => {});
     }
-  }, [open, prompts.length]);
+    if ((open || variant === "rail") && !toolRegistry) {
+      fetchPilotTools().then(setToolRegistry).catch(() => setToolRegistry(FALLBACK_TOOL_REGISTRY));
+    }
+  }, [open, variant, prompts.length, toolRegistry]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -97,6 +125,7 @@ export function AICopilot({ onNavigate }: AICopilotProps) {
           method: res.method,
           actions: res.suggested_actions,
           dataInsight: res.data_insight,
+          toolsUsed: res.tools_used,
         },
       ]);
       applyActions(res.suggested_actions);
@@ -112,106 +141,131 @@ export function AICopilot({ onNavigate }: AICopilotProps) {
     setLoading(false);
   };
 
-  const methodLabel = (method?: string) => {
-    if (!method) return null;
-    if (method.includes("anthropic")) return "Claude agent";
-    if (method.includes("openai")) return "GPT agent";
-    if (method === "pilot_local_agent") return "Data Pilot";
-    if (method === "data_analysis") return "Data analysis";
-    return method;
-  };
+  const panel = (
+    <div className="df2-copilot">
+      <div className="df2-copilot-head">
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>Data Pilot</div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>
+            {activeData
+              ? `Context: ${activeData.filename || activeData.name}`
+              : "Any data question · app actions"}
+          </div>
+        </div>
+        <button
+          type="button"
+          className="df2-btn df2-btn-ghost df2-btn-sm"
+          onClick={() => (variant === "rail" ? onClose?.() : setOpen(false))}
+          aria-label="Close"
+        >
+          <DtIcon name="x" size={16} />
+        </button>
+      </div>
+
+      {activeData && (
+        <div className="df2-copilot-context">
+          <DtIcon name="zap" size={12} />
+          {activeData.columns.length} cols · {activeData.row_count.toLocaleString()} rows in context
+        </div>
+      )}
+
+      {toolRegistry && (
+        <div className="df2-copilot-console">
+          <div>
+            <span>Tools</span>
+            <strong>{toolRegistry.tool_count}</strong>
+          </div>
+          <div>
+            <span>Actions</span>
+            <strong>{toolRegistry.total_routable_actions}</strong>
+          </div>
+          <div>
+            <span>Families</span>
+            <strong>{toolRegistry.families.length}</strong>
+          </div>
+        </div>
+      )}
+
+      {prompts.length > 0 && messages.length <= 2 && (
+        <div className="df2-copilot-suggestions">
+          {prompts.slice(0, 3).map((p) => (
+            <button key={p} type="button" onClick={() => send(p)}>{p}</button>
+          ))}
+        </div>
+      )}
+
+      <div className="df2-copilot-msgs">
+        {messages.map((msg, i) => (
+          <div key={i} className={`df2-copilot-msg ${msg.role}`}>
+            <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+            {(msg.method || msg.toolsUsed?.length) && (
+              <div className="df2-copilot-evidence">
+                {msg.method && <span>{msg.method}</span>}
+                {msg.toolsUsed?.slice(0, 3).map((tool) => (
+                  <span key={tool.name} className={tool.success ? "ok" : "err"}>{tool.name}</span>
+                ))}
+              </div>
+            )}
+            {msg.actions && msg.actions.length > 0 && (
+              <div className="df2-copilot-actions">
+                {msg.actions.map((action, j) => {
+                  const screen = action.screen || action.route;
+                  const label = action.label || (screen ? `Open ${SCREEN_LABELS[screen] || screen}` : "Action");
+                  return (
+                    <button
+                      key={j}
+                      type="button"
+                      className="df2-btn df2-btn-sm"
+                      onClick={() => screen && onNavigate?.(screen as Screen)}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+        {loading && (
+          <div className="df2-copilot-msg assistant df2-copilot-thinking">
+            <span className="df2-loader-bars" aria-label="Data Pilot is working"><i /><i /><i /></span>
+            <span>Routing tools</span>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className="df2-copilot-input-row">
+        <input
+          placeholder={activeData ? `Ask about ${activeData.name}…` : "Move data, analyze, or navigate…"}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && send()}
+        />
+        <button type="button" className="df2-btn df2-btn-primary" onClick={() => send()} disabled={loading}>
+          <DtIcon name="transfer" size={16} />
+          Send
+        </button>
+      </div>
+    </div>
+  );
+
+  if (variant === "rail") return panel;
 
   return (
     <>
-      <button type="button" className="dt-copilot-fab" onClick={() => setOpen(!open)} aria-label="Data Pilot">
+      <button
+        type="button"
+        className="df2-btn df2-btn-primary"
+        style={{ position: "fixed", bottom: 24, right: 24, width: 48, height: 48, borderRadius: "50%", padding: 0 }}
+        onClick={() => setOpen(!open)}
+        aria-label="Data Pilot"
+      >
         <DtIcon name="sparkle" size={22} />
       </button>
-
       {open && (
-        <div className="dt-copilot-panel">
-          <div className="dt-copilot-header">
-            <div>
-              <div className="dt-font-semibold">Data Pilot</div>
-              <div className="dt-text-sm dt-text-muted">
-                {activeData
-                  ? `Context: ${activeData.filename || activeData.name}`
-                  : "Agent · any data question · app actions"}
-              </div>
-            </div>
-            <button type="button" className="dt-btn dt-btn-ghost dt-btn-icon" onClick={() => setOpen(false)}>
-              <DtIcon name="x" size={16} />
-            </button>
-          </div>
-
-          {activeData && (
-            <div style={{ padding: "8px 16px", borderBottom: "1px solid var(--dt-border)", fontSize: 11, color: "var(--dt-text-muted)" }}>
-              {activeData.columns.length} columns · {activeData.row_count.toLocaleString()} rows in context
-            </div>
-          )}
-
-          {prompts.length > 0 && messages.length <= 2 && (
-            <div className="dt-copilot-suggestions">
-              {prompts.slice(0, 4).map((p) => (
-                <button key={p} type="button" className="dt-copilot-chip" onClick={() => send(p)}>
-                  {p}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div className="dt-copilot-messages">
-            {messages.map((msg, i) => (
-              <div key={i} className={`dt-copilot-msg ${msg.role}`}>
-                <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
-                {msg.actions && msg.actions.length > 0 && (
-                  <div className="dt-flex dt-gap-2 dt-mt-2" style={{ flexWrap: "wrap" }}>
-                    {msg.actions.map((action, j) => {
-                      const screen = action.screen || action.route;
-                      const label = action.label || (screen ? `Open ${SCREEN_LABELS[screen] || screen}` : "Action");
-                      return (
-                        <button
-                          key={j}
-                          type="button"
-                          className="dt-btn dt-btn-sm"
-                          onClick={() => screen && onNavigate?.(screen as Screen)}
-                        >
-                          {label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                {(msg.dataInsight || msg.method) && (
-                  <div className="dt-copilot-data-badge">
-                    <DtIcon name="zap" size={10} />
-                    {msg.dataInsight
-                      ? `${msg.dataInsight.dataset} · ${msg.dataInsight.columns} cols · Q${msg.dataInsight.quality_score?.toFixed(0)}%`
-                      : methodLabel(msg.method)}
-                  </div>
-                )}
-              </div>
-            ))}
-            {loading && (
-              <div className="dt-copilot-msg assistant">
-                <span className="dt-spinner" style={{ width: 16, height: 16 }} />
-                <span className="dt-text-sm dt-text-muted dt-ml-2">Thinking…</span>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          <div className="dt-copilot-input">
-            <input
-              className="dt-input"
-              placeholder={activeData ? `Ask or command about ${activeData.name}…` : "Ask anything · \"show my jobs\" · \"analyze HR data\"…"}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send()}
-            />
-            <button type="button" className="dt-btn dt-btn-primary" onClick={() => send()} disabled={loading}>
-              Send
-            </button>
-          </div>
+        <div style={{ position: "fixed", bottom: 88, right: 24, width: 380, maxHeight: 560, zIndex: 50, boxShadow: "0 12px 32px rgba(15,23,42,0.15)", borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+          {panel}
         </div>
       )}
     </>

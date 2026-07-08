@@ -3,6 +3,8 @@ DataTransfer.space — File Parser Service
 Parse various file formats: CSV, JSON, Excel, Parquet
 """
 
+from __future__ import annotations
+
 import json
 import csv
 import io

@@ -5,7 +5,13 @@ import os
 from typing import Optional
 
 from ..services.mongodb_service import get_mongodb_service
-from ..services.preflight_service import run_file_preflight
+from ..services.preflight_service import (
+    apply_policy_gates,
+    confidence_threshold_for_mode,
+    probe_destination,
+    run_file_preflight,
+    run_transfer_policy_gates,
+)
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -13,9 +19,19 @@ from .adapters import (
     write_destination_database,
     write_destination_file,
 )
-from .models import EndpointConfig, TransferRequest, TransferResult
+from .models import EndpointConfig, TransferRequest, TransferResult, transfer_request_to_dict
+from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
+from .file_stream import peek_file_source, should_stream_file, stream_file_to_database
+from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
+
+import sys
+from pathlib import Path
+_api_root = Path(__file__).resolve().parents[2]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 
 
 class UniversalTransferEngine:
@@ -29,6 +45,12 @@ class UniversalTransferEngine:
     """
 
     def execute(self, request: TransferRequest) -> TransferResult:
+        """Synchronous transfer — creates job record on completion."""
+        job_id = self._create_pending_job(request)
+        return self.execute_tracked(request, job_id)
+
+    def execute_tracked(self, request: TransferRequest, job_id: str) -> TransferResult:
+        mongo = get_mongodb_service()
         src_fmt = request.source.format or "csv"
         dst_fmt = request.destination.format or "mongodb"
         ok, msg = validate_transfer(
@@ -36,42 +58,117 @@ class UniversalTransferEngine:
             request.destination.kind, dst_fmt,
         )
         if not ok:
-            return TransferResult(success=False, error=msg, operation=request.operation)
+            mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+            return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
+
+        if supports_streaming(request.source, request.destination):
+            return self._execute_streaming(request, job_id, mongo, src_fmt)
+
+        if (
+            request.source.kind == "file"
+            and request.destination.kind == "database"
+            and request.source_content
+            and should_stream_file(
+                request.source_content,
+                request.source_filename or "upload.csv",
+                request.destination,
+            )
+        ):
+            return self._execute_file_streaming(request, job_id, mongo, src_fmt)
 
         try:
+            mongo.update_job_status(
+                job_id, "running", phase="reading", progress_pct=5,
+                message="Reading source data…",
+            )
             records, columns, schema = self._read_source(request)
             if not records and request.source.kind != "database":
-                return TransferResult(success=False, error="No records to transfer", operation=request.operation)
+                mongo.update_job_status(job_id, "failed", error="No records to transfer", phase="failed")
+                return TransferResult(success=False, error="No records to transfer", operation=request.operation, job_id=job_id)
+
+            total_rows = len(records)
+            mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
 
             mappings = request.mappings or default_mappings(columns)
             column_types = request.column_types or build_column_types(columns, schema)
 
+            mongo.update_job_status(
+                job_id, "running", phase="preflight", progress_pct=15,
+                message="Validating mapping and schema…",
+            )
             if not request.skip_preflight and request.destination.kind == "database":
+                dest_ok, dest_msg = probe_destination(request.destination)
                 pf = run_file_preflight(
                     columns=columns,
                     column_types=schema,
                     row_count=len(records),
                     mappings=mappings,
-                    destination_connected=True,
+                    destination_connected=dest_ok,
+                    source_kind=request.source.kind,
                     sample_rows=records[:100],
+                    confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                 )
+                pf = apply_policy_gates(
+                    pf,
+                    run_transfer_policy_gates(
+                        sync_mode=request.sync_mode,
+                        schema_policy=request.schema_policy,
+                        validation_mode=request.validation_mode,
+                        stream_contracts=request.stream_contracts,
+                        backfill_new_fields=request.backfill_new_fields,
+                    ),
+                )
+                if not dest_ok:
+                    mongo.update_job_status(
+                        job_id, "failed",
+                        error=f"Destination unreachable: {dest_msg}",
+                        phase="failed", progress_pct=0,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=f"Destination unreachable: {dest_msg}",
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
                 if not pf["passed"]:
+                    mongo.update_job_status(
+                        job_id, "failed", error="Preflight blocked transfer",
+                        phase="failed", progress_pct=0,
+                    )
                     return TransferResult(
                         success=False,
                         error="Preflight blocked transfer",
                         operation=request.operation,
+                        job_id=job_id,
                     )
 
             ddl_log: list[str] = []
             dest_summary: dict = {}
             rows_written = 0
-            export_bytes: bytes | None = None
-            export_name = ""
+
+            mongo.update_job_status(
+                job_id, "running", phase="writing", progress_pct=25,
+                message=f"Writing {total_rows:,} rows…",
+            )
+
+            def on_checkpoint(chunk: int, chunks: int, rows: int) -> None:
+                pct = 25 + int((chunk / max(chunks, 1)) * 65)
+                mongo.update_job_status(
+                    job_id, "running",
+                    records_processed=rows,
+                    progress_pct=min(pct, 90),
+                    chunk_current=chunk,
+                    chunk_total=chunks,
+                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                )
 
             if request.destination.kind == "database":
                 rows_written, ddl_log, dest_summary = write_destination_database(
                     request.destination, records, columns, schema, mappings,
+                    on_checkpoint=on_checkpoint,
                 )
+                if total_rows <= CHUNK_SIZE:
+                    mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
             elif request.destination.kind == "file_export":
                 export_bytes, export_name, dest_summary = write_destination_file(
                     request.destination, records, columns,
@@ -85,9 +182,48 @@ class UniversalTransferEngine:
                 dest_summary["path"] = export_path
                 ddl_log.append(f"Exported {rows_written} rows to {export_name}")
             else:
-                return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}")
+                mongo.update_job_status(job_id, "failed", error=f"Unknown destination: {request.destination.kind}", phase="failed")
+                return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}", job_id=job_id)
 
-            job_id = self._create_job(request, rows_written, dest_summary)
+            mongo.update_job_status(
+                job_id, "running", phase="reconcile", progress_pct=95,
+                message="Running reconciliation…",
+            )
+
+            recon = run_reconciliation(
+                endpoint=request.destination,
+                records=records,
+                columns=columns,
+                rows_written=rows_written,
+                writer_checksum=dest_summary.get("checksum", ""),
+                dest_summary=dest_summary,
+            )
+            if not recon.get("passed"):
+                mongo.update_job_status(
+                    job_id, "failed",
+                    error=recon.get("message", "Reconciliation failed"),
+                    phase="failed",
+                    progress_pct=95,
+                    message=recon.get("message"),
+                )
+                return TransferResult(
+                    success=False,
+                    error=recon.get("message", "Reconciliation failed"),
+                    operation=request.operation,
+                    job_id=job_id,
+                    records_transferred=rows_written,
+                    destination_summary=dest_summary,
+                )
+
+            mongo.update_job_status(
+                job_id, "completed",
+                records_processed=rows_written,
+                progress_pct=100,
+                phase="completed",
+                message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
+                destination_database=dest_summary.get("database", request.destination.database or ""),
+                destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+            )
 
             try:
                 from ..ai.training.training_scheduler import schedule_training_on_transfer
@@ -113,15 +249,379 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
                 ddl_executed=ddl_log,
                 columns=columns,
+                reconciliation=recon,
             )
         except Exception as e:
-            job_id = self._create_job(request, 0, {}, status="failed")
+            mongo.update_job_status(
+                job_id, "failed",
+                error=str(e), phase="failed", progress_pct=0, message=str(e),
+            )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
                 operation=request.operation,
             )
+
+    def _execute_streaming(
+        self,
+        request: TransferRequest,
+        job_id: str,
+        mongo,
+        src_fmt: str,
+    ) -> TransferResult:
+        """Batched DB→DB path — never loads full table into memory."""
+        try:
+            mongo.update_job_status(
+                job_id, "running", phase="reading", progress_pct=5,
+                message="Analyzing source table…",
+            )
+            columns, schema, total_rows, sample_rows = peek_stream_source(request.source)
+            if total_rows == 0:
+                mongo.update_job_status(job_id, "failed", error="Source table is empty", phase="failed")
+                return TransferResult(
+                    success=False, error="Source table is empty",
+                    operation=request.operation, job_id=job_id,
+                )
+
+            mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            mappings = request.mappings or default_mappings(columns)
+            column_types = request.column_types or build_column_types(columns, schema)
+
+            mongo.update_job_status(
+                job_id, "running", phase="preflight", progress_pct=15,
+                message="Validating mapping and schema…",
+            )
+            if not request.skip_preflight:
+                dest_ok, dest_msg = probe_destination(request.destination)
+                pf = run_file_preflight(
+                    columns=columns,
+                    column_types=schema,
+                    row_count=total_rows,
+                    mappings=mappings,
+                    destination_connected=dest_ok,
+                    source_kind=request.source.kind,
+                    sample_rows=sample_rows,
+                    confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                )
+                pf = apply_policy_gates(
+                    pf,
+                    run_transfer_policy_gates(
+                        sync_mode=request.sync_mode,
+                        schema_policy=request.schema_policy,
+                        validation_mode=request.validation_mode,
+                        stream_contracts=request.stream_contracts,
+                        backfill_new_fields=request.backfill_new_fields,
+                    ),
+                )
+                if not dest_ok:
+                    mongo.update_job_status(
+                        job_id, "failed",
+                        error=f"Destination unreachable: {dest_msg}",
+                        phase="failed", progress_pct=0,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=f"Destination unreachable: {dest_msg}",
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
+                if not pf["passed"]:
+                    mongo.update_job_status(
+                        job_id, "failed", error="Preflight blocked transfer",
+                        phase="failed", progress_pct=0,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error="Preflight blocked transfer",
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
+
+            def on_checkpoint(chunk: int, chunks: int, rows: int) -> None:
+                pct = 25 + int((chunk / max(chunks, 1)) * 65)
+                mongo.update_job_status(
+                    job_id, "running",
+                    records_processed=rows,
+                    progress_pct=min(pct, 90),
+                    chunk_current=chunk,
+                    chunk_total=chunks,
+                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                )
+
+            mongo.update_job_status(
+                job_id, "running", phase="writing", progress_pct=25,
+                message=f"Streaming {total_rows:,} rows in batches…",
+            )
+
+            rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
+                request.source,
+                request.destination,
+                mappings,
+                schema,
+                on_checkpoint=on_checkpoint,
+            )
+
+            mongo.update_job_status(
+                job_id, "running", phase="reconcile", progress_pct=95,
+                message="Running reconciliation…",
+            )
+
+            recon = run_reconciliation(
+                endpoint=request.destination,
+                records=[],
+                columns=columns,
+                rows_written=rows_written,
+                writer_checksum=dest_summary.get("checksum", ""),
+                dest_summary=dest_summary,
+            )
+            if not recon.get("passed"):
+                mongo.update_job_status(
+                    job_id, "failed",
+                    error=recon.get("message", "Reconciliation failed"),
+                    phase="failed",
+                    progress_pct=95,
+                    message=recon.get("message"),
+                )
+                return TransferResult(
+                    success=False,
+                    error=recon.get("message", "Reconciliation failed"),
+                    operation=request.operation,
+                    job_id=job_id,
+                    records_transferred=rows_written,
+                    destination_summary=dest_summary,
+                )
+
+            mongo.update_job_status(
+                job_id, "completed",
+                records_processed=rows_written,
+                progress_pct=100,
+                phase="completed",
+                message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
+                destination_database=dest_summary.get("database", request.destination.database or ""),
+                destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+            )
+
+            return TransferResult(
+                success=True,
+                job_id=job_id,
+                records_transferred=rows_written,
+                operation=request.operation,
+                source_summary={
+                    "kind": request.source.kind,
+                    "format": src_fmt,
+                    "columns": len(columns),
+                    "rows": total_rows,
+                    "streaming": True,
+                },
+                destination_summary=dest_summary,
+                ddl_executed=ddl_log,
+                columns=columns,
+                reconciliation=recon,
+            )
+        except Exception as e:
+            mongo.update_job_status(
+                job_id, "failed",
+                error=str(e), phase="failed", progress_pct=0, message=str(e),
+            )
+            return TransferResult(
+                success=False,
+                job_id=job_id,
+                error=str(e),
+                operation=request.operation,
+            )
+
+    def _execute_file_streaming(
+        self,
+        request: TransferRequest,
+        job_id: str,
+        mongo,
+        src_fmt: str,
+    ) -> TransferResult:
+        """Batched file → database path for large CSV/TSV/JSONL uploads."""
+        try:
+            content = request.source_content or b""
+            filename = request.source_filename or "upload.csv"
+
+            mongo.update_job_status(
+                job_id, "running", phase="reading", progress_pct=5,
+                message="Analyzing uploaded file…",
+            )
+            columns, schema, total_rows, sample_rows = peek_file_source(content, filename)
+            if total_rows == 0:
+                mongo.update_job_status(job_id, "failed", error="File contains no records", phase="failed")
+                return TransferResult(
+                    success=False, error="File contains no records",
+                    operation=request.operation, job_id=job_id,
+                )
+
+            mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            mappings = request.mappings or default_mappings(columns)
+            column_types = request.column_types or build_column_types(columns, schema)
+
+            mongo.update_job_status(
+                job_id, "running", phase="preflight", progress_pct=15,
+                message="Validating mapping and schema…",
+            )
+            if not request.skip_preflight:
+                dest_ok, dest_msg = probe_destination(request.destination)
+                pf = run_file_preflight(
+                    columns=columns,
+                    column_types=schema,
+                    row_count=total_rows,
+                    mappings=mappings,
+                    destination_connected=dest_ok,
+                    source_kind=request.source.kind,
+                    sample_rows=sample_rows,
+                    confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                )
+                pf = apply_policy_gates(
+                    pf,
+                    run_transfer_policy_gates(
+                        sync_mode=request.sync_mode,
+                        schema_policy=request.schema_policy,
+                        validation_mode=request.validation_mode,
+                        stream_contracts=request.stream_contracts,
+                        backfill_new_fields=request.backfill_new_fields,
+                    ),
+                )
+                if not dest_ok:
+                    mongo.update_job_status(
+                        job_id, "failed",
+                        error=f"Destination unreachable: {dest_msg}",
+                        phase="failed", progress_pct=0,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=f"Destination unreachable: {dest_msg}",
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
+                if not pf["passed"]:
+                    mongo.update_job_status(
+                        job_id, "failed", error="Preflight blocked transfer",
+                        phase="failed", progress_pct=0,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error="Preflight blocked transfer",
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
+
+            def on_checkpoint(chunk: int, chunks: int, rows: int) -> None:
+                pct = 25 + int((chunk / max(chunks, 1)) * 65)
+                mongo.update_job_status(
+                    job_id, "running",
+                    records_processed=rows,
+                    progress_pct=min(pct, 90),
+                    chunk_current=chunk,
+                    chunk_total=chunks,
+                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                )
+
+            mongo.update_job_status(
+                job_id, "running", phase="writing", progress_pct=25,
+                message=f"Streaming {total_rows:,} rows in batches…",
+            )
+
+            rows_written, ddl_log, dest_summary, _ = stream_file_to_database(
+                content,
+                filename,
+                request.destination,
+                mappings,
+                schema,
+                on_checkpoint=on_checkpoint,
+            )
+
+            mongo.update_job_status(
+                job_id, "running", phase="reconcile", progress_pct=95,
+                message="Running reconciliation…",
+            )
+
+            recon = run_reconciliation(
+                endpoint=request.destination,
+                records=[],
+                columns=columns,
+                rows_written=rows_written,
+                writer_checksum=dest_summary.get("checksum", ""),
+                dest_summary=dest_summary,
+            )
+            if not recon.get("passed"):
+                mongo.update_job_status(
+                    job_id, "failed",
+                    error=recon.get("message", "Reconciliation failed"),
+                    phase="failed",
+                    progress_pct=95,
+                    message=recon.get("message"),
+                )
+                return TransferResult(
+                    success=False,
+                    error=recon.get("message", "Reconciliation failed"),
+                    operation=request.operation,
+                    job_id=job_id,
+                    records_transferred=rows_written,
+                    destination_summary=dest_summary,
+                )
+
+            mongo.update_job_status(
+                job_id, "completed",
+                records_processed=rows_written,
+                progress_pct=100,
+                phase="completed",
+                message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
+                destination_database=dest_summary.get("database", request.destination.database or ""),
+                destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+            )
+
+            return TransferResult(
+                success=True,
+                job_id=job_id,
+                records_transferred=rows_written,
+                operation=request.operation,
+                source_summary={
+                    "kind": "file",
+                    "format": src_fmt,
+                    "columns": len(columns),
+                    "rows": total_rows,
+                    "streaming": True,
+                },
+                destination_summary=dest_summary,
+                ddl_executed=ddl_log,
+                columns=columns,
+                reconciliation=recon,
+            )
+        except Exception as e:
+            mongo.update_job_status(
+                job_id, "failed",
+                error=str(e), phase="failed", progress_pct=0, message=str(e),
+            )
+            return TransferResult(
+                success=False,
+                job_id=job_id,
+                error=str(e),
+                operation=request.operation,
+            )
+
+    def _create_pending_job(self, request: TransferRequest) -> str:
+        mongo = get_mongodb_service()
+        return mongo.create_transfer_job({
+            "source_type": request.source.kind,
+            "source_name": request.source_filename or request.source.table or request.source.collection or "database",
+            "source_format": request.source.format,
+            "destination_type": request.destination.format,
+            "destination_kind": request.destination.kind,
+            "destination_database": request.destination.database or "",
+            "destination_collection": request.destination.collection or request.destination.table or "",
+            "operation": request.operation,
+            "records_processed": 0,
+            "total_rows": 0,
+            "progress_pct": 0,
+            "phase": "queued",
+            "message": "Transfer queued",
+            "transfer_request": transfer_request_to_dict(request),
+            "retry_of": None,
+        })
 
     def _read_source(self, request: TransferRequest) -> tuple[list, list[str], dict[str, str]]:
         if request.source.kind == "file":
@@ -131,31 +631,6 @@ class UniversalTransferEngine:
         if request.source.kind == "database":
             return read_source_database(request.source)
         raise ValueError(f"Unsupported source kind: {request.source.kind}")
-
-    def _create_job(
-        self,
-        request: TransferRequest,
-        records: int,
-        dest_summary: dict,
-        status: str = "completed",
-    ) -> str:
-        mongo = get_mongodb_service()
-        job_id = mongo.create_transfer_job({
-            "source_type": request.source.kind,
-            "source_name": request.source_filename or request.source.table or request.source.collection or "database",
-            "source_format": request.source.format,
-            "destination_type": request.destination.format,
-            "destination_kind": request.destination.kind,
-            "destination_database": request.destination.database or dest_summary.get("database", ""),
-            "destination_collection": request.destination.collection or dest_summary.get("collection") or dest_summary.get("table", ""),
-            "operation": request.operation,
-            "records_processed": records,
-        })
-        if status == "completed":
-            mongo.update_job_status(job_id, "completed", records_processed=records)
-        else:
-            mongo.update_job_status(job_id, "failed", records_processed=0)
-        return job_id
 
     def analyze_compatibility(
         self,

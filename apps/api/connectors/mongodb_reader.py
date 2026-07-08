@@ -1,0 +1,73 @@
+"""MongoDB collection reader — batched cursor extraction for DB→DB migration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class ReadBatch:
+    headers: list[str]
+    rows: list[list[str]]
+    offset: int
+    total_rows: int
+
+
+def _connection_string(cfg: dict[str, Any]) -> str:
+    if cfg.get("connection_string"):
+        return cfg["connection_string"]
+    if cfg.get("username") and cfg.get("password"):
+        return (
+            f"mongodb://{cfg['username']}:{cfg['password']}"
+            f"@{cfg['host']}:{cfg['port'] or 27017}/"
+        )
+    return f"mongodb://{cfg['host']}:{cfg['port'] or 27017}/"
+
+
+def _serialize(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        import json
+
+        return json.dumps(value, default=str)
+    return str(value)
+
+
+def read_collection_batch(
+    *,
+    cfg: dict[str, Any],
+    database: str,
+    collection: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 500,
+) -> ReadBatch:
+    from pymongo import MongoClient
+
+    client = MongoClient(_connection_string(cfg), serverSelectionTimeoutMS=10000)
+    try:
+        coll = client[database][collection]
+        total = coll.count_documents({})
+        cursor = coll.find({}).skip(offset).limit(limit)
+        docs = list(cursor)
+        if not docs:
+            return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
+
+        for doc in docs:
+            if "_id" in doc:
+                doc["_id"] = str(doc["_id"])
+
+        if columns:
+            headers = columns
+        else:
+            keys: set[str] = set()
+            for doc in docs:
+                keys.update(doc.keys())
+            headers = sorted(keys)
+
+        rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
+        return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    finally:
+        client.close()

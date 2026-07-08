@@ -1,36 +1,34 @@
 {
   "brand": {
     "name": { "value": "DataFlow" },
-    "tagline": { "value": "Precision data operations" },
-    "aesthetic": { "value": "Precision Data" }
+    "tagline": { "value": "Any data · anywhere · with intelligence" },
+    "aesthetic": { "value": "Light Enterprise" }
   },
   "color": {
-    "navy900": { "value": "#060D18" },
-    "navy800": { "value": "#0B1426" },
-    "navy700": { "value": "#111D33" },
-    "steel500": { "value": "#2D6CDF" },
-    "steel400": { "value": "#4A82E8" },
-    "accentTeal": { "value": "#0D9488" },
-    "success": { "value": "#0D9488" },
-    "warning": { "value": "#B45309" },
-    "danger": { "value": "#BE123C" },
-    "bgCanvas": { "value": "#F8F9FB" },
-    "bgSubtle": { "value": "#F0F2F5" },
+    "brand": { "value": "#2563EB" },
+    "brandHover": { "value": "#1D4ED8" },
+    "navy900": { "value": "#0F172A" },
+    "navy800": { "value": "#1E293B" },
+    "steel500": { "value": "#2563EB" },
+    "accentTeal": { "value": "#0891B2" },
+    "success": { "value": "#059669" },
+    "warning": { "value": "#D97706" },
+    "danger": { "value": "#DC2626" },
+    "bgCanvas": { "value": "#F4F5F7" },
+    "bgSubtle": { "value": "#EEF0F3" },
     "surface": { "value": "#FFFFFF" },
-    "border": { "value": "#E2E6ED" },
-    "borderStrong": { "value": "#C8CFDA" },
-    "textPrimary": { "value": "#0B1426" },
-    "textSecondary": { "value": "#4A5568" },
-    "textTertiary": { "value": "#7A8494" },
-    "focusRing": { "value": "rgba(45, 108, 223, 0.28)" }
+    "border": { "value": "#E5E7EB" },
+    "textPrimary": { "value": "#111827" },
+    "textSecondary": { "value": "#4B5563" },
+    "textTertiary": { "value": "#9CA3AF" }
   },
   "font": {
-    "sans": { "value": "'IBM Plex Sans', system-ui, sans-serif" },
-    "mono": { "value": "'IBM Plex Mono', ui-monospace, monospace" }
+    "sans": { "value": "'Inter', system-ui, sans-serif" },
+    "mono": { "value": "'JetBrains Mono', ui-monospace, monospace" }
   },
   "layout": {
     "headerHeight": { "value": "56px" },
-    "sidebarWidth": { "value": "248px" },
-    "contentMaxWidth": { "value": "880px" }
+    "sidebarWidth": { "value": "260px" },
+    "contentMaxWidth": { "value": "1280px" }
   }
 }

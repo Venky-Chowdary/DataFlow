@@ -1,0 +1,159 @@
+/**
+ * DataFlow design tokens — unified light enterprise theme
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  --dt-flow-start: #134e4a;
+  --dt-flow-end: var(--df-teal-500);
+  --dt-flow-particle: var(--df-brand);
+  --df-brand: #0f766e;
+  --df-brand-hover: #115e59;
+  --df-brand-muted: #f0fdfa;
+  --df-brand-ring: rgba(15, 118, 110, 0.24);
+  --df-accent: #0f766e;
+  --df-accent-muted: #f0fdfa;
+
+  --df-navy-900: #0f172a;
+  --df-navy-800: #1e293b;
+  --df-navy-700: #334155;
+  --df-steel-500: #334155;
+  --df-steel-400: #475569;
+  --df-teal-500: #0f766e;
+  --df-success: #059669;
+  --df-success-bg: #ecfdf5;
+  --df-warning: #d97706;
+  --df-warning-bg: #fffbeb;
+  --df-danger: #dc2626;
+  --df-danger-bg: #fef2f2;
+
+  /* Surfaces */
+  --df-bg-canvas: #f6f7f8;
+  --df-bg-subtle: #eef2f1;
+  --df-surface: #ffffff;
+  --df-surface-raised: #ffffff;
+  --df-border: #e5e7eb;
+  --df-border-strong: #d1d5db;
+
+  --df-text-primary: #111827;
+  --df-text-secondary: #4b5563;
+  --df-text-tertiary: #9ca3af;
+  --df-focus-ring: var(--df-brand-ring);
+
+  --df-font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --df-font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --df-header-height: 56px;
+  --df-sidebar-width: 260px;
+  --df-content-max: 1280px;
+  --df-rail-width: 360px;
+  --dt-copilot-rail-width: 360px;
+
+  --df-radius-sm: 6px;
+  --df-radius-md: 8px;
+  --df-radius-lg: 12px;
+  --df-radius-xl: 16px;
+
+  --df-space-1: 4px;
+  --df-space-2: 8px;
+  --df-space-3: 12px;
+  --df-space-4: 16px;
+  --df-space-5: 20px;
+  --df-space-6: 24px;
+  --df-space-8: 32px;
+  --df-space-10: 40px;
+  --df-space-12: 48px;
+  --df-space-16: 64px;
+
+  --df-shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.04);
+  --df-shadow-sm: 0 1px 3px rgba(17, 24, 39, 0.06), 0 1px 2px rgba(17, 24, 39, 0.04);
+  --df-shadow-md: 0 4px 12px rgba(17, 24, 39, 0.08);
+  --df-shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.1);
+
+  /* dt-* aliases */
+  --dt-obsidian: var(--df-navy-900);
+  --dt-obsidian-raised: var(--df-navy-800);
+  --dt-obsidian-border: var(--df-border);
+  --dt-copper-400: var(--df-steel-400);
+  --dt-copper-500: var(--df-steel-500);
+  --dt-copper-600: var(--df-brand-hover);
+  --dt-copper-glow: var(--df-brand-ring);
+  --dt-teal-400: #22d3ee;
+  --dt-teal-500: var(--df-teal-500);
+  --dt-teal-600: #0e7490;
+  --dt-teal-glow: var(--df-accent-muted);
+  --dt-gold: var(--df-warning);
+  --dt-gold-dim: var(--df-warning-bg);
+  --dt-accent-300: #93c5fd;
+  --dt-accent-teal: var(--df-teal-500);
+  --dt-error-light: var(--df-danger-bg);
+  --dt-gray-100: var(--df-bg-subtle);
+  --dt-surface-elevated: var(--df-surface);
+  --dt-accent-500: var(--df-steel-500);
+  --dt-accent-600: var(--df-brand-hover);
+  --dt-brand-primary: var(--df-steel-500);
+  --dt-brand-secondary: var(--df-teal-500);
+  --dt-white: #fff;
+  --dt-surface-0: var(--df-bg-canvas);
+  --dt-surface-1: var(--df-bg-subtle);
+  --dt-surface-2: #e5e7eb;
+  --dt-surface-3: var(--df-border-strong);
+  --dt-surface: var(--df-surface);
+  --dt-border: var(--df-border);
+  --dt-border-strong: var(--df-border-strong);
+  --dt-text-primary: var(--df-text-primary);
+  --dt-text-secondary: var(--df-text-secondary);
+  --dt-text-muted: var(--df-text-tertiary);
+  --dt-text-inverse: #fff;
+  --dt-sidebar-text: var(--df-text-secondary);
+  --dt-sidebar-text-active: var(--df-text-primary);
+  --dt-success: var(--df-success);
+  --dt-success-bg: var(--df-success-bg);
+  --dt-warning: var(--df-warning);
+  --dt-warning-bg: var(--df-warning-bg);
+  --dt-error: var(--df-danger);
+  --dt-error-bg: var(--df-danger-bg);
+  --dt-info: var(--df-steel-500);
+  --dt-info-bg: var(--df-brand-muted);
+  --dt-shadow-xs: var(--df-shadow-xs);
+  --dt-shadow-sm: var(--df-shadow-sm);
+  --dt-shadow-md: var(--df-shadow-md);
+  --dt-shadow-lg: var(--df-shadow-lg);
+  --dt-shadow-xl: var(--df-shadow-lg);
+  --dt-shadow-copper: none;
+  --dt-font: var(--df-font-sans);
+  --dt-font-mono: var(--df-font-mono);
+  --dt-space-1: var(--df-space-1);
+  --dt-space-2: var(--df-space-2);
+  --dt-space-3: var(--df-space-3);
+  --dt-space-4: var(--df-space-4);
+  --dt-space-5: var(--df-space-5);
+  --dt-space-6: var(--df-space-6);
+  --dt-space-8: var(--df-space-8);
+  --dt-space-10: var(--df-space-10);
+  --dt-space-12: var(--df-space-12);
+  --dt-space-16: var(--df-space-16);
+  --dt-radius-sm: var(--df-radius-sm);
+  --dt-radius-md: var(--df-radius-md);
+  --dt-radius-lg: var(--df-radius-lg);
+  --dt-radius-xl: var(--df-radius-xl);
+  --dt-radius-full: 9999px;
+  --dt-sidebar-width: var(--df-sidebar-width);
+  --dt-header-height: var(--df-header-height);
+  --dt-transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
+  --dt-transition-slow: 240ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--df-brand);
+  outline-offset: 2px;
+}

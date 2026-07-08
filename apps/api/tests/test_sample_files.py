@@ -18,6 +18,8 @@ SAMPLE_FILES = [
     "sample_synonyms.csv",
     "sample_hr.json",
     "sample_payments.tsv",
+    "sample_schema_types.csv",
+    "sample_mixed_types.jsonl",
 ]
 
 WAREHOUSE_TARGETS = [

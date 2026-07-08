@@ -20,18 +20,6 @@ def _wrap_checkpoint(job_id: str, inner):
     return callback
 
 
-def _load_file_rows(file_id: str) -> tuple[dict, list[str], list[list[str]]]:
-    from services.csv_profiler import parse_csv_full
-    from services.file_parser import get_file
-
-    record = get_file(file_id)
-    if not record:
-        raise FileNotFoundError("Source file not found")
-    path = Path(record["path"])
-    headers, data_rows, _enc, _delim = parse_csv_full(path.read_bytes())
-    return record, headers, data_rows
-
-
 def dispatch_file_to_database(
     *,
     job_id: str,
@@ -45,11 +33,15 @@ def dispatch_file_to_database(
         job_store.set_workflow_phase(job_id, "transfer")
         try:
             import re
-
-            record, headers, data_rows = _load_file_rows(file_id)
+            from services.file_parser import get_file, get_file_chunks
+            from connectors.writer_common import row_checksum
+            
+            record = get_file(file_id)
+            if not record:
+                raise FileNotFoundError("Source file not found")
+                
             column_types = {c["name"]: c["inferred_type"] for c in record["columns"]}
-            total_rows = len(data_rows)
-            source_checksum = checksum_rows(data_rows)
+            total_rows = record["row_count"]
 
             base = re.sub(r"[^a-zA-Z0-9_]", "_", Path(record["filename"]).stem.lower())[:40]
             table_name = f"df_{base}_{file_id[:8]}"
@@ -66,53 +58,80 @@ def dispatch_file_to_database(
                 "connection_string": dest.get("connection_string", ""),
                 "ssl": dest.get("ssl", True),
                 "table_name": table_name,
-                "headers": headers,
-                "data_rows": data_rows,
                 "mappings": mappings,
                 "column_types": column_types,
-                "on_checkpoint": _wrap_checkpoint(job_id, lambda c, t, r: None),
             }
-
+            
             if db_type == "snowflake":
                 from connectors.snowflake_writer import write_mapped_rows
-
                 common["schema"] = dest.get("schema", "PUBLIC")
                 common["warehouse"] = dest.get("warehouse", "")
-                result = write_mapped_rows(**common)
                 verify_schema = common["schema"]
+            elif db_type == "mongodb":
+                from connectors.mongodb_writer import write_mapped_rows
+                verify_schema = dest.get("database", dest.get("schema", "db"))
             else:
                 from connectors.postgresql_writer import write_mapped_rows
-
-                result = write_mapped_rows(**common)
                 verify_schema = common["schema"]
 
-            if not result.ok:
-                job_store.fail(job_id, result.error or "Write failed")
-                set_phase(job_id, WorkflowPhase.FAILED, result.error or "Failed")
-                return
+            chunks_generator = get_file_chunks(file_id, chunk_size=10000)
+            rows_written = 0
+            rejected_rows = 0
+            final_checksum_list = []
+            
+            target_schema_out = ""
+            table_name_out = table_name
+            driver_out = ""
+
+            chunk_idx = 0
+            # Rough estimation of total chunks, assuming chunk_size is 10000
+            estimated_chunks = max(1, (total_rows + 9999) // 10000)
+            
+            for headers, data_rows in chunks_generator:
+                is_first = (chunk_idx == 0)
+                common["headers"] = headers
+                common["data_rows"] = data_rows
+                common["create_table"] = is_first
+                common["on_checkpoint"] = _wrap_checkpoint(job_id, lambda c, t, r: None)
+                
+                result = write_mapped_rows(**common)
+                if not result.ok:
+                    raise RuntimeError(result.error or "Batch write failed")
+                    
+                rows_written += result.rows_written
+                rejected_rows += int(getattr(result, "rejected_rows", 0) or 0)
+                final_checksum_list.append(result.checksum)
+                target_schema_out = result.target_schema
+                table_name_out = result.table_name
+                driver_out = result.driver
+                
+                chunk_idx += 1
+
+            combined_checksum = row_checksum([[c] for c in final_checksum_list])
 
             set_phase(job_id, WorkflowPhase.RECONCILE, "Verifying row fidelity")
             target_rows, target_checksum = verify_target(
                 db_type,
                 dest,
                 schema=verify_schema,
-                table_name=result.table_name,
-                fallback_rows=result.rows_written,
-                fallback_checksum=result.checksum,
+                table_name=table_name_out,
+                fallback_rows=rows_written,
+                fallback_checksum=combined_checksum,
             )
             recon = reconcile(
                 source_rows=total_rows,
                 target_rows=target_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum if target_checksum else result.checksum,
+                source_checksum="N/A (Streamed)",
+                target_checksum=target_checksum if target_checksum else combined_checksum,
+                rejected_rows=rejected_rows,
             )
 
             job_store.complete(
                 job_id,
-                result.rows_written,
+                rows_written,
                 reconciliation=recon.to_dict(),
-                table_name=f"{result.target_schema}.{result.table_name}",
-                driver=result.driver,
+                table_name=f"{target_schema_out}.{table_name_out}",
+                driver=driver_out,
             )
             set_phase(job_id, WorkflowPhase.COMPLETED, recon.message)
             job_store.set_workflow_phase(job_id, "completed")

@@ -1,0 +1,1000 @@
+/**
+ * Enterprise Pro — Airbyte-grade layout, viewport pages, job cards, topology
+ */
+
+/* ─── Viewport pages: one pane, scroll only in designated panels ─── */
+
+.dt-page-viewport {
+  height: 100%;
+  overflow: hidden !important;
+}
+
+.dt-page-stack-viewport {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  gap: var(--df-space-4);
+  padding-bottom: var(--df-space-4);
+}
+
+.dt-page-stack-viewport > .dt-page-header {
+  flex-shrink: 0;
+  padding-bottom: var(--df-space-3);
+  margin-bottom: 0;
+}
+
+.dt-page-stack-viewport {
+  display: flex;
+  flex-direction: column;
+}
+
+.dt-page-viewport .dt-page-body {
+  overflow: hidden;
+}
+
+.dt-page-body {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ─── Flow topology — aligned nodes + paths ─── */
+
+.dt-flow-graph-wrap {
+  min-height: 0;
+  padding: var(--df-space-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dt-flow-graph {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 10 / 7;
+  min-height: clamp(260px, 38vh, 400px);
+  max-height: none;
+  margin: 0 auto;
+}
+
+.dt-flow-graph-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: inherit;
+}
+
+.dt-flow-graph-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dt-flow-path {
+  animation: df-flow-dash 1.2s linear infinite;
+}
+
+@keyframes df-flow-dash {
+  to { stroke-dashoffset: -28; }
+}
+
+.dt-flow-nodes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.dt-flow-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 88px;
+  pointer-events: auto;
+  z-index: 2;
+  animation: df-flow-node-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dt-flow-node:nth-child(1) { animation-delay: 0.05s; }
+.dt-flow-node:nth-child(2) { animation-delay: 0.12s; }
+.dt-flow-node:nth-child(3) { animation-delay: 0.19s; }
+.dt-flow-node:nth-child(4) { animation-delay: 0.26s; }
+.dt-flow-node:nth-child(5) { animation-delay: 0.33s; }
+.dt-flow-node:nth-child(6) { animation-delay: 0.4s; }
+
+@keyframes df-flow-node-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.dt-flow-node-icon {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--df-surface);
+  border: 2px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  box-shadow: var(--df-shadow-md);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.dt-flow-node:hover .dt-flow-node-icon {
+  transform: translateY(-3px);
+  border-color: var(--df-brand);
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.18);
+}
+
+.dt-flow-node-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-text-secondary);
+  text-align: center;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dt-flow-hub-center {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--df-brand);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.dt-flow-empty-text {
+  fill: var(--df-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dt-flow-hub-ring {
+  animation: df-hub-pulse 3s ease-in-out infinite;
+}
+
+@keyframes df-hub-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.75; }
+}
+
+/* ─── Dashboard workspace ─── */
+
+.dt-dashboard-workspace {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--df-space-4);
+  min-height: 0;
+}
+
+.dt-dashboard-workspace .dt-stats-premium {
+  flex-shrink: 0;
+}
+
+.dt-dashboard-main {
+  display: grid;
+  grid-template-columns: 1fr minmax(280px, 320px);
+  grid-template-rows: 1fr auto;
+  gap: var(--df-space-4);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dt-topology-card {
+  grid-row: 1;
+  grid-column: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dt-topology-card .dt-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+}
+
+.dt-transfers-card {
+  grid-row: 2;
+  grid-column: 1;
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dt-transfers-card .dt-card-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.dt-transfers-card .dt-table-scroll {
+  overflow: visible;
+}
+
+.dt-transfers-card .dt-table th,
+.dt-transfers-card .dt-table td {
+  padding: var(--df-space-3) var(--df-space-5);
+}
+
+.dt-command-aside-pro {
+  grid-row: 1 / -1;
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-4);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+@media (max-width: 1024px) {
+  .dt-dashboard-main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    overflow-y: auto;
+  }
+
+  .dt-command-aside-pro {
+    grid-row: auto;
+    grid-column: 1;
+    overflow: visible;
+  }
+
+  .dt-transfers-card {
+    max-height: none;
+  }
+
+  .dt-page-viewport {
+    overflow-y: auto !important;
+    height: auto;
+  }
+}
+
+/* ─── Job Theater workspace ─── */
+
+.dt-jobs-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, 380px) 1fr;
+  gap: var(--df-space-5);
+  min-height: 0;
+  flex: 1;
+}
+
+.dt-jobs-list-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-3);
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: var(--df-space-1);
+}
+
+.dt-jobs-detail-panel {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Job list cards (Airbyte-style) */
+.dt-job-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-3);
+  width: 100%;
+  padding: var(--df-space-5);
+  text-align: left;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  box-shadow: var(--df-shadow-xs);
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+  font-family: inherit;
+  color: inherit;
+}
+
+.dt-job-card:hover {
+  border-color: var(--df-brand);
+  box-shadow: var(--df-shadow-md);
+  transform: translateY(-1px);
+}
+
+.dt-job-card.active {
+  border-color: var(--df-brand);
+  box-shadow: 0 0 0 1px var(--df-brand), var(--df-shadow-md);
+  background: var(--df-brand-muted);
+}
+
+.dt-job-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--df-space-3);
+}
+
+.dt-job-card-route {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.dt-job-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--df-space-4);
+  font-size: 13px;
+  color: var(--df-text-secondary);
+}
+
+.dt-job-card-meta span {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-1);
+}
+
+/* Job Theater — large production panel */
+.dt-job-theater {
+  flex: 1;
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--df-space-8);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-xl);
+  box-shadow: var(--df-shadow-lg);
+}
+
+.dt-job-theater-header {
+  margin-bottom: var(--df-space-6);
+}
+
+.dt-job-theater-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+.dt-job-theater-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(100px, 1fr));
+  gap: var(--df-space-4);
+  margin-top: var(--df-space-4);
+}
+
+.dt-job-stat {
+  align-items: flex-start !important;
+  padding: var(--df-space-4) var(--df-space-5);
+  background: var(--df-bg-subtle);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+}
+
+.dt-job-stat-value {
+  font-size: 28px !important;
+  font-weight: 700 !important;
+  color: var(--df-brand) !important;
+  line-height: 1.1;
+}
+
+.dt-job-stat-label {
+  font-size: 11px !important;
+  margin-top: var(--df-space-1);
+}
+
+.dt-job-progress-track {
+  height: 12px !important;
+  margin: var(--df-space-6) 0 var(--df-space-3);
+}
+
+.dt-job-progress-fill {
+  background: linear-gradient(90deg, var(--df-brand), var(--df-teal-500)) !important;
+}
+
+.dt-job-phases {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--df-space-2);
+  margin-top: auto;
+  padding-top: var(--df-space-6);
+  border-top: 1px solid var(--df-border);
+}
+
+.dt-job-phase-dot {
+  width: 36px !important;
+  height: 36px !important;
+}
+
+.dt-job-phase-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  max-width: 72px;
+  line-height: 1.25;
+}
+
+.dt-job-theater-connecting {
+  flex: 1;
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--df-space-4);
+  font-size: 15px;
+  color: var(--df-text-secondary);
+}
+
+.dt-job-detail-panel {
+  flex: 1;
+  min-height: 420px;
+}
+
+.dt-job-detail-panel .dt-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.dt-job-detail-panel .dt-card-body {
+  flex: 1;
+  padding: var(--df-space-6);
+}
+
+@media (max-width: 1024px) {
+  .dt-jobs-workspace {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .dt-jobs-list-panel {
+    max-height: 280px;
+    flex-shrink: 0;
+  }
+
+  .dt-job-theater {
+    min-height: 360px;
+  }
+}
+
+/* ─── Stat cards — consistent enterprise ─── */
+
+.dt-stat {
+  padding: var(--df-space-5) var(--df-space-6);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  box-shadow: var(--df-shadow-xs);
+}
+
+.dt-stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.dt-stat-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--df-radius-md);
+}
+
+/* ─── Cards — Airbyte density ─── */
+
+.dt-card {
+  border-radius: var(--df-radius-lg);
+  border: 1px solid var(--df-border);
+}
+
+.dt-card-header {
+  padding: var(--df-space-4) var(--df-space-6);
+  min-height: 52px;
+}
+
+.dt-card-body {
+  padding: var(--df-space-5) var(--df-space-6);
+}
+
+/* ─── Transfer studio — viewport step panel ─── */
+
+.dt-transfer-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-4);
+}
+
+.dt-transfer-step-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dt-transfer-step-panel .dt-card-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ─── Empty panel placeholder ─── */
+
+.dt-panel-empty {
+  flex: 1;
+  min-height: 420px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--df-bg-subtle);
+  border: 2px dashed var(--df-border);
+  border-radius: var(--df-radius-xl);
+}
+
+.dt-panel-empty-inner {
+  text-align: center;
+  max-width: 360px;
+  padding: var(--df-space-8);
+}
+
+.dt-panel-empty-inner h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: var(--df-space-2);
+}
+
+.dt-panel-empty-inner p {
+  font-size: 14px;
+  color: var(--df-text-secondary);
+  line-height: 1.5;
+}
+
+/* ─── Settings — sidebar nav (Airbyte-style) ─── */
+
+.dt-settings-workspace {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--df-space-5);
+  min-height: 0;
+}
+
+.dt-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-1);
+  flex-shrink: 0;
+}
+
+.dt-settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-3);
+  width: 100%;
+  padding: var(--df-space-3) var(--df-space-4);
+  border: none;
+  border-radius: var(--df-radius-md);
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--df-text-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dt-settings-nav-item:hover {
+  background: var(--df-bg-subtle);
+  color: var(--df-text-primary);
+}
+
+.dt-settings-nav-item.active {
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
+  font-weight: 600;
+}
+
+.dt-settings-content {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.dt-settings-panel {
+  height: fit-content;
+}
+
+.dt-settings-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--df-space-10) var(--df-space-6);
+}
+
+.dt-team-member {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-4);
+  padding: var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-bg-subtle);
+}
+
+.dt-team-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--df-radius-md);
+  background: var(--df-brand);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.dt-team-info {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ─── Schedules — pipeline cards ─── */
+
+.dt-schedules-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-4);
+  min-height: 0;
+}
+
+.dt-schedules-stats-row {
+  flex-shrink: 0;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.dt-pipelines-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-3);
+  padding-right: var(--df-space-1);
+}
+
+.dt-pipeline-card {
+  padding: var(--df-space-5) var(--df-space-6);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  box-shadow: var(--df-shadow-xs);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.dt-pipeline-card:hover {
+  border-color: var(--df-border-strong);
+  box-shadow: var(--df-shadow-sm);
+}
+
+.dt-pipeline-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--df-space-4);
+  margin-bottom: var(--df-space-3);
+}
+
+.dt-pipeline-card-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.dt-pipeline-route {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--df-space-3);
+  padding: var(--df-space-3) var(--df-space-4);
+  background: var(--df-bg-subtle);
+  border-radius: var(--df-radius-md);
+  font-size: 13px;
+  margin-bottom: var(--df-space-3);
+}
+
+.dt-pipeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--df-space-5);
+  font-size: 13px;
+  color: var(--df-text-secondary);
+  margin-bottom: var(--df-space-4);
+}
+
+.dt-pipeline-meta span {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-1);
+}
+
+.dt-pipeline-actions {
+  display: flex;
+  gap: var(--df-space-2);
+}
+
+.dt-schedule-form {
+  flex-shrink: 0;
+}
+
+/* ─── MCP workspace ─── */
+
+.dt-mcp-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-5);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.dt-mcp-integrations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-3);
+}
+
+.dt-mcp-integration-card {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-4);
+  padding: var(--df-space-4);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-bg-subtle);
+  transition: border-color 0.2s ease;
+}
+
+.dt-mcp-integration-card:hover {
+  border-color: var(--df-brand);
+}
+
+.dt-mcp-integration-icon {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--df-radius-md);
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
+  flex-shrink: 0;
+}
+
+.dt-mcp-url-box {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-3);
+  padding: var(--df-space-4);
+  background: var(--df-bg-subtle);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  margin-bottom: var(--df-space-5);
+}
+
+.dt-mcp-url-box code {
+  flex: 1;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.dt-mcp-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--df-space-3);
+}
+
+.dt-mcp-stat {
+  padding: var(--df-space-4);
+  background: var(--df-bg-subtle);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+}
+
+.dt-mcp-stat-value {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--df-brand);
+}
+
+.dt-mcp-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--df-text-tertiary);
+}
+
+.dt-mcp-tools-section {
+  flex-shrink: 0;
+}
+
+.dt-section-heading {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: var(--df-space-4);
+  letter-spacing: -0.01em;
+}
+
+.dt-mcp-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: var(--df-space-3);
+}
+
+.dt-mcp-tool-card {
+  padding: var(--df-space-4) var(--df-space-5);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  box-shadow: var(--df-shadow-xs);
+}
+
+.dt-mcp-tool-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--df-brand);
+  margin-bottom: var(--df-space-2);
+}
+
+/* ─── Pilot full viewport ─── */
+
+.dt-page-flush.dt-page-viewport {
+  height: 100%;
+}
+
+.dt-page-flush.dt-page-viewport .dt-pilot-layout {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.dt-pilot-sidebar {
+  width: 280px;
+  padding: var(--df-space-5);
+}
+
+.dt-pilot-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.dt-pilot-composer,
+.dt-pilot-composer-sticky {
+  padding: var(--df-space-5) var(--df-space-6);
+  border-top: 1px solid var(--df-border);
+  background: var(--df-surface);
+}
+
+.dt-pilot-msg {
+  padding: var(--df-space-4) var(--df-space-5);
+  border-radius: var(--df-radius-lg);
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 85%;
+}
+
+/* ─── Connectors scroll panel ─── */
+
+.dt-page-body.dt-connectors-body {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-4);
+}
+
+@media (max-width: 1024px) {
+  .dt-settings-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .dt-settings-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .dt-schedules-stats-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Data Pilot — fix overlapping subgroups ─── */
+
+.dt-pilot-main-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-5);
+  padding-top: var(--df-space-6);
+  padding-bottom: var(--df-space-10);
+}
+
+.dt-pilot-hero {
+  flex-shrink: 0;
+  padding-bottom: 0;
+}
+
+.dt-pilot-composer {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.dt-pilot-categories {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--df-space-2);
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  max-width: 100%;
+}
+
+.dt-pilot-quick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--df-space-2);
+  margin: var(--df-space-2) 0 var(--df-space-4);
+  width: 100%;
+}
+
+.dt-pilot-ideas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: var(--df-space-3);
+  width: 100%;
+  margin: 0 0 var(--df-space-6);
+}
+
+.dt-pilot-idea-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+  min-height: 120px;
+  text-align: left;
+}
+
+.dt-pilot-main-inner .dt-section-title {
+  margin: var(--df-space-2) 0;
+  flex-shrink: 0;
+}
+
+@media (min-width: 1440px) {
+  .dt-topology-card .dt-flow-graph {
+    min-height: clamp(300px, 45vh, 480px);
+  }
+}

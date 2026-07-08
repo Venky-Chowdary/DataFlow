@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from connectors.snowflake_conn import get_connection, normalize_account
@@ -12,7 +12,9 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
+    transform_error_policy,
 )
+from services.type_system import ddl_type
 
 
 @dataclass
@@ -25,18 +27,12 @@ class WriteResult:
     chunks_completed: int
     error: str | None = None
     driver: str = "snowflake-connector-python"
+    rejected_rows: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 def sf_type(inferred: str) -> str:
-    mapping = {
-        "INTEGER": "NUMBER(38,0)",
-        "DECIMAL": "NUMBER(18,4)",
-        "BOOLEAN": "BOOLEAN",
-        "DATE": "DATE",
-        "TIMESTAMP": "TIMESTAMP_TZ",
-        "TEXT": "VARCHAR",
-    }
-    return mapping.get(inferred.upper(), "VARCHAR")
+    return ddl_type("snowflake", inferred)
 
 
 def write_mapped_rows(
@@ -56,25 +52,29 @@ def write_mapped_rows(
     mappings: list[dict],
     column_types: dict[str, str],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
+    error_policy: str | None = None,
 ) -> WriteResult:
     del port, ssl
     try:
         import snowflake.connector  # noqa: F401
     except ImportError:
-        rows = len(data_rows)
-        chunks = max(1, (rows + CHUNK_SIZE - 1) // CHUNK_SIZE)
-        if on_checkpoint:
-            for c in range(1, chunks + 1):
-                done = min(c * CHUNK_SIZE, rows)
-                on_checkpoint(c, chunks, done)
+        from connectors.driver_guard import allow_stub_writes, require_driver
+        from connectors.stub_writer import simulate_stub_write
+
+        if not allow_stub_writes():
+            return WriteResult(
+                ok=False, rows_written=0, table_name=table_name, target_schema=schema or "PUBLIC",
+                checksum="", chunks_completed=0,
+                error=require_driver("snowflake.connector", "snowflake-connector-python"),
+                driver="none",
+            )
+        rows, checksum, chunks = simulate_stub_write(
+            data_rows=data_rows, table_name=table_name, target_schema=schema or "PUBLIC",
+            on_checkpoint=on_checkpoint,
+        )
         return WriteResult(
-            ok=True,
-            rows_written=rows,
-            table_name=table_name,
-            target_schema=schema or "PUBLIC",
-            checksum=row_checksum([tuple(r) for r in data_rows]),
-            chunks_completed=chunks,
-            driver="stub",
+            ok=True, rows_written=rows, table_name=table_name, target_schema=schema or "PUBLIC",
+            checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
     target_cols, source_types = resolve_target_columns(mappings, column_types)
@@ -93,6 +93,7 @@ def write_mapped_rows(
     table_name = sanitize_identifier(table_name).upper()
     target_types = [sf_type(t) for t in source_types]
     account = normalize_account(host)
+    policy = transform_error_policy(error_policy)
 
     try:
         conn = get_connection(
@@ -121,8 +122,10 @@ def write_mapped_rows(
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
+                error_policy=policy,
             )
-            if transform_errors:
+            rejected_rows = len(data_rows) - len(mapped_rows)
+            if transform_errors and policy == "fail":
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -131,6 +134,8 @@ def write_mapped_rows(
                     checksum="",
                     chunks_completed=0,
                     error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+                    rejected_rows=rejected_rows,
+                    warnings=transform_errors,
                 )
             total = len(mapped_rows)
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
@@ -157,6 +162,8 @@ def write_mapped_rows(
             target_schema=schema,
             checksum=row_checksum(mapped_rows),
             chunks_completed=chunks,
+            rejected_rows=len(data_rows) - written,
+            warnings=transform_errors,
         )
     except Exception as exc:
         return WriteResult(

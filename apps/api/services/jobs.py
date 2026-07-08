@@ -478,7 +478,9 @@ def create_job_store() -> MemoryJobStore | PostgresJobStore:
             logger.info("Job store: in-memory (Postgres unreachable)")
 
     if isinstance(store, MemoryJobStore) and store.stats()["total_jobs"] == 0:
-        _seed_demo_jobs(store)
+        from services.config import get_settings
+        if get_settings().seed_demo_jobs:
+            _seed_demo_jobs(store)
 
     return store
 

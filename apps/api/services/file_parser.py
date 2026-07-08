@@ -19,19 +19,45 @@ def detect_format(filename: str, content: bytes) -> str:
     lower = filename.lower()
     if lower.endswith(".csv"):
         return "csv"
+    if lower.endswith(".tsv"):
+        return "tsv"
     if lower.endswith((".xlsx", ".xls")):
         return "excel"
     if lower.endswith(".json"):
         return "json"
+    if lower.endswith((".jsonl", ".ndjson")):
+        return "jsonl"
     if lower.endswith(".parquet"):
         return "parquet"
     if lower.endswith((".txt", ".dat")):
         return "fixed_width"
-    if content[:1] == b"{" or content[:1] == b"[": 
+    if content[:1] == b"{" or content[:1] == b"[":
         return "json"
+    if b"\n{" in content[:2048]:
+        return "jsonl"
     if b"," in content[:512]:
         return "csv"
+    if b"\t" in content[:512]:
+        return "tsv"
     return "unknown"
+
+
+def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
+    lines = content.decode("utf-8", errors="replace").strip().splitlines()
+    objects = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        objects.append(json.loads(line))
+    if not objects:
+        raise ValueError("JSONL must contain at least one JSON object per line")
+    headers = list(objects[0].keys())
+    rows = [
+        [json.dumps(item[h]) if isinstance(item.get(h), (dict, list)) else str(item.get(h, "")) for h in headers]
+        for item in objects
+    ]
+    return headers, rows, len(objects)
 
 
 def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
@@ -58,8 +84,13 @@ def store_upload(filename: str, content: bytes) -> dict:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
         row_count = count_csv_rows(content, encoding)
         fmt = "csv" if fmt == "unknown" else fmt
+    elif fmt == "tsv":
+        headers, rows, encoding, delimiter = parse_csv_preview(content)
+        row_count = count_csv_rows(content, encoding)
     elif fmt == "json":
         headers, rows, row_count = parse_json(content)
+    elif fmt == "jsonl":
+        headers, rows, row_count = parse_jsonl(content)
     elif fmt == "excel":
         from services.excel_parser import parse_excel_preview
 
@@ -97,3 +128,67 @@ def store_upload(filename: str, content: bytes) -> dict:
 
 def get_file(file_id: str) -> dict | None:
     return _file_registry.get(file_id)
+
+
+def get_file_chunks(file_id: str, chunk_size: int = 10000):
+    """Generator to yield chunks of a file for streaming transfers."""
+    record = get_file(file_id)
+    if not record:
+        raise FileNotFoundError(f"File {file_id} not found in registry")
+    
+    path = Path(record["path"])
+    fmt = record["format"]
+    encoding = record["encoding"]
+    delimiter = record["delimiter"]
+    
+    if fmt == "csv":
+        import csv, io
+        with open(path, "r", encoding=encoding, errors="replace") as f:
+            reader = csv.reader(f, delimiter=delimiter)
+            headers = next(reader, [])
+            chunk = []
+            for row in reader:
+                chunk.append(row)
+                if len(chunk) >= chunk_size:
+                    yield headers, chunk
+                    chunk = []
+            if chunk:
+                yield headers, chunk
+    elif fmt == "json":
+        import json
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                raise ValueError("JSON must be an array of objects")
+            if not data:
+                return
+            headers = list(data[0].keys())
+            for i in range(0, len(data), chunk_size):
+                batch = data[i:i+chunk_size]
+                rows = [[str(item.get(h, "")) for h in headers] for item in batch]
+                yield headers, rows
+    elif fmt == "jsonl":
+        import json
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            chunk = []
+            headers = None
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if headers is None:
+                    headers = list(obj.keys())
+                row = [json.dumps(obj[h]) if isinstance(obj.get(h), (dict, list)) else str(obj.get(h, "")) for h in headers]
+                chunk.append(row)
+                if len(chunk) >= chunk_size:
+                    yield headers, chunk
+                    chunk = []
+            if chunk:
+                yield headers, chunk
+    else:
+        # Fallback to full load then chunk
+        from services.csv_profiler import parse_csv_full
+        headers, data_rows, _, _ = parse_csv_full(path.read_bytes(), encoding)
+        for i in range(0, len(data_rows), chunk_size):
+            yield headers, data_rows[i:i+chunk_size]

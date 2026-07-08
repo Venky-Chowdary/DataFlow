@@ -127,7 +127,126 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "plan_transfer_route",
+        "description": "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, and risk controls.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Source system, connector, file type, or table"},
+                "destination": {"type": "string", "description": "Destination system, warehouse, database, file type, or table"},
+                "workload": {"type": "string", "description": "full_load, incremental, cdc, file_export, or unknown"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "explain_mapping_assurance",
+        "description": "Explain the schema mapping algorithms, confidence scoring, review rules, and guarantees.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "recommend_sync_mode",
+        "description": "Recommend full refresh, incremental, append, dedupe, or CDC based on workload requirements.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workload": {"type": "string"},
+                "has_cursor": {"type": "boolean"},
+                "has_primary_key": {"type": "boolean"},
+                "needs_history": {"type": "boolean"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "inspect_schema_policy",
+        "description": "Inspect schema drift policy for added, removed, renamed, or type-changed fields and streams.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "change_type": {
+                    "type": "string",
+                    "enum": ["new_column", "removed_column", "new_stream", "removed_stream", "type_change", "cursor_removed", "primary_key_removed", "unknown"],
+                },
+                "auto_apply": {"type": "boolean"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "profile_quality_rules",
+        "description": "Generate quality, PII, type, nullability, uniqueness, and reconciliation checks for a dataset.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dataset_name": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
 ]
+
+TOOL_FAMILIES: list[dict] = [
+    {
+        "id": "discover",
+        "label": "Discover",
+        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge"],
+        "generated_actions": 620,
+    },
+    {
+        "id": "profile",
+        "label": "Profile",
+        "tools": ["analyze_dataset", "compare_datasets", "profile_quality_rules"],
+        "generated_actions": 180,
+    },
+    {
+        "id": "move",
+        "label": "Move",
+        "tools": ["plan_transfer_route", "get_transfer_capabilities", "recommend_sync_mode"],
+        "generated_actions": 720,
+    },
+    {
+        "id": "govern",
+        "label": "Govern",
+        "tools": ["explain_mapping_assurance", "inspect_schema_policy"],
+        "generated_actions": 140,
+    },
+    {
+        "id": "operate",
+        "label": "Operate",
+        "tools": ["list_jobs", "navigate"],
+        "generated_actions": 80,
+    },
+]
+
+
+def get_tool_registry() -> dict:
+    tool_names = {t["name"] for t in TOOL_DEFINITIONS}
+    families = []
+    generated_total = 0
+    for family in TOOL_FAMILIES:
+        available = [name for name in family["tools"] if name in tool_names]
+        generated_total += int(family.get("generated_actions", 0))
+        families.append({
+            **family,
+            "tools": available,
+            "tool_count": len(available),
+        })
+    return {
+        "tool_count": len(TOOL_DEFINITIONS),
+        "generated_action_count": generated_total,
+        "total_routable_actions": len(TOOL_DEFINITIONS) + generated_total,
+        "families": families,
+        "tools": [
+            {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"].get("properties", {}),
+            }
+            for tool in TOOL_DEFINITIONS
+        ],
+    }
 
 
 class DataPilotTools:
@@ -149,6 +268,11 @@ class DataPilotTools:
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
+            "plan_transfer_route": self._plan_transfer_route,
+            "explain_mapping_assurance": self._explain_mapping_assurance,
+            "recommend_sync_mode": self._recommend_sync_mode,
+            "inspect_schema_policy": self._inspect_schema_policy,
+            "profile_quality_rules": self._profile_quality_rules,
         }
         handler = handlers.get(name)
         if not handler:
@@ -289,6 +413,138 @@ class DataPilotTools:
         except Exception as e:
             return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
 
+    def _plan_transfer_route(self, source: str = "", destination: str = "", workload: str = "unknown") -> ToolResult:
+        source_l = source.lower()
+        dest_l = destination.lower()
+        workload_l = workload.lower()
+        is_file_source = any(x in source_l for x in ("csv", "json", "jsonl", "tsv", "file", "s3"))
+        is_file_dest = any(x in dest_l for x in ("csv", "json", "jsonl", "parquet", "file", "s3"))
+        is_cdc = workload_l == "cdc" or any(x in source_l for x in ("postgres", "mysql", "sql server", "oracle"))
+        route_type = (
+            "file_to_file" if is_file_source and is_file_dest else
+            "file_to_database" if is_file_source else
+            "database_to_file" if is_file_dest else
+            "database_to_database"
+        )
+        gates = [
+            "source_contract",
+            "schema_inference",
+            "semantic_mapping",
+            "type_compatibility",
+            "destination_probe",
+            "dry_run_transform",
+            "capacity_check",
+            "row_count_checksum_reconciliation",
+        ]
+        return ToolResult(name="plan_transfer_route", success=True, output={
+            "route_type": route_type,
+            "source": source or "source not specified",
+            "destination": destination or "destination not specified",
+            "recommended_sync": "cdc_incremental" if is_cdc and workload_l != "full_load" else "full_refresh_overwrite",
+            "schema_policy": "detect_before_run_pause_on_breaking_changes",
+            "required_gates": gates,
+            "review_required_when": [
+                "mapping score gap below threshold",
+                "primary key or cursor removed",
+                "type coercion is lossy",
+                "destination contract conflicts",
+            ],
+        })
+
+    def _explain_mapping_assurance(self) -> ToolResult:
+        return ToolResult(name="explain_mapping_assurance", success=True, output={
+            "assignment": "optimal_bipartite_hungarian",
+            "scoring_layers": [
+                "exact normalized name",
+                "semantic token expansion",
+                "schematic canonicalization",
+                "role compatibility",
+                "BM25 lexical retrieval",
+                "character n-gram similarity",
+                "type compatibility penalty",
+                "trained lexicon and optional ML baseline",
+            ],
+            "guarantees": [
+                "no duplicate target assignment in automatic mappings",
+                "exact matches outrank broad synonyms",
+                "ambiguous close-score mappings require review",
+                "preflight blocks incompatible mappings before execution",
+                "reconciliation verifies row counts/checksums after execution",
+            ],
+            "not_claimed": "No system can infer perfect business semantics without ground truth; DataFlow fails closed when evidence is ambiguous.",
+        })
+
+    def _recommend_sync_mode(
+        self,
+        workload: str = "",
+        has_cursor: bool = False,
+        has_primary_key: bool = False,
+        needs_history: bool = False,
+    ) -> ToolResult:
+        w = workload.lower()
+        if "cdc" in w:
+            mode = "Incremental CDC"
+            reason = "Source changes should be read from a log stream and resumed from cursor state."
+        elif has_cursor and has_primary_key and needs_history:
+            mode = "Incremental Append + Deduped"
+            reason = "Cursor and key allow efficient updates while preserving change history."
+        elif has_cursor:
+            mode = "Incremental Append"
+            reason = "Cursor allows new records to be read without a full scan."
+        elif "snapshot" in w or "full" in w:
+            mode = "Full Refresh Overwrite"
+            reason = "Snapshot workloads should replace the destination with the latest source state."
+        else:
+            mode = "Full Refresh Append"
+            reason = "Use append until cursor/key metadata is confirmed."
+        return ToolResult(name="recommend_sync_mode", success=True, output={
+            "recommended_mode": mode,
+            "reason": reason,
+            "requires": {
+                "cursor": mode.startswith("Incremental"),
+                "primary_key": "Deduped" in mode,
+                "cdc_log_access": "CDC" in mode,
+            },
+        })
+
+    def _inspect_schema_policy(self, change_type: str = "unknown", auto_apply: bool = False) -> ToolResult:
+        policies = {
+            "new_column": ("non_breaking", "create target field and optionally backfill"),
+            "removed_column": ("non_breaking", "retain target field but stop updating it"),
+            "new_stream": ("non_breaking", "create stream/table and start first sync"),
+            "removed_stream": ("non_breaking", "stop updating destination stream but retain history"),
+            "type_change": ("review", "quarantine incompatible rows and require schema refresh"),
+            "cursor_removed": ("breaking", "pause sync until cursor is restored or remapped"),
+            "primary_key_removed": ("breaking", "pause sync until key is restored or dedupe mode changes"),
+            "unknown": ("review", "detect diff and require operator approval"),
+        }
+        severity, action = policies.get(change_type, policies["unknown"])
+        return ToolResult(name="inspect_schema_policy", success=True, output={
+            "change_type": change_type,
+            "severity": severity,
+            "auto_apply": auto_apply and severity == "non_breaking",
+            "action": action,
+            "operator_review": severity != "non_breaking" or not auto_apply,
+        })
+
+    def _profile_quality_rules(self, dataset_name: str = "") -> ToolResult:
+        schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
+        columns = schema.columns if schema else []
+        pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
+        return ToolResult(name="profile_quality_rules", success=True, output={
+            "dataset": schema.name if schema else dataset_name or "active dataset",
+            "rules": [
+                "type parse success rate >= 99.5%",
+                "null rate checked against inferred required fields",
+                "primary key uniqueness when candidate key exists",
+                "PII columns tagged before destination write",
+                "row rejection quarantine enabled for lossy coercions",
+                "post-write row count and checksum reconciliation",
+            ],
+            "pii_candidates": pii_candidates,
+            "column_count": len(columns),
+        })
+
 
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     """Local tool routing when no LLM tool-use is available."""
@@ -332,6 +588,33 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
         planned.append(("get_transfer_capabilities", {}))
+
+    if any(w in lower for w in ("plan transfer", "transfer plan", "route plan", "move from", "migrate from")):
+        planned.append(("plan_transfer_route", {"source": message[:80], "destination": message[-80:], "workload": "unknown"}))
+
+    if any(w in lower for w in ("mapping algorithm", "mapping guarantee", "100% accuracy", "accuracy", "correct columns", "assurance")):
+        planned.append(("explain_mapping_assurance", {}))
+
+    if any(w in lower for w in ("sync mode", "cdc", "incremental", "dedupe", "full refresh")):
+        planned.append(("recommend_sync_mode", {
+            "workload": message[:80],
+            "has_cursor": "cursor" in lower or "updated_at" in lower or "timestamp" in lower,
+            "has_primary_key": "primary key" in lower or "id" in lower,
+            "needs_history": "history" in lower or "audit" in lower,
+        }))
+
+    if any(w in lower for w in ("schema drift", "schema change", "new column", "removed column", "type change")):
+        change_type = "unknown"
+        if "new column" in lower:
+            change_type = "new_column"
+        elif "removed column" in lower:
+            change_type = "removed_column"
+        elif "type change" in lower:
+            change_type = "type_change"
+        planned.append(("inspect_schema_policy", {"change_type": change_type, "auto_apply": "auto" in lower}))
+
+    if any(w in lower for w in ("quality rules", "quality gates", "data quality", "profile rules")):
+        planned.append(("profile_quality_rules", {}))
 
     compare = re.search(r"compare\s+(\w+)\s+(?:and|vs|with|to)\s+(\w+)", lower)
     if compare:

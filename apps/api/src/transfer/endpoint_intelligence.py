@@ -64,7 +64,7 @@ def introspect_endpoint(
             password=cfg.get("password", ""),
             schema=cfg.get("schema", "public"),
             connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", True),
+            ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
@@ -111,7 +111,48 @@ def introspect_endpoint(
             password=cfg.get("password", ""),
             schema=cfg.get("schema", "PUBLIC"),
             connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", True),
+            ssl=cfg.get("ssl", False),
+            warehouse=cfg.get("warehouse", ""),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if endpoint.table and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "mysql":
+        from connectors.mysql import test_mysql
+
+        probe = test_mysql(
+            host=cfg["host"],
+            port=cfg["port"] or 3306,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if endpoint.table and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "bigquery":
+        from connectors.bigquery import test_bigquery
+
+        probe = test_bigquery(
+            host=cfg["host"],
+            port=cfg["port"] or 443,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", "dataflow"),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
         )
         out["connected"] = probe.ok
@@ -167,7 +208,10 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
         if db == "mongodb":
             plan["auto_create"].append(f"MongoDB collection `{destination.database or 'test_db'}.{target}`")
         else:
-            sch = destination.schema or ("PUBLIC" if db == "snowflake" else "public")
+            sch = destination.schema or (
+                "PUBLIC" if db == "snowflake" else
+                "dataflow" if db == "bigquery" else "public"
+            )
             plan["auto_create"].append(f"{db} table `{sch}.{target}` with typed columns (CREATE IF NOT EXISTS)")
         for col in columns:
             plan["type_mappings"].append({

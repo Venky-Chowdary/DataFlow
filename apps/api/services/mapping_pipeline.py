@@ -9,19 +9,36 @@ CONFIDENCE_FLOOR = 0.72
 
 
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
-    hints = [c.upper() for c in source_columns[:5]]
-    payment_tokens = {"AMT", "CUST_ID", "TXN_DT", "ACCT_NO", "CCY", "REF_NO"}
+    from services.semantic_analyzer import analyze_column
+
+    semantic_hits = 0
+    for col in source_columns[:12]:
+        analyzed = analyze_column(col, "VARCHAR", [])
+        if analyzed.get("semantic_type") not in ("unknown", "text", ""):
+            semantic_hits += 1
+
+    hints = [c.upper() for c in source_columns[:8]]
+    payment_tokens = {"AMT", "CUST_ID", "TXN_DT", "ACCT_NO", "CCY", "REF_NO", "PAY_AMT"}
     overlap = len(set(hints) & payment_tokens)
+
     if overlap >= 2:
         fmt = "payment_feed"
+        confidence = min(0.95, 0.75 + overlap * 0.05)
+    elif semantic_hits >= max(2, len(source_columns[:8]) // 2):
+        fmt = "semantic_tabular"
+        confidence = min(0.92, 0.7 + semantic_hits * 0.04)
     elif file_format:
         fmt = file_format
+        confidence = 0.78
     else:
         fmt = "generic_tabular"
+        confidence = 0.72
+
     return {
         "format": fmt,
-        "confidence": 0.92 if overlap >= 2 else 0.78,
+        "confidence": confidence,
         "agent": "FormatClassifierAgent",
+        "semantic_hits": semantic_hits,
     }
 
 
@@ -85,6 +102,12 @@ def validate_mappings(mappings: list[dict], *, confidence_threshold: float = 0.8
     for m in mappings:
         if m["confidence"] < confidence_threshold:
             issues.append(f"Low confidence: {m['source']} → {m['target']} ({m['confidence']:.0%})")
+        if m.get("requires_review"):
+            gap = float(m.get("score_gap", 0.0))
+            issues.append(
+                f"Ambiguous mapping: {m['source']} → {m['target']} "
+                f"(winner gap {gap:.0%}; review required)"
+            )
         tgt = m["target"].lower()
         if tgt in seen_targets:
             issues.append(f"Duplicate target column: {m['target']}")
@@ -93,7 +116,7 @@ def validate_mappings(mappings: list[dict], *, confidence_threshold: float = 0.8
         "passed": len(issues) == 0,
         "issues": issues,
         "agent": "ValidationCriticAgent",
-        "requires_reflexion": any("Low confidence" in i for i in issues),
+        "requires_reflexion": any(("Low confidence" in i or "Ambiguous mapping" in i) for i in issues),
     }
 
 

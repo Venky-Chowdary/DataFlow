@@ -10,12 +10,17 @@ _CATALOG_PATH = os.path.join(
 )
 
 SUGGESTED_SOURCES = [
-    "postgresql", "mongodb", "mysql", "csv___tsv", "json", "excel",
+    "postgresql", "mongodb", "mysql", "mariadb", "sqlserver", "oracle",
+    "csv___tsv", "json", "jsonl", "excel", "parquet", "avro",
     "salesforce", "shopify", "stripe", "github", "kafka", "s3",
+    "google_sheets", "hubspot", "zendesk", "jira", "slack",
+    "dynamodb", "redis", "elasticsearch", "snowflake", "bigquery",
 ]
 SUGGESTED_DESTINATIONS = [
     "snowflake", "postgresql", "mongodb", "bigquery", "redshift",
     "pinecone", "clickhouse", "databricks", "s3", "hubspot",
+    "mysql", "sqlserver", "delta_lake", "iceberg", "duckdb",
+    "kafka", "elasticsearch", "firestore", "supabase", "neon",
 ]
 
 
@@ -77,6 +82,22 @@ def search_catalog(
     }
 
 
+def catalog_summary() -> dict:
+    data = load_catalog()
+    connectors = data.get("connectors", [])
+    by_status: dict[str, int] = {}
+    for c in connectors:
+        st = c.get("status", "planned")
+        by_status[st] = by_status.get(st, 0) + 1
+    return {
+        "total": data.get("total", len(connectors)),
+        "live": by_status.get("live", 0),
+        "beta": by_status.get("beta", 0),
+        "planned": by_status.get("planned", 0),
+        "categories": len({c.get("category", "other") for c in connectors}),
+    }
+
+
 def get_connector_by_id(connector_id: str) -> dict | None:
     for c in load_catalog().get("connectors", []):
         if c["id"] == connector_id:
@@ -92,22 +113,28 @@ def catalog_training_docs(limit: int | None = None) -> list[dict]:
 
     docs = []
     for c in connectors:
+        status = c.get("status", "planned")
+        readiness = (
+            "Live connector path is available for setup and transfer."
+            if status == "live"
+            else "Connector is in catalog discovery; setup may require beta driver work or implementation before production transfer."
+        )
         docs.append({
             "id": f"catalog_{c['id']}",
             "text": (
                 f"Connector: {c['name']} ({c['id']})\n"
                 f"Category: {c.get('category', 'unknown')}\n"
-                f"Status: {c.get('status', 'planned')}\n"
+                f"Status: {status}\n"
                 f"Description: {c.get('description', '')}\n"
-                f"Use as source or destination in DataTransfer.space universal transfer.\n"
-                f"Data Pilot can help set up {c['name']} as a source or destination, "
-                f"map schemas, and run any→any transfers."
+                f"Readiness: {readiness}\n"
+                f"Data Pilot can search this catalog entry, explain setup requirements, "
+                f"and route live transfers only when the connector status and registry support it."
             ),
             "metadata": {
                 "type": "copilot_knowledge",
                 "connector_id": c["id"],
                 "category": c.get("category", ""),
-                "status": c.get("status", ""),
+                "status": status,
             },
         })
     return docs

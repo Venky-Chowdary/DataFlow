@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from typing import Any, Callable
 
 from services.transform_engine import apply_transform, infer_transform
 
-CHUNK_SIZE = 500
+# Configurable batch size — default 5 000 rows per commit (enterprise scale)
+CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "5000"))
+TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantine").lower()
+VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 
 def sanitize_identifier(name: str) -> str:
@@ -26,6 +30,11 @@ def row_checksum(rows: list[tuple]) -> str:
     return h.hexdigest()[:16]
 
 
+def transform_error_policy(policy: str | None = None) -> str:
+    selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
+    return selected if selected in VALID_ERROR_POLICIES else "quarantine"
+
+
 def build_mapped_rows(
     *,
     headers: list[str],
@@ -33,15 +42,18 @@ def build_mapped_rows(
     mappings: list[dict],
     target_cols: list[str],
     column_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
 ) -> tuple[list[tuple], list[str]]:
     """Returns mapped rows and any transform errors (first 10)."""
     column_types = column_types or {}
+    policy = transform_error_policy(error_policy)
     source_indices = {h: i for i, h in enumerate(headers)}
     mapped: list[tuple] = []
     errors: list[str] = []
 
-    for raw in data_rows:
+    for row_number, raw in enumerate(data_rows, start=1):
         row_map: dict[str, Any] = {}
+        row_has_error = False
         for m in mappings:
             idx = source_indices.get(m["source"])
             val = raw[idx] if idx is not None and idx < len(raw) else None
@@ -51,8 +63,14 @@ def build_mapped_rows(
             )
             converted, err = apply_transform(val, transform)
             if err and len(errors) < 10:
-                errors.append(f"{m['source']}: {err}")
+                errors.append(f"row {row_number} {m['source']}→{m['target']}: {err}")
+            if err:
+                row_has_error = True
+                if policy == "coerce_null":
+                    converted = None
             row_map[tgt] = converted
+        if row_has_error and policy in {"fail", "quarantine"}:
+            continue
         mapped.append(tuple(row_map.get(c) for c in target_cols))
 
     return mapped, errors

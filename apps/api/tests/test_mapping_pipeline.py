@@ -13,3 +13,9 @@ def test_pipeline_returns_agents():
     assert r["mappings"][0]["target"] == "payment_amount"
     assert "transforms" in r
     assert r["validation"]["agent"] == "ValidationCriticAgent"
+
+
+def test_pipeline_flags_ambiguous_mapping_for_review():
+    r = run_mapping_pipeline(["id", "customer_id"], ["customer_id", "order_id"])
+    assert not r["validation"]["passed"]
+    assert any("Ambiguous mapping" in issue for issue in r["validation"]["issues"])

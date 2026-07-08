@@ -1,0 +1,409 @@
+/**
+ * Page-level polish — layout rhythm, stepped wizard, empty states, pilot light theme
+ */
+
+/* ─── Page vertical stack ─── */
+
+.dt-page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-6);
+}
+
+.dt-page-stack > .dt-page-header {
+  margin-bottom: 0;
+}
+
+.dt-page-header {
+  padding-bottom: var(--df-space-5);
+  border-bottom: 1px solid var(--df-border);
+}
+
+/* ─── Command center aside ─── */
+
+.dt-command-aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-4);
+  min-width: 0;
+}
+
+@media (min-width: 1025px) {
+  .dt-command-aside {
+    position: sticky;
+    top: 0;
+    align-self: start;
+  }
+}
+
+.dt-flow-graph-wrap {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ─── Stat skeleton ─── */
+
+.dt-stat-skeleton .dt-stat-value {
+  color: transparent;
+  background: linear-gradient(90deg, var(--df-bg-subtle), var(--df-border), var(--df-bg-subtle));
+  background-size: 200% 100%;
+  animation: dt-shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--df-radius-sm);
+  min-width: 3ch;
+}
+
+/* ─── Transfer stepped wizard ─── */
+
+.dt-transfer-step-panel {
+  animation: dt-step-in 240ms ease;
+}
+
+@keyframes dt-step-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.dt-step-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2);
+  padding: var(--df-space-3) var(--df-space-4);
+  background: var(--df-bg-subtle);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  font-size: 13px;
+  color: var(--df-text-secondary);
+}
+
+.dt-step-summary strong {
+  color: var(--df-text-primary);
+  font-weight: 600;
+}
+
+.dt-wizard-nav-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--df-space-4);
+  padding-top: var(--df-space-4);
+  border-top: 1px solid var(--df-border);
+  flex-wrap: wrap;
+}
+
+.dt-studio-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--df-space-3);
+  padding-top: var(--df-space-5);
+  margin-top: var(--df-space-4);
+  border-top: 1px solid var(--df-border);
+}
+
+/* ─── Mapping mobile list ─── */
+
+.dt-mapping-mobile-list {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .dt-mapping-canvas-body,
+  .dt-mapping-canvas-svg,
+  .dt-mapping-engine {
+    display: none !important;
+  }
+
+  .dt-mapping-mobile-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--df-space-2);
+  }
+
+  .dt-mapping-mobile-row {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: var(--df-space-2);
+    align-items: center;
+    padding: var(--df-space-3);
+    border: 1px solid var(--df-border);
+    border-radius: var(--df-radius-md);
+    background: var(--df-surface);
+    font-size: 13px;
+  }
+
+  .dt-mapping-mobile-arrow {
+    color: var(--df-text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .dt-mapping-mobile-conf {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: var(--df-text-tertiary);
+  }
+}
+
+/* ─── Jobs detail panel ─── */
+
+.dt-jobs-detail-empty .dt-empty {
+  padding: var(--df-space-8) var(--df-space-4);
+}
+
+.dt-jobs-layout.dt-jobs-has-selection .dt-jobs-detail {
+  order: 0;
+}
+
+@media (max-width: 1024px) {
+  .dt-jobs-layout:not(.dt-jobs-has-selection) .dt-jobs-detail {
+    display: none;
+  }
+
+  .dt-jobs-layout.dt-jobs-has-selection {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dt-job-phases-scroll {
+  display: flex;
+  gap: var(--df-space-2);
+  overflow-x: auto;
+  padding-bottom: var(--df-space-2);
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ─── Schedule stats unified with dashboard stats ─── */
+
+.dt-schedule-stat,
+.dt-schedules-stats .dt-schedule-stat {
+  padding: var(--df-space-5);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  box-shadow: var(--df-shadow-xs);
+  text-align: center;
+}
+
+.dt-schedule-stat-value {
+  display: block;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--df-text-primary);
+}
+
+.dt-schedule-stat-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--df-text-tertiary);
+  margin-top: var(--df-space-1);
+}
+
+.dt-schedule-route {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2);
+  font-size: 13px;
+}
+
+.dt-toggle-badge {
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  transition: opacity var(--dt-transition);
+}
+
+.dt-toggle-badge:hover {
+  opacity: 0.85;
+}
+
+.dt-toggle-badge[aria-pressed="false"] {
+  background: var(--df-bg-subtle);
+  color: var(--df-text-secondary);
+}
+
+/* ─── Settings ─── */
+
+.dt-settings-tabs {
+  margin-bottom: var(--df-space-2);
+}
+
+.dt-settings-panel {
+  animation: dt-step-in 200ms ease;
+}
+
+/* ─── MCP ─── */
+
+.dt-mcp-tools-empty {
+  padding: var(--df-space-8);
+  text-align: center;
+  color: var(--df-text-secondary);
+  border: 1px dashed var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-bg-subtle);
+}
+
+.dt-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--df-text-tertiary);
+  margin: var(--df-space-2) 0 var(--df-space-4);
+}
+
+/* ─── Pilot light sidebar ─── */
+
+.dt-pilot-sidebar {
+  background: var(--df-surface) !important;
+  border-right: 1px solid var(--df-border) !important;
+}
+
+.dt-pilot-sidebar-label {
+  color: var(--df-text-tertiary) !important;
+}
+
+.dt-pilot-session {
+  color: var(--df-text-secondary) !important;
+}
+
+.dt-pilot-session.active {
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand) !important;
+}
+
+.dt-pilot-tool {
+  background: var(--df-bg-subtle) !important;
+  border: 1px solid var(--df-border) !important;
+}
+
+.dt-badge-warning {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.dt-badge-info {
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
+}
+
+.dt-badge-default {
+  background: var(--df-bg-subtle);
+  color: var(--df-text-secondary);
+}
+
+.dt-mb-4 { margin-bottom: var(--df-space-4); }
+
+.dt-text-center { text-align: center; }
+
+/* ─── Empty compact ─── */
+
+.dt-empty-compact {
+  padding: var(--df-space-8) var(--df-space-4);
+}
+
+.dt-empty-compact .dt-empty-icon {
+  width: 44px;
+  height: 44px;
+}
+
+/* ─── Shell header slim (actions only) ─── */
+
+.dt-header-slim .dt-header-titles {
+  display: none;
+}
+
+@media (min-width: 769px) {
+  .dt-header-slim {
+    justify-content: flex-end;
+  }
+
+  .dt-header-slim .dt-header-left {
+    flex: 1;
+  }
+}
+
+.dt-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+
+/* Card spacing inside page stack uses gap — drop redundant margins */
+
+.dt-page-stack .dt-mt-6,
+.dt-page-stack .dt-mb-6 {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+.dt-page-stack .dt-tabs {
+  margin-bottom: 0 !important;
+}
+
+/* ─── Modal a11y focus ─── */
+
+.dt-modal:focus {
+  outline: none;
+}
+
+/* ─── Job theater connecting ─── */
+
+.dt-job-theater-connecting {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-3);
+  padding: var(--df-space-4);
+  color: var(--df-text-secondary);
+  font-size: 14px;
+}
+
+/* ─── Landing mobile menu ─── */
+
+.landing-nav-toggle {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .landing-nav-toggle {
+    display: inline-flex;
+  }
+
+  .landing-nav-links {
+    display: none;
+    position: absolute;
+    top: 64px;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 0;
+    background: var(--df-surface);
+    border-bottom: 1px solid var(--df-border);
+    padding: var(--df-space-4);
+    box-shadow: var(--df-shadow-md);
+  }
+
+  .landing-nav-links.open {
+    display: flex;
+    z-index: 60;
+  }
+
+  .landing-nav-links a {
+    padding: var(--df-space-3);
+    border-radius: var(--df-radius-md);
+  }
+
+  .landing-nav-links a:hover {
+    background: var(--df-bg-subtle);
+  }
+
+  .landing-nav {
+    position: relative;
+  }
+}

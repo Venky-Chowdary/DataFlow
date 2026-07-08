@@ -1,6 +1,6 @@
 """Universal transfer API — any source to any destination."""
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
@@ -94,6 +94,7 @@ async def analyze_file_transfer(
 
 @router.post("/run")
 async def run_universal_transfer(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(None),
     source_kind: str = Form("file"),
     source_format: str = Form(""),
@@ -113,7 +114,14 @@ async def run_universal_transfer(
     source_database: str = Form(""),
     source_table: str = Form(""),
     source_collection: str = Form(""),
-    skip_preflight: str = Form("true"),
+    skip_preflight: str = Form("false"),
+    async_mode: str = Form("true"),
+    mappings_json: str = Form(""),
+    sync_mode: str = Form("full_refresh_overwrite"),
+    schema_policy: str = Form("manual_review"),
+    validation_mode: str = Form("strict"),
+    backfill_new_fields: str = Form("false"),
+    stream_contracts_json: str = Form(""),
 ):
     """
     Execute universal transfer: file/db → db/file/warehouse.
@@ -121,6 +129,7 @@ async def run_universal_transfer(
     """
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
+    from ..transfer.background import run_transfer_async
 
     src_fmt = source_format
     if source_kind == "file" and file:
@@ -160,9 +169,43 @@ async def run_universal_transfer(
         skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
         source_filename=filename,
         source_content=content,
+        sync_mode=sync_mode,
+        schema_policy=schema_policy,
+        validation_mode=validation_mode,
+        backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
+    if mappings_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(mappings_json)
+            if isinstance(parsed, list):
+                request.mappings = parsed
+        except Exception:
+            pass
+    if stream_contracts_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(stream_contracts_json)
+            if isinstance(parsed, list):
+                request.stream_contracts = parsed
+        except Exception:
+            pass
 
-    result = get_transfer_engine().execute(request)
+    engine = get_transfer_engine()
+    job_id = engine._create_pending_job(request)
+
+    if async_mode.lower() in ("true", "1", "yes"):
+        background_tasks.add_task(run_transfer_async, job_id, request)
+        return {
+            "success": True,
+            "async": True,
+            "job_id": job_id,
+            "status": "running",
+            "operation": request.operation,
+            "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
+        }
+
+    result = engine.execute_tracked(request, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={
             "error": result.error,
@@ -171,6 +214,7 @@ async def run_universal_transfer(
         })
     return {
         "success": True,
+        "async": False,
         "job_id": result.job_id,
         "operation": result.operation,
         "records_transferred": result.records_transferred,

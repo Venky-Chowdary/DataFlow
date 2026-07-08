@@ -1,0 +1,153 @@
+"""BigQuery bulk writer — load rows via insert_rows_json with checkpoints."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Callable
+
+from connectors.writer_common import (
+    CHUNK_SIZE,
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    sanitize_identifier,
+    transform_error_policy,
+)
+from services.type_system import ddl_type
+
+
+@dataclass
+class WriteResult:
+    ok: bool
+    rows_written: int
+    table_name: str
+    target_schema: str
+    checksum: str
+    chunks_completed: int
+    error: str | None = None
+    driver: str = "google-cloud-bigquery"
+    rejected_rows: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+def bq_type(inferred: str) -> str:
+    return ddl_type("bigquery", inferred)
+
+
+def write_mapped_rows(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    warehouse: str,
+    table_name: str,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    on_checkpoint: Callable[[int, int, int], None] | None = None,
+    error_policy: str | None = None,
+) -> WriteResult:
+    del port, username, password, ssl, warehouse
+    project_id = database or host
+    dataset_id = schema or "dataflow"
+    table_name = sanitize_identifier(table_name)
+    policy = transform_error_policy(error_policy)
+
+    try:
+        from google.cloud import bigquery  # noqa: F401
+    except ImportError:
+        from connectors.driver_guard import allow_stub_writes, require_driver
+        from connectors.stub_writer import simulate_stub_write
+
+        if not allow_stub_writes():
+            return WriteResult(
+                ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
+                checksum="", chunks_completed=0,
+                error=require_driver("google.cloud.bigquery", "google-cloud-bigquery"),
+                driver="none",
+            )
+        rows, checksum, chunks = simulate_stub_write(
+            data_rows=data_rows, table_name=table_name, target_schema=dataset_id,
+            on_checkpoint=on_checkpoint,
+        )
+        return WriteResult(
+            ok=True, rows_written=rows, table_name=table_name, target_schema=dataset_id,
+            checksum=checksum, chunks_completed=chunks, driver="stub",
+        )
+
+    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    if not target_cols:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
+            checksum="", chunks_completed=0, error="No column mappings",
+        )
+
+    try:
+        from google.cloud import bigquery
+        from connectors.bigquery_conn import get_client
+
+        client = get_client(project_id=project_id, credentials_path=connection_string)
+        table_id = f"{project_id}.{dataset_id}.{table_name}"
+
+        schema_fields = [
+            bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types)
+        ]
+        table = bigquery.Table(table_id, schema=schema_fields)
+        client.create_table(table, exists_ok=True)
+
+        mapped_rows, transform_errors = build_mapped_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=policy,
+        )
+        rejected_rows = len(data_rows) - len(mapped_rows)
+        if transform_errors and policy == "fail":
+            return WriteResult(
+                ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
+                checksum="", chunks_completed=0,
+                error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+                rejected_rows=rejected_rows,
+                warnings=transform_errors,
+            )
+
+        total = len(mapped_rows)
+        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
+        written = 0
+
+        for chunk_idx in range(chunks):
+            start = chunk_idx * CHUNK_SIZE
+            batch = mapped_rows[start : start + CHUNK_SIZE]
+            if not batch:
+                break
+            records = [dict(zip(target_cols, row)) for row in batch]
+            errors = client.insert_rows_json(table_id, records)
+            if errors:
+                return WriteResult(
+                    ok=False, rows_written=written, table_name=table_name, target_schema=dataset_id,
+                    checksum="", chunks_completed=chunk_idx,
+                    error=str(errors[:2]),
+                )
+            written += len(batch)
+            if on_checkpoint:
+                on_checkpoint(chunk_idx + 1, chunks, written)
+
+        return WriteResult(
+            ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,
+            checksum=row_checksum(mapped_rows), chunks_completed=chunks,
+            rejected_rows=len(data_rows) - written,
+            warnings=transform_errors,
+        )
+    except Exception as exc:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
+            checksum="", chunks_completed=0, error=str(exc),
+        )

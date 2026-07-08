@@ -3,7 +3,8 @@
 from connectors.snowflake_writer import write_mapped_rows
 
 
-def test_snowflake_writer_stub():
+def test_snowflake_writer_stub(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_ALLOW_STUB_WRITES", "1")
     result = write_mapped_rows(
         host="xy12345.us-east-1",
         port=443,

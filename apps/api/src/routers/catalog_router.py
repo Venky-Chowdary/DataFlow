@@ -17,6 +17,12 @@ async def list_catalog_connectors(
     return search_catalog(q, role, category, status, limit)
 
 
+@router.get("/stats")
+async def catalog_stats():
+    from ..services.catalog_service import catalog_summary
+    return catalog_summary()
+
+
 @router.get("/connectors/{connector_id}")
 async def get_catalog_connector(connector_id: str):
     from ..services.catalog_service import get_connector_by_id

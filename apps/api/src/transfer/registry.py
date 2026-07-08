@@ -3,57 +3,36 @@
 from __future__ import annotations
 
 LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson"]
-LIVE_DEST_DATABASES = ["mongodb", "postgresql", "snowflake"]
+LIVE_DEST_DATABASES = ["mongodb", "postgresql", "snowflake", "mysql", "bigquery"]
+LIVE_SOURCE_DATABASES = ["postgresql", "mongodb", "snowflake", "mysql", "bigquery"]
 LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl"]
 
 # (source_kind, source_format, dest_kind, dest_format) -> live
-LIVE_MATRIX: set[tuple[str, str, str, str]] = {
-    # File → Database
-    ("file", "csv", "database", "mongodb"),
-    ("file", "csv", "database", "postgresql"),
-    ("file", "csv", "database", "snowflake"),
-    ("file", "tsv", "database", "mongodb"),
-    ("file", "tsv", "database", "postgresql"),
-    ("file", "tsv", "database", "snowflake"),
-    ("file", "json", "database", "mongodb"),
-    ("file", "json", "database", "postgresql"),
-    ("file", "json", "database", "snowflake"),
-    ("file", "jsonl", "database", "mongodb"),
-    ("file", "jsonl", "database", "postgresql"),
-    ("file", "jsonl", "database", "snowflake"),
-    # File → File
-    ("file", "csv", "file_export", "json"),
-    ("file", "csv", "file_export", "csv"),
-    ("file", "json", "file_export", "csv"),
-    ("file", "json", "file_export", "json"),
-    ("file", "json", "file_export", "jsonl"),
-    # Database → Database
-    ("database", "postgresql", "database", "mongodb"),
-    ("database", "postgresql", "database", "postgresql"),
-    ("database", "postgresql", "database", "snowflake"),
-    ("database", "mongodb", "database", "mongodb"),
-    ("database", "mongodb", "database", "postgresql"),
-    ("database", "mongodb", "database", "snowflake"),
-    # Database → File
-    ("database", "postgresql", "file_export", "csv"),
-    ("database", "postgresql", "file_export", "json"),
-    ("database", "mongodb", "file_export", "csv"),
-    ("database", "mongodb", "file_export", "json"),
-    # Snowflake warehouse as source
-    ("database", "snowflake", "database", "mongodb"),
-    ("database", "snowflake", "database", "postgresql"),
-    ("database", "snowflake", "database", "snowflake"),
-    ("database", "snowflake", "file_export", "csv"),
-    ("database", "snowflake", "file_export", "json"),
-    # File → Snowflake warehouse (alias via wildcard)
-}
+LIVE_MATRIX: set[tuple[str, str, str, str]] = set()
+
+# File → Database
+for _sf in LIVE_SOURCE_FORMATS:
+    for _db in LIVE_DEST_DATABASES:
+        LIVE_MATRIX.add(("file", _sf, "database", _db))
+
+# File → File (core conversions)
+for _pair in [
+    ("csv", "json"), ("csv", "csv"), ("json", "csv"), ("json", "json"), ("json", "jsonl"),
+]:
+    LIVE_MATRIX.add(("file", _pair[0], "file_export", _pair[1]))
+
+# Database → Database & Database → File
+for _src in LIVE_SOURCE_DATABASES:
+    for _db in LIVE_DEST_DATABASES:
+        LIVE_MATRIX.add(("database", _src, "database", _db))
+    for _ef in ["csv", "json"]:
+        LIVE_MATRIX.add(("database", _src, "file_export", _ef))
 
 
 def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest_format: str) -> tuple[bool, str]:
     key = (source_kind, source_format.lower(), dest_kind, dest_format.lower())
     if key in LIVE_MATRIX:
         return True, "supported"
-    # Allow file formats to wildcard match
     for sk, sf, dk, df in LIVE_MATRIX:
         if sk == source_kind and dk == dest_kind and df == dest_format.lower():
             if source_kind == "file" and source_format.lower() in LIVE_SOURCE_FORMATS:
@@ -82,7 +61,8 @@ def get_capabilities() -> dict:
         "source_formats": LIVE_SOURCE_FORMATS,
         "destination_databases": LIVE_DEST_DATABASES,
         "destination_file_formats": LIVE_DEST_FILE_FORMATS,
+        "source_databases": LIVE_SOURCE_DATABASES,
         "operations": ["upload", "migration", "convert", "dump", "transfer"],
         "auto_ddl": True,
-        "description": "Universal Data Freedom — any file, any database, any warehouse",
+        "description": "Live registry for implemented file, database, warehouse, and export routes; catalog-only connectors require driver implementation before production transfer.",
     }

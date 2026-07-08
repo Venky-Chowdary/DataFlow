@@ -19,6 +19,22 @@ def test_apply_date():
     assert val == "2024-01-15"
 
 
+def test_apply_json_and_boolean():
+    val, err = apply_transform('{"b": 2, "a": 1}', "json")
+    assert err is None
+    assert val == '{"b":2,"a":1}'
+
+    bool_val, bool_err = apply_transform("yes", "boolean")
+    assert bool_err is None
+    assert bool_val is True
+
+
+def test_apply_integer_rejects_fractional_value():
+    val, err = apply_transform("10.5", "integer")
+    assert val is None
+    assert "Invalid integer" in err
+
+
 def test_dry_run_catches_bad_decimal():
     ok, errors = dry_run_sample(
         headers=["AMT"],

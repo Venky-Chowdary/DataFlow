@@ -1,0 +1,234 @@
+/**
+ * Enterprise UI Polish — UI Design Brain skill patterns
+ * Modern SaaS · accessibility · feedback · scannable dashboards
+ */
+
+/* ─── Skill-aligned design tokens (extends tokens.css) ─── */
+
+:root {
+  --ui-space-xs: 0.25rem;
+  --ui-space-sm: 0.5rem;
+  --ui-space-md: 1rem;
+  --ui-space-lg: 1.5rem;
+  --ui-space-xl: 2rem;
+  --ui-radius-sm: 0.375rem;
+  --ui-radius-md: 0.5rem;
+  --ui-radius-lg: 0.75rem;
+  --ui-shadow-focus: 0 0 0 3px rgba(59, 130, 246, 0.35);
+  --ui-success: #10b981;
+  --ui-warning: #f59e0b;
+  --ui-error: #ef4444;
+  --ui-info: #3b82f6;
+}
+
+/* ─── Focus & keyboard (anti-pattern: missing focus rings) ─── */
+
+.dt-btn:focus-visible,
+.dt-input:focus-visible,
+.dt-select:focus-visible,
+.dt-tab:focus-visible,
+.dt-catalog-tile:focus-visible,
+.dt-connector-row:focus-within {
+  outline: none;
+  box-shadow: var(--ui-shadow-focus);
+}
+
+/* ─── Empty state — skill: always handle zero-data ─── */
+
+.dt-empty {
+  text-align: center;
+  padding: var(--ui-space-xl) var(--ui-space-lg);
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.dt-empty-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto var(--ui-space-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ui-radius-lg);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(34, 211, 238, 0.08));
+  color: var(--df-brand, var(--ui-info));
+}
+
+.dt-empty-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 0 0 var(--ui-space-sm);
+  color: var(--df-text-primary);
+}
+
+.dt-empty-text {
+  font-size: 0.875rem;
+  color: var(--df-text-muted);
+  line-height: 1.55;
+  margin: 0 0 var(--ui-space-lg);
+}
+
+/* ─── Toast — skill: feedback with clear tone ─── */
+
+.dt-toast {
+  border-left: 3px solid var(--ui-info);
+  backdrop-filter: blur(12px);
+}
+
+.dt-toast--success { border-left-color: var(--ui-success); }
+.dt-toast--warning { border-left-color: var(--ui-warning); }
+.dt-toast--error { border-left-color: var(--ui-error); }
+
+/* ─── Loading — skill: never leave user without feedback ─── */
+
+.dt-loading-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ui-space-sm);
+  padding: var(--ui-space-xl);
+  min-height: 160px;
+}
+
+.dt-loading-block-title {
+  font-weight: 600;
+  font-size: 0.9375rem;
+  margin: 0;
+  color: var(--df-text-secondary);
+}
+
+.dt-loading-block-hint {
+  font-size: 0.8125rem;
+  color: var(--df-text-muted);
+  margin: 0;
+}
+
+.dt-btn[aria-busy="true"] {
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* ─── Catalog skeleton grid ─── */
+
+.dt-catalog-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--ui-space-md);
+}
+
+.dt-catalog-skeleton .dt-skeleton {
+  height: 100px;
+  border-radius: var(--ui-radius-lg);
+}
+
+/* ─── KPI cards — Data Dashboard direction ─── */
+
+.dt-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--ui-space-md);
+}
+
+.dt-kpi-card {
+  padding: var(--ui-space-md) var(--ui-space-lg);
+  border-radius: var(--ui-radius-lg);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.dt-kpi-card:hover {
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.dt-kpi-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--df-text-muted);
+  margin-bottom: 4px;
+}
+
+.dt-kpi-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary);
+  line-height: 1.1;
+}
+
+.dt-kpi-change {
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.dt-kpi-change.positive { color: var(--ui-success); }
+.dt-kpi-change.negative { color: var(--ui-error); }
+.dt-kpi-change.neutral { color: var(--df-text-muted); }
+
+/* ─── Form validation feedback ─── */
+
+.dt-field-error {
+  font-size: 0.8125rem;
+  color: var(--ui-error);
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dt-input.dt-input-error,
+.dt-select.dt-input-error {
+  border-color: var(--ui-error);
+}
+
+/* ─── Accessible table ─── */
+
+.dt-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.dt-table th {
+  text-align: left;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--df-text-muted);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.dt-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--df-border);
+  font-size: 0.875rem;
+}
+
+.dt-table tbody tr:hover {
+  background: rgba(59, 130, 246, 0.04);
+}
+
+/* ─── Status badge pulse for active jobs ─── */
+
+.dt-badge-live {
+  animation: ui-badge-pulse 2s ease-in-out infinite;
+}
+
+@keyframes ui-badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dt-badge-live,
+  .dt-connection-hub-path,
+  .dt-toast {
+    animation: none !important;
+  }
+}

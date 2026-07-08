@@ -1,0 +1,262 @@
+/**
+ * Public marketing landing — matches ui-v2 light enterprise theme
+ */
+
+.landing-page {
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(37, 99, 235, 0.06), transparent),
+    #f8fafc;
+  color: #0f172a;
+  font-family: var(--df-font-sans);
+}
+
+.landing-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--df-space-3);
+  min-height: 64px;
+  padding: var(--df-space-2) var(--df-space-8);
+  border-bottom: 1px solid var(--df-border);
+  background: var(--df-surface);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  box-shadow: var(--df-shadow-xs);
+}
+
+.landing-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-3);
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+.landing-nav-links {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-8);
+}
+
+.landing-nav-links a {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--df-text-secondary);
+  text-decoration: none;
+  transition: color var(--dt-transition);
+}
+
+.landing-nav-links a:hover { color: var(--df-text-primary); }
+
+.landing-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.landing-hero {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: var(--df-space-16) var(--df-space-8) var(--df-space-12);
+  text-align: center;
+}
+
+.landing-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-2);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--df-brand);
+  margin-bottom: var(--df-space-4);
+  padding: 6px 12px;
+  background: var(--df-brand-muted);
+  border-radius: var(--df-radius-full);
+}
+
+.landing-hero h1 {
+  font-size: clamp(2.25rem, 5vw, 3.25rem);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.1;
+  margin-bottom: var(--df-space-5);
+  color: var(--df-text-primary);
+}
+
+.landing-hero-lead {
+  font-size: 18px;
+  line-height: 1.65;
+  color: var(--df-text-secondary);
+  max-width: 600px;
+  margin: 0 auto var(--df-space-8);
+}
+
+.landing-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--df-space-3);
+  justify-content: center;
+  margin-bottom: var(--df-space-12);
+}
+
+.landing-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--df-space-4);
+  max-width: 840px;
+  margin: 0 auto;
+}
+
+.landing-metric {
+  padding: var(--df-space-6);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--df-shadow-sm);
+  transition: transform 0.2s ease;
+}
+
+.landing-metric:hover {
+  transform: translateY(-2px);
+}
+
+.landing-metric-value {
+  display: block;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--df-brand);
+}
+
+.landing-metric-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--df-text-tertiary);
+  margin-top: var(--df-space-1);
+}
+
+.landing-section {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--df-space-12) var(--df-space-8);
+}
+
+.landing-section-title {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin-bottom: var(--df-space-2);
+  text-align: center;
+}
+
+.landing-section-sub {
+  text-align: center;
+  color: var(--df-text-secondary);
+  margin-bottom: var(--df-space-8);
+  font-size: 15px;
+}
+
+.landing-features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--df-space-4);
+}
+
+.landing-feature {
+  padding: var(--df-space-6);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-xl);
+  background: var(--df-surface);
+  box-shadow: var(--df-shadow-xs);
+  transition: box-shadow var(--df-duration-base, 220ms) ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.landing-feature:hover {
+  box-shadow: var(--df-shadow-md);
+  border-color: var(--df-brand);
+  transform: translateY(-2px);
+}
+
+.landing-feature h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: var(--df-space-2);
+  letter-spacing: 0;
+  color: var(--df-text-primary);
+}
+
+.landing-feature p {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--df-text-secondary);
+}
+
+.landing-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--df-space-4);
+  margin-top: var(--df-space-4);
+}
+
+.landing-compare-col {
+  padding: var(--df-space-6);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-lg);
+  background: var(--df-surface);
+}
+
+.landing-compare-col h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: var(--df-space-4);
+}
+
+.landing-compare-col ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.landing-compare-col li {
+  font-size: 14px;
+  padding: var(--df-space-3) 0;
+  border-bottom: 1px solid var(--df-border);
+  color: var(--df-text-secondary);
+}
+
+.landing-compare-col li:last-child { border-bottom: none; }
+
+.landing-compare-col.highlight {
+  border-color: var(--df-brand);
+  box-shadow: 0 0 0 1px var(--df-brand-ring);
+}
+
+.landing-cta {
+  text-align: center;
+  padding: var(--df-space-16) var(--df-space-8);
+  border-top: 1px solid var(--df-border);
+  background: var(--df-surface);
+}
+
+.landing-footer {
+  padding: var(--df-space-6) var(--df-space-8);
+  border-top: 1px solid var(--df-border);
+  font-size: 13px;
+  color: var(--df-text-tertiary);
+  text-align: center;
+  background: var(--df-bg-subtle);
+}
+
+@media (max-width: 768px) {
+  .landing-metrics { grid-template-columns: repeat(2, 1fr); }
+  .landing-features { grid-template-columns: 1fr; }
+  .landing-compare { grid-template-columns: 1fr; }
+}

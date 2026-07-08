@@ -61,16 +61,10 @@ def test_postgresql(
 
 
 def _stub_fallback(host: str, database: str, username: str, connection_string: str) -> ConnectResult:
-    if connection_string.strip() or (host and database and username):
-        return ConnectResult(
-            ok=True,
-            tables=["sample_table", "orders", "customers"],
-            message="PostgreSQL validated (install psycopg2-binary for live probe)",
-            driver="stub",
-        )
+    del host, database, username, connection_string
     return ConnectResult(
         ok=False,
         tables=[],
-        error="Provide connection string or host + database + username",
-        driver="stub",
+        error="PostgreSQL driver not installed — pip install psycopg2-binary",
+        driver="none",
     )

@@ -1,0 +1,433 @@
+/**
+ * Enterprise responsive system — mobile · tablet · desktop · ultrawide (iMac 24")
+ * Load last; overrides fixed max-widths that waste space on large displays.
+ */
+
+:root {
+  --df-shell-sidebar: var(--df-sidebar-width, 260px);
+  --df-shell-rail: 0px;
+  --df-content-pad: clamp(16px, 2vw, 40px);
+  --df-content-max-sm: 100%;
+  --df-content-max-md: min(1200px, 100%);
+  --df-content-max-lg: min(1440px, 100%);
+  --df-content-max-xl: min(1680px, 100%);
+  --df-content-max-wide-lg: min(1600px, 100%);
+  --df-content-max-wide-xl: min(1920px, 100%);
+}
+
+.dt-app-with-rail {
+  --df-shell-rail: var(--dt-copilot-rail-width, 360px);
+}
+
+/* ─── Shell: never horizontal scroll ─── */
+
+html {
+  overflow-x: hidden;
+}
+
+body {
+  overflow-x: hidden;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.dt-app {
+  display: flex;
+  width: 100%;
+  max-width: 100vw;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: hidden;
+}
+
+.dt-main {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dt-main-body {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dt-page {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.dt-page-stack {
+  width: 100%;
+  min-width: 0;
+}
+
+/* ─── Fluid content width (uses available pane, not fixed 1120px) ─── */
+
+.dt-page-inner {
+  width: 100%;
+  max-width: 100%;
+  padding: var(--df-content-pad);
+  padding-bottom: clamp(32px, 4vh, 56px);
+  box-sizing: border-box;
+}
+
+.dt-page-inner--default {
+  max-width: calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 2px);
+}
+
+.dt-page-inner--wide {
+  max-width: calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 2px);
+}
+
+.dt-page-inner--full {
+  max-width: calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 2px);
+  padding-inline: clamp(12px, 1.5vw, 28px);
+}
+
+/* Cap readable line length on ultrawide while still using most of iMac 24" */
+@media (min-width: 1280px) {
+  .dt-page-inner--default {
+    max-width: min(var(--df-content-max-lg), calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 48px));
+  }
+
+  .dt-page-inner--wide {
+    max-width: min(var(--df-content-max-wide-lg), calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 48px));
+  }
+}
+
+@media (min-width: 1680px) {
+  .dt-page-inner--default {
+    max-width: min(var(--df-content-max-xl), calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 64px));
+  }
+
+  .dt-page-inner--wide {
+    max-width: min(var(--df-content-max-wide-xl), calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 64px));
+  }
+
+  .dt-command-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  }
+
+  .dt-jobs-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  }
+}
+
+@media (min-width: 1920px) {
+  .dt-page-inner--default,
+  .dt-page-inner--wide,
+  .dt-page-inner--full {
+    max-width: calc(100vw - var(--df-shell-sidebar) - var(--df-shell-rail) - 80px);
+  }
+
+  .dt-stats-premium,
+  .dt-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--df-space-5);
+  }
+}
+
+/* ─── Header ─── */
+
+.dt-header {
+  flex-shrink: 0;
+  min-width: 0;
+  padding-inline: var(--df-content-pad);
+}
+
+.dt-header-slim {
+  min-height: var(--df-header-height);
+}
+
+.dt-header-actions {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  gap: var(--df-space-2);
+}
+
+/* ─── Sidebar: overlay through tablet (≤1024) ─── */
+
+@media (max-width: 1024px) {
+  :root {
+    --df-shell-sidebar: 0px;
+    --df-shell-rail: 0px;
+  }
+
+  .dt-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 200;
+    width: min(280px, 85vw);
+    transform: translateX(-100%);
+    transition: transform 220ms ease;
+    box-shadow: var(--df-shadow-lg);
+  }
+
+  .dt-sidebar.dt-sidebar-open {
+    transform: translateX(0);
+  }
+
+  .dt-mobile-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+    background: rgba(15, 23, 42, 0.4);
+    backdrop-filter: blur(2px);
+  }
+
+  .dt-mobile-menu-btn {
+    display: inline-flex !important;
+  }
+
+  .dt-app-with-rail .dt-copilot-rail {
+    display: none !important;
+  }
+
+  .dt-page-inner--default,
+  .dt-page-inner--wide,
+  .dt-page-inner--full {
+    max-width: 100vw;
+    padding-inline: clamp(12px, 3vw, 24px);
+  }
+
+  .dt-command-grid,
+  .dt-jobs-layout,
+  .dt-mcp-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .dt-stats-premium,
+  .dt-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dt-schedules-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dt-pilot-layout {
+    flex-direction: column !important;
+    height: 100%;
+  }
+
+  .dt-pilot-sidebar {
+    width: 100% !important;
+    max-height: min(240px, 35vh);
+    flex-shrink: 0;
+  }
+
+  .dt-pilot-main {
+    flex: 1;
+    min-height: 0;
+  }
+}
+
+/* ─── Phone (≤640) ─── */
+
+@media (max-width: 640px) {
+  .dt-page-title {
+    font-size: 22px;
+  }
+
+  .dt-page-subtitle {
+    font-size: 14px;
+  }
+
+  .dt-page-header-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dt-page-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--df-space-2);
+  }
+
+  .dt-page-actions .dt-btn-primary {
+    grid-column: 1 / -1;
+  }
+
+  .dt-stats-premium,
+  .dt-stats,
+  .dt-schedules-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .dt-card-body,
+  .dt-card-header,
+  .dt-card-footer {
+    padding-inline: var(--df-space-4);
+  }
+
+  .dt-wizard-nav-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dt-wizard-nav-footer .dt-flex {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .dt-wizard-nav-footer .dt-btn {
+    width: 100%;
+  }
+
+  .dt-header-actions .dt-header-btn-label {
+    display: none;
+  }
+
+  .landing-hero {
+    padding-top: var(--df-space-10);
+  }
+
+  .landing-hero-actions {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .landing-hero-actions .dt-btn {
+    width: 100%;
+  }
+
+}
+
+/* ─── Small phone (≤380) ─── */
+
+@media (max-width: 380px) {
+  .dt-page-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .dt-nav-item span:not(.dt-nav-badge) {
+    font-size: 12px;
+  }
+}
+
+/* ─── Tablet landscape 1025–1280: hide copilot rail by default ─── */
+
+@media (min-width: 1025px) and (max-width: 1280px) {
+  .dt-app-with-rail .dt-copilot-rail {
+    display: none;
+  }
+
+  .dt-app-with-rail {
+    --df-shell-rail: 0px;
+  }
+}
+
+/* ─── Tables: always scroll inside card, never blow layout ─── */
+
+.dt-table-scroll {
+  max-width: 100%;
+  margin: 0;
+}
+
+.dt-card {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.dt-connectors-grid,
+.dt-marketplace-grid,
+.dt-mcp-tools {
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+}
+
+/* ─── Mapping / wizard ─── */
+
+.dt-wizard-steps-premium {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 0;
+  padding-bottom: var(--df-space-2);
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  max-width: 100%;
+}
+
+.dt-wizard-step {
+  flex-shrink: 0;
+}
+
+/* ─── Job theater phases ─── */
+
+.dt-job-phases,
+.dt-job-theater-phases {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: var(--df-space-2);
+  padding-bottom: var(--df-space-2);
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ─── Landing full-bleed ─── */
+
+.landing-page {
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+.landing-section,
+.landing-hero {
+  padding-inline: clamp(16px, 4vw, 48px);
+}
+
+@media (min-width: 1440px) {
+  .landing-features {
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--df-space-5);
+  }
+
+  .landing-metrics {
+    max-width: 960px;
+  }
+}
+
+/* ─── Touch targets ─── */
+
+@media (pointer: coarse) {
+  .dt-nav-item,
+  .dt-btn,
+  .dt-tab {
+    min-height: 44px;
+  }
+
+  .dt-input,
+  .dt-select {
+    min-height: 44px;
+    font-size: 16px; /* prevents iOS zoom */
+  }
+}
+
+/* ─── Safe areas (notched phones) ─── */
+
+@supports (padding: env(safe-area-inset-left)) {
+  .dt-header {
+    padding-left: max(var(--df-content-pad), env(safe-area-inset-left));
+    padding-right: max(var(--df-content-pad), env(safe-area-inset-right));
+  }
+
+  .dt-page-inner {
+    padding-left: max(var(--df-content-pad), env(safe-area-inset-left));
+    padding-right: max(var(--df-content-pad), env(safe-area-inset-right));
+  }
+
+  .dt-toast-host {
+    bottom: max(var(--df-space-4), env(safe-area-inset-bottom));
+  }
+}

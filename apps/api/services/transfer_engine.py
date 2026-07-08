@@ -70,6 +70,7 @@ def execute_file_to_postgres(
         target_rows=result.rows_written,
         source_checksum=result.checksum,
         target_checksum=result.checksum,
+        rejected_rows=int(getattr(result, "rejected_rows", 0) or 0),
     )
 
     job_store.complete(

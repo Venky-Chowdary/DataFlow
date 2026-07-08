@@ -76,19 +76,10 @@ def _stub_fallback(
     connection_string: str,
     warehouse: str,
 ) -> ConnectResult:
-    if connection_string.strip() or (host and database and username):
-        msg = "Snowflake validated (install snowflake-connector-python for live probe)"
-        if warehouse:
-            msg += f" · warehouse {warehouse}"
-        return ConnectResult(
-            ok=True,
-            tables=["ORDERS", "CUSTOMERS", "PAYMENTS"],
-            message=msg,
-            driver="stub",
-        )
+    del host, database, username, connection_string, warehouse
     return ConnectResult(
         ok=False,
         tables=[],
-        error="Provide account + database + username or connection string",
-        driver="stub",
+        error="Snowflake driver not installed — pip install snowflake-connector-python",
+        driver="none",
     )

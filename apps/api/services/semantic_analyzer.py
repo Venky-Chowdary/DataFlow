@@ -9,12 +9,19 @@ from typing import Any
 SEMANTIC_ROLES: dict[str, list[str]] = {
     "payment_amount": [
         "amount", "payment_amount", "pay_amt", "amt", "txn_amt", "transaction_amount",
-        "value", "total", "order_total", "payment", "pmt", "pymt", "fld_07",
+        "payment", "pmt", "pymt", "fld_07",
     ],
     "payment_date": [
-        "date", "payment_date", "pay_date", "txn_dt", "trans_dt", "transaction_date",
-        "value_date", "dtpmt", "order_date", "created_at",
+        "payment_date", "pay_date", "txn_dt", "trans_dt", "transaction_date",
+        "value_date", "dtpmt",
     ],
+    "order_total": ["order_total", "cart_total", "invoice_total", "subtotal", "grand_total", "total"],
+    "order_date": ["order_date", "purchase_date", "placed_at", "ordered_at"],
+    "created_timestamp": ["created_at", "created_on", "created_ts", "inserted_at"],
+    "updated_timestamp": ["updated_at", "updated_on", "modified_at", "modified_on", "last_updated"],
+    "date_value": ["date", "event_date", "effective_date"],
+    "numeric_value": ["value", "metric_value", "score", "measure"],
+    "identifier": ["id", "record_id", "row_id", "object_id", "external_id"],
     "customer_id": [
         "customer_id", "cust_id", "customerid", "buyer_id", "client_id", "cust_no",
     ],
@@ -37,6 +44,8 @@ SEMANTIC_ROLES: dict[str, list[str]] = {
     "destination_city": ["destination_city", "dest_city", "to_city", "delivery_city", "destination"],
     "shipment_weight_kg": ["shipment_weight_kg", "weight_kg", "weight", "pkg_weight", "wt_kg"],
     "tracking_number": ["tracking_number", "track_no", "tracking_id", "awb", "consignment_no"],
+    "long_text": ["body", "content", "story", "narrative", "comment", "remarks", "blob_text", "clob"],
+    "binary_data": ["binary", "blob", "bytea", "raw_bytes", "image_data", "file_data", "attachment"],
 }
 
 
@@ -86,14 +95,22 @@ def _role_from_samples(samples: list[str], inferred_type: str) -> tuple[str | No
             id_like += 1
 
     n = len(non_empty)
+    avg_len = sum(len(str(s)) for s in non_empty) / n
+    if avg_len > 256 or inferred_type.upper() in {"TEXT", "CLOB", "LONGTEXT"}:
+        return "long_text", 0.85
+    if inferred_type.upper() in {"BINARY", "BLOB", "BYTEA"}:
+        return "binary_data", 0.88
+    base64_hits = sum(1 for s in non_empty[:10] if re.match(r"^[A-Za-z0-9+/=]{32,}$", str(s).strip()))
+    if base64_hits / min(n, 10) >= 0.6:
+        return "binary_data", 0.82
     if date_like / n >= 0.5:
-        return "payment_date", 0.82
+        return "date_value", 0.72
     if currency_like / n >= 0.5:
         return "currency_code", 0.8
     if numeric / n >= 0.7 and inferred_type.upper() in {"INTEGER", "DECIMAL", "NUMBER", "FLOAT", "NUMERIC"}:
-        return "payment_amount", 0.78
+        return "numeric_value", 0.66
     if id_like / n >= 0.5:
-        return "customer_id", 0.72
+        return "identifier", 0.66
     return None, 0.0
 
 
@@ -129,6 +146,13 @@ def _role_description(role: str) -> str:
     descriptions = {
         "payment_amount": "Monetary amount / payment value",
         "payment_date": "Transaction or payment date",
+        "order_total": "Order, invoice, or cart total",
+        "order_date": "Order or purchase date",
+        "created_timestamp": "Creation timestamp",
+        "updated_timestamp": "Update or modification timestamp",
+        "date_value": "Generic date value",
+        "numeric_value": "Generic numeric value",
+        "identifier": "Generic record identifier",
         "customer_id": "Customer or client identifier",
         "account_number": "Bank or beneficiary account",
         "currency_code": "ISO currency code",
@@ -146,6 +170,8 @@ def _role_description(role: str) -> str:
         "destination_city": "Shipment destination city",
         "shipment_weight_kg": "Package weight in kilograms",
         "tracking_number": "Carrier tracking or AWB number",
+        "long_text": "Long-form text, narrative, or CLOB content",
+        "binary_data": "Binary blob, bytea, or base64-encoded payload",
     }
     return descriptions.get(role, role.replace("_", " ").title())
 
