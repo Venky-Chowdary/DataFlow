@@ -15,3 +15,5 @@ venv/
 apps/api/uploads/
 packages/ml/data/
 .DS_Store
+
+apps/api/data/vector_store/
