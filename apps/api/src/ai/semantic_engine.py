@@ -12,6 +12,7 @@ This is the core AI engine that differentiates us from competitors:
 
 import re
 import math
+from difflib import SequenceMatcher
 from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
@@ -937,7 +938,49 @@ class SmartMapper:
             if norm1 in group and norm2 in group:
                 return True
         return False
-    
+
+    def _char_similarity(self, name1: str, name2: str) -> float:
+        """Character-level similarity on normalized names.
+
+        Catches typos and abbreviations that token/synonym matching miss,
+        e.g. ``custmer_id`` vs ``customer_id`` or ``phonenum`` vs ``phone_number``.
+        """
+        norm1 = self._normalize(name1)
+        norm2 = self._normalize(name2)
+        if not norm1 or not norm2:
+            return 0.0
+        return SequenceMatcher(None, norm1, norm2).ratio()
+
+    def _score_pair(
+        self,
+        src_col: str,
+        tgt_col: str,
+        src_analysis: "ColumnAnalysis",
+        tgt_analysis: "ColumnAnalysis",
+    ) -> tuple[float, str]:
+        """Score a single source→target pair. Higher is better."""
+        if self._normalize(src_col) == self._normalize(tgt_col):
+            return 0.98, "Exact match"
+        if src_col.lower() == tgt_col.lower():
+            return 0.95, "Case-insensitive match"
+        if self._synonym_match(src_col, tgt_col):
+            return 0.88, "Synonym match"
+        if src_analysis.semantic_type and src_analysis.semantic_type == tgt_analysis.semantic_type:
+            return 0.85, f"Same semantic type: {src_analysis.semantic_type}"
+
+        token_sim = self._token_similarity(src_col, tgt_col)
+        char_sim = self._char_similarity(src_col, tgt_col)
+
+        token_score = 0.6 + token_sim * 0.3 if token_sim > 0.3 else 0.0
+        # Character similarity rescues abbreviations/typos with no shared tokens.
+        char_score = 0.55 + (char_sim - 0.7) * 1.0 if char_sim >= 0.7 else 0.0
+
+        if token_score >= char_score and token_score > 0.0:
+            return token_score, f"Token similarity: {token_sim:.0%}"
+        if char_score > 0.0:
+            return round(char_score, 3), f"Name similarity: {char_sim:.0%}"
+        return 0.0, "No suitable match found"
+
     def map_columns(
         self,
         source_columns: list[str],
@@ -946,18 +989,25 @@ class SmartMapper:
     ) -> list[MappingSuggestion]:
         """
         Generate intelligent column mappings.
-        
+
+        Uses order-independent global assignment: every source→target pair is
+        scored, then the highest-confidence pairs are assigned first so a weaker
+        earlier column can never claim a target that is a stronger match for a
+        later column (the classic greedy pitfall). Each target is used at most
+        once. Character-level similarity rescues typos and abbreviations that
+        exact/synonym/token matching miss.
+
         Args:
             source_columns: List of source column names
             target_columns: List of target column names
             source_samples: Optional sample data for source columns
-            
+
         Returns:
             List of mapping suggestions with confidence scores
         """
         if source_samples is None:
             source_samples = {}
-        
+
         source_analyses = {
             col: self.analyzer.analyze_column(col, source_samples.get(col, []))
             for col in source_columns
@@ -966,63 +1016,53 @@ class SmartMapper:
             col: self.analyzer.analyze_column(col, [])
             for col in target_columns
         }
-        
+
+        # Score every candidate pair once.
+        candidates: list[tuple[float, str, str]] = []
+        for src_col in source_columns:
+            for tgt_col in target_columns:
+                score, _reason = self._score_pair(
+                    src_col, tgt_col, source_analyses[src_col], target_analyses[tgt_col]
+                )
+                if score > 0.5:
+                    candidates.append((score, src_col, tgt_col))
+
+        # Assign globally: strongest pairs first, one target per source and
+        # one source per target. Deterministic tie-break keeps results stable.
+        candidates.sort(key=lambda c: (-c[0], c[1], c[2]))
+        assigned: dict[str, tuple[str, float]] = {}
+        used_targets: set[str] = set()
+        for score, src_col, tgt_col in candidates:
+            if src_col in assigned or tgt_col in used_targets:
+                continue
+            assigned[src_col] = (tgt_col, score)
+            used_targets.add(tgt_col)
+
         mappings = []
-        used_targets = set()
-        
         for src_col in source_columns:
             src_analysis = source_analyses[src_col]
-            best_target = None
-            best_score = 0.0
-            best_reason = ""
-            needs_transform = False
-            transform = None
-            
-            for tgt_col in target_columns:
-                if tgt_col in used_targets:
-                    continue
-                
-                tgt_analysis = target_analyses[tgt_col]
-                score = 0.0
-                reason = ""
-                
-                if self._normalize(src_col) == self._normalize(tgt_col):
-                    score = 0.98
-                    reason = "Exact match"
-                elif src_col.lower() == tgt_col.lower():
-                    score = 0.95
-                    reason = "Case-insensitive match"
-                elif self._synonym_match(src_col, tgt_col):
-                    score = 0.88
-                    reason = "Synonym match"
-                elif src_analysis.semantic_type and src_analysis.semantic_type == tgt_analysis.semantic_type:
-                    score = 0.85
-                    reason = f"Same semantic type: {src_analysis.semantic_type}"
-                else:
-                    token_sim = self._token_similarity(src_col, tgt_col)
-                    if token_sim > 0.3:
-                        score = 0.6 + token_sim * 0.3
-                        reason = f"Token similarity: {token_sim:.0%}"
-                
-                if score > best_score:
-                    best_score = score
-                    best_target = tgt_col
-                    best_reason = reason
-                    
-                    if src_analysis.inferred_type != tgt_analysis.inferred_type:
-                        needs_transform = True
-                        transform = f"Convert {src_analysis.inferred_type} to {tgt_analysis.inferred_type}"
-            
-            if best_target and best_score > 0.5:
+            match = assigned.get(src_col)
+            if match:
+                tgt_col, score = match
+                _score, reason = self._score_pair(
+                    src_col, tgt_col, src_analysis, target_analyses[tgt_col]
+                )
+                needs_transform = False
+                transform = None
+                if src_analysis.inferred_type != target_analyses[tgt_col].inferred_type:
+                    needs_transform = True
+                    transform = (
+                        f"Convert {src_analysis.inferred_type} to "
+                        f"{target_analyses[tgt_col].inferred_type}"
+                    )
                 mappings.append(MappingSuggestion(
                     source_column=src_col,
-                    target_column=best_target,
-                    confidence=round(best_score, 3),
-                    reason=best_reason,
+                    target_column=tgt_col,
+                    confidence=round(score, 3),
+                    reason=reason,
                     transformation_needed=needs_transform,
                     suggested_transformation=transform,
                 ))
-                used_targets.add(best_target)
             else:
                 mappings.append(MappingSuggestion(
                     source_column=src_col,
@@ -1030,7 +1070,7 @@ class SmartMapper:
                     confidence=0.0,
                     reason="No suitable match found",
                 ))
-        
+
         return sorted(mappings, key=lambda m: m.confidence, reverse=True)
 
 
