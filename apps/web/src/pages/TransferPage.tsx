@@ -19,6 +19,7 @@ import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
+import { ProofDashboard } from "../components/transfer/ProofDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import { useActiveData } from "../lib/DataContext";
 import {
@@ -2284,6 +2285,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
       {step === STEP_VALIDATE && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split">
+          <div className="df2-proof-dashboard-wrap">
+            <ProofDashboard preflight={preflight} running={preflighting} />
+          </div>
           <PreflightTimeline
             result={preflight ?? {
               passed: false,

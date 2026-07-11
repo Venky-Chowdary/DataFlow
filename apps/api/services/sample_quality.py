@@ -41,7 +41,13 @@ def _iqr_outliers(values: list[float]) -> tuple[float, float, int]:
 
 
 def _column_values(rows: list[dict[str, Any]], column: str) -> list[str]:
-    return [str(row.get(column, "")).strip() for row in rows if row.get(column) is not None]
+    values: list[str] = []
+    for row in rows:
+        raw = row.get(column, "")
+        if raw is None:
+            raw = ""
+        values.append(str(raw).strip())
+    return values
 
 
 def analyze_column_quality(
@@ -130,6 +136,15 @@ def analyze_dataset_quality(
     all_issues: list[str] = []
     blocking = False
 
+    key_signature_counts: dict[tuple[Any, ...], int] = {}
+    for row in sample:
+        signature = tuple(row.get(col, "") for col in columns)
+        key_signature_counts[signature] = key_signature_counts.get(signature, 0) + 1
+    duplicate_row_count = sum(count - 1 for count in key_signature_counts.values() if count > 1)
+    if duplicate_row_count > 0:
+        all_issues.append(f"Duplicate rows detected: {duplicate_row_count} replicated sample record(s)")
+        blocking = True
+
     for col in columns:
         values = _column_values(sample, col)
         report = analyze_column_quality(col, values, inferred_type=schema.get(col, "VARCHAR"))
@@ -149,9 +164,10 @@ def analyze_dataset_quality(
         "issue_count": len(all_issues),
         "warning_columns": warn_count,
         "blocking_columns": block_count,
+        "duplicate_row_count": duplicate_row_count,
         "blocks_transfer": blocking,
         "quality_score": round(
-            max(0.0, 100.0 - warn_count * 5 - block_count * 20),
+            max(0.0, 100.0 - warn_count * 5 - block_count * 20 - duplicate_row_count * 15),
             1,
         ),
     }

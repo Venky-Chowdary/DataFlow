@@ -14,8 +14,15 @@ _API_ROOT = Path(__file__).resolve().parents[2]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from ..services.file_parser import FileParser
-from ..services.mongodb_service import get_mongodb_service
+try:
+    from services.file_parser import FileParser
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services.file_parser import FileParser
+
+try:
+    from services.mongodb_service import get_mongodb_service
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services.mongodb_service import get_mongodb_service
 from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
 

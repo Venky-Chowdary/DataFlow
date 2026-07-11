@@ -1,0 +1,621 @@
+/* Final UI stability layer — loaded last to normalize page-level alignment and responsiveness. */
+
+:root {
+  --df-card-radius-enterprise: 14px;
+  --df-card-border-enterprise: #dbe5f3;
+  --df-card-head-bg-enterprise: linear-gradient(180deg, #fbfdff 0%, #ffffff 100%);
+  --df-card-shadow-enterprise: 0 10px 26px rgba(15, 23, 42, 0.05);
+}
+
+/* Shared enterprise card rhythm across all high-traffic pages. */
+.df2-page-overview-enterprise .df2-card,
+.df2-page-overview-enterprise .df2-glass-panel,
+.df2-page-jobs .df2-card,
+.df2-page-connectors .df2-card,
+.df2-page-connectors .df2-connection-workbench,
+.df2-page-connectors .df2-connection-panel,
+.df2-page-connectors .df2-topology-card,
+.df2-page-pipelines .df2-card,
+.df2-page-pipelines .df2-pipeline-card,
+.df2-page-settings .df2-card,
+.df2-page-settings .df2-settings-section,
+.df2-page-settings .df2-model-card,
+.df2-page-settings .df2-settings-sso-card,
+.df2-page-settings .df2-api-key-card {
+  border: 1px solid var(--df-card-border-enterprise) !important;
+  border-radius: var(--df-card-radius-enterprise) !important;
+  background: #ffffff;
+  box-shadow: var(--df-card-shadow-enterprise);
+  overflow: hidden;
+}
+
+.df2-page-overview-enterprise .df2-card-head,
+.df2-page-overview-enterprise .df2-glass-panel-head,
+.df2-page-jobs .df2-card-head,
+.df2-page-connectors .df2-card-head,
+.df2-page-connectors .df2-connection-workbench-head,
+.df2-page-pipelines .df2-card-head,
+.df2-page-pipelines .df2-pipeline-card-head,
+.df2-page-settings .df2-card-head,
+.df2-page-settings .df2-settings-section-head,
+.df2-page-settings .df2-model-card-head {
+  padding: 14px 16px;
+  border-bottom: 1px solid #edf2f7;
+  background: var(--df-card-head-bg-enterprise);
+}
+
+.df2-page-overview-enterprise .df2-card-body,
+.df2-page-overview-enterprise .df2-glass-panel-body,
+.df2-page-jobs .df2-card-body,
+.df2-page-connectors .df2-card-body,
+.df2-page-connectors .df2-connection-panel,
+.df2-page-pipelines .df2-card-body,
+.df2-page-pipelines .df2-pipeline-card > :not(.df2-pipeline-card-head),
+.df2-page-settings .df2-card-body,
+.df2-page-settings .df2-settings-section-body,
+.df2-page-settings .df2-model-card > :not(.df2-model-card-head) {
+  padding: 14px 16px;
+}
+
+.df2-page-overview-enterprise .df2-card-footer,
+.df2-page-jobs .df2-card-footer,
+.df2-page-connectors .df2-card-footer,
+.df2-page-pipelines .df2-card-footer,
+.df2-page-settings .df2-card-footer,
+.df2-page-settings .df2-settings-section-footer,
+.df2-page-pipelines .df2-card-footer--form {
+  padding: 12px 16px;
+  border-top: 1px solid #edf2f7;
+  background: #fafcff;
+}
+
+/* Keep card interiors breathable with long data labels. */
+.df2-page-connectors .df2-connector-card-title,
+.df2-page-connectors .df2-connector-card-meta,
+.df2-page-connectors .df2-connector-card-endpoint,
+.df2-page-pipelines .df2-pipeline-card-title,
+.df2-page-pipelines .df2-pipeline-card-sub,
+.df2-page-settings .df2-settings-hint,
+.df2-page-settings .df2-api-key-card-meta,
+.df2-page-settings .df2-api-key-card-copy code,
+.df2-page-overview-enterprise .df2-cell-meta,
+.df2-page-jobs .df2-jobs-v3-item-meta,
+.df2-page-jobs .df2-jobs-v3-item-error {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Standardized gaps between page sections to stop visual jumps. */
+.df2-page-workspace.df2-overview-page,
+.df2-page-workspace.df2-connectors-page,
+.df2-page-workspace.df2-pipeline-page,
+.df2-page-workspace.df2-settings-workspace,
+.df2-page-workspace.df2-jobs-workspace,
+.df2-page-workspace.df2-jobs-workspace-v3 {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Structured tables in cards should not clip on dense datasets. */
+.df2-page-overview-enterprise .df2-table-wrap,
+.df2-page-connectors .df2-table-wrap,
+.df2-page-pipelines .df2-table-wrap,
+.df2-page-settings .df2-settings-table-wrap,
+.df2-page-settings .df2-settings-logs-table-wrap,
+.df2-page-jobs .df2-jobs-v3-mappings-scroll {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #ffffff;
+  overflow: auto;
+}
+
+/* Empty states inside cards follow one consistent hierarchy. */
+.df2-page-overview-enterprise .df2-empty,
+.df2-page-connectors .df2-empty,
+.df2-page-pipelines .df2-empty,
+.df2-page-settings .df2-empty,
+.df2-page-jobs .df2-empty {
+  min-height: 168px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f9fbfd;
+}
+
+.df2-system-visibility-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #dbe5f3;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+  padding: 10px 12px;
+  margin: 10px 16px 0;
+}
+
+.df2-system-visibility-banner.ok {
+  border-color: #bfdbfe;
+}
+
+.df2-system-visibility-banner.live {
+  border-color: #99f6e4;
+}
+
+.df2-system-visibility-banner.warn {
+  border-color: #fed7aa;
+  background: linear-gradient(180deg, #fffaf5 0%, #ffffff 100%);
+}
+
+.df2-system-visibility-copy {
+  min-width: 0;
+}
+
+.df2-system-visibility-copy strong {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #0f172a;
+}
+
+.df2-system-visibility-copy p {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.df2-system-visibility-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.df2-system-visibility-close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: 1px solid #dbe5f3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #64748b;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.df2-system-visibility-close:hover {
+  color: #0f172a;
+  border-color: #cbd5e1;
+}
+
+.df2-system-visibility-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.df2-system-metric-pill {
+  padding: 4px 8px;
+  border: 1px solid #dbe5f3;
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.df2-system-metric-pill.ok {
+  color: #0f766e;
+  border-color: #99f6e4;
+}
+
+.df2-system-metric-pill.live {
+  color: #0369a1;
+  border-color: #bae6fd;
+}
+
+.df2-system-metric-pill.warn {
+  color: #b45309;
+  border-color: #fdba74;
+}
+
+.df2-system-visibility-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Normalize card sizing in visual grids for cleaner enterprise rhythm. */
+.df2-page-connectors .df2-connector-grid,
+.df2-page-pipelines .df2-pipeline-grid,
+.df2-page-settings .df2-model-grid,
+.df2-page-settings .df2-settings-sso-grid {
+  align-items: stretch;
+}
+
+.df2-page-connectors .df2-connector-card-grid,
+.df2-page-pipelines .df2-pipeline-grid {
+  grid-auto-rows: 1fr;
+}
+
+.df2-page-connectors .df2-connector-card-grid {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.df2-page-connectors .df2-connector-card,
+.df2-page-pipelines .df2-pipeline-card,
+.df2-page-settings .df2-model-card,
+.df2-page-settings .df2-settings-sso-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.df2-page-connectors .df2-connector-card {
+  gap: 12px;
+  min-height: 238px;
+}
+
+.df2-page-connectors .df2-connector-card-head {
+  align-items: center;
+}
+
+.df2-page-connectors .df2-connector-card-icon {
+  width: 44px;
+  height: 44px;
+}
+
+.df2-page-connectors .df2-connector-card-badges {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.df2-page-connectors .df2-connector-card-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.3;
+  min-height: 2.6em;
+}
+
+.df2-page-connectors .df2-connector-card-meta,
+.df2-page-connectors .df2-connector-card-endpoint {
+  min-height: 1.35em;
+  color: #64748b;
+}
+
+.df2-page-connectors .df2-connection-workbench-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.df2-page-connectors .df2-connection-workbench-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.df2-page-connectors .df2-connection-workbench-head p {
+  margin: 4px 0 0;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.df2-page-connectors .df2-connection-workbench-head,
+.df2-page-connectors .df2-connection-workbench,
+.df2-page-connectors .df2-connection-panel,
+.df2-page-pipelines .df2-pipeline-workspace,
+.df2-page-pipelines .df2-pipeline-scroll {
+  overflow: visible !important;
+}
+
+.df2-page-pipelines .df2-pipeline-card-route {
+  align-items: stretch;
+}
+
+.df2-page-pipelines .df2-pipeline-grid {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.df2-page-pipelines .df2-pipeline-card {
+  min-height: 250px;
+}
+
+.df2-page-pipelines .df2-pipeline-card-head {
+  align-items: center;
+}
+
+.df2-page-pipelines .df2-pipeline-card-title {
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.df2-page-pipelines .df2-pipeline-card-sub {
+  margin-top: 2px;
+}
+
+.df2-page-pipelines .df2-pipeline-card-node {
+  justify-content: center;
+}
+
+.df2-page-pipelines .df2-pipeline-card-node span {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  line-height: 1.3;
+  min-height: 2.6em;
+}
+
+.df2-page-pipelines .df2-pipeline-card-node small {
+  min-height: 1.35em;
+  overflow-wrap: anywhere;
+}
+
+.df2-page-pipelines .df2-pipeline-card-meta {
+  row-gap: 6px;
+}
+
+.df2-page-pipelines .df2-pipeline-card-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.df2-page-settings .df2-settings-layout,
+.df2-page-settings .df2-settings-panel,
+.df2-page-settings .df2-settings-section,
+.df2-page-settings .df2-settings-section-body {
+  min-width: 0;
+}
+
+.df2-page-settings .df2-settings-nav-item {
+  align-items: center !important;
+}
+
+.df2-page-settings .df2-settings-nav-icon {
+  flex-shrink: 0;
+}
+
+.df2-page-settings .df2-settings-nav-text {
+  min-width: 0;
+}
+
+.df2-page-settings .df2-settings-nav-label,
+.df2-page-settings .df2-settings-nav-desc {
+  overflow-wrap: anywhere;
+}
+
+.df2-page-settings .df2-settings-panel {
+  gap: 14px;
+}
+
+.df2-page-settings .df2-settings-section-head h2 {
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.df2-page-settings .df2-settings-section-head p {
+  line-height: 1.45;
+}
+
+.df2-page-settings .df2-settings-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.df2-page-settings .df2-settings-logs-table thead th {
+  background: #f8fafc;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+.df2-page-settings .df2-settings-logs-table td {
+  vertical-align: top;
+  line-height: 1.4;
+}
+
+.df2-page-connectors .df2-connector-card-actions,
+.df2-page-pipelines .df2-pipeline-card-actions,
+.df2-page-settings .df2-model-card > .df2-btn,
+.df2-page-settings .df2-settings-sso-card > .df2-btn {
+  margin-top: auto;
+}
+
+/* Remove unnecessary nested scrolling in Jobs on desktop. */
+.df2-jobs-v3-layout {
+  min-height: 0;
+}
+
+.df2-jobs-v3-list {
+  max-height: none;
+  overflow-y: visible;
+}
+
+.df2-jobs-v3-detail {
+  min-height: 0;
+}
+
+/* Transfer Studio — prevent two-column validate layout from clipping on laptop widths. */
+@media (max-width: 1280px) {
+  .df2-transfer-studio-body.is-validate-step {
+    grid-template-columns: 1fr !important;
+  }
+
+  .df2-validate-split {
+    padding: 12px !important;
+  }
+}
+
+/* Route and theater content — avoid truncation collisions on narrow cards. */
+.df2-route-bar-label,
+.df2-jobs-v3-item-source,
+.df2-jobs-v3-item-dest {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .df2-jobs-v3-item-route {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .df2-jobs-v3-item-source,
+  .df2-jobs-v3-item-dest {
+    max-width: none;
+  }
+
+  .df2-theater-v3-route {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .df2-theater-v3-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+}
+
+/* Overview and jobs — enforce safe overflow/stacking for dense data cards. */
+.df2-overview-analytics,
+.df2-overview-workspace,
+.df2-jobs-v3-layout {
+  min-width: 0;
+}
+
+.df2-page-overview-enterprise .df2-overview-analytics > .df2-chart-panel {
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-page-overview-enterprise .df2-overview-analytics > .df2-chart-panel .df2-glass-panel-body,
+.df2-page-overview-enterprise .df2-overview-analytics > .df2-chart-panel .df2-chart-panel-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+}
+
+.df2-page-overview-enterprise .df2-overview-rail .df2-glass-panel {
+  min-height: 230px;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-page-overview-enterprise .df2-overview-rail .df2-glass-panel .df2-glass-panel-body {
+  flex: 1;
+}
+
+.df2-page-overview-enterprise .df2-overview-table th,
+.df2-page-overview-enterprise .df2-overview-table td {
+  padding: 10px 12px;
+  vertical-align: middle;
+}
+
+.df2-page-overview-enterprise .df2-overview-table tbody tr {
+  transition: background-color 0.12s ease;
+}
+
+.df2-page-overview-enterprise .df2-overview-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.df2-page-jobs .df2-jobs-v3-layout {
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.df2-page-jobs .df2-jobs-v3-item {
+  min-height: 108px;
+}
+
+.df2-page-jobs .df2-jobs-v3-detail {
+  position: sticky;
+  top: 6px;
+}
+
+.df2-overview-migrations .df2-table-wrap,
+.df2-jobs-v3-mappings-scroll {
+  overflow-x: auto;
+}
+
+@media (max-width: 1100px) {
+  .df2-overview-workspace {
+    grid-template-columns: 1fr !important;
+  }
+
+  .df2-overview-rail {
+    order: 2;
+  }
+
+  .df2-overview-primary {
+    order: 1;
+  }
+
+  .df2-page-settings .df2-settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-page-jobs .df2-jobs-v3-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-page-jobs .df2-jobs-v3-detail {
+    position: static;
+  }
+}
+
+@media (max-width: 768px) {
+  .df2-system-visibility-banner {
+    grid-template-columns: 1fr;
+    margin: 8px 10px 0;
+    padding: 10px;
+  }
+
+  .df2-system-visibility-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .df2-system-visibility-metrics {
+    justify-content: flex-start;
+  }
+
+  .df2-jobs-v3-list {
+    max-height: 38vh;
+    overflow-y: auto;
+  }
+
+  .df2-jobs-v3-summary-metrics,
+  .df2-jobs-v3-summary-dl {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-proof-dashboard-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .df2-page-connectors .df2-connector-card-grid,
+  .df2-page-pipelines .df2-pipeline-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-page-pipelines .df2-pipeline-card-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .df2-proof-dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -34,3 +34,15 @@ def test_clean_dataset_high_score():
         schema={"id": "INTEGER", "amount": "DECIMAL"},
     )
     assert result["quality_score"] >= 80
+
+
+def test_detects_duplicate_rows_as_quality_issue():
+    rows = [
+        {"id": "1", "email": "alice@example.com"},
+        {"id": "1", "email": "alice@example.com"},
+        {"id": "2", "email": "bob@example.com"},
+    ]
+    result = analyze_dataset_quality(["id", "email"], rows)
+
+    assert result["duplicate_row_count"] >= 1
+    assert any("duplicate" in issue.lower() for issue in result["issues"])

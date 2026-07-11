@@ -165,6 +165,138 @@
   padding: 12px 14px !important;
 }
 
+.df2-proof-dashboard-wrap {
+  margin-bottom: 12px;
+}
+
+.df2-proof-dashboard {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid #dbeafe;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+}
+
+.df2-proof-dashboard.ok {
+  border-color: #a7f3d0;
+}
+
+.df2-proof-dashboard.warn {
+  border-color: #fde68a;
+}
+
+.df2-proof-dashboard.live {
+  border-color: #bfdbfe;
+}
+
+.df2-proof-dashboard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-proof-dashboard-kicker {
+  margin: 0 0 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.df2-proof-dashboard-title {
+  margin: 0;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.df2-proof-dashboard-trust {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.df2-status-chip,
+.df2-proof-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+}
+
+.df2-status-chip {
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #0f766e;
+}
+
+.df2-proof-dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.df2-proof-dashboard-stat {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.df2-proof-dashboard-stat span {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.df2-proof-dashboard-stat strong {
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.df2-proof-dashboard-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.df2-proof-chip {
+  min-width: 120px;
+  justify-content: space-between;
+  padding: 6px 10px;
+}
+
+.df2-proof-chip small {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.df2-proof-chip strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.df2-proof-dashboard-summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #334155;
+}
+
 .df2-preflight.is-compact {
   padding: 0;
   height: 100%;

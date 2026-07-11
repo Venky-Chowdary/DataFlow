@@ -102,16 +102,19 @@ def _parse_decimal(value: str) -> str | None:
     text = text.replace(",", "").strip()
     if not text:
         return None
-    # Scientific notation: 1.5e3, 2E-4
-    if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
-        try:
-            return str(Decimal(text))
-        except InvalidOperation:
-            return None
     try:
-        return str(Decimal(text))
+        dec = Decimal(text)
     except InvalidOperation:
         return None
+
+    # Scientific notation: 1.5e3, 2E-4. Convert to fixed-point form so
+    # downstream numeric checks stay stable and comparable across formats.
+    if "e" in text.lower():
+        fixed = format(dec, "f")
+        if "." in fixed:
+            fixed = fixed.rstrip("0").rstrip(".")
+        return fixed or "0"
+    return str(dec)
 
 
 def _parse_integer(value: str) -> int | None:

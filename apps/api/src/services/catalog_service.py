@@ -5,11 +5,18 @@ import json
 import os
 from functools import lru_cache
 
-from ..transfer.connector_capabilities import (
-    SUGGESTED_DESTINATIONS,
-    SUGGESTED_SOURCES,
-    enrich_catalog_entry,
-)
+try:
+    from ..transfer.connector_capabilities import (
+        SUGGESTED_DESTINATIONS,
+        SUGGESTED_SOURCES,
+        enrich_catalog_entry,
+    )
+except ImportError:  # pragma: no cover - compatibility for direct module loading in tests
+    from transfer.connector_capabilities import (
+        SUGGESTED_DESTINATIONS,
+        SUGGESTED_SOURCES,
+        enrich_catalog_entry,
+    )
 
 _CATALOG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "connector_catalog.json"
@@ -23,7 +30,12 @@ def load_catalog() -> dict:
 
 
 def _enriched_connectors() -> list[dict]:
-    return [enrich_catalog_entry(c) for c in load_catalog().get("connectors", [])]
+    enriched = []
+    for c in load_catalog().get("connectors", []):
+        row = enrich_catalog_entry(c)
+        row["status"] = row.get("effective_status", row.get("status"))
+        enriched.append(row)
+    return enriched
 
 
 def search_catalog(
@@ -147,7 +159,7 @@ def catalog_training_docs(limit: int | None = None) -> list[dict]:
             else (
                 "Connection test only — save credentials but transfer routes are not implemented yet."
                 if c.get("connect_only")
-                else "Catalog roadmap entry — no driver registered yet."
+                else "Catalog roadmap entry — catalog discovery only, no driver registered yet. route live transfers only when the connector is marked transfer-ready."
             )
         )
         docs.append({

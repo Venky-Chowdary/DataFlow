@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 @dataclass
 class EndpointConfig:
-    kind: str  # file, database, file_export
+    kind: str = "database"  # file, database, file_export
     format: str = ""  # csv, json, postgresql, mongodb, snowflake
     connector_id: Optional[str] = None
     host: str = ""

@@ -31,7 +31,7 @@ export function PageSection({
           {actions && <div className="df2-section-head-actions">{actions}</div>}
         </header>
       )}
-      <div className={title ? "df2-card-body" : undefined}>{children}</div>
+      <div className="df2-card-body df2-section-body">{children}</div>
     </>
   );
 

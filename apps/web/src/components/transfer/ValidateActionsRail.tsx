@@ -32,6 +32,11 @@ export function ValidateActionsRail({
   const passed = preflight?.passed;
   const blocked = preflight && !preflight.passed && !preflighting;
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
+  const proofDecision = preflight?.proof_bundle?.transfer_decision?.decision || "approve";
+  const proofReason = preflight?.proof_bundle?.transfer_decision?.reason || "No blocking issues detected";
+  const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
+  const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
+  const evidenceSummary = preflight?.proof_bundle?.evidence_summary || "Deterministic proof signals ready for operator review.";
 
   return (
     <aside className="df2-validate-rail" aria-label="Validation actions">
@@ -57,6 +62,28 @@ export function ValidateActionsRail({
           <p>
             <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks passed
           </p>
+          {preflight.proof_bundle && (
+            <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#0f172a" }}>
+                Proof decision: {proofDecision.toUpperCase()}
+              </span>
+              <span style={{ fontSize: 12, color: "#475569" }}>
+                {proofReason}
+              </span>
+              <span style={{ fontSize: 12, color: "#475569" }}>
+                Confidence {confidenceBand} · Quality grade {qualityGrade}
+              </span>
+              <span style={{ fontSize: 12, color: "#475569" }}>
+                {evidenceSummary}
+              </span>
+              <span style={{ fontSize: 12, color: "#475569" }}>
+                Semantic {preflight.proof_bundle.semantic_mapping_score.toFixed(2)} · Quality {preflight.proof_bundle.quality_score.toFixed(2)}
+              </span>
+              <span style={{ fontSize: 12, color: "#475569" }}>
+                Compliance risk {preflight.proof_bundle.compliance.risk_score.toFixed(2)}
+              </span>
+            </div>
+          )}
           {preflight.blockers.length > 0 && (
             <ul className="df2-validate-rail-blockers">
               {preflight.blockers.slice(0, 4).map((b) => (

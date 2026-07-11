@@ -8,7 +8,8 @@ export type MappingTransform =
   | "date_iso"
   | "hash_pii"
   | "cast_number"
-  | "cast_boolean";
+  | "cast_boolean"
+  | "parse_json";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
@@ -19,6 +20,7 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   { id: "hash_pii", label: "Hash PII", detail: "One-way hash for sensitive fields" },
   { id: "cast_number", label: "Cast number", detail: "Coerce to numeric" },
   { id: "cast_boolean", label: "Cast boolean", detail: "Coerce to true/false" },
+  { id: "parse_json", label: "Parse JSON", detail: "Normalize JSON payloads into structured objects" },
 ];
 
 export interface EditableMapping {
@@ -89,6 +91,7 @@ export function buildPreflightMappings(
       hash_pii: "hash_pii",
       cast_number: "decimal",
       cast_boolean: "boolean",
+      parse_json: "json",
     };
     return map[t];
   };
@@ -132,6 +135,7 @@ export function engineTransformToUi(engine?: string): MappingTransform {
     integer: "cast_number",
     boolean: "cast_boolean",
     hash_pii: "hash_pii",
+    json: "parse_json",
   };
   return map[engine] ?? "none";
 }

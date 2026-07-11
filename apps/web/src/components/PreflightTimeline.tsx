@@ -53,9 +53,23 @@ export function PreflightTimeline({
         }]
       : [];
 
+  const proof = result.proof_bundle;
+  const decision = proof?.transfer_decision?.decision ?? (result.passed ? "approve" : "review");
+  const decisionLabel = decision.toUpperCase();
+  const decisionTone = decision === "block" ? "#dc2626" : decision === "review" ? "#f59e0b" : "#16a34a";
   const stateClass = result.passed ? "passed" : result.blockers.length ? "blocked" : "";
   const mappingBlocked = result.blockers.some((b) => b.id.includes("mapping"));
   const schemaPolicyBlocked = result.blockers.some((b) => b.id.includes("schema_policy"));
+  const decisionTitle = decision === "block"
+    ? "Blocked by proof guardrails"
+    : decision === "review"
+      ? "Human review required"
+      : "Proof approved";
+  const decisionReason = proof?.transfer_decision?.reason || "No blocking issues detected";
+  const proofNotes = proof?.semantic_notes?.slice(0, 3) || [];
+  const confidenceBand = proof?.confidence_band?.toUpperCase() || "MEDIUM";
+  const qualityGrade = proof?.quality_grade?.toUpperCase() || "GOOD";
+  const evidenceSummary = proof?.evidence_summary || "Deterministic proof signals ready for operator review.";
 
   return (
     <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}`}>
@@ -86,6 +100,62 @@ export function PreflightTimeline({
             {result.passed_count}/{result.total_gates} checks passed
             {result.passed ? " · you can execute the transfer" : " · fix items below, then re-run"}
           </p>
+          {proof && (
+            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    padding: "4px 8px",
+                    borderRadius: 999,
+                    background: decisionTone,
+                    color: "white",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: 0.5,
+                  }}
+                >
+                  PROOF {decisionLabel}
+                </span>
+                <span style={{ fontSize: 12, color: "#475569", fontWeight: 700 }}>
+                  Semantic {proof.semantic_mapping_score.toFixed(2)}
+                </span>
+                <span style={{ fontSize: 12, color: "#475569", fontWeight: 700 }}>
+                  Quality {proof.quality_score.toFixed(2)}
+                </span>
+                <span style={{ fontSize: 12, color: "#475569", fontWeight: 700 }}>
+                  Compliance {proof.compliance.risk_score.toFixed(2)}
+                </span>
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gap: 6,
+                  padding: 10,
+                  borderRadius: 10,
+                  background: "#f8fafc",
+                  border: "1px solid #e2e8f0",
+                  fontSize: 12,
+                  color: "#0f172a",
+                }}
+              >
+                <strong>{decisionTitle}</strong>
+                <span>{decisionReason}</span>
+                <span>
+                  Confidence band: {confidenceBand} · Quality grade: {qualityGrade}
+                </span>
+                <span>{evidenceSummary}</span>
+                {proofNotes.length > 0 && (
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {proofNotes.map((note) => (
+                      <li key={note}>{note}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
           {result.blockers.length > 0 && (
             <ul className="df2-preflight-blocker-list">
               {result.blockers.map((b) => (

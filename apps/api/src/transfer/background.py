@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 
-from ..services.mongodb_service import get_mongodb_service
+try:
+    from services.mongodb_service import get_mongodb_service
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services.mongodb_service import get_mongodb_service
 from .engine import get_transfer_engine
 from .models import TransferRequest
 

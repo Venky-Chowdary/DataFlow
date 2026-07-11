@@ -226,21 +226,37 @@ def run_transfer_policy_gates(
 
 
 def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]]) -> dict[str, Any]:
-    if not policy_gates:
-        return result
+    proof_bundle = result.get("proof_bundle") or {}
+    transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
+    proof_blockers = (proof_bundle.get("transfer_decision") or {}).get("blockers") or []
 
-    gates = [*result.get("gates", []), *policy_gates]
     blockers = [
         {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
         for b in result.get("blockers", [])
-    ] + [
-        {"id": g["id"], "message": g["message"], "details": g.get("details", {})}
-        for g in policy_gates
-        if g.get("status") == GateStatus.BLOCK.value
     ]
+    blockers.extend(
+        {"id": f"proof_{idx}", "message": str(message), "details": {}}
+        for idx, message in enumerate(proof_blockers)
+    )
+
+    if policy_gates:
+        gates = [*result.get("gates", []), *policy_gates]
+        blockers.extend(
+            {"id": g["id"], "message": g["message"], "details": g.get("details", {})}
+            for g in policy_gates
+            if g.get("status") == GateStatus.BLOCK.value
+        )
+    else:
+        gates = list(result.get("gates", []))
+
     passed_count = sum(1 for g in gates if g.get("status") == GateStatus.PASS.value)
     total_gates = len(gates)
     has_blocks = any(g.get("status") == GateStatus.BLOCK.value for g in gates)
+    proof_blocks = transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
+
+    if proof_blocks:
+        has_blocks = True
+
     return {
         **result,
         "passed": not has_blocks,
@@ -384,6 +400,24 @@ def run_file_preflight(
     engine = PreflightEngine(fail_fast=False)
     result = engine.run(ctx)
 
+    from services.preflight_proof_bundle import build_preflight_proof_bundle
+
+    proof_bundle = build_preflight_proof_bundle(
+        columns=columns,
+        sample_rows=sample_rows or [],
+        mappings=mappings,
+        source_schemas=[
+            {
+                "name": c,
+                "inferred_type": column_types.get(c, "VARCHAR").upper(),
+                "samples": [str(row.get(c, "")) for row in (sample_rows or [])[:20] if row.get(c) is not None],
+            }
+            for c in columns
+        ],
+        source_records=sample_rows or [],
+        target_records=[],
+    )
+
     out = {
         "passed": result.passed,
         "passed_count": result.passed_count,
@@ -406,6 +440,7 @@ def run_file_preflight(
         "schema_drift": drift,
         "ddl_issues": ddl_issues,
         "sample_quality": sample_quality,
+        "proof_bundle": proof_bundle,
     }
     return out
 

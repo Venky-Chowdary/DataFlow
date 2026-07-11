@@ -212,6 +212,7 @@ def write_mapped_rows(
                 chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
                 col_list = ", ".join(f'"{c}"' for c in target_cols)
                 placeholders = ", ".join(["%s"] * len(target_cols))
+                source_cols = ", ".join(f's."{c}"' for c in target_cols)
                 conflict = [c for c in (conflict_columns or []) if c in target_cols]
                 for chunk_idx in range(chunks):
                     start = chunk_idx * CHUNK_SIZE
@@ -230,14 +231,14 @@ def write_mapped_rows(
                                     f'USING (SELECT {sel}) s '
                                     f'ON t."{pk}" = s."{pk}" '
                                     f'WHEN MATCHED THEN UPDATE SET {set_clause} '
-                                    f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({", ".join(f"s.\"{c}\"" for c in target_cols)})'
+                                    f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})'
                                 )
                             else:
                                 merge_sql = (
                                     f'MERGE INTO "{table_name}" t '
                                     f'USING (SELECT {sel}) s '
                                     f'ON t."{pk}" = s."{pk}" '
-                                    f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({", ".join(f"s.\"{c}\"" for c in target_cols)})'
+                                    f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})'
                                 )
                             cur.execute(merge_sql, row)
                             written += 1

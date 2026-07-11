@@ -337,6 +337,69 @@ def normalize_cell(value: Any) -> str:
     return str(value).strip()
 
 
+def build_reconciliation_proof(
+    source_records: list[dict[str, Any]],
+    target_records: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    *,
+    primary_key: str | None = None,
+    sample_size: int = 50,
+) -> dict[str, Any]:
+    """Build a deterministic proof object for row-level transfer verification.
+
+    The proof is based on exact primary-key matching and normalized mapped-value
+    comparison across a bounded sample. It returns a score suitable for a
+    preflight/reconciliation gate, not a legal audit guarantee.
+    """
+    if not source_records and not target_records:
+        return {
+            "passed": True,
+            "matched_key_count": 0,
+            "missing_key_count": 0,
+            "row_fidelity_score": 1.0,
+            "sample_compare": {"passed": True, "compared": 0, "mismatches": []},
+        }
+
+    key_col = primary_key or "id"
+    source_keys = {normalize_cell(row.get(key_col)) for row in source_records if row.get(key_col) is not None}
+    target_keys = {normalize_cell(row.get(key_col)) for row in target_records if row.get(key_col) is not None}
+    matched_keys = source_keys & target_keys
+    missing_keys = source_keys - target_keys
+    extra_keys = target_keys - source_keys
+
+    sample_compare = sample_compare_rows(
+        source_records,
+        target_records,
+        mappings,
+        sample_size=sample_size,
+    )
+
+    matched_key_count = len(matched_keys)
+    missing_key_count = len(missing_keys)
+    extra_key_count = len(extra_keys)
+    total_keys = max(len(source_keys), 1)
+    row_fidelity_score = round(
+        max(0.0, 1.0 - (missing_key_count / total_keys) - (extra_key_count / total_keys) * 0.25),
+        4,
+    )
+
+    passed = (
+        missing_key_count == 0
+        and extra_key_count == 0
+        and sample_compare.get("passed", True)
+        and row_fidelity_score >= 0.95
+    )
+
+    return {
+        "passed": passed,
+        "matched_key_count": matched_key_count,
+        "missing_key_count": missing_key_count,
+        "extra_key_count": extra_key_count,
+        "row_fidelity_score": row_fidelity_score,
+        "sample_compare": sample_compare,
+    }
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],

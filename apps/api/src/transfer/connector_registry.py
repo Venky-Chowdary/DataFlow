@@ -7,6 +7,7 @@ duplicating driver→module maps.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from .connector_capabilities import _DRIVER_CAPS, default_port
@@ -133,17 +134,22 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         else "dataflow" if db_type == "bigquery"
         else "public"
     )
-    result = probe_fn(
-        host=cfg.get("host", ""),
-        port=int(cfg.get("port") or default_port(db_type)),
-        database=cfg.get("database", ""),
-        username=cfg.get("username", ""),
-        password=cfg.get("password", ""),
-        schema=cfg.get("schema", schema_default),
-        connection_string=cfg.get("connection_string", ""),
-        ssl=cfg.get("ssl", False),
-        warehouse=cfg.get("warehouse", ""),
-    )
+    probe_kwargs = {
+        "host": cfg.get("host", ""),
+        "port": int(cfg.get("port") or default_port(db_type)),
+        "database": cfg.get("database", ""),
+        "username": cfg.get("username", ""),
+        "password": cfg.get("password", ""),
+        "schema": cfg.get("schema", schema_default),
+        "connection_string": cfg.get("connection_string", ""),
+        "ssl": cfg.get("ssl", False),
+        "warehouse": cfg.get("warehouse", ""),
+    }
+    sig = inspect.signature(probe_fn)
+    accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if not accepts_var_kw:
+        probe_kwargs = {k: v for k, v in probe_kwargs.items() if k in sig.parameters}
+    result = probe_fn(**probe_kwargs)
     if hasattr(result, "ok"):
         return bool(result.ok), str(result.message if result.ok else (result.error or result.message))
     if isinstance(result, tuple) and len(result) >= 2:

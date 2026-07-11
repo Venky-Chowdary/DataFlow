@@ -372,7 +372,12 @@ def expect_column_distribution_drift(
         column=column,
         passed=max_delta <= threshold,
         failing_count=0 if max_delta <= threshold else 1,
-        details={"max_freq_delta": round(max_delta, 4), "threshold": threshold, "method": "categorical"},
+        details={
+            "drift_score": round(max_delta, 4),
+            "max_freq_delta": round(max_delta, 4),
+            "threshold": threshold,
+            "method": "categorical",
+        },
         severity=severity,
     )
 

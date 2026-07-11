@@ -81,3 +81,45 @@ def test_sample_compare_rows_detects_mismatch():
     )
     assert not result["passed"]
     assert result["mismatches"]
+
+
+def test_build_reconciliation_proof_scores_exact_key_fidelity():
+    from services.reconciliation import build_reconciliation_proof
+
+    source_records = [
+        {"id": "1", "amount": "10.00"},
+        {"id": "2", "amount": "20.00"},
+    ]
+    target_records = [
+        {"id": "1", "amount": "10.00"},
+        {"id": "2", "amount": "20.00"},
+    ]
+    proof = build_reconciliation_proof(
+        source_records,
+        target_records,
+        [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}],
+        primary_key="id",
+    )
+    assert proof["passed"] is True
+    assert proof["matched_key_count"] == 2
+    assert proof["row_fidelity_score"] >= 0.95
+
+
+def test_build_reconciliation_proof_detects_missing_keys():
+    from services.reconciliation import build_reconciliation_proof
+
+    source_records = [
+        {"id": "1", "amount": "10.00"},
+        {"id": "2", "amount": "20.00"},
+    ]
+    target_records = [
+        {"id": "1", "amount": "10.00"},
+    ]
+    proof = build_reconciliation_proof(
+        source_records,
+        target_records,
+        [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}],
+        primary_key="id",
+    )
+    assert proof["passed"] is False
+    assert proof["missing_key_count"] == 1

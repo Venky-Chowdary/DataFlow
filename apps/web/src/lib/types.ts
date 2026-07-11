@@ -103,6 +103,37 @@ export interface PreflightGate {
   details?: Record<string, unknown>;
 }
 
+export interface PreflightProofBundle {
+  passed: boolean;
+  semantic_mapping_score: number;
+  semantic_notes: string[];
+  quality_score: number;
+  confidence_band?: "high" | "medium" | "low";
+  quality_grade?: "excellent" | "good" | "review";
+  evidence_summary?: string;
+  compliance: {
+    risk_score: number;
+    requires_review: boolean;
+    tags: string[];
+    details?: Record<string, unknown>;
+  };
+  reconciliation: {
+    passed: boolean;
+    preview?: boolean;
+    row_fidelity_score?: number;
+    matched_key_count?: number;
+    missing_key_count?: number;
+    extra_key_count?: number;
+    message?: string;
+    sample_compare?: { passed: boolean; compared: number; mismatches: Record<string, unknown>[]; skipped?: boolean };
+  };
+  transfer_decision: {
+    decision: "approve" | "review" | "block";
+    blockers: string[];
+    reason: string;
+  };
+}
+
 export interface PreflightResult {
   passed: boolean;
   passed_count: number;
@@ -110,6 +141,7 @@ export interface PreflightResult {
   readiness_score: number;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown> }[];
+  proof_bundle?: PreflightProofBundle;
 }
 
 export interface TransferResult {

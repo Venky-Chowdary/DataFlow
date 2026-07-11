@@ -114,6 +114,10 @@ def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
     for name in preferred:
         if name in lower_map:
             return lower_map[name]
+    for c in target_cols:
+        lc = c.lower()
+        if lc.endswith("_id"):
+            return c
     for mapping in mappings:
         target = (mapping.get("target") or "").strip()
         if target and target.lower() in preferred:

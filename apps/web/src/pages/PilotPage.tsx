@@ -218,6 +218,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
   return (
     <PageShell
+      title="Data Pilot"
       wide
       fit
       showHeader={false}

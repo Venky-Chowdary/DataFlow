@@ -18,7 +18,10 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from connectors.writer_common import CHUNK_SIZE  # noqa: E402
-from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
+try:
+    from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
 
 from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_table
 from .stream import _write_batch
@@ -35,13 +38,19 @@ def _decode(content: bytes) -> str:
 def supports_file_streaming(source_kind: str, filename: str, destination: EndpointConfig) -> bool:
     if source_kind != "file" or destination.kind != "database":
         return False
-    from ..services.file_parser import FileParser
+    try:
+        from services.file_parser import FileParser
+    except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+        from src.services.file_parser import FileParser
 
     return FileParser.detect_file_type(filename) in STREAMABLE_TYPES
 
 
 def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str, str], int, list[dict]]:
-    from ..services.file_parser import FileParser
+    try:
+        from services.file_parser import FileParser
+    except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+        from src.services.file_parser import FileParser
 
     file_type = FileParser.detect_file_type(filename)
     if file_type in ("csv", "tsv"):
@@ -184,7 +193,10 @@ def stream_file_to_database(
     schema: dict[str, str],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
-    from ..services.file_parser import FileParser
+    try:
+        from services.file_parser import FileParser
+    except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+        from src.services.file_parser import FileParser
 
     file_type = FileParser.detect_file_type(filename)
     columns, probe_schema, total_rows, _ = peek_file_source(content, filename)

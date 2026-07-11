@@ -21,6 +21,8 @@ import { usePageMeta } from "./lib/usePageMeta";
 import { readAppHash, writeAppHash } from "./lib/appNavigation";
 import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
 
+const SYSTEM_BANNER_PREF_KEY = "df2.systemVisibilityBanner.hidden";
+
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const PilotPage = lazy(() => import("./pages/PilotPage").then((m) => ({ default: m.PilotPage })));
 const TransferPage = lazy(() => import("./pages/TransferPage").then((m) => ({ default: m.TransferPage })));
@@ -91,6 +93,13 @@ function AppShell({
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
+  const [showSystemBanner, setShowSystemBanner] = useState(() => {
+    try {
+      return localStorage.getItem(SYSTEM_BANNER_PREF_KEY) !== "1";
+    } catch {
+      return true;
+    }
+  });
   const searchRef = useRef<HTMLInputElement>(null);
 
   usePageMeta(metaForScreen(screen));
@@ -221,6 +230,39 @@ function AppShell({
   const currentNav = NAV.find((n) => n.id === screen);
   const envLabel = apiEnvLabel(apiOnline);
   const offlineCopy = apiOfflineMessage();
+  const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
+  const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
+  const unhealthyConnectorsCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
+  const hasAttentionItems = !apiOnline || failedJobsCount > 0 || unhealthyConnectorsCount > 0;
+  const systemTone: "ok" | "live" | "warn" = hasAttentionItems ? "warn" : runningJobsCount > 0 ? "live" : "ok";
+  const shouldRenderSystemBanner = showSystemBanner && (hasAttentionItems || runningJobsCount > 0);
+  const systemMessage = !apiOnline
+    ? "Control plane API is offline. Transfers and validation checks can fail until connectivity recovers."
+    : failedJobsCount > 0
+      ? `${failedJobsCount} failed job${failedJobsCount > 1 ? "s" : ""} need triage in Job Theater.`
+      : unhealthyConnectorsCount > 0
+        ? `${unhealthyConnectorsCount} connector${unhealthyConnectorsCount > 1 ? "s" : ""} need health checks before production transfers.`
+        : runningJobsCount > 0
+          ? `${runningJobsCount} active transfer${runningJobsCount > 1 ? "s" : ""} streaming now.`
+          : "All systems healthy. Preflight, routing, and transfer services are operational.";
+
+  const closeSystemBanner = () => {
+    setShowSystemBanner(false);
+    try {
+      localStorage.setItem(SYSTEM_BANNER_PREF_KEY, "1");
+    } catch {
+      // Ignore localStorage failures (private mode / policy).
+    }
+  };
+
+  const openSystemBanner = () => {
+    setShowSystemBanner(true);
+    try {
+      localStorage.removeItem(SYSTEM_BANNER_PREF_KEY);
+    } catch {
+      // Ignore localStorage failures (private mode / policy).
+    }
+  };
 
   return (
     <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
@@ -354,6 +396,18 @@ function AppShell({
               <span className="df2-system-dot" />
               <span className="df2-topbar-pill-text">{apiOnline ? "Online" : "Offline"}</span>
             </div>
+            {!shouldRenderSystemBanner && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost"
+                onClick={openSystemBanner}
+                aria-label="Show system visibility"
+                title="Show system visibility"
+              >
+                <DtIcon name="activity" size={16} />
+                <span className="df2-topbar-btn-text">Status</span>
+              </button>
+            )}
             {screen !== "pilot" && (
               <button
                 type="button"
@@ -379,6 +433,54 @@ function AppShell({
               <strong>{offlineCopy.title}</strong>
               <p>{offlineCopy.body}</p>
             </div>
+          </div>
+        )}
+
+        {shouldRenderSystemBanner && (
+          <div className={`df2-system-visibility-banner ${systemTone}`} role="status" aria-live="polite">
+            <div className="df2-system-visibility-copy">
+              <strong>System visibility</strong>
+              <p>{systemMessage}</p>
+            </div>
+            <div className="df2-system-visibility-meta">
+              <button
+                type="button"
+                className="df2-system-visibility-close"
+                onClick={closeSystemBanner}
+                aria-label="Dismiss system visibility"
+                title="Dismiss"
+              >
+                <DtIcon name="x" size={14} />
+              </button>
+              <div className="df2-system-visibility-metrics" aria-label="System status summary">
+                <span className={`df2-system-metric-pill ${!apiOnline ? "warn" : "ok"}`}>
+                  API {apiOnline ? "online" : "offline"}
+                </span>
+                <span className={`df2-system-metric-pill ${failedJobsCount > 0 ? "warn" : "ok"}`}>
+                  Failed {failedJobsCount}
+                </span>
+                <span className={`df2-system-metric-pill ${runningJobsCount > 0 ? "live" : "ok"}`}>
+                  Running {runningJobsCount}
+                </span>
+                <span className={`df2-system-metric-pill ${unhealthyConnectorsCount > 0 ? "warn" : "ok"}`}>
+                  Connector alerts {unhealthyConnectorsCount}
+                </span>
+              </div>
+            </div>
+            {(failedJobsCount > 0 || unhealthyConnectorsCount > 0) && (
+              <div className="df2-system-visibility-actions">
+                {failedJobsCount > 0 && (
+                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("jobs")}>
+                    Open Job Theater
+                  </button>
+                )}
+                {unhealthyConnectorsCount > 0 && (
+                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("connectors")}>
+                    Review connectors
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 

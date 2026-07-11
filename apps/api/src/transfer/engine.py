@@ -4,14 +4,24 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from ..services.mongodb_service import get_mongodb_service
-from ..services.preflight_service import (
-    apply_policy_gates,
-    confidence_threshold_for_mode,
-    probe_destination,
-    run_file_preflight,
-    run_transfer_policy_gates,
-)
+try:
+    from services.mongodb_service import get_mongodb_service
+    from services.preflight_service import (
+        apply_policy_gates,
+        confidence_threshold_for_mode,
+        probe_destination,
+        run_file_preflight,
+        run_transfer_policy_gates,
+    )
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services.mongodb_service import get_mongodb_service
+    from src.services.preflight_service import (
+        apply_policy_gates,
+        confidence_threshold_for_mode,
+        probe_destination,
+        run_file_preflight,
+        run_transfer_policy_gates,
+    )
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -25,7 +35,10 @@ from .registry import validate_transfer
 from .file_stream import peek_file_source, should_stream_file, stream_file_to_database
 from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
-from ..ai.training.training_scheduler import schedule_training_on_transfer
+try:
+    from ai.training.training_scheduler import schedule_training_on_transfer
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.ai.training.training_scheduler import schedule_training_on_transfer
 
 import sys
 from pathlib import Path

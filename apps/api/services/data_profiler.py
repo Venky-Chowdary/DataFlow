@@ -171,11 +171,11 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
 
     pattern = _infer_pattern(non_empty)
     pii = bool(re.search(r"email|phone|ssn|password|secret|name|address", name, re.I))
-    if pii and best_type == "VARCHAR" and any(EMAIL_RE.match(s) for s in non_empty[:8]):
+    if pii and best_type == "VARCHAR" and any(bool(EMAIL_RE.match(s)) for s in non_empty[:8]):
         pii = True
 
     # Uniqueness estimate — high distinct ratio on id-like columns
-    is_likely_key = distinct_ratio > 0.95 and distinct >= 5 and re.search(r"id|key|uuid|code", name, re.I)
+    is_likely_key = bool(distinct_ratio > 0.95 and distinct >= 5 and re.search(r"id|key|uuid|code", name, re.I))
 
     return {
         "name": name,
