@@ -236,15 +236,24 @@ function AppShell({
   const hasAttentionItems = !apiOnline || failedJobsCount > 0 || unhealthyConnectorsCount > 0;
   const systemTone: "ok" | "live" | "warn" = hasAttentionItems ? "warn" : runningJobsCount > 0 ? "live" : "ok";
   const shouldRenderSystemBanner = showSystemBanner && (hasAttentionItems || runningJobsCount > 0);
-  const systemMessage = !apiOnline
-    ? "Control plane API is offline. Transfers and validation checks can fail until connectivity recovers."
-    : failedJobsCount > 0
-      ? `${failedJobsCount} failed job${failedJobsCount > 1 ? "s" : ""} need triage in Job Theater.`
-      : unhealthyConnectorsCount > 0
-        ? `${unhealthyConnectorsCount} connector${unhealthyConnectorsCount > 1 ? "s" : ""} need health checks before production transfers.`
-        : runningJobsCount > 0
-          ? `${runningJobsCount} active transfer${runningJobsCount > 1 ? "s" : ""} streaming now.`
-          : "All systems healthy. Preflight, routing, and transfer services are operational.";
+  const parts: string[] = [];
+  if (!apiOnline) {
+    parts.push("Control plane API is offline. Transfers and validation checks can fail until connectivity recovers.");
+  } else {
+    if (failedJobsCount > 0) {
+      parts.push(`${failedJobsCount} failed job${failedJobsCount > 1 ? "s" : ""} need triage in Job Theater.`);
+    }
+    if (unhealthyConnectorsCount > 0) {
+      parts.push(`${unhealthyConnectorsCount} connector${unhealthyConnectorsCount > 1 ? "s" : ""} need health checks before production transfers.`);
+    }
+    if (runningJobsCount > 0 && parts.length === 0) {
+      parts.push(`${runningJobsCount} active transfer${runningJobsCount > 1 ? "s" : ""} streaming now.`);
+    }
+    if (parts.length === 0) {
+      parts.push("All systems healthy. Preflight, routing, and transfer services are operational.");
+    }
+  }
+  const systemMessage = parts.join(" ");
 
   const closeSystemBanner = () => {
     setShowSystemBanner(false);
