@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.aws_common import boto3_client
@@ -23,11 +26,42 @@ class WriteResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _to_attr(value: Any) -> dict:
+def _to_dynamo_value(value: Any, source_type: str) -> Any:
+    """Convert transform-engine values to DynamoDB-serializable native types."""
+    if value is None:
+        return None
+    upper = source_type.upper()
+    if upper in {"DECIMAL", "NUMERIC"}:
+        try:
+            return Decimal(value)
+        except Exception:
+            return value
+    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
+    if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            try:
+                return base64.b64decode(value, validate=True)
+            except Exception:
+                return value.encode("utf-8")
+        return value
+    return value
+
+
+def _to_attr(value: Any, source_type: str) -> dict:
     from boto3.dynamodb.types import TypeSerializer
 
     ser = TypeSerializer()
-    return ser.serialize(value)
+    return ser.serialize(_to_dynamo_value(value, source_type))
 
 
 def write_mapped_rows(
@@ -58,7 +92,7 @@ def write_mapped_rows(
         "password": password,
         "connection_string": connection_string,
     }
-    target_cols, _ = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
@@ -80,7 +114,7 @@ def write_mapped_rows(
             slice_rows = mapped_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
             for row in slice_rows:
-                item = {col: _to_attr(val) for col, val in zip(target_cols, row)}
+                item = {target_cols[i]: _to_attr(row[i], source_types[i]) for i in range(len(target_cols))}
                 request_items.append({"PutRequest": {"Item": item}})
             _batch_write_with_retry(client, table, request_items)
             written += len(slice_rows)
