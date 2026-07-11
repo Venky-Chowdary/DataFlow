@@ -82,9 +82,15 @@ const STEPS = [
 
 const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_blob", "adls"]);
 
-const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
-const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl"] as const;
-const FALLBACK_SOURCE_DBS = ["mongodb", "postgresql", "snowflake", "mysql", "bigquery"] as const;
+const FALLBACK_DEST_TYPES = [
+  "mongodb", "postgresql", "mysql", "snowflake", "bigquery", "redshift",
+  "dynamodb", "s3", "gcs", "redis", "elasticsearch",
+] as const;
+const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl", "tsv", "parquet"] as const;
+const FALLBACK_SOURCE_DBS = [
+  "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
+  "dynamodb", "s3", "gcs", "redis", "elasticsearch",
+] as const;
 
 const ACCEPTED_UPLOAD_EXTENSIONS = new Set(["csv", "json", "jsonl", "tsv", "parquet"]);
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
