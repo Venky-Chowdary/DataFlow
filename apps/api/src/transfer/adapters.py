@@ -413,12 +413,14 @@ def write_destination_database(
     schema: dict[str, str],
     mappings: list[dict],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
+    validation_mode: str = "strict",
 ) -> tuple[int, list[str], dict]:
     db_type = endpoint.format.lower()
     cfg = resolve_connector_config(endpoint)
     ddl_log: list[str] = []
 
-
+    from connectors.writer_common import transform_error_policy_for_validation_mode
+    error_policy = transform_error_policy_for_validation_mode(validation_mode)
 
     headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
@@ -446,6 +448,7 @@ def write_destination_database(
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
+        "error_policy": error_policy,
     }
 
     if db_type == "snowflake":

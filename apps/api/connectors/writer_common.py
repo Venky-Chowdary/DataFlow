@@ -36,6 +36,21 @@ def transform_error_policy(policy: str | None = None) -> str:
     return selected if selected in VALID_ERROR_POLICIES else "quarantine"
 
 
+_VALIDATION_MODE_POLICIES = {
+    "maximum": "fail",
+    "strict": "fail",
+    "balanced": "quarantine",
+}
+
+
+def transform_error_policy_for_validation_mode(validation_mode: str | None) -> str:
+    """Strict/maximum modes fail the transfer on bad cells — no silent row drops."""
+    mode = (validation_mode or "strict").strip().lower()
+    if mode in _VALIDATION_MODE_POLICIES:
+        return _VALIDATION_MODE_POLICIES[mode]
+    return transform_error_policy()
+
+
 def build_mapped_rows(
     *,
     headers: list[str],

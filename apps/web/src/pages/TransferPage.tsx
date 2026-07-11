@@ -1059,7 +1059,22 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
   const executePreflight = async (overrideMappings?: EditableMapping[], validationOverride?: ValidationMode) => {
     const activeMappings = overrideMappings ?? columnMappings;
-    const threshold = confidenceThresholdForMode(validationOverride ?? validationMode);
+    const activeValidation = validationOverride ?? validationMode;
+    const threshold = confidenceThresholdForMode(activeValidation);
+    if (
+      sourceKind === "file"
+      && parsed?.validation
+      && !parsed.validation.ok
+      && activeValidation !== "balanced"
+    ) {
+      toast({
+        title: "Source data issues detected",
+        message: `${parsed.validation.issue_count} CSV type issue(s) found — fix source data or switch to Balanced validation after review.`,
+        tone: "error",
+      });
+      setStep(STEP_SOURCE);
+      return;
+    }
     const pendingReview = activeMappings.filter(
       (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
     ).length;
@@ -1244,6 +1259,20 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (destKindMode === "database" && !preflight?.passed) {
       toast({ title: "Preflight required", message: "Run and pass preflight gates before writing to a database.", tone: "warning" });
       setStep(STEP_VALIDATE);
+      return;
+    }
+    if (
+      sourceKind === "file"
+      && parsed?.validation
+      && !parsed.validation.ok
+      && validationMode !== "balanced"
+    ) {
+      toast({
+        title: "Source data issues block transfer",
+        message: `${parsed.validation.issue_count} CSV type issue(s) — fix source file before writing to production.`,
+        tone: "error",
+      });
+      setStep(STEP_SOURCE);
       return;
     }
 

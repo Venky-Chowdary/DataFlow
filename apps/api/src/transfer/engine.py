@@ -210,6 +210,7 @@ class UniversalTransferEngine:
                 rows_written, ddl_log, dest_summary = write_destination_database(
                     request.destination, records, columns, schema, mappings,
                     on_checkpoint=throttled_checkpoint,
+                    validation_mode=request.validation_mode,
                 )
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)

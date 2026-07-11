@@ -90,6 +90,13 @@ async def platform_status():
     }
 
 
+@router.get("/readiness")
+async def transfer_readiness():
+    """Per-driver dependency + module wiring check — run after deploy."""
+    from ..transfer.readiness import platform_readiness_report
+    return platform_readiness_report()
+
+
 @router.post("/route")
 async def analyze_route(body: AnalyzeRequest):
     """Score a source → destination route with conversion and driver hints."""
