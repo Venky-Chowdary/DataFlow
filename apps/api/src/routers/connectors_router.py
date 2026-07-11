@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Background
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional
+from pymongo.errors import PyMongoError
 from ..services.mongodb_service import get_mongodb_service
 from ..services.file_parser import FileParser
 
@@ -320,11 +321,25 @@ async def list_connectors():
 
 @router.get("/jobs")
 async def list_transfer_jobs():
-    """List recent transfer jobs"""
+    """List recent transfer jobs.
+
+    Degrades gracefully when the job store is unavailable: returns an empty
+    list flagged ``degraded`` (HTTP 200) so Job Theater still renders instead
+    of erroring. The ``/health`` endpoint continues to report the outage, so
+    the infrastructure problem is not hidden.
+    """
     try:
         mongo = get_mongodb_service()
         jobs = mongo.list_jobs()
-        return {"jobs": jobs, "count": len(jobs)}
+        return {"jobs": jobs, "count": len(jobs), "degraded": False}
+    except (PyMongoError, ConnectionError) as e:
+        return {
+            "jobs": [],
+            "count": 0,
+            "degraded": True,
+            "persistence": "unavailable",
+            "detail": str(e),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

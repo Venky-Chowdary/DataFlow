@@ -1672,3 +1672,66 @@ select.df2-select:focus {
 .df2-switch.on .df2-switch-thumb {
   transform: translateX(20px);
 }
+
+/* ─────────────────────────────────────────────────────────────
+   Mobile top bar — authoritative stacked layout (fixes overlap
+   where the primary Transfer button covered the menu button).
+   ───────────────────────────────────────────────────────────── */
+@media (max-width: 560px) {
+  .df2-app .df2-topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    height: auto;
+    min-height: 0;
+    padding: 10px 14px;
+  }
+
+  .df2-app .df2-topbar-left {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  /* Show the page title next to the hamburger so row 1 is meaningful. */
+  .df2-app .df2-topbar-left .df2-breadcrumb {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+  }
+  .df2-app .df2-topbar-left .df2-breadcrumb span {
+    display: none;
+  }
+  .df2-app .df2-topbar-left .df2-breadcrumb strong {
+    font-size: 15px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .df2-app .df2-topbar-actions {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    justify-content: stretch;
+  }
+  .df2-app .df2-topbar-actions .df2-btn,
+  .df2-app .df2-topbar-actions .df2-system-pill,
+  .df2-app .df2-topbar-actions .df2-account-pill {
+    flex: 1 1 calc(50% - 8px);
+    min-width: 0;
+    justify-content: center;
+  }
+
+  /* Full-width action buttons read better with labels than lone icons. */
+  .df2-app .df2-topbar-actions .df2-topbar-btn-text {
+    display: inline;
+  }
+}

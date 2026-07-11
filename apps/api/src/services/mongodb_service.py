@@ -47,9 +47,17 @@ class MongoDBService:
             self.client = None
     
     def get_database(self, db_name: Optional[str] = None):
-        """Get database instance"""
+        """Get database instance.
+
+        Raises ``ConnectionError`` (instead of an opaque ``NoneType`` error)
+        when the server is unreachable, so callers can degrade cleanly.
+        """
         if not self.client:
             self.connect()
+        if not self.client:
+            raise ConnectionError(
+                f"MongoDB unavailable at {self.connection_string}"
+            )
         return self.client[db_name or self.db_name]
     
     def test_connection(self) -> dict:
