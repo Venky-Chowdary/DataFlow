@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import re
 from dataclasses import dataclass, field
-from typing import Callable
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 from connectors.mysql_conn import get_connection
 from connectors.writer_common import (
@@ -33,6 +36,37 @@ class WriteResult:
 
 def mysql_type(inferred: str) -> str:
     return ddl_type("mysql", inferred)
+
+
+def _to_mysql_value(value: Any, source_type: str) -> Any:
+    """Normalize transform-engine values to forms pymysql/MySQL can bind."""
+    if value is None:
+        return None
+    upper = source_type.upper()
+    if upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
+        if isinstance(value, str):
+            # ISO 8601 with Z -> naive UTC DATETIME
+            text = value.strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(text)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except ValueError:
+                return value
+        return value
+    if upper in {"BINARY", "BLOB", "LONGBLOB", "VARBINARY", "BYTEA"}:
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            try:
+                return base64.b64decode(value, validate=True)
+            except Exception:
+                return value.encode("utf-8")
+        return value
+    return value
 
 
 def write_mapped_rows(
@@ -145,9 +179,14 @@ def write_mapped_rows(
             else:
                 insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
 
+            converted_rows = [
+                tuple(_to_mysql_value(v, source_types[i]) for i, v in enumerate(row))
+                for row in mapped_rows
+            ]
+
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE
-                batch = mapped_rows[start : start + CHUNK_SIZE]
+                batch = converted_rows[start : start + CHUNK_SIZE]
                 if not batch:
                     break
                 cur.executemany(insert_sql, batch)
