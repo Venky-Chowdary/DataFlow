@@ -137,12 +137,13 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         6379 if fmt == "redis" else
         9200 if fmt == "elasticsearch" else
         5439 if fmt == "redshift" else
+        0 if fmt == "sqlite" else
         443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs") else 5432
     )
     cfg = {
         "host": endpoint.host or "localhost",
         "port": endpoint.port or default_port,
-        "database": endpoint.database,
+        "database": endpoint.database or endpoint.host or "",
         "schema": endpoint.schema or ("PUBLIC" if fmt == "snowflake" else "public"),
         "username": endpoint.username,
         "password": endpoint.password,
@@ -410,6 +411,29 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
+    if db_type == "sqlite":
+        from connectors.sqlite_reader import read_table_batch
+
+        table = endpoint.table
+        if not table:
+            raise ValueError("Source SQLite table name required")
+        batch = read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            table=table,
+            limit=_NON_STREAMING_ROW_LIMIT,
+        )
+        _guard_truncated_read(batch, db_type, table)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "TEXT" for c in batch.headers}
+        return records, batch.headers, schema
+
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
@@ -601,6 +625,20 @@ def write_destination_database(
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
         return result.rows_written, ddl_log, {
             "type": "redis", "prefix": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "sqlite":
+        from connectors.sqlite_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "SQLite write failed")
+        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "sqlite", "database": cfg["database"], "table": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
             **_writer_diagnostics(result),
         }

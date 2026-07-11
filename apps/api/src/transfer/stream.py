@@ -32,7 +32,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "s3", "gcs", "dynamodb", "elasticsearch", "redis",
+    "s3", "gcs", "dynamodb", "elasticsearch", "redis", "sqlite",
 })
 
 
@@ -374,6 +374,38 @@ def _write_batch(
             "type": "mongodb",
             "database": result.target_schema,
             "collection": result.table_name,
+            "checksum": result.checksum,
+            "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+        return result.rows_written, result.checksum, summary
+
+    if dest_type == "sqlite":
+        from connectors.sqlite_writer import write_mapped_rows
+
+        result = write_mapped_rows(
+            host=cfg["host"],
+            port=0,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            table_name=table_name,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            create_table=create_table,
+            on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or "SQLite batch write failed")
+        summary = {
+            "type": "sqlite",
+            "database": cfg["database"],
+            "table": result.table_name,
             "checksum": result.checksum,
             "driver": result.driver,
             **_writer_diagnostics(result),

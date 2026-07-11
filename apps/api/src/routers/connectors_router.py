@@ -182,6 +182,15 @@ async def test_connection(request: TestConnectionRequest):
             )
             return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
 
+        if request.type == "sqlite":
+            from connectors.sqlite import test_sqlite
+            probe = test_sqlite(
+                host=request.host or "", port=0, database=request.database,
+                username=request.username or "", password=request.password or "",
+                schema=request.schema or "", connection_string=request.connection_string or "", ssl=False,
+            )
+            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
+
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             return {
                 "success": True,

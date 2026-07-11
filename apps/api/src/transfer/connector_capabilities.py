@@ -17,6 +17,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "elasticsearch": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "redshift": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -78,6 +79,7 @@ SUGGESTED_SOURCES = [
 TRANSFER_READY_CATALOG_IDS = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+    "sqlite",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
 })
 
@@ -100,6 +102,7 @@ def default_port(driver_type: str) -> int:
         "s3": 443,
         "gcs": 443,
         "redshift": 5439,
+        "sqlite": 0,
     }.get((driver_type or "").lower(), 5432)
 
 

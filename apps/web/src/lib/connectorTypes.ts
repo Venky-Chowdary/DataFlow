@@ -5,6 +5,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+  "sqlite",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -68,6 +69,7 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   if (type === "gcs") return { host: "", port: 443, label: "Google Cloud Storage" };
   if (type === "redis") return { host: "localhost", port: 6379, label: "Redis" };
   if (type === "elasticsearch") return { host: "localhost", port: 9200, label: "Elasticsearch" };
+  if (type === "sqlite") return { host: "", port: 0, label: "SQLite" };
   return {
     host: "localhost",
     port: item?.port ?? 5432,

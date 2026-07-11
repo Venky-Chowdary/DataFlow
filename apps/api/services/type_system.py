@@ -262,6 +262,20 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "SUPER",
         LOGICAL_BINARY: "VARBYTE",
     },
+    "sqlite": {
+        LOGICAL_STRING: "TEXT",
+        LOGICAL_TEXT: "TEXT",
+        LOGICAL_INTEGER: "INTEGER",
+        LOGICAL_DECIMAL: "REAL",
+        LOGICAL_BOOLEAN: "INTEGER",
+        LOGICAL_DATE: "TEXT",
+        LOGICAL_DATETIME: "TEXT",
+        LOGICAL_TIME: "TEXT",
+        LOGICAL_UUID: "TEXT",
+        LOGICAL_JSON: "TEXT",
+        LOGICAL_ARRAY: "TEXT",
+        LOGICAL_BINARY: "BLOB",
+    },
 }
 
 DEFAULT_DDL: Final[dict[str, str]] = {
@@ -271,6 +285,7 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "bigquery": "STRING",
     "mongodb": "string",
     "redshift": "VARCHAR(65535)",
+    "sqlite": "TEXT",
 }
 
 

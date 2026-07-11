@@ -84,12 +84,12 @@ const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_
 
 const FALLBACK_DEST_TYPES = [
   "mongodb", "postgresql", "mysql", "snowflake", "bigquery", "redshift",
-  "dynamodb", "s3", "gcs", "redis", "elasticsearch",
+  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite",
 ] as const;
 const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl", "tsv", "parquet", "excel", "ndjson"] as const;
 const FALLBACK_SOURCE_DBS = [
   "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
-  "dynamodb", "s3", "gcs", "redis", "elasticsearch",
+  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite",
 ] as const;
 
 const ACCEPTED_UPLOAD_EXTENSIONS = new Set(["csv", "json", "jsonl", "tsv", "parquet"]);

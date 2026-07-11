@@ -92,6 +92,12 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="read_index_batch",
         writer="connectors.elasticsearch_writer",
     ),
+    "sqlite": ConnectorModules(
+        probe=("connectors.sqlite", "test_sqlite"),
+        reader="connectors.sqlite_reader",
+        reader_fn="read_table_batch",
+        writer="connectors.sqlite_writer",
+    ),
 }
 
 
