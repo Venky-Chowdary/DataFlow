@@ -86,7 +86,7 @@ const FALLBACK_DEST_TYPES = [
   "mongodb", "postgresql", "mysql", "snowflake", "bigquery", "redshift",
   "dynamodb", "s3", "gcs", "redis", "elasticsearch",
 ] as const;
-const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl", "tsv", "parquet"] as const;
+const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl", "tsv", "parquet", "excel", "ndjson"] as const;
 const FALLBACK_SOURCE_DBS = [
   "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
   "dynamodb", "s3", "gcs", "redis", "elasticsearch",

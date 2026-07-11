@@ -25,9 +25,9 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "tsv": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "json": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "jsonl": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
-    "ndjson": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
-    "excel": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
-    "parquet": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
+    "ndjson": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "excel": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "parquet": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
 }
 
 # Catalog marketplace id → driver / format type

@@ -11,7 +11,7 @@ LIVE_SOURCE_DATABASES = [
     "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
     "dynamodb", "s3", "gcs", "redis", "elasticsearch",
 ]
-LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv"]
+LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson"]
 
 # (source_kind, source_format, dest_kind, dest_format) -> live
 LIVE_MATRIX: set[tuple[str, str, str, str]] = set()
@@ -21,19 +21,16 @@ for _sf in LIVE_SOURCE_FORMATS:
     for _db in LIVE_DEST_DATABASES:
         LIVE_MATRIX.add(("file", _sf, "database", _db))
 
-# File → File (core conversions)
-for _pair in [
-    ("csv", "json"), ("csv", "csv"), ("csv", "jsonl"), ("csv", "tsv"),
-    ("tsv", "csv"), ("tsv", "json"), ("json", "csv"), ("json", "json"), ("json", "jsonl"),
-    ("jsonl", "csv"), ("jsonl", "json"),
-]:
-    LIVE_MATRIX.add(("file", _pair[0], "file_export", _pair[1]))
+# File → File (any supported source format → any supported export format)
+for _src_fmt in LIVE_SOURCE_FORMATS:
+    for _dst_fmt in LIVE_DEST_FILE_FORMATS:
+        LIVE_MATRIX.add(("file", _src_fmt, "file_export", _dst_fmt))
 
 # Database → Database & Database → File
 for _src in LIVE_SOURCE_DATABASES:
     for _db in LIVE_DEST_DATABASES:
         LIVE_MATRIX.add(("database", _src, "database", _db))
-    for _ef in ["csv", "json", "jsonl", "tsv"]:
+    for _ef in LIVE_DEST_FILE_FORMATS:
         LIVE_MATRIX.add(("database", _src, "file_export", _ef))
 
 

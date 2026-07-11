@@ -656,7 +656,13 @@ def write_destination_file(
 
     if can_convert(src_fmt, fmt) and grid:
         content, mime = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
-        ext = "tsv" if fmt == "tsv" else fmt if fmt in ("csv", "jsonl") else "json"
+        ext = (
+            "tsv" if fmt == "tsv"
+            else "xlsx" if fmt == "excel"
+            else "parquet" if fmt == "parquet"
+            else fmt if fmt in ("csv", "jsonl")
+            else "json"
+        )
         filename = f"export.{ext}"
         return content, filename, {
             "format": fmt,
@@ -686,6 +692,12 @@ def write_destination_file(
         lines = [json.dumps(r, default=str) for r in export_records]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
+    elif fmt == "excel":
+        content, _ = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
+        filename = "export.xlsx"
+    elif fmt == "parquet":
+        content, _ = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
+        filename = "export.parquet"
     else:
         content = json.dumps(export_records, indent=2, default=str).encode("utf-8")
         filename = "export.json"
