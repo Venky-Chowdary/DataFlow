@@ -68,6 +68,60 @@ DOMAINS: dict[str, dict[str, Any]] = {
             "effective_date": "DATE",
         },
     },
+    "ecommerce": {
+        "label": "E-commerce",
+        "compliance": ["PCI-DSS"],
+        "patterns": [
+            r"order", r"cart", r"checkout", r"product", r"sku", r"item",
+            r"quantity", r"unit_price", r"line_amount", r"customer", r"buyer",
+            r"purchase", r"discount", r"coupon", r"shipping", r"payment",
+            r"transaction", r"invoice", r"refund", r"store", r"merchant",
+        ],
+        "required_fields": ["order_id", "product_id", "quantity"],
+        "type_overrides": {
+            "unit_price": "DECIMAL",
+            "line_amount": "DECIMAL",
+            "discount": "DECIMAL",
+            "quantity": "INTEGER",
+            "order_date": "TIMESTAMP",
+        },
+    },
+    "human_resources": {
+        "label": "Human resources",
+        "compliance": ["GDPR", "CCPA"],
+        "patterns": [
+            r"employee", r"hire", r"termination", r"salary", r"compensation",
+            r"benefit", r"department", r"job_title", r"manager", r"payroll",
+            r"timesheet", r"leave", r"vacation", r"applicant", r"candidate",
+            r"performance", r"review", r"bonus", r"commission", r"expense",
+        ],
+        "required_fields": ["employee_id", "hire_date"],
+        "type_overrides": {
+            "salary": "DECIMAL",
+            "bonus": "DECIMAL",
+            "commission": "DECIMAL",
+            "hire_date": "DATE",
+            "termination_date": "DATE",
+        },
+        "pii_fields": ["employee_id", "ssn", "dob", "salary", "bank_account"],
+    },
+    "crm": {
+        "label": "CRM & sales",
+        "compliance": ["GDPR", "CCPA"],
+        "patterns": [
+            r"lead", r"opportunity", r"contact", r"account", r"campaign",
+            r"deal", r"pipeline", r"stage", r"forecast", r"activity",
+            r"task", r"call", r"meeting", r"email", r"phone", r"owner",
+            r"customer", r"prospect", r"quote", r"contract",
+        ],
+        "required_fields": ["contact_id", "account_id"],
+        "type_overrides": {
+            "deal_amount": "DECIMAL",
+            "forecast": "DECIMAL",
+            "close_date": "DATE",
+            "created_date": "TIMESTAMP",
+        },
+    },
 }
 
 
