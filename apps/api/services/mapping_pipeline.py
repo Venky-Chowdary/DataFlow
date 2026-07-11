@@ -337,6 +337,25 @@ def run_mapping_pipeline(
             "requires_reflexion": True,
         }
 
+    from services.data_integrity import run_integrity_audit
+
+    integrity = run_integrity_audit(
+        source_columns=source_columns,
+        target_columns=target_columns,
+        mappings=enriched_mappings,
+        source_schemas=source_schemas,
+        target_schemas=target_schemas,
+        source_samples=source_samples,
+        validation_mode="strict",
+    )
+    if integrity.get("blocks_transfer"):
+        validation = {
+            **validation,
+            "passed": False,
+            "issues": [*validation.get("issues", []), *integrity.get("issues", [])[:15]],
+            "requires_reflexion": True,
+        }
+
     plan_summary = mapping_plan_summary(
         source_columns=source_columns,
         target_columns=target_columns,
@@ -357,6 +376,7 @@ def run_mapping_pipeline(
         "SampleValidatorAgent",
         "MappingQualityAgent",
         "SampleQualityAgent",
+        "DataIntegrityAgent",
         "TransformCodegenAgent",
         "ValidationCriticAgent",
     ]
@@ -376,6 +396,7 @@ def run_mapping_pipeline(
         "quality_issues": quality_issues,
         "coercion_issues": coercion_issues,
         "sample_quality": sample_quality_report,
+        "integrity": integrity,
         "agents_used": agents_used,
         "llm": llm_meta,
     }

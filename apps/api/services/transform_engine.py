@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+import unicodedata
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -78,15 +79,35 @@ def _parse_date(value: str) -> str | None:
     return None
 
 
-def _parse_decimal(value: str) -> str | None:
-    text = value.strip().replace(",", "")
-    for sym in ("$", "€", "£", "¥"):
-        text = text.replace(sym, "")
+def _normalize_numeric_text(value: str) -> str:
+    """Normalize unicode spaces, accounting formats, and percent suffixes."""
+    text = unicodedata.normalize("NFKC", value)
+    for ch in ("\u00a0", "\u2007", "\u202f", "\u2009"):
+        text = text.replace(ch, "")
     text = text.strip()
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    # Accounting negative: (1,234.56) or 1,234.56-
     if text.startswith("(") and text.endswith(")"):
         text = f"-{text[1:-1].strip()}"
+    if text.endswith("-") and text[:-1].strip():
+        text = f"-{text[:-1].strip()}"
+    return text
+
+
+def _parse_decimal(value: str) -> str | None:
+    text = _normalize_numeric_text(value.strip())
+    for sym in ("$", "€", "£", "¥", "₹", "₩"):
+        text = text.replace(sym, "")
+    text = text.replace(",", "").strip()
     if not text:
         return None
+    # Scientific notation: 1.5e3, 2E-4
+    if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
+        try:
+            return str(Decimal(text))
+        except InvalidOperation:
+            return None
     try:
         return str(Decimal(text))
     except InvalidOperation:
@@ -94,9 +115,17 @@ def _parse_decimal(value: str) -> str | None:
 
 
 def _parse_integer(value: str) -> int | None:
-    text = value.strip().replace(",", "")
+    text = _normalize_numeric_text(value.strip()).replace(",", "")
     if not text:
         return None
+    if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
+        try:
+            dec = Decimal(text)
+            if dec != dec.to_integral_value():
+                return None
+            return int(dec)
+        except (InvalidOperation, ValueError):
+            return None
     try:
         dec = Decimal(text)
     except InvalidOperation:

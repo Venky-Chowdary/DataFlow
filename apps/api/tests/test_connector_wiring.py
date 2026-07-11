@@ -133,14 +133,16 @@ def test_core_route_matrix_samples():
     assert ok
 
 
-def test_catalog_has_100_plus_transfer_ready():
+def test_catalog_native_transfer_ready_only():
     import json
     from pathlib import Path
 
-    from transfer.connector_capabilities import enrich_catalog_entry
+    from transfer.connector_capabilities import enrich_catalog_entry, transfer_live_driver_types
 
     catalog_path = Path(__file__).resolve().parents[1] / "data" / "connector_catalog.json"
     data = json.loads(catalog_path.read_text(encoding="utf-8"))
     enriched = [enrich_catalog_entry(c) for c in data.get("connectors", [])]
     live = [c for c in enriched if c.get("transfer_ready")]
-    assert len(live) >= 100, f"expected >=100 transfer-ready catalog entries, got {len(live)}"
+    # Honest count: native drivers only, not alias inflation
+    assert len(live) >= len(transfer_live_driver_types())
+    assert len(live) < 100, f"alias inflation detected: {len(live)} marked transfer_ready"

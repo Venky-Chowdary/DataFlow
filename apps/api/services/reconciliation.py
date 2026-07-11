@@ -28,6 +28,33 @@ def checksum_rows(rows: list[list[str]]) -> str:
     return h.hexdigest()[:16]
 
 
+def aggregate_checksum(
+    records: list[dict[str, Any]],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+) -> str:
+    """
+    Order-independent checksum for reconciliation.
+    Sorts row fingerprints before hashing — same data in different order = same checksum.
+    """
+    if not records:
+        return hashlib.sha256(b"").hexdigest()[:16]
+    cols = columns or sorted(records[0].keys())
+    fingerprints: list[str] = []
+    for rec in records:
+        parts = [f"{c}={normalize_cell(rec.get(c))}" for c in cols]
+        fingerprints.append("\x1f".join(parts))
+    if sort_key and sort_key in cols:
+        fingerprints.sort(key=lambda fp: fp.split("\x1f")[cols.index(sort_key)] if sort_key in cols else fp)
+    else:
+        fingerprints.sort()
+    h = hashlib.sha256()
+    for fp in fingerprints:
+        h.update(fp.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def reconcile(
     *,
     source_rows: int,
@@ -35,7 +62,7 @@ def reconcile(
     source_checksum: str,
     target_checksum: str,
     rejected_rows: int = 0,
-    strict_checksum: bool = False,
+    strict_checksum: bool = True,
     sample_compare: dict[str, Any] | None = None,
 ) -> ReconciliationReport:
     expected_rows = max(source_rows - max(rejected_rows, 0), 0)

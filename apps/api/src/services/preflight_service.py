@@ -80,6 +80,42 @@ class FilePreflightContext(PreflightContext):
                 dupes.append({"column": col, "value": val, "count": count})
         return dupes[:5]
 
+    def run_integrity_audit(self) -> dict[str, Any]:
+        from services.data_integrity import run_integrity_audit as audit
+
+        source_columns = [c.name for c in self.plan.source.columns]
+        mapping_dicts = [
+            {
+                "source": m.source,
+                "target": m.target,
+                "confidence": m.confidence,
+                "transform": m.transform,
+                "requires_review": m.requires_review,
+                "target_type": next(
+                    (c.inferred_type for c in self.plan.destination.target_columns if c.name == m.target),
+                    None,
+                ),
+            }
+            for m in self.plan.mappings
+        ]
+        source_schemas = [
+            {"name": c.name, "inferred_type": c.inferred_type, "samples": c.samples}
+            for c in self.plan.source.columns
+        ]
+        target_schemas = [
+            {"name": c.name, "inferred_type": c.inferred_type}
+            for c in self.plan.destination.target_columns
+        ]
+        mode = getattr(self.plan, "validation_mode", "strict") or "strict"
+        return audit(
+            source_columns=source_columns,
+            mappings=mapping_dicts,
+            source_schemas=source_schemas,
+            target_schemas=target_schemas,
+            sample_rows=self.sample_rows,
+            validation_mode=mode,
+        )
+
 
 VALIDATION_CONFIDENCE_THRESHOLDS = {
     "balanced": 0.75,
@@ -230,12 +266,13 @@ def run_file_preflight(
     sample_rows: list[dict] | None = None,
     estimated_bytes: int = 0,
     confidence_threshold: float = 0.85,
+    validation_mode: str = "strict",
     destination_column_types: dict[str, str] | None = None,
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
     available_staging_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Run 8 preflight gates for a file-based transfer."""
+    """Run 9 preflight gates for a file-based transfer."""
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
@@ -340,6 +377,7 @@ def run_file_preflight(
         estimated_bytes=est_bytes,
         available_staging_bytes=available_staging_bytes,
         confidence_threshold=confidence_threshold,
+        validation_mode=validation_mode,
     )
 
     ctx = FilePreflightContext(plan, sample_rows)

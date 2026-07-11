@@ -40,6 +40,37 @@ def test_reconcile_fails_sample_mismatch():
     assert "read-back" in r.message.lower()
 
 
+def test_reconcile_fails_checksum_mismatch_strict():
+    r = reconcile(
+        source_rows=10,
+        target_rows=10,
+        source_checksum="abc",
+        target_checksum="xyz",
+        strict_checksum=True,
+    )
+    assert not r.passed
+    assert "checksum" in r.message.lower()
+
+
+def test_reconcile_allows_checksum_mismatch_balanced():
+    r = reconcile(
+        source_rows=10,
+        target_rows=10,
+        source_checksum="abc",
+        target_checksum="xyz",
+        strict_checksum=False,
+    )
+    assert r.passed
+
+
+def test_aggregate_checksum_order_independent():
+    from services.reconciliation import aggregate_checksum
+
+    rows_a = [{"id": "1", "amt": "10"}, {"id": "2", "amt": "20"}]
+    rows_b = [{"id": "2", "amt": "20"}, {"id": "1", "amt": "10"}]
+    assert aggregate_checksum(rows_a, ["id", "amt"]) == aggregate_checksum(rows_b, ["id", "amt"])
+
+
 def test_sample_compare_rows_detects_mismatch():
     from services.reconciliation import sample_compare_rows
 

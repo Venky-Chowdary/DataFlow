@@ -17,3 +17,4 @@ packages/ml/data/
 .DS_Store
 
 apps/api/data/vector_store/
+apps/api/data/training/

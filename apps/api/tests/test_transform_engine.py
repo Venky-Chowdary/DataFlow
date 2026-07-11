@@ -65,6 +65,20 @@ def test_apply_uuid_validates():
     assert "Invalid UUID" in err2
 
 
+def test_apply_decimal_accounting_and_scientific():
+    val, err = apply_transform("(1,234.56)", "decimal")
+    assert err is None
+    assert val == "-1234.56"
+
+    val2, err2 = apply_transform("1.5e3", "decimal")
+    assert err2 is None
+    assert val2 == "1500"
+
+    val3, err3 = apply_transform("$10,000.00", "decimal")
+    assert err3 is None
+    assert val3 == "10000.00"
+
+
 def test_unknown_transform_fails_closed():
     val, err = apply_transform("hello", "bogus_transform")
     assert val is None

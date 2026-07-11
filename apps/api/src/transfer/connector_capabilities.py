@@ -212,26 +212,18 @@ def capability_label(caps: dict[str, bool]) -> str:
 
 
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
-    """True when catalog entry maps to an implemented transfer driver."""
+    """True only for native catalog ids — aliases resolve for routing but stay roadmap."""
     if not transfer_ready(caps):
         return False
-    if driver in _DRIVER_CAPS:
+    cid = (catalog_id or "").lower().strip()
+    if not cid:
+        return False
+    # Native driver/format ids only — no alias inflation (e.g. amazon_rds_postgresql → planned)
+    if cid in TRANSFER_READY_CATALOG_IDS:
         return True
-    if driver in _FILE_CAPS:
-        cid = (catalog_id or "").lower()
-        if cid in _FILE_CAPS or cid in TRANSFER_READY_CATALOG_IDS:
-            return True
-        if driver == "csv" and ("csv" in cid or "tsv" in cid):
-            return True
-        if driver == "json" and "json" in cid and "jsonl" not in cid and "ndjson" not in cid:
-            return True
-        if driver in ("jsonl", "ndjson") and driver in cid:
-            return True
-        if driver == "parquet" and "parquet" in cid:
-            return True
-        if driver == "excel" and ("excel" in cid or "xlsx" in cid or "spreadsheet" in cid):
-            return True
-    return catalog_id in TRANSFER_READY_CATALOG_IDS
+    if cid in _DRIVER_CAPS or cid in _FILE_CAPS:
+        return True
+    return False
 
 
 def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:

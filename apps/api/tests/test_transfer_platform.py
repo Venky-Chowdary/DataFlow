@@ -18,7 +18,7 @@ def test_platform_status_shape(client):
     assert "transfer_ready" in data
     assert "live_route_combinations" in data
     assert "llm_mapping_available" in data
-    assert data["preflight_gates"] == 8
+    assert data["preflight_gates"] == 9
 
 
 def test_capabilities_includes_format_conversion(client):

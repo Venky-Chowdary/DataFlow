@@ -64,6 +64,14 @@ def run_reconciliation(
 
     _, data_rows = records_to_matrix(records, columns)
     source_checksum = writer_checksum or checksum_rows(data_rows)
+    if records:
+        mapped_cols = list(dict.fromkeys(
+            str(m.get("target") or m.get("source") or "")
+            for m in (mappings or [])
+            if m.get("target") or m.get("source")
+        )) or columns
+        from services.reconciliation import aggregate_checksum
+        source_checksum = aggregate_checksum(records, mapped_cols)
     cfg = resolve_connector_config(endpoint)
     schema = dest_summary.get("schema") or cfg.get("schema", "public")
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""

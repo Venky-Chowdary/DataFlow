@@ -7,6 +7,7 @@ const GATE_LABELS: Record<string, string> = {
   g3_schema: "Schema contract",
   g4_mapping: "Column mappings",
   g5_transform: "Dry-run transform",
+  g9_data_integrity: "Data integrity",
   g6_ddl: "Target DDL",
   g7_capacity: "Staging capacity",
   g8_reconciliation: "Reconciliation (post-transfer)",

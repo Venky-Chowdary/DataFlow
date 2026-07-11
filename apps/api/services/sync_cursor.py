@@ -123,7 +123,7 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
 
 
 def max_cursor_value(rows: list[list[str]], headers: list[str], cursor_column: str) -> str | None:
-    """Find maximum cursor value in a batch (lexicographic — works for ISO timestamps and IDs)."""
+    """Find maximum cursor value using typed watermark comparator."""
     if not cursor_column or not rows:
         return None
     try:
@@ -133,7 +133,10 @@ def max_cursor_value(rows: list[list[str]], headers: list[str], cursor_column: s
     values = [rows[i][idx] for i in range(len(rows)) if idx < len(rows[i]) and rows[i][idx]]
     if not values:
         return None
-    return max(values)
+    from services.cdc_engine import infer_watermark_type, max_watermark
+
+    wm_type = infer_watermark_type(values)
+    return max_watermark(values, wm_type)
 
 
 def requires_incremental(sync_mode: str) -> bool:

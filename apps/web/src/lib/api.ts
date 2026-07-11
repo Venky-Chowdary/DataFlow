@@ -776,6 +776,18 @@ export async function fetchPlatformStatus(): Promise<{
   return res.json();
 }
 
+export async function fetchTransferReadiness(): Promise<{
+  ready: boolean;
+  drivers_total: number;
+  drivers_ready: number;
+  drivers_failed: number;
+  production_note?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/transfer/readiness`);
+  if (!res.ok) throw new Error("Failed to load transfer readiness");
+  return res.json();
+}
+
 export async function mapTransferColumns(payload: {
   source_columns: string[];
   source_schema?: Record<string, string>;

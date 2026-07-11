@@ -194,6 +194,34 @@ def gate_g7_capacity(ctx: PreflightContext) -> GateResult:
     return _pass(GateId.G7_CAPACITY, "Capacity sufficient", start)
 
 
+def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
+    """Critical data integrity — financial precision, required nulls, duplicate keys."""
+    start = time.perf_counter()
+    audit = getattr(ctx, "run_integrity_audit", None)
+    if not callable(audit):
+        return GateResult(
+            gate_id=GateId.G9_DATA_INTEGRITY,
+            status=GateStatus.SKIP,
+            message="Skipped — integrity audit not available",
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    report = audit()
+    if report.get("blocks_transfer"):
+        issues = report.get("issues", [])[:15]
+        return _block(
+            GateId.G9_DATA_INTEGRITY,
+            f"Data integrity failed — {len(issues)} issue(s)",
+            start,
+            {"issues": issues, "checks_failed": report.get("checks_failed", 0)},
+        )
+    return _pass(
+        GateId.G9_DATA_INTEGRITY,
+        report.get("summary", "Data integrity checks passed"),
+        start,
+        {"checks_passed": report.get("checks_passed", 0)},
+    )
+
+
 def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     """Post-transfer gate — skipped during preflight, run after transfer completes."""
     return GateResult(
@@ -209,6 +237,7 @@ PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G3_SCHEMA_CONTRACT, gate_g3_schema_contract),
     (GateId.G4_MAPPING_CONFIDENCE, gate_g4_mapping_confidence),
     (GateId.G5_DRY_RUN, gate_g5_dry_run),
+    (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
     (GateId.G6_TARGET_DDL, gate_g6_target_ddl),
     (GateId.G7_CAPACITY, gate_g7_capacity),
     (GateId.G8_RECONCILIATION, gate_g8_reconciliation),

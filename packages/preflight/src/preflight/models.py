@@ -20,6 +20,7 @@ class GateId(str, Enum):
     G6_TARGET_DDL = "g6_target_ddl"
     G7_CAPACITY = "g7_capacity"
     G8_RECONCILIATION = "g8_reconciliation"
+    G9_DATA_INTEGRITY = "g9_data_integrity"
 
 
 @dataclass
@@ -101,6 +102,7 @@ class TransferPlan:
     estimated_bytes: int = 0
     available_staging_bytes: int = 0
     confidence_threshold: float = 0.85
+    validation_mode: str = "strict"
 
 
 @dataclass

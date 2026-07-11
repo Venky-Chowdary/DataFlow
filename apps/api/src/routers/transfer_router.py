@@ -85,7 +85,7 @@ async def platform_status():
         "live_drivers": manifest.get("transfer_live_drivers", []),
         "live_route_combinations": manifest.get("live_route_combinations", 0),
         "llm_mapping_available": llm_ready,
-        "preflight_gates": 8,
+        "preflight_gates": 9,
         "tagline": "Governed transfers with honest connector readiness",
     }
 

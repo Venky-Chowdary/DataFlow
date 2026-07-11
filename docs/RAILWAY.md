@@ -106,9 +106,13 @@ Redeploy API after changing CORS.
 
 ```bash
 curl https://YOUR-API-DOMAIN.up.railway.app/health
+curl https://YOUR-API-DOMAIN.up.railway.app/api/v1/transfer/readiness
+curl https://YOUR-API-DOMAIN.up.railway.app/api/v1/transfer/platform
 ```
 
-Expected: `"status": "healthy"` or `"degraded"` (degraded = check mongodb section).
+Expected: `"status": "healthy"` or `"degraded"` (degraded = check mongodb section).  
+`/transfer/readiness` should report `"ready": true` when all 18 drivers are wired.  
+`/transfer/platform` shows honest `transfer_ready` count (native drivers only, not catalog aliases).
 
 Open `https://YOUR-WEB-DOMAIN.up.railway.app` → sign in with your admin user.
 
