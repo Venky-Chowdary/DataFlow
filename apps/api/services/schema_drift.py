@@ -6,9 +6,47 @@ from typing import Any
 
 from services.schema_fingerprint import fingerprint_schema, schemas_match
 
+_SCHEMALESS_DESTS = {"mongodb", "dynamodb", "redis"}
+_DB_TYPE_ALIASES = {
+    "mongo": "mongodb",
+    "mongodb+srv": "mongodb",
+    "mongodb_atlas": "mongodb",
+    "atlas": "mongodb",
+    "cosmos-mongodb": "mongodb",
+    "cosmos_mongodb": "mongodb",
+    "documentdb": "mongodb",
+    "aws_documentdb": "mongodb",
+    "dynamo": "dynamodb",
+    "redis-kv": "redis",
+    "redis_kv": "redis",
+}
+
 
 def _norm_type(value: str | None) -> str:
     return (value or "VARCHAR").strip().upper()
+
+
+def _ci_get(schema: dict[str, str], key: str) -> str | None:
+    key_l = key.lower()
+    for existing_key, value in schema.items():
+        if existing_key.lower() == key_l:
+            return value
+    return None
+
+
+def _normalize_dest_kind(dest_db_type: str | None) -> str:
+    raw = (dest_db_type or "").strip().lower().replace(" ", "_")
+    if not raw:
+        return ""
+    if raw in _DB_TYPE_ALIASES:
+        return _DB_TYPE_ALIASES[raw]
+    if raw.startswith("mongodb"):
+        return "mongodb"
+    if raw.startswith("dynamodb"):
+        return "dynamodb"
+    if raw.startswith("redis"):
+        return "redis"
+    return raw
 
 
 def detect_schema_drift(
@@ -20,6 +58,7 @@ def detect_schema_drift(
     stored_source_fp: str = "",
     stored_target_fp: str = "",
     mappings: list[dict[str, Any]] | None = None,
+    destination_db_type: str = "",
 ) -> dict[str, Any]:
     """
     Compare current schemas to stored fingerprints and mapping coverage.
@@ -29,6 +68,8 @@ def detect_schema_drift(
     target_columns = target_columns or []
     target_schema = target_schema or {}
     mappings = mappings or []
+    dest_kind = _normalize_dest_kind(destination_db_type)
+    schemaless = dest_kind in _SCHEMALESS_DESTS
 
     live_source_fp = fingerprint_schema(source_columns, source_schema)
     live_target_fp = fingerprint_schema(target_columns, target_schema) if target_columns else ""
@@ -37,20 +78,21 @@ def detect_schema_drift(
     target_changed = bool(stored_target_fp and target_columns) and stored_target_fp != live_target_fp
 
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
-    mapped_targets = {str(m.get("target")) for m in mappings if m.get("target")}
+    mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
     unmapped_sources = [c for c in source_columns if c not in mapped_sources]
-    orphan_targets = [c for c in target_columns if c not in mapped_targets]
+    orphan_targets = [c for c in target_columns if c.lower() not in mapped_targets]
 
     type_mismatches: list[dict[str, str]] = []
-    for m in mappings:
-        src = str(m.get("source") or "")
-        tgt = str(m.get("target") or "")
-        if not src or not tgt:
-            continue
-        src_type = _norm_type(source_schema.get(src))
-        tgt_type = _norm_type(target_schema.get(tgt))
-        if target_schema and src_type != tgt_type and src_type != "VARCHAR" and tgt_type != "VARCHAR":
-            type_mismatches.append({"source": src, "target": tgt, "source_type": src_type, "target_type": tgt_type})
+    if not schemaless:
+        for m in mappings:
+            src = str(m.get("source") or "")
+            tgt = str(m.get("target") or "")
+            if not src or not tgt:
+                continue
+            src_type = _norm_type(source_schema.get(src))
+            tgt_type = _norm_type(_ci_get(target_schema, tgt))
+            if target_schema and src_type != tgt_type and src_type != "VARCHAR" and tgt_type != "VARCHAR":
+                type_mismatches.append({"source": src, "target": tgt, "source_type": src_type, "target_type": tgt_type})
 
     issues: list[str] = []
     if source_changed:

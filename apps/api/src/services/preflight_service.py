@@ -287,6 +287,7 @@ def run_file_preflight(
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
     available_staging_bytes: int | None = None,
+    destination_db_type: str = "postgresql",
 ) -> dict[str, Any]:
     """Run 9 preflight gates for a file-based transfer."""
     if row_count <= 0 and sample_rows:
@@ -339,6 +340,7 @@ def run_file_preflight(
         sample_rows=sample_rows,
         table_exists=dest_table_exists,
         dest_connected=destination_connected,
+        dest_db_type=destination_db_type,
         allow_create=dest_can_create,
     )
 
@@ -348,6 +350,7 @@ def run_file_preflight(
         target_columns=target_cols or [m["target"] for m in mappings],
         target_schema=destination_column_types or {},
         mappings=mappings,
+        destination_db_type=destination_db_type,
     )
     if drift.get("drift_detected"):
         for issue in drift.get("issues", []):
@@ -498,6 +501,7 @@ def inspect_destination_for_preflight(
         "can_create_table": False,
         "column_types": {},
         "columns": [],
+        "db_type": (dest_type or "").lower(),
         "message": "",
     }
     if dest_kind == "file_export":
@@ -515,6 +519,7 @@ def inspect_destination_for_preflight(
             out["message"] = f"Connector '{connector_id}' not found"
             return out
         db_type = (conn.get("type") or "mongodb").lower()
+        out["db_type"] = db_type
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
@@ -533,6 +538,7 @@ def inspect_destination_for_preflight(
         )
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
+        out["db_type"] = db_type
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,

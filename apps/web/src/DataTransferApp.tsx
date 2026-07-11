@@ -633,6 +633,12 @@ function AppShell({
   );
 
   async function handleDeleteConnector(id: string) {
+    const target = connectors.find((c) => c.id === id);
+    const confirmed = window.confirm(
+      `Delete ${target?.name ?? "this connector"}? This removes saved credentials and route references for this connection.`,
+    );
+    if (!confirmed) return;
+
     try {
       await deleteConnector(id);
       await loadConnectors();

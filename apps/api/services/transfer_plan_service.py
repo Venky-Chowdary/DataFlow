@@ -167,6 +167,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         stored_source_fp=rev.source_schema_hash,
         stored_target_fp=rev.target_schema_hash,
         mappings=rev.mappings,
+        destination_db_type=(dest.get("format") or dest.get("type") or "").lower(),
     )
 
     policies = plan.policies
@@ -187,6 +188,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_column_types=live_target_schema,
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
+        destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
     )
     pf = apply_policy_gates(
         pf,

@@ -134,8 +134,7 @@ export function TransferMapStep({
           <section className="df2-map-editor-pane" aria-label="Column mappings editor">
             <header className="df2-map-pane-label">
               <DtIcon name="database" size={14} />
-              Mapping editor
-              <span className="df2-map-pane-hint">Scroll table below</span>
+              Column mappings
             </header>
             <div className="df2-map-editor-scroll-host">
               <ColumnReviewPanel

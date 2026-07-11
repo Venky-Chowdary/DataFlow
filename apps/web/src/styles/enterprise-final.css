@@ -649,12 +649,41 @@ select.df2-select:focus {
   overflow-wrap: anywhere;
 }
 
+.df2-connector-card-created {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  letter-spacing: 0.01em;
+}
+
 .df2-connector-card-actions {
   display: flex;
   gap: 6px;
   margin-top: auto;
   padding-top: 10px;
   border-top: 1px solid var(--ef-card-head-border);
+}
+
+.df2-connector-card-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.df2-connector-card-actions .df2-btn {
+  justify-content: center;
+  width: 100%;
+}
+
+.df2-connector-delete-btn {
+  background: #fff5f5;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.df2-connector-delete-btn:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
 }
 
 /* ─── 17. Pipeline cards ─── */
@@ -1035,6 +1064,244 @@ select.df2-select:focus {
 .df2-settings-log-level--warn { background: #fffbeb; color: #d97706; }
 .df2-settings-log-level--error { background: #fef2f2; color: #dc2626; }
 
+/* ─── 20.5. Shell account rail cleanup ─── */
+
+.df2-sidebar-user {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fbff 100%);
+}
+
+.df2-user-row {
+  border-color: #e2e8f0;
+  background: #ffffff;
+}
+
+.df2-user-avatar {
+  background: linear-gradient(135deg, #0f766e 0%, #0ea5a4 100%);
+}
+
+.df2-user-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.df2-user-actions button {
+  min-height: 32px;
+  font-size: 12px;
+}
+
+/* ─── 20.6. Jobs controls polish ─── */
+
+.df2-jobs-v3-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 440px);
+  gap: 12px;
+  align-items: center;
+}
+
+.df2-jobs-v3-toolbar .df2-page-toolbar {
+  margin-left: auto;
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.df2-jobs-v3-toolbar .df2-page-toolbar-search {
+  max-width: 440px;
+}
+
+.df2-jobs-v3-toolbar .df2-command-search {
+  min-height: 40px;
+  border-radius: 10px;
+}
+
+.df2-jobs-v3-toolbar .df2-command-search svg {
+  width: 17px;
+  height: 17px;
+}
+
+.df2-jobs-v3-toolbar .df2-filter-tabs {
+  min-height: 40px;
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.df2-jobs-v3-toolbar .df2-filter-tabs button,
+.df2-jobs-v3-toolbar .df2-tab {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.df2-jobs-v3-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.df2-jobs-v3-summary {
+  gap: 18px;
+}
+
+.df2-jobs-v3-summary-head {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e6edf5;
+}
+
+.df2-jobs-v3-summary-route > div strong {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.df2-jobs-v3-summary-metrics article {
+  background: #ffffff;
+  border-color: #dde7f2;
+}
+
+.df2-jobs-v3-summary-metrics strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-jobs-v3-summary-dl {
+  padding: 12px;
+  border: 1px solid #e5edf6;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.df2-jobs-v3-mappings,
+.df2-jobs-v3-log {
+  padding: 12px;
+  border: 1px solid #e5edf6;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.df2-jobs-v3-mappings h3,
+.df2-jobs-v3-log h3 {
+  margin: 0 0 10px;
+}
+
+.df2-jobs-v3-actions {
+  padding-top: 12px;
+  border-top: 1px solid #e6edf5;
+}
+
+/* ─── 20.7. Pilot layout spacing cleanup ─── */
+
+.df2-pilot-workspace {
+  min-height: 0;
+}
+
+.df2-pilot-status-bar {
+  margin-bottom: 2px;
+}
+
+.df2-pilot-body {
+  display: grid;
+  grid-template-columns: minmax(230px, 280px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.df2-pilot-aside,
+.df2-pilot-main {
+  min-height: min(72vh, 780px);
+}
+
+.df2-pilot-main-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.df2-pilot-hero {
+  padding: 6px 2px;
+}
+
+.df2-pilot-composer textarea,
+.df2-pilot-composer-sticky textarea {
+  min-height: 92px;
+}
+
+/* ─── 20.9. Transfer run readiness emphasis ─── */
+
+.df2-run-step .df2-run-center {
+  gap: 14px;
+}
+
+.df2-run-readiness {
+  width: min(760px, 100%);
+  padding: 14px 16px;
+  border: 1px solid #bfeadf;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f0fdf7 0%, #f8fdfa 100%);
+  display: grid;
+  gap: 8px;
+}
+
+.df2-run-readiness-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-run-readiness-score {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f766e;
+}
+
+.df2-run-readiness-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: #0f172a;
+}
+
+.df2-run-readiness-route strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.df2-run-readiness p {
+  margin: 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.df2-run-step .df2-empty {
+  width: min(760px, 100%);
+  border-style: solid;
+  background: #ffffff;
+}
+
+.df2-run-step .df2-empty .df2-empty-action .df2-btn {
+  min-width: 210px;
+}
+
+/* ─── 20.8. Overview readability improvements ─── */
+
+.df2-overview-analytics {
+  gap: 16px;
+}
+
+.df2-overview-workspace {
+  gap: 16px;
+}
+
+.df2-overview-migrations .df2-table-wrap {
+  max-height: min(48vh, 420px);
+}
+
 /* ─── 20. Responsive grid collapsing ─── */
 
 @media (max-width: 1180px) {
@@ -1074,6 +1341,32 @@ select.df2-select:focus {
     flex: 1 1 auto;
     min-width: 140px;
     justify-content: center !important;
+  }
+
+  .df2-jobs-v3-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-jobs-v3-toolbar .df2-page-toolbar {
+    margin-left: 0;
+    justify-content: stretch;
+  }
+
+  .df2-jobs-v3-toolbar .df2-page-toolbar-search {
+    max-width: none;
+  }
+
+  .df2-pilot-body {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-pilot-aside,
+  .df2-pilot-main {
+    min-height: auto;
+  }
+
+  .df2-connector-card-actions {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1271,6 +1564,80 @@ select.df2-select:focus {
 
 .df2-model-card > .df2-btn {
   margin-top: auto;
+}
+
+/* ─── 23. Map step declutter ─── */
+
+.df2-map-step-panel .df2-card-head {
+  gap: 8px;
+}
+
+.df2-map-step-panel .df2-card-body {
+  padding-top: 12px !important;
+}
+
+.df2-map-editor-pane {
+  border-color: #dbe5f0;
+  box-shadow: none;
+}
+
+.df2-map-pane-label {
+  padding: 8px 12px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  background: #fbfdff;
+  border-bottom-color: #e8eef6;
+}
+
+.df2-mapping-intelligence {
+  border-color: #dbe5f0;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.df2-mapping-intelligence-head {
+  padding: 10px 12px;
+  border-bottom-color: #e8eef6;
+}
+
+.df2-mapping-intelligence-route-compact {
+  padding: 8px 12px;
+  background: #fcfdff;
+}
+
+.df2-mapping-attention {
+  background: #ffffff;
+  border-bottom-color: #edf2f7;
+  max-height: min(170px, 24vh);
+}
+
+.df2-mapping-attention-head {
+  text-transform: none;
+  letter-spacing: 0;
+  color: #475569;
+}
+
+.df2-mapping-attention-count {
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.df2-mapping-intelligence-pairs-head {
+  display: none;
+}
+
+.df2-mapping-intelligence-pair {
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 36px auto;
+  padding: 8px 12px;
+}
+
+.df2-mapping-intelligence-pair .pair-source,
+.df2-mapping-intelligence-pair .pair-target {
+  font-size: 12px;
+}
+
+.df2-map-editor-scroll-host {
+  padding: 0 8px 8px;
 }
 
 /* Switch toggle */

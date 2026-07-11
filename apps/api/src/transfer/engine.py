@@ -162,6 +162,7 @@ class UniversalTransferEngine:
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=_destination_schema_types(request.destination),
+                    destination_db_type=(request.destination.format or "postgresql").lower(),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -373,6 +374,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=_destination_schema_types(request.destination),
+                    destination_db_type=(request.destination.format or "postgresql").lower(),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -558,6 +560,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=_destination_schema_types(request.destination),
+                    destination_db_type=(request.destination.format or "postgresql").lower(),
                 )
                 pf = apply_policy_gates(
                     pf,

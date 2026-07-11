@@ -71,6 +71,13 @@ export function PreflightTimeline({
   const qualityGrade = proof?.quality_grade?.toUpperCase() || "GOOD";
   const evidenceSummary = proof?.evidence_summary || "Deterministic proof signals ready for operator review.";
 
+  const blockerIssuePreview = (details?: Record<string, unknown>): string | null => {
+    const rawIssues = details?.issues;
+    if (!Array.isArray(rawIssues) || rawIssues.length === 0) return null;
+    const firstIssue = rawIssues[0];
+    return typeof firstIssue === "string" ? firstIssue : null;
+  };
+
   return (
     <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}`}>
       {!compact && (
@@ -159,7 +166,14 @@ export function PreflightTimeline({
           {result.blockers.length > 0 && (
             <ul className="df2-preflight-blocker-list">
               {result.blockers.map((b) => (
-                <li key={b.id}>{b.message}</li>
+                <li key={b.id}>
+                  <span>{b.message}</span>
+                  {blockerIssuePreview(b.details) && (
+                    <small style={{ display: "block", marginTop: 2, color: "#64748b" }}>
+                      {blockerIssuePreview(b.details)}
+                    </small>
+                  )}
+                </li>
               ))}
             </ul>
           )}

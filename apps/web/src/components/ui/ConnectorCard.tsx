@@ -27,6 +27,10 @@ export function ConnectorCard({
 }: ConnectorCardProps) {
   const role = inferTopologyRole(c.type, c.name, c.role);
   const healthy = c.status !== "error";
+  const createdAt = c.created_at ? new Date(c.created_at) : null;
+  const createdLabel = createdAt && !Number.isNaN(createdAt.getTime())
+    ? createdAt.toLocaleDateString()
+    : "Unknown";
 
   return (
     <article
@@ -65,6 +69,10 @@ export function ConnectorCard({
         </p>
       )}
 
+      <p className="df2-connector-card-created" title={c.created_at || ""}>
+        Added {createdLabel}
+      </p>
+
       <div className="df2-connector-card-actions" onClick={(e) => e.stopPropagation()}>
         <button
           type="button"
@@ -88,8 +96,15 @@ export function ConnectorCard({
           <DtIcon name="settings" size={14} />
           Edit
         </button>
-        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-btn-danger" onClick={onDelete}>
+        <button
+          type="button"
+          className="df2-btn df2-btn-ghost df2-btn-sm df2-btn-danger df2-connector-delete-btn"
+          onClick={onDelete}
+          aria-label={`Delete ${c.name}`}
+          title={`Delete ${c.name}`}
+        >
           <DtIcon name="x" size={14} />
+          Delete
         </button>
       </div>
     </article>

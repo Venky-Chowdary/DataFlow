@@ -408,7 +408,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               onChange={setCategory}
               items={[
                 { id: "all", label: "All" },
-                ...AUTOMATION_CATEGORIES.map((c) => ({ id: c.id, label: c.label })),
+                ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
               ]}
             />
 

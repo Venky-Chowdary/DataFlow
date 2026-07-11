@@ -175,6 +175,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [mappingProgress, setMappingProgress] = useState(0);
+  const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [preflighting, setPreflighting] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -1183,9 +1185,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             tone: "warning",
           });
         } else {
+          setStep(STEP_RUN);
           toast({
             title: "Ready to transfer",
-            message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved for execution.`,
+            message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved — moved to Run step.`,
             tone: "success",
           });
         }
@@ -1225,9 +1228,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           tone: "warning",
         });
       } else {
+        setStep(STEP_RUN);
         toast({
           title: "Ready to transfer",
-          message: `All ${pf.total_gates} checks passed. Click Execute to move your data.`,
+          message: `All ${pf.total_gates} checks passed. Moved to Run step — execute when ready.`,
           tone: "success",
         });
       }
@@ -1482,6 +1486,35 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         : `New schema will be created in ${targetDb}.${targetCollection || "collection"}`;
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
 
+  useEffect(() => {
+    if (!(step === STEP_MAP && analyzing)) {
+      setMappingProgress(0);
+      setMappingPhase("Preparing schema context…");
+      return;
+    }
+
+    const phaseForProgress = (value: number) => {
+      if (value < 25) return "Preparing schema context…";
+      if (value < 55) return "Profiling semantic intent…";
+      if (value < 80) return "Matching source to destination fields…";
+      if (value < 95) return "Scoring confidence and policy checks…";
+      return "Finalizing mapping editor…";
+    };
+
+    setMappingProgress(10);
+    setMappingPhase(phaseForProgress(10));
+
+    const timer = window.setInterval(() => {
+      setMappingProgress((prev) => {
+        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 8)), 96);
+        setMappingPhase(phaseForProgress(next));
+        return next;
+      });
+    }, 260);
+
+    return () => window.clearInterval(timer);
+  }, [step, analyzing]);
+
   const transferInsightTone =
     transferring || activeJobId
       ? "live"
@@ -1620,6 +1653,15 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-card-body df2-analyzing">
             <Spinner />
             <p className="df2-analyzing-title">Mapping source to destination…</p>
+            <div className="df2-mapping-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={mappingProgress}>
+              <div className="df2-mapping-progress-meta">
+                <strong>{mappingProgress}%</strong>
+                <span>{mappingPhase}</span>
+              </div>
+              <div className="df2-mapping-progress-track">
+                <span className="df2-mapping-progress-fill" style={{ width: `${mappingProgress}%` }} />
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -2308,6 +2350,24 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
           <div className="df2-card-body df2-run-center">
+            <div className="df2-run-readiness" aria-label="Run readiness summary">
+              <div className="df2-run-readiness-head">
+                <span className="df2-badge df2-badge-live">
+                  <DtIcon name="check" size={12} /> Preflight passed
+                </span>
+                <span className="df2-run-readiness-score">
+                  {preflight ? `${preflight.passed_count}/${preflight.total_gates} checks` : "Validated"}
+                </span>
+              </div>
+              <div className="df2-run-readiness-route">
+                <strong>{sourceLabel}</strong>
+                <DtIcon name="transfer" size={14} />
+                <strong>{mapDestRouteLabel}</strong>
+              </div>
+              <p>
+                Execute now to start governed transfer with live theater progress and reconciliation evidence.
+              </p>
+            </div>
             <EmptyState
               icon="transfer"
               title="Ready to transfer"

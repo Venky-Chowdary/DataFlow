@@ -181,6 +181,7 @@ async def add_timing_header(request: Request, call_next):
 
 
 app.include_router(ai_router, prefix="/api/v1")
+app.include_router(saved_connectors_router, prefix="/api/v1")
 app.include_router(connectors_router, prefix="/api/v1")
 app.include_router(preflight_router, prefix="/api/v1")
 app.include_router(copilot_router, prefix="/api/v1")
@@ -190,7 +191,6 @@ app.include_router(mcp_router, prefix="/api/v1")
 app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")
-app.include_router(saved_connectors_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")

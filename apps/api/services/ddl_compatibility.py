@@ -9,6 +9,28 @@ from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_
 
 _VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.I)
+_SCHEMALESS_DESTS = {"mongodb", "dynamodb", "redis"}
+_DB_TYPE_ALIASES = {
+    "mongo": "mongodb",
+    "mongodb+srv": "mongodb",
+    "mongodb_atlas": "mongodb",
+    "atlas": "mongodb",
+    "cosmos-mongodb": "mongodb",
+    "cosmos_mongodb": "mongodb",
+    "documentdb": "mongodb",
+    "aws_documentdb": "mongodb",
+    "dynamo": "dynamodb",
+    "redis-kv": "redis",
+    "redis_kv": "redis",
+}
+
+
+def _ci_get(schema: dict[str, str], key: str) -> str | None:
+    key_l = key.lower()
+    for existing_key, value in schema.items():
+        if existing_key.lower() == key_l:
+            return value
+    return None
 
 
 def _max_string_len(values: list[str]) -> int:
@@ -32,6 +54,19 @@ def _sample_values(sample_rows: list[dict] | None, column: str) -> list[str]:
     return out
 
 
+def _normalize_dest_kind(dest_db_type: str | None) -> str:
+    raw = (dest_db_type or "postgresql").strip().lower().replace(" ", "_")
+    if raw in _DB_TYPE_ALIASES:
+        return _DB_TYPE_ALIASES[raw]
+    if raw.startswith("mongodb"):
+        return "mongodb"
+    if raw.startswith("dynamodb"):
+        return "dynamodb"
+    if raw.startswith("redis"):
+        return "redis"
+    return raw
+
+
 def _pk_candidates(mappings: list[dict]) -> list[str]:
     keys: list[str] = []
     for m in mappings:
@@ -46,12 +81,21 @@ def _pk_candidates(mappings: list[dict]) -> list[str]:
 def _duplicate_pk_in_source(
     sample_rows: list[dict] | None,
     mappings: list[dict],
+    *,
+    dest_kind: str,
 ) -> list[str]:
     if not sample_rows:
         return []
     issues: list[str] = []
     src_by_tgt = {str(m["target"]): str(m["source"]) for m in mappings if m.get("target")}
-    for tgt in _pk_candidates(mappings):
+
+    # For schemaless destinations, only `_id` is a true uniqueness contract.
+    if dest_kind in _SCHEMALESS_DESTS:
+        targets = ["_id"] if "_id" in {str(m.get("target", "")).lower() for m in mappings} else []
+    else:
+        targets = _pk_candidates(mappings)
+
+    for tgt in targets:
         src = src_by_tgt.get(tgt, tgt)
         seen: dict[str, int] = {}
         for row in sample_rows:
@@ -85,6 +129,8 @@ def evaluate_ddl_compatibility(
     source_schema = source_schema or {}
     target_schema = target_schema or {}
     issues: list[str] = []
+    dest_kind = _normalize_dest_kind(dest_db_type)
+    schemaless = dest_kind in _SCHEMALESS_DESTS
 
     if not mappings:
         return False, ["No column mappings defined"]
@@ -101,19 +147,19 @@ def evaluate_ddl_compatibility(
             issues.append(f"Duplicate target column in mapping contract: {tgt}")
         seen_targets.add(tgt_key)
 
-        src_type = source_schema.get(src, "VARCHAR")
-        tgt_type = target_schema.get(tgt)
+        src_type = _ci_get(source_schema, src) or "VARCHAR"
+        tgt_type = _ci_get(target_schema, tgt)
 
-        if table_exists and target_schema and tgt not in target_schema:
+        if not schemaless and table_exists and target_schema and tgt_type is None:
             issues.append(f"Target column '{tgt}' does not exist in destination table")
             continue
 
-        if tgt_type and is_lossy_coercion(src_type, tgt_type):
+        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             issues.append(
                 f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
             )
 
-        if sample_rows and tgt_type:
+        if not schemaless and sample_rows and tgt_type:
             samples = _sample_values(sample_rows, src)
             if samples:
                 width = _parse_varchar_width(tgt_type)
@@ -135,7 +181,7 @@ def evaluate_ddl_compatibility(
                             )
                             break
 
-        if not table_exists and allow_create:
+        if not schemaless and not table_exists and allow_create:
             inferred_ddl = ddl_type(dest_db_type, src_type)
             width = _parse_varchar_width(inferred_ddl)
             if width is not None and sample_rows:
@@ -145,13 +191,14 @@ def evaluate_ddl_compatibility(
                         f"Proposed DDL {inferred_ddl} for {tgt} may truncate values (max {max_len} chars)"
                     )
 
-    issues.extend(_duplicate_pk_in_source(sample_rows, mappings))
+    issues.extend(_duplicate_pk_in_source(sample_rows, mappings, dest_kind=dest_kind))
 
-    if table_exists and target_schema:
-        mapped_targets = {str(m.get("target")) for m in mappings if m.get("target")}
+    if not schemaless and table_exists and target_schema:
+        mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
         required_unmapped = [
-            c for c in target_schema
-            if c.lower().endswith("_id") and c not in mapped_targets and c.lower() not in {"id", "_id"}
+            c
+            for c in target_schema
+            if c.lower().endswith("_id") and c.lower() not in mapped_targets and c.lower() not in {"id", "_id"}
         ]
         if required_unmapped[:3]:
             issues.append(

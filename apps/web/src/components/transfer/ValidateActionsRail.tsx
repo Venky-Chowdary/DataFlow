@@ -37,6 +37,7 @@ export function ValidateActionsRail({
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
   const evidenceSummary = preflight?.proof_bundle?.evidence_summary || "Deterministic proof signals ready for operator review.";
+  const firstBlocker = preflight?.blockers?.[0]?.message;
 
   return (
     <aside className="df2-validate-rail" aria-label="Validation actions">
@@ -117,22 +118,31 @@ export function ValidateActionsRail({
           </button>
         )}
 
-        {passed && !transferLaunch && (
+        {preflight && !transferLaunch && (
           <button
             type="button"
             className="df2-btn df2-btn-primary df2-btn-lg"
             onClick={onExecute}
-            disabled={transferring}
+            disabled={transferring || !passed}
+            title={!passed ? `Blocked: ${firstBlocker || "Resolve failed checks and re-run preflight"}` : undefined}
           >
             {transferring ? (
               <ButtonLoader label="Starting…" />
             ) : (
               <>
                 <DtIcon name="transfer" size={18} />
-                Execute transfer{rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}
+                {passed
+                  ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
+                  : "Execute transfer (blocked)"}
               </>
             )}
           </button>
+        )}
+
+        {blocked && firstBlocker && (
+          <p className="df2-validate-rail-explain">
+            Run is blocked: {firstBlocker}
+          </p>
         )}
       </div>
     </aside>
