@@ -490,6 +490,318 @@
   color: #92400e;
 }
 
+/* Run launch sequence */
+.df2-run-launch {
+  display: grid;
+  gap: 12px;
+  align-content: center;
+  min-height: 320px;
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.df2-run-launch-kicker {
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #0f766e;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+}
+
+.df2-run-launch h3 {
+  margin: 0;
+  font-size: clamp(22px, 2.1vw, 28px);
+  line-height: 1.15;
+  color: #0f172a;
+}
+
+.df2-run-launch > p {
+  margin: 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.df2-run-launch-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #dbe5f0;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f8fafc 100%);
+}
+
+.df2-run-launch-route strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-run-launch-route .dt-icon {
+  color: #64748b;
+}
+
+.df2-run-launch-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.df2-run-launch-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.df2-run-launch-progress-meta strong {
+  color: #0f766e;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-run-launch-progress-track {
+  height: 10px;
+  border-radius: 999px;
+  background: #dbe4ef;
+  overflow: hidden;
+}
+
+.df2-run-launch-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #0f766e 0%, #14b8a6 60%, #22d3ee 100%);
+  transition: width 260ms ease;
+  position: relative;
+}
+
+.df2-run-launch-progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.55) 45%, transparent 100%);
+  transform: translateX(-100%);
+  animation: df2-run-launch-shimmer 1.6s linear infinite;
+}
+
+.df2-run-launch-stages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.df2-run-launch-stage {
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.df2-run-launch-stage.done {
+  border-color: #99f6e4;
+  color: #0f766e;
+  background: #f0fdfa;
+}
+
+.df2-run-launch-stage.active {
+  border-color: #7dd3fc;
+  color: #0c4a6e;
+  background: #eff6ff;
+}
+
+.df2-run-launch-foot {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 12px;
+}
+
+@keyframes df2-run-launch-shimmer {
+  to { transform: translateX(100%); }
+}
+
+/* Job theater v3 enterprise polish */
+.df2-run-step .df2-theater-v3 {
+  border-color: #dbe5f0;
+  background:
+    radial-gradient(1100px 240px at 92% -35%, rgba(20, 184, 166, 0.09), transparent 55%),
+    linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+}
+
+.df2-run-step .df2-theater-v3-header {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e8eef6;
+}
+
+.df2-theater-v3-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.df2-theater-v3-live-pill::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.df2-theater-v3-live-pill.is-live {
+  color: #0f766e;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.df2-theater-v3-live-pill.is-live::before {
+  animation: df2-theater-live-pulse 1.2s ease-in-out infinite;
+}
+
+.df2-theater-v3-live-pill.is-done {
+  color: #166534;
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+}
+
+.df2-theater-v3-live-pill.is-failed {
+  color: #b91c1c;
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.df2-theater-v3-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-theater-v3-sla {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.df2-theater-v3-sla-card {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #dbe5f0;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.df2-theater-v3-sla-card span {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+
+.df2-theater-v3-sla-card strong {
+  font-size: 15px;
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-theater-v3-sla-card small {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.df2-theater-v3-op-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid #dbe5f0;
+  background: #f8fbff;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.df2-theater-v3-op-chip .dt-icon {
+  color: #0f766e;
+}
+
+.df2-run-step .df2-theater-v3-progress-block {
+  border-color: #dde7f2;
+  background: linear-gradient(180deg, #f8fbff 0%, #f4f8fc 100%);
+}
+
+.df2-run-step .df2-theater-v3-metric {
+  background: #ffffff;
+  border-color: #dbe5f0;
+}
+
+.df2-run-step .df2-theater-v3-phase {
+  min-width: 82px;
+}
+
+.df2-run-step .df2-theater-v3-phase.skipped {
+  background: #f8fafc;
+  color: #94a3b8;
+}
+
+.df2-run-step .df2-theater-v3-log {
+  border: 1px solid #253449;
+  background: linear-gradient(180deg, #0f172a 0%, #101b31 100%);
+}
+
+.df2-theater-v3-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -2px 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
+}
+
+.df2-theater-v3-log-head strong {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.df2-theater-v3-log-head span {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+@keyframes df2-theater-live-pulse {
+  0%,
+  100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}
+
 /* Job Theater v2 */
 .df2-theater-v2 {
   display: flex;

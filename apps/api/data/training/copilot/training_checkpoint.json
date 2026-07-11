@@ -1,6 +1,6 @@
 {
-  "run_id": "aab9184f",
-  "completed_at": "2026-07-11T12:38:27.013122+00:00",
+  "run_id": "6ae27bc7",
+  "completed_at": "2026-07-11T21:42:45.501620+00:00",
   "metrics": {
     "universal_schemas": 6089,
     "upload_schemas": 4673,
@@ -16,7 +16,7 @@
     "agent_action_examples": 803,
     "data_grounded_examples": 120,
     "catalog_docs_total": 726,
-    "semantic_examples": 2160,
+    "semantic_examples": 2165,
     "rag_documents_ingested": 14730,
     "catalog_docs_ingested": 726,
     "artifact_paths": {

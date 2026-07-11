@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
-import { JobProgress } from "../lib/types";
+import { JobPhase, JobProgress } from "../lib/types";
 import { streamJobProgress } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
 
@@ -25,6 +25,14 @@ const PHASES = [
   { id: "completed", label: "Done" },
 ];
 
+const PHASE_LABELS: Record<string, string> = {
+  preflight: "Gates",
+  extract: "Extract",
+  transform: "Transform",
+  load: "Load",
+  reconcile: "Reconcile",
+};
+
 function phaseIndex(phase?: string, status?: string): number {
   if (status === "completed") return 5;
   if (status === "failed") return -1;
@@ -37,6 +45,12 @@ function formatDuration(ms: number): string {
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return `${m}m ${s % 60}s`;
+}
+
+function toEpochMs(value?: string): number | null {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 export function JobTheater({
@@ -99,7 +113,36 @@ export function JobTheater({
   const isFailed = job?.status === "failed";
   const isComplete = job?.status === "completed";
   const isRunning = !isFailed && !isComplete;
-  const elapsed = Date.now() - startRef.current;
+  const startMs = toEpochMs(job?.started_at) ?? startRef.current;
+  const endMs = toEpochMs(job?.completed_at) ?? Date.now();
+  const elapsed = Math.max(0, endMs - startMs);
+
+  const destinationSummary = (job?.destination_summary ?? {}) as Record<string, unknown>;
+  const rejectedRows = Number(job?.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
+  const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
+  const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
+  const rejectionRate = processed > 0 && rejectedRows > 0 ? (rejectedRows / processed) * 100 : 0;
+
+  const timelinePhases = useMemo(() => {
+    if (job?.phases?.length) {
+      return job.phases.map((phase: JobPhase) => ({
+        id: phase.name,
+        label: PHASE_LABELS[phase.name] ?? phase.name,
+        state: phase.status,
+      }));
+    }
+
+    return PHASES.map((phase, i) => {
+      const state = isFailed && i === currentPhase ? "failed"
+        : i < currentPhase || isComplete ? "done"
+        : i === currentPhase ? "active"
+        : "pending";
+      return { id: phase.id, label: phase.label, state };
+    });
+  }, [job?.phases, isFailed, currentPhase, isComplete]);
+
+  const activePhase = timelinePhases.find((p) => p.state === "active");
+  const phaseLabel = activePhase?.label || (isComplete ? "Done" : isFailed ? "Failed" : "Queued");
 
   const eta = useMemo(() => {
     if (!isRunning || throughput <= 0 || total <= processed) return null;
@@ -139,10 +182,46 @@ export function JobTheater({
           </div>
         </div>
         <div className="df2-theater-v3-header-meta">
+          <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isComplete ? "is-done" : "is-failed"}`}>
+            {isRunning ? "Control plane live" : isComplete ? "Run finalized" : "Operator attention"}
+          </span>
           <span className={jobStatusBadgeClass(job.status)}>{job.status}</span>
           <span className="df2-theater-v3-job-id" title={jobId}>#{jobId.slice(0, 8)}</span>
         </div>
       </header>
+
+      <div className="df2-theater-v3-ops" aria-label="Execution posture">
+        <span className="df2-theater-v3-op-chip">
+          <DtIcon name="gate" size={12} />
+          Guardrails enforced
+        </span>
+        <span className="df2-theater-v3-op-chip">
+          <DtIcon name="activity" size={12} />
+          Phase: {phaseLabel}
+        </span>
+        <span className="df2-theater-v3-op-chip">
+          <DtIcon name="jobs" size={12} />
+          Job #{jobId.slice(0, 8)}
+        </span>
+      </div>
+
+      <div className="df2-theater-v3-sla" aria-label="Execution quality and evidence">
+        <article className="df2-theater-v3-sla-card">
+          <span>Rejected rows</span>
+          <strong>{rejectedRows.toLocaleString()}</strong>
+          <small>{rejectionRate > 0 ? `${rejectionRate.toFixed(2)}% of processed` : "No rejections reported"}</small>
+        </article>
+        <article className="df2-theater-v3-sla-card">
+          <span>Writer warnings</span>
+          <strong>{warningCount.toLocaleString()}</strong>
+          <small>{warningCount ? "Review warnings in destination summary" : "No destination warnings"}</small>
+        </article>
+        <article className="df2-theater-v3-sla-card">
+          <span>Checksum evidence</span>
+          <strong>{checksum ? checksum.slice(0, 12) : "Unavailable"}</strong>
+          <small>{checksum ? "Writer checksum captured" : "Pending writer checksum"}</small>
+        </article>
+      </div>
 
       <div className="df2-theater-v3-progress-block">
         <div className="df2-theater-v3-progress-top">
@@ -220,16 +299,14 @@ export function JobTheater({
       </div>
 
       <div className="df2-theater-v3-phases" aria-label="Pipeline phases">
-        {PHASES.map((phase, i) => {
-          const state = isFailed && i === currentPhase ? "failed"
-            : i < currentPhase || isComplete ? "done"
-            : i === currentPhase ? "active"
-            : "pending";
+        {timelinePhases.map((phase) => {
+          const state = phase.state;
           return (
             <div key={phase.id} className={`df2-theater-v3-phase ${state}`}>
               <span className="df2-theater-v3-phase-dot" aria-hidden>
                 {state === "done" && <DtIcon name="check" size={10} />}
                 {state === "failed" && <DtIcon name="x" size={10} />}
+                {state === "skipped" && <span>—</span>}
               </span>
               <span className="df2-theater-v3-phase-label">{phase.label}</span>
             </div>
@@ -257,11 +334,11 @@ export function JobTheater({
         </div>
       )}
 
-      {job.rejected_rows != null && job.rejected_rows > 0 && (
+      {rejectedRows > 0 && (
         <div className="df2-theater-v3-alert warn">
           <DtIcon name="alert" size={18} />
           <div>
-            <strong>{job.rejected_rows.toLocaleString()} rows rejected</strong>
+            <strong>{rejectedRows.toLocaleString()} rows rejected</strong>
             <p>Review rejected details in the event log.</p>
           </div>
         </div>
@@ -275,6 +352,10 @@ export function JobTheater({
           </button>
           {logOpen && (
             <div className="df2-theater-v3-log" ref={logRef}>
+              <div className="df2-theater-v3-log-head">
+                <strong>Execution events</strong>
+                <span>{log.length} updates</span>
+              </div>
               {log.map((line, i) => (
                 <div key={i}>{line}</div>
               ))}

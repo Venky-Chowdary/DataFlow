@@ -20,7 +20,7 @@ interface JobDetailRecord extends JobProgress {
     sync_mode?: string;
     validation_mode?: string;
   };
-  phases?: { name: string; status: string; message?: string }[];
+  phases?: { name: string; status: "pending" | "active" | "done" | "failed" | "skipped"; message?: string }[];
   ddl_log?: string[];
   started_at?: string;
   completed_at?: string;

@@ -33,6 +33,15 @@ export interface TransferJob {
   error?: string;
   chunk_current?: number;
   chunk_total?: number;
+  updated_at?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface JobPhase {
+  name: string;
+  status: "pending" | "active" | "done" | "failed" | "skipped";
+  message?: string;
 }
 
 export interface JobProgress extends TransferJob {
@@ -43,6 +52,7 @@ export interface JobProgress extends TransferJob {
   rejected_rows?: number;
   rejected_details?: { row?: number; column?: string; reason?: string; value?: string }[];
   destination_summary?: Record<string, unknown>;
+  phases?: JobPhase[];
 }
 
 export interface CsvValidationReport {

@@ -80,6 +80,13 @@ const STEPS = [
   { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
 ];
 
+const RUN_LAUNCH_STAGES = [
+  "Submitting governed job request",
+  "Locking approved mapping revision",
+  "Provisioning destination writer",
+  "Opening live telemetry stream",
+] as const;
+
 const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_blob", "adls"]);
 
 const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
@@ -222,6 +229,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [liveRouteCount, setLiveRouteCount] = useState<number | null>(null);
   const [transferLaunch, setTransferLaunch] = useState<{ jobId: string; rows: number } | null>(null);
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
+  const [runStartupProgress, setRunStartupProgress] = useState(0);
+  const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
   const mappingReviewCount = columnMappings.filter(
@@ -1284,6 +1293,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     const enforcePreflight = destKindMode === "database";
 
     setTransferring(true);
+    setStep(STEP_RUN);
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
@@ -1328,14 +1338,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         planId: persistedPlanId ?? undefined,
       });
       if (data.job_id && (data as { async?: boolean }).async) {
-        setTransferLaunch({
-          jobId: data.job_id,
-          rows: parsed?.row_count ?? sourceRowEstimate ?? 0,
-        });
+        setActiveJobId(data.job_id);
         setTransferring(false);
         toast({
           title: "Transfer started",
-          message: "Review the summary, then open live progress when ready.",
+          message: "Live theater is now tracking throughput, phases, and reconciliation in real time.",
           tone: "success",
         });
         return;
@@ -1514,6 +1521,35 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
     return () => window.clearInterval(timer);
   }, [step, analyzing]);
+
+  useEffect(() => {
+    const isLaunching = step === STEP_RUN && transferring && !activeJobId && !result;
+    if (!isLaunching) {
+      setRunStartupProgress(0);
+      setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
+      return;
+    }
+
+    const phaseForProgress = (value: number) => {
+      if (value < 25) return RUN_LAUNCH_STAGES[0];
+      if (value < 50) return RUN_LAUNCH_STAGES[1];
+      if (value < 75) return RUN_LAUNCH_STAGES[2];
+      return RUN_LAUNCH_STAGES[3];
+    };
+
+    setRunStartupProgress(12);
+    setRunStartupPhase(phaseForProgress(12));
+
+    const timer = window.setInterval(() => {
+      setRunStartupProgress((prev) => {
+        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 6)), 94);
+        setRunStartupPhase(phaseForProgress(next));
+        return next;
+      });
+    }, 280);
+
+    return () => window.clearInterval(timer);
+  }, [step, transferring, activeJobId, result]);
 
   const transferInsightTone =
     transferring || activeJobId
@@ -2384,8 +2420,42 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
       {step === STEP_RUN && transferring && !activeJobId && !result && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body df2-run-center df2-analyzing">
-            <ButtonLoader label="Starting transfer…" />
+          <div className="df2-card-body df2-run-launch">
+            <span className="df2-run-launch-kicker">Live control plane</span>
+            <h3>Transfer engine is preparing execution</h3>
+            <p>{runStartupPhase}</p>
+
+            <div className="df2-run-launch-route" aria-label="Transfer route">
+              <strong title={sourceLabel}>{sourceLabel}</strong>
+              <DtIcon name="transfer" size={14} />
+              <strong title={mapDestRouteLabel}>{mapDestRouteLabel}</strong>
+            </div>
+
+            <div className="df2-run-launch-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runStartupProgress}>
+              <div className="df2-run-launch-progress-meta">
+                <span>Initializing transfer job</span>
+                <strong>{runStartupProgress}%</strong>
+              </div>
+              <div className="df2-run-launch-progress-track">
+                <span className="df2-run-launch-progress-fill" style={{ width: `${runStartupProgress}%` }} />
+              </div>
+            </div>
+
+            <div className="df2-run-launch-stages" aria-label="Launch stages">
+              {RUN_LAUNCH_STAGES.map((stage, idx) => {
+                const state = runStartupProgress >= (idx + 1) * 25 ? "done" : runStartupProgress >= idx * 25 ? "active" : "pending";
+                return (
+                  <span key={stage} className={`df2-run-launch-stage ${state}`}>
+                    {stage}
+                  </span>
+                );
+              })}
+            </div>
+
+            <div className="df2-run-launch-foot">
+              <Spinner size="sm" />
+              <span>Establishing telemetry stream and destination writer...</span>
+            </div>
           </div>
         </div>
       )}
