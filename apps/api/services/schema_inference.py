@@ -8,6 +8,14 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from services.transform_engine import (
+    _parse_boolean,
+    _parse_date,
+    _parse_datetime,
+    _parse_decimal,
+    NULL_SENTINELS,
+)
+
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
     "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP",
@@ -41,7 +49,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def _classify_value(value: str) -> str:
     s = value.strip()
-    if not s:
+    if not s or s.lower() in NULL_SENTINELS:
         return "VARCHAR"
 
     if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
@@ -57,54 +65,20 @@ def _classify_value(value: str) -> str:
     if _is_base64(s):
         return "BINARY"
 
-    low = s.lower()
-    if low in {"true", "false", "yes", "no", "y", "n"}:
-        return "BOOLEAN"
-    if low in {"0", "1"} and len(s) == 1:
+    if _parse_boolean(s) is not None:
         return "BOOLEAN"
 
-    if _EPOCH_MS_RE.match(s):
+    if _parse_date(s) is not None:
+        return "DATE"
+
+    if _parse_datetime(s) is not None:
         return "TIMESTAMP"
-    if _EPOCH_S_RE.match(s):
-        return "TIMESTAMP"
 
-    if _YYYYMMDD_RE.match(s):
-        try:
-            datetime.strptime(s, "%Y%m%d")
-            return "DATE"
-        except ValueError:
-            pass
-
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S%z",
-    ):
-        try:
-            datetime.strptime(s.replace("Z", "+0000"), fmt.replace("Z", "+0000"))
-            return "TIMESTAMP"
-        except ValueError:
-            continue
-
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            datetime.strptime(s, fmt)
-            return "DATE"
-        except ValueError:
-            continue
-
-    cleaned = s.replace(",", "")
-    if re.match(r"^-?\d+$", cleaned):
-        return "INTEGER"
-    try:
-        float(cleaned)
-        if "." in cleaned or "e" in cleaned.lower():
+    decimal_parsed = _parse_decimal(s)
+    if decimal_parsed is not None:
+        if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
         return "INTEGER"
-    except ValueError:
-        pass
 
     if len(s) > 255:
         return "TEXT"
