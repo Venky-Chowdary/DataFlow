@@ -53,7 +53,7 @@ def resolve_transform(
         mapping["source"],
         mapping["target"],
         column_types.get(mapping["source"], "VARCHAR"),
-        dest_types.get(mapping["target"]) or mapping.get("target_type"),
+        mapping.get("target_type") or dest_types.get(mapping["target"]),
     )
 
 

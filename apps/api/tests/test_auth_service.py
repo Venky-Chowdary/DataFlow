@@ -2,7 +2,7 @@ from src.services.auth_service import authenticate, create_token, hash_password,
 
 
 def test_hash_and_login():
-    assert hash_password("password123") == "527ebe0507adc1c8d2260420e4f70e1ae6e61f24ec6bcf54e827c1afba8b2810"
+    assert hash_password("password123") == "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
     user = authenticate("test@gmail.com", "password123")
     assert user is not None
     assert user["email"] == "test@gmail.com"

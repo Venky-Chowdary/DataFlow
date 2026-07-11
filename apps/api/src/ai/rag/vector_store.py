@@ -46,16 +46,20 @@ class DataTransferVectorStore:
         self._init_backend()
 
     def _init_backend(self):
-        try:
-            import chromadb
-            os.makedirs(self.persist_dir, exist_ok=True)
-            client = chromadb.PersistentClient(path=self.persist_dir)
-            self._collection = client.get_or_create_collection(
-                name=self.COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"},
-            )
-            self._backend = "chromadb"
-        except ImportError:
+        os.makedirs(self.persist_dir, exist_ok=True)
+        backend = os.environ.get("DATAFLOW_VECTOR_STORE_BACKEND", "memory").lower()
+        if backend == "chromadb":
+            try:
+                import chromadb
+                client = chromadb.PersistentClient(path=self.persist_dir)
+                self._collection = client.get_or_create_collection(
+                    name=self.COLLECTION_NAME,
+                    metadata={"hnsw:space": "cosine"},
+                )
+                self._backend = "chromadb"
+            except ImportError:
+                self._backend = "memory"
+        else:
             self._backend = "memory"
 
     @property

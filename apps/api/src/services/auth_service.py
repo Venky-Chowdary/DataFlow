@@ -19,7 +19,7 @@ _ALLOW_DEV_USER = os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() in ("1", "tr
 # SHA-256 of "password123" for test@gmail.com (dev/staging only)
 _DEV_USER = {
     "email": "test@gmail.com",
-    "password_hash": "527ebe0507adc1c8d2260420e4f70e1ae6e61f24ec6bcf54e827c1afba8b2810",
+    "password_hash": "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f",
     "name": "Test User",
     "role": "Workspace tester",
 }

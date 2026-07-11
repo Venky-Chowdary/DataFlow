@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from connectors.driver_guard import stub_writes_allowed
+from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
@@ -59,11 +61,20 @@ def write_mapped_rows(
     table_name = sanitize_identifier(table_name)
     policy = transform_error_policy(error_policy)
 
+    if stub_writes_allowed():
+        rows, checksum, chunks = simulate_stub_write(
+            data_rows=data_rows, table_name=table_name, target_schema=dataset_id,
+            on_checkpoint=on_checkpoint,
+        )
+        return WriteResult(
+            ok=True, rows_written=rows, table_name=table_name, target_schema=dataset_id,
+            checksum=checksum, chunks_completed=chunks, driver="stub",
+        )
+
     try:
         from google.cloud import bigquery  # noqa: F401
     except ImportError:
-        from connectors.driver_guard import require_driver, stub_writes_allowed
-        from connectors.stub_writer import simulate_stub_write
+        from connectors.driver_guard import require_driver
 
         if not stub_writes_allowed():
             return WriteResult(
