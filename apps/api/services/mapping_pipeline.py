@@ -19,11 +19,19 @@ def classify_format(source_columns: list[str], file_format: str | None = None) -
     semantic_hits = 0
     for col in source_columns[:12]:
         analyzed = analyze_column(col, "VARCHAR", [])
-        if analyzed.get("semantic_type") not in ("unknown", "text", ""):
+        if analyzed.get("detection_source") != "unknown":
             semantic_hits += 1
 
     hints = [c.upper() for c in source_columns[:8]]
-    payment_tokens = {"AMT", "CUST_ID", "TXN_DT", "ACCT_NO", "CCY", "REF_NO", "PAY_AMT"}
+    payment_tokens = {
+        "AMT", "PAY_AMT", "PAY_AMOUNT", "PAYMENT_AMOUNT",
+        "PAYMENT", "PAY", "PMT", "PYMT",
+        "TXN_AMT", "TRANSACTION_AMOUNT",
+        "TXN_DT", "TRANSACTION_DATE", "PAY_DATE", "PAYMENT_DATE",
+        "PAY_DT", "VALUE_DATE", "DTPMT",
+        "CUST_ID", "ACCT_NO", "REF_NO", "CCY", "CURRENCY", "CURRENCY_CODE",
+        "PAYMENT_ID", "MERCHANT_ID", "PAYER_ID", "BENEFICIARY_ACCOUNT",
+    }
     overlap = len(set(hints) & payment_tokens)
 
     if overlap >= 2:

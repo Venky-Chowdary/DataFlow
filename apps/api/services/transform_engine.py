@@ -20,7 +20,17 @@ DATE_PATTERNS = (
     "%d/%m/%Y",
     "%Y/%m/%d",
     "%m-%d-%Y",
+    "%d-%m-%Y",
     "%Y%m%d",
+    "%d.%m.%Y",
+    "%Y.%m.%d",
+    "%d-%b-%Y",
+    "%d-%B-%Y",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%Y-%b-%d",
 )
 
 DATETIME_PATTERNS = (
@@ -31,6 +41,53 @@ DATETIME_PATTERNS = (
     "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S%z",
     "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y/%m/%d %H:%M:%S",
+    "%m/%d/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S",
+    "%m-%d-%Y %H:%M:%S",
+    "%d-%m-%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%Y-%m-%d %I:%M %p",
+    "%d-%b-%Y %H:%M:%S",
+    "%d-%B-%Y %H:%M:%S",
+)
+
+# Values that are unambiguously empty/missing for non-string types.
+NULL_SENTINELS = frozenset({
+    "null", "none", "nil", "undefined", "n/a", "na", "nan", "",
+    "-", "--", "—", "empty", "blank", "missing", "not available",
+    "not applicable", "not_applicable",
+})
+
+# Currency symbols and codes that are safe to strip from numeric values.
+_CURRENCY_SYMBOLS = "".join({
+    "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₴", "₱", "₫", "₭", "₦", "₲",
+    "₮", "₣", "₤", "₨", "₪", "₸", "₾", "₼", "₿", "Ξ", "Ð", "₳", "✕", "Ł",
+    "⚛", "∞", "Ȧ", "฿", "﷼", "؋", "৳",
+})
+
+# ISO / common letter codes and regional dollar notations.
+_CURRENCY_CODES = "|".join(sorted({
+    "USD", "EUR", "GBP", "INR", "JPY", "CNY", "CAD", "AUD", "CHF", "SEK",
+    "DKK", "NOK", "NZD", "SGD", "HKD", "MXN", "BRL", "ZAR", "SAR", "AED",
+    "KRW", "RUB", "TRY", "PLN", "THB", "IDR", "MYR", "PHP", "VND", "CZK",
+    "HUF", "ILS", "CLP", "PEN", "COP", "ARS", "PKR", "BDT", "EGP", "NGN",
+    "KES", "GHS", "XOF", "XAF", "XCD", "XPF", "XDR", "USDC", "USDT", "BUSD",
+    "DAI", "BTC", "ETH", "DOGE", "ADA", "SOL", "XRP", "LTC", "BCH", "BNB",
+    "DOT", "MATIC", "LINK", "UNI", "AAVE", "MKR", "COMP", "CRV", "SUSHI",
+    "1INCH", "YFI", "BAL", "GRT", "SNX", "ZRX", "KNC", "BNT", "REN", "ANT",
+    "BAND", "KAVA", "SC", "OCEAN", "STORJ", "FET", "AGIX", "RNDR", "COTI",
+    "CELO", "NEAR", "ALGO", "XLM", "VET", "TRX", "EOS", "XTZ", "AVAX", "LDO",
+    "ATOM", "IMX", "GALA", "MANA", "SAND", "ENJ", "AXS", "GODS", "BICO", "ANKR",
+}, key=len, reverse=True))
+
+_CURRENCY_RE = re.compile(
+    rf"(?:^|\s)({_CURRENCY_CODES})(?:\s|$)|"
+    rf"(?:^|\s)(US\$|A\$|C\$|HK\$|NZ\$|S\$|MX\$|R\$|CA\$|AU\$|SG\$)(?:\s|$)|"
+    rf"(?:^|\s)(Rs\.?|Rp|RM|kr|Ft|Kč|zł|lei|лв|ден|ман|Нэм|CHF|Fr\.?|SFr)(?:\s|$)|"
+    rf"[{re.escape(_CURRENCY_SYMBOLS)}]",
+    re.IGNORECASE,
 )
 
 
@@ -47,7 +104,7 @@ def _parse_datetime(value: str) -> str | None:
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
         return _to_utc_z(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
-    if re.match(r"^\d{10}$", text):
+    if _EPOCH_S_RE.match(text):
         return _to_utc_z(datetime.fromtimestamp(int(text), tz=timezone.utc))
     try:
         iso = text.replace("Z", "+00:00")
@@ -65,12 +122,21 @@ def _parse_datetime(value: str) -> str | None:
 
 
 _EPOCH_MS_RE = re.compile(r"^\d{13}$")
+_EPOCH_S_RE = re.compile(r"^\d{10}$")
 
 
 def _parse_date(value: str) -> str | None:
     text = value.strip()
     if not text:
         return None
+    if text.lower() in NULL_SENTINELS:
+        return None
+    # Plain YYYYMMDD integer
+    if re.match(r"^\d{8}$", text):
+        try:
+            return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
     for fmt in DATE_PATTERNS:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
@@ -80,9 +146,11 @@ def _parse_date(value: str) -> str | None:
 
 
 def _normalize_numeric_text(value: str) -> str:
-    """Normalize unicode spaces, accounting formats, and percent suffixes."""
+    """Normalize unicode spaces, currency markers, accounting negatives, and percent signs."""
     text = unicodedata.normalize("NFKC", value)
-    for ch in ("\u00a0", "\u2007", "\u202f", "\u2009"):
+    for ch in ("\u00a0", "\u2007", "\u202f", "\u2009", "\u2002", "\u2003",
+               "\u2000", "\u2001", "\u2004", "\u2005", "\u2006", "\u2008",
+               "\u200a", "\u205f", "\u3000"):
         text = text.replace(ch, "")
     text = text.strip()
     if text.endswith("%"):
@@ -92,21 +160,59 @@ def _normalize_numeric_text(value: str) -> str:
         text = f"-{text[1:-1].strip()}"
     if text.endswith("-") and text[:-1].strip():
         text = f"-{text[:-1].strip()}"
+    # Remove currency symbols and common codes.
+    text = _CURRENCY_RE.sub("", text)
+    return text.strip()
+
+
+def _normalize_locale_separators(text: str) -> str | None:
+    """Resolve . / , separator ambiguity into a decimal string.
+
+    Returns None for unambiguous null sentinels and values that are not
+    parseable numbers.
+    """
+    if text.lower() in NULL_SENTINELS:
+        return None
+    if not text:
+        return None
+    if "." in text and "," in text:
+        last_dot = text.rfind(".")
+        last_comma = text.rfind(",")
+        if last_dot > last_comma:
+            return text.replace(",", "")
+        text = text.replace(".", "")
+        return text[:last_comma] + "." + text[last_comma + 1:]
+    if "," in text:
+        parts = text.split(",")
+        if parts[0] and not parts[0].startswith("0") and all(
+            part.isdigit() and len(part) == 3 for part in parts[1:]
+        ):
+            return text.replace(",", "")
+        # Comma is used as decimal separator.
+        if len(parts) == 2:
+            return parts[0] + "." + parts[1]
+        return None
+    if "." in text:
+        parts = text.split(".")
+        if len(parts) > 2 and parts[0] and not parts[0].startswith("0") and all(
+            part.isdigit() and len(part) == 3 for part in parts[1:]
+        ):
+            return text.replace(".", "")
+        return text
     return text
 
 
 def _parse_decimal(value: str) -> str | None:
     text = _normalize_numeric_text(value.strip())
-    for sym in ("$", "€", "£", "¥", "₹", "₩"):
-        text = text.replace(sym, "")
-    text = text.replace(",", "").strip()
-    if not text:
+    text = _normalize_locale_separators(text)
+    if text is None or text == "":
         return None
     try:
         dec = Decimal(text)
     except InvalidOperation:
         return None
 
+    # Percent is parsed as the numeric value (50% -> 50) to preserve magnitude.
     # Scientific notation: 1.5e3, 2E-4. Convert to fixed-point form so
     # downstream numeric checks stay stable and comparable across formats.
     if "e" in text.lower():
@@ -118,8 +224,9 @@ def _parse_decimal(value: str) -> str | None:
 
 
 def _parse_integer(value: str) -> int | None:
-    text = _normalize_numeric_text(value.strip()).replace(",", "")
-    if not text:
+    text = _normalize_numeric_text(value.strip())
+    text = _normalize_locale_separators(text)
+    if text is None or text == "":
         return None
     if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
         try:
@@ -140,9 +247,11 @@ def _parse_integer(value: str) -> int | None:
 
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
-    if text in {"true", "t", "yes", "y", "1"}:
+    if text in NULL_SENTINELS:
+        return None
+    if text in {"true", "t", "yes", "y", "1", "on", "enabled", "active", "ok", "aye", "positive"}:
         return True
-    if text in {"false", "f", "no", "n", "0"}:
+    if text in {"false", "f", "no", "n", "0", "off", "disabled", "inactive", "nope", "negative"}:
         return False
     return None
 
@@ -267,6 +376,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     text = str(raw).strip()
     if text == "":
         return None, None
+
+    # Null/missing sentinels for typed transforms are treated as None.
+    if transform in {"decimal", "integer", "boolean", "date", "datetime", "json", "uuid", "binary"}:
+        if text.lower() in NULL_SENTINELS:
+            return None, None
 
     if transform == "decimal":
         parsed = _parse_decimal(text)

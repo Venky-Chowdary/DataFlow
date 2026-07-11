@@ -8,6 +8,13 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from services.transform_engine import (
+    _parse_boolean,
+    _parse_date,
+    _parse_datetime,
+    _parse_decimal,
+    NULL_SENTINELS,
+)
 
 _BOOLEAN_FIELD_RE = re.compile(
     r"(?:^|_)(?:is|has|was|are|can|should|will|do|does|did|enable|enabled|disabled|active|flag|bool|status|"
@@ -17,7 +24,6 @@ _BOOLEAN_FIELD_RE = re.compile(
     r"\d*(?:$|_)",
     re.I,
 )
-
 
 # Values accepted as boolean when the field name looks boolean
 _BOOLEAN_STRINGS = {
@@ -39,6 +45,8 @@ _UUID_RE = re.compile(
     re.I,
 )
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_YYYYMMDD_RE = re.compile(r"^\d{8}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _is_base64(value: str) -> bool:
@@ -53,15 +61,11 @@ def _is_base64(value: str) -> bool:
     if s.isalpha() and len(s) > 32:
         return False
     return True
-_EPOCH_MS_RE = re.compile(r"^\d{13}$")
-_EPOCH_S_RE = re.compile(r"^\d{10}$")
-_YYYYMMDD_RE = re.compile(r"^\d{8}$")
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _classify_value(value: str) -> str:
     s = value.strip()
-    if not s:
+    if not s or s.lower() in NULL_SENTINELS:
         return "VARCHAR"
 
     if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
@@ -77,41 +81,18 @@ def _classify_value(value: str) -> str:
     if _is_base64(s):
         return "BINARY"
 
-    low = s.lower()
-    if low in {"true", "false", "yes", "no", "y", "n", "t", "f"}:
+    boolean_parsed = _parse_boolean(s)
+    if boolean_parsed is not None:
+        # Defer 0/1 disambiguation to infer_type, where the field name is known.
+        if s in {"0", "1"}:
+            return "INTEGER"
         return "BOOLEAN"
 
-    if _EPOCH_MS_RE.match(s):
+    if _parse_date(s) is not None:
+        return "DATE"
+
+    if _parse_datetime(s) is not None:
         return "TIMESTAMP"
-    if _EPOCH_S_RE.match(s):
-        return "TIMESTAMP"
-
-    if _YYYYMMDD_RE.match(s):
-        try:
-            datetime.strptime(s, "%Y%m%d")
-            return "DATE"
-        except ValueError:
-            pass
-
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S%z",
-    ):
-        try:
-            datetime.strptime(s.replace("Z", "+0000"), fmt.replace("Z", "+0000"))
-            return "TIMESTAMP"
-        except ValueError:
-            continue
-
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            datetime.strptime(s, fmt)
-            return "DATE"
-        except ValueError:
-            continue
 
     for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
         try:
@@ -120,16 +101,11 @@ def _classify_value(value: str) -> str:
         except ValueError:
             continue
 
-    cleaned = s.replace(",", "")
-    if re.match(r"^-?\d+$", cleaned):
-        return "INTEGER"
-    try:
-        float(cleaned)
-        if "." in cleaned or "e" in cleaned.lower():
+    decimal_parsed = _parse_decimal(s)
+    if decimal_parsed is not None:
+        if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
         return "INTEGER"
-    except ValueError:
-        pass
 
     if len(s) > 255:
         return "TEXT"
