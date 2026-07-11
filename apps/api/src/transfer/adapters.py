@@ -130,7 +130,9 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
 
 def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
-    fmt = (endpoint.format or "").lower()
+    from .connector_capabilities import resolve_driver_type
+    driver = resolve_driver_type(endpoint.format or "")
+    fmt = driver
     default_port = (
         27017 if fmt == "mongodb" else
         3306 if fmt == "mysql" else
@@ -235,8 +237,9 @@ def _guard_truncated_read(batch, db_type: str, name: str) -> None:
 
 
 def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str], dict[str, str]]:
+    from .connector_capabilities import resolve_driver_type
     cfg = resolve_connector_config(endpoint)
-    db_type = endpoint.format.lower()
+    db_type = resolve_driver_type(endpoint.format)
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
@@ -446,7 +449,8 @@ def write_destination_database(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     validation_mode: str = "strict",
 ) -> tuple[int, list[str], dict]:
-    db_type = endpoint.format.lower()
+    from .connector_capabilities import resolve_driver_type
+    db_type = resolve_driver_type(endpoint.format)
     cfg = resolve_connector_config(endpoint)
     ddl_log: list[str] = []
 

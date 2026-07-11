@@ -13,6 +13,8 @@ from typing import Optional
 from pymongo.errors import PyMongoError
 from ..services.mongodb_service import get_mongodb_service
 from ..services.file_parser import FileParser
+from ..transfer.connector_capabilities import resolve_driver_type, get_capabilities
+from ..transfer.connector_registry import CONNECTOR_MODULES, run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
@@ -100,96 +102,21 @@ async def test_connection(request: TestConnectionRequest):
                     "port": request.port,
                 }
             }
-        if request.type == "postgresql":
-            from connectors.postgresql import test_postgresql
-            probe = test_postgresql(
-                host=request.host, port=request.port or 5432, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="public", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "mysql":
-            from connectors.mysql import test_mysql
-            probe = test_mysql(
-                host=request.host, port=request.port or 3306, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "bigquery":
-            from connectors.bigquery import test_bigquery
-            probe = test_bigquery(
-                host=request.host or "bigquery.googleapis.com", port=request.port or 443, database=request.database,
-                username="", password="", schema=request.schema or "dataflow",
-                connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "snowflake":
-            from connectors.snowflake import test_snowflake
-            probe = test_snowflake(
-                host=request.host, port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="PUBLIC", connection_string=request.connection_string or "", ssl=True,
-                warehouse="",
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "redshift":
-            from connectors.redshift import test_redshift
-            probe = test_redshift(
-                host=request.host or "localhost", port=request.port or 5439, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema=request.schema or "public", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "dynamodb":
-            from connectors.dynamodb import test_dynamodb
-            probe = test_dynamodb(
-                host=request.host or "us-east-1", port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "redis":
-            from connectors.redis_kv import test_redis
-            probe = test_redis(
-                host=request.host or "localhost", port=request.port or 6379, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "s3":
-            from connectors.s3 import test_s3
-            probe = test_s3(
-                host=request.host or "us-east-1", port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type in ("gcs", "google_cloud_storage"):
-            from connectors.gcs import test_gcs
-            probe = test_gcs(
-                host=request.host or "", port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "elasticsearch":
-            from connectors.elasticsearch import test_elasticsearch
-            probe = test_elasticsearch(
-                host=request.host or "localhost", port=request.port or 9200, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-
-        if request.type == "sqlite":
-            from connectors.sqlite import test_sqlite
-            probe = test_sqlite(
-                host=request.host or "", port=0, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema=request.schema or "", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
+        driver = resolve_driver_type(request.type)
+        if driver in CONNECTOR_MODULES:
+            cfg = {
+                "host": request.host or "",
+                "port": request.port or 0,
+                "database": request.database or "",
+                "username": request.username or "",
+                "password": request.password or "",
+                "schema": request.schema or "",
+                "connection_string": request.connection_string or "",
+                "ssl": False,
+                "warehouse": "",
+            }
+            ok, msg = run_probe(driver, cfg)
+            return {"success": ok, "message": msg, "driver": driver}
 
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             return {

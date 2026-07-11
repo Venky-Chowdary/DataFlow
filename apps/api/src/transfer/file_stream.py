@@ -206,7 +206,11 @@ def stream_file_to_database(
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
-    dest_type = destination.format.lower()
+    try:
+        from .connector_capabilities import resolve_driver_type
+    except ImportError:
+        from transfer.connector_capabilities import resolve_driver_type
+    dest_type = resolve_driver_type(destination.format)
     dest_cfg = resolve_connector_config(destination)
     chunks = max(1, (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE)
     dest_table = resolve_dest_table(dest_type, destination, "import")

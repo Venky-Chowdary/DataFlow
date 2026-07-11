@@ -37,7 +37,8 @@ _STREAMING_TYPES = frozenset({
 
 
 def _source_name(source: EndpointConfig) -> str:
-    fmt = source.format.lower()
+    from .connector_capabilities import resolve_driver_type
+    fmt = resolve_driver_type(source.format or "")
     if fmt == "mongodb":
         return source.collection or source.table or ""
     if fmt == "dynamodb":
@@ -248,6 +249,22 @@ def _read_batch(
         return read_keys_batch(
             cfg=cfg, pattern=table or "*", limit=limit,
             known_total_rows=known_total_rows, scan_state=redis_scan_state,
+        )
+    if src_type == "sqlite":
+        from connectors.sqlite_reader import read_table_batch
+
+        return read_table_batch(
+            host=cfg["host"],
+            port=0,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            table=table,
+            limit=limit,
+            offset=offset,
         )
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
@@ -517,8 +534,9 @@ def stream_database_transfer(
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
     """
-    src_type = source.format.lower()
-    dest_type = destination.format.lower()
+    from .connector_capabilities import resolve_driver_type
+    src_type = resolve_driver_type(source.format)
+    dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
 

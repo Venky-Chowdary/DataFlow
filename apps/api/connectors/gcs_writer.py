@@ -74,20 +74,42 @@ def write_mapped_rows(
         target_cols=target_cols,
         column_types=column_types,
     )
-    records = [dict(zip(target_cols, row)) for row in mapped_rows]
+
+    def _to_json_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return value
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    records = [{c: _to_json_value(v) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
     if key.endswith(".csv"):
+        def _csv_cell(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            return str(value)
+
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=target_cols, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(records)
+        for record in records:
+            writer.writerow({k: _csv_cell(v) for k, v in record.items()})
         body = buf.getvalue().encode("utf-8")
         content_type = "text/csv"
     elif key.endswith(".jsonl"):
-        body = "\n".join(json.dumps(r, default=str) for r in records).encode("utf-8")
+        body = "\n".join(json.dumps(r, default=str, ensure_ascii=False) for r in records).encode("utf-8")
         content_type = "application/x-ndjson"
     else:
-        body = json.dumps(records, indent=2, default=str).encode("utf-8")
+        body = json.dumps(records, indent=2, default=str, ensure_ascii=False).encode("utf-8")
         content_type = "application/json"
 
     try:

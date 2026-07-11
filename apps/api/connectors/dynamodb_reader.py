@@ -79,6 +79,8 @@ def _deserialize(value: Any) -> Any:
         if value % 1 == 0:
             return int(value)
         return float(value)
+    if isinstance(value, set):
+        return sorted(_deserialize(v) for v in value)
     if isinstance(value, dict):
         return {k: _deserialize(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -96,6 +98,8 @@ def _item_to_record(item: dict) -> dict[str, Any]:
 def _cell(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)

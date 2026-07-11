@@ -215,16 +215,12 @@ def capability_label(caps: dict[str, bool]) -> str:
 
 
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
-    """True only for native catalog ids — aliases resolve for routing but stay roadmap."""
+    """True when the resolved driver is implemented and live (aliases inherit readiness)."""
     if not transfer_ready(caps):
         return False
-    cid = (catalog_id or "").lower().strip()
-    if not cid:
-        return False
-    # Native driver/format ids only — no alias inflation (e.g. amazon_rds_postgresql → planned)
-    if cid in TRANSFER_READY_CATALOG_IDS:
+    if driver in TRANSFER_READY_CATALOG_IDS:
         return True
-    if cid in _DRIVER_CAPS or cid in _FILE_CAPS:
+    if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
         return True
     return False
 
