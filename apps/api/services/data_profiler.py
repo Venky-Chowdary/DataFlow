@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import math
 import re
 from collections import Counter
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.schema_inference import infer_type
 from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime, _parse_integer, _parse_uuid
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
@@ -21,6 +25,18 @@ DATE_PATTERN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{8}$")
 def _as_str(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        return json.dumps(value, default=str)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
     return str(value).strip()
 
 
@@ -146,11 +162,11 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
     distinct_ratio = distinct / max(len(non_empty), 1)
 
     scores = _type_scores(non_empty)
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    best_type, best_score = ranked[0]
-    if best_score < 0.5:
-        best_type = "VARCHAR"
-        best_score = max(0.5, 1.0 - null_rate)
+    best_type = infer_type(non_empty, field_name=name)
+    if best_type in scores:
+        best_score = max(0.5, scores[best_type])
+    else:
+        best_score = max(0.75, 1.0 - null_rate)
 
     # Top-K value frequencies (cardinality analysis)
     freq = Counter(non_empty).most_common(10)
@@ -171,7 +187,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
 
     pattern = _infer_pattern(non_empty)
     pii = bool(re.search(r"email|phone|ssn|password|secret|name|address", name, re.I))
-    if pii and best_type == "VARCHAR" and any(bool(EMAIL_RE.match(s)) for s in non_empty[:8]):
+    if pii and best_type in {"VARCHAR", "TEXT"} and any(bool(EMAIL_RE.match(s)) for s in non_empty[:8]):
         pii = True
 
     # Uniqueness estimate — high distinct ratio on id-like columns

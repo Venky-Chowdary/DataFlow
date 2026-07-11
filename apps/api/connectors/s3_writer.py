@@ -45,18 +45,32 @@ def write_mapped_rows(
     create_table: bool = True,
     error_policy: str | None = None,
 ) -> WriteResult:
-    del port, ssl, create_table, error_policy
-    bucket = database or connection_string
+    del create_table, error_policy
+    bucket = database
+    if not bucket:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error="S3 bucket is required (set the Database field).",
+        )
     key = table_name or schema or "exports/dataflow_export.json"
     if not key.endswith((".json", ".jsonl", ".csv")):
         key = f"{key.rstrip('/')}/export.json"
 
     cfg = {
         "host": host,
+        "port": port,
         "username": username,
         "password": password,
+        "connection_string": connection_string,
+        "ssl": ssl,
+        "database": database,
     }
-    target_cols = resolve_target_columns(mappings, headers)
+    target_cols, _ = resolve_target_columns(mappings, column_types)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,

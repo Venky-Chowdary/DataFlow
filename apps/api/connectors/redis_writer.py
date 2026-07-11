@@ -50,7 +50,7 @@ def write_mapped_rows(
         "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl,
     }
-    target_cols = resolve_target_columns(mappings, headers)
+    target_cols, _ = resolve_target_columns(mappings, column_types)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,

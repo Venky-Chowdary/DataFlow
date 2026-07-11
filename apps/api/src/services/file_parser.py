@@ -5,11 +5,23 @@ Parse various file formats: CSV, JSON, Excel, Parquet
 
 from __future__ import annotations
 
-import json
+import base64
 import csv
 import io
-from typing import Any
+import json
+import sys
 from dataclasses import dataclass
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any
+
+# Ensure apps/api is on PYTHONPATH so root services.* imports resolve before src/services.*
+_api_root = Path(__file__).resolve().parents[2]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.csv_profiler import detect_delimiter
+from services.schema_inference import infer_type
 
 
 @dataclass
@@ -189,29 +201,51 @@ class FileParser:
             )
     
     @staticmethod
-    def parse_csv(content: str, delimiter: str = ",") -> ParseResult:
-        """Parse CSV file content"""
+    def parse_csv(content: str | bytes, delimiter: str = ",") -> ParseResult:
+        """Parse CSV/TSV file content — auto-detects delimiter and encoding."""
         try:
-            reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
+            if isinstance(content, bytes):
+                text = content.decode("utf-8", errors="replace").lstrip("\ufeff")
+            else:
+                text = content.lstrip("\ufeff")
+            if not text.strip():
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error="CSV file is empty",
+                    file_type="csv",
+                )
+            delim = detect_delimiter(text[:8192])
+            reader = csv.DictReader(io.StringIO(text), delimiter=delim)
             records = list(reader)
             columns = reader.fieldnames or []
-            
+            if not columns:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error="CSV has no header row",
+                    file_type="csv",
+                )
+            file_type = "tsv" if delim == "\t" else "csv"
             return ParseResult(
                 success=True,
                 data=records,
                 columns=list(columns),
                 row_count=len(records),
-                file_type="csv" if delimiter == "," else "tsv"
+                file_type=file_type,
             )
-            
         except Exception as e:
             return ParseResult(
                 success=False,
                 data=[],
                 columns=[],
                 row_count=0,
-                error=f"CSV parse error: {str(e)}",
-                file_type="csv"
+                error=f"CSV parse error: {e}",
+                file_type="csv",
             )
     
     @staticmethod
@@ -334,29 +368,39 @@ class FileParser:
             )
     
     @staticmethod
+    def _value_to_string(value: Any) -> str:
+        """Convert a typed Python value into a string for statistical inference."""
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (bytes, bytearray)):
+            return base64.b64encode(bytes(value)).decode("ascii")
+        if isinstance(value, (dict, list, tuple, set, frozenset)):
+            return json.dumps(value, default=str)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, time):
+            return value.isoformat()
+        return str(value)
+
+    @staticmethod
     def infer_schema(records: list[dict]) -> dict[str, str]:
-        """Infer schema from records"""
-        schema = {}
-        
+        """Infer rich schema from records using statistical type inference."""
         if not records:
-            return schema
-        
-        for record in records[:100]:
+            return {}
+
+        samples: dict[str, list[str]] = {}
+        for record in records[:1000]:
             for key, value in record.items():
-                if key not in schema:
-                    if value is None:
-                        schema[key] = "null"
-                    elif isinstance(value, bool):
-                        schema[key] = "boolean"
-                    elif isinstance(value, int):
-                        schema[key] = "integer"
-                    elif isinstance(value, float):
-                        schema[key] = "number"
-                    elif isinstance(value, list):
-                        schema[key] = "array"
-                    elif isinstance(value, dict):
-                        schema[key] = "object"
-                    else:
-                        schema[key] = "string"
-        
+                if value is None:
+                    continue
+                if key not in samples:
+                    samples[key] = []
+                if len(samples[key]) < 100:
+                    samples[key].append(FileParser._value_to_string(value))
+
+        schema = {key: infer_type(samples[key], field_name=key) for key in samples}
         return schema

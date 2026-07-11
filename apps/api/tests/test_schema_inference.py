@@ -19,7 +19,7 @@ class TestInferType:
             (["1", "2", "100"], "INTEGER"),
             (["1.5", "2.0", "100.99"], "DECIMAL"),
             (["true", "false"], "BOOLEAN"),
-            (["0", "1"], "BOOLEAN"),
+            (["0", "1"], "INTEGER"),
             (["2024-01-15"], "DATE"),
             (["20240115"], "DATE"),
             (["01/15/2024"], "DATE"),
@@ -43,6 +43,12 @@ class TestInferType:
 
     def test_empty_samples_varchar(self) -> None:
         assert infer_type(["", "  "]) == "VARCHAR"
+
+    def test_zero_one_with_boolean_field_name(self) -> None:
+        assert infer_type(["0", "1"], field_name="is_active") == "BOOLEAN"
+
+    def test_zero_one_without_boolean_field_name_is_integer(self) -> None:
+        assert infer_type(["0", "1"], field_name="row_id") == "INTEGER"
 
 
 class TestSchemaTypesFixture:

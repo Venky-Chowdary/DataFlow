@@ -23,9 +23,9 @@ def _parse_object_body(body: bytes, key: str) -> tuple[list[dict], list[str], di
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    if str(root / "src") not in sys.path:
-        sys.path.insert(0, str(root / "src"))
-    from services.file_parser import FileParser
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from src.services.file_parser import FileParser
 
     result = FileParser.parse(body, key)
     if not result.success:

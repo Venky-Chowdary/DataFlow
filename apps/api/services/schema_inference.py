@@ -8,9 +8,29 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+
+_BOOLEAN_FIELD_RE = re.compile(
+    r"(?:^|_)(?:is|has|was|are|can|should|will|do|does|did|enable|enabled|disabled|active|flag|bool|status|"
+    r"confirmed|verified|valid|success|passed|failed|locked|paid|sent|done|toggled|archived|deleted|"
+    r"subscribed|premium|hidden|visible|public|private|readonly|read_only|write|approved|rejected|"
+    r"processed|resolved|completed|cancelled|canceled|cancel|on|off|yes|no|true|false)"
+    r"\d*(?:$|_)",
+    re.I,
+)
+
+
+# Values accepted as boolean when the field name looks boolean
+_BOOLEAN_STRINGS = {
+    "0", "1", "true", "false", "yes", "no", "y", "n", "t", "f",
+}
+
+
+def _is_boolean_field_name(name: str) -> bool:
+    return bool(_BOOLEAN_FIELD_RE.search(name or ""))
+
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
-    "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP",
+    "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP", "TIME",
     "VARCHAR", "TEXT", "UUID", "JSON", "BINARY",
 })
 
@@ -58,9 +78,7 @@ def _classify_value(value: str) -> str:
         return "BINARY"
 
     low = s.lower()
-    if low in {"true", "false", "yes", "no", "y", "n"}:
-        return "BOOLEAN"
-    if low in {"0", "1"} and len(s) == 1:
+    if low in {"true", "false", "yes", "no", "y", "n", "t", "f"}:
         return "BOOLEAN"
 
     if _EPOCH_MS_RE.match(s):
@@ -95,6 +113,13 @@ def _classify_value(value: str) -> str:
         except ValueError:
             continue
 
+    for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
+        try:
+            datetime.strptime(s.replace("Z", "+0000"), fmt.replace("Z", "+0000"))
+            return "TIME"
+        except ValueError:
+            continue
+
     cleaned = s.replace(",", "")
     if re.match(r"^-?\d+$", cleaned):
         return "INTEGER"
@@ -113,7 +138,9 @@ def _classify_value(value: str) -> str:
     return "VARCHAR"
 
 
-def infer_type(samples: list[str], *, threshold: float = 0.85) -> str:
+def infer_type(
+    samples: list[str], *, threshold: float = 0.85, field_name: str | None = None
+) -> str:
     """Majority-vote type inference across sample values."""
     non_empty = [s.strip() for s in samples if s and str(s).strip()]
     if not non_empty:
@@ -124,17 +151,33 @@ def infer_type(samples: list[str], *, threshold: float = 0.85) -> str:
     ratio = best_count / len(non_empty)
 
     if ratio >= threshold:
-        return best_type
+        inferred = best_type
+    else:
+        # Mixed column — prefer safer wider types
+        if "TEXT" in counts and max(len(s) for s in non_empty) > 255:
+            inferred = "TEXT"
+        elif counts.get("DECIMAL", 0) + counts.get("INTEGER", 0) >= len(non_empty) * 0.66:
+            inferred = "DECIMAL" if counts.get("DECIMAL", 0) > 0 else "INTEGER"
+        elif counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) + counts.get("TIME", 0) >= len(non_empty) * 0.7:
+            if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
+                inferred = "TIMESTAMP"
+            elif counts.get("DATE", 0) >= counts.get("TIME", 0):
+                inferred = "DATE"
+            else:
+                inferred = "TIME"
+        else:
+            inferred = best_type if ratio >= 0.6 else "VARCHAR"
 
-    # Mixed column — prefer safer wider types
-    if "TEXT" in counts and max(len(s) for s in non_empty) > 255:
-        return "TEXT"
-    if counts.get("DECIMAL", 0) + counts.get("INTEGER", 0) >= len(non_empty) * 0.66:
-        return "DECIMAL" if counts.get("DECIMAL", 0) > 0 else "INTEGER"
-    if counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) >= len(non_empty) * 0.7:
-        return "TIMESTAMP" if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) else "DATE"
+    # Disambiguate 0/1 numeric columns from boolean flags using the field name
+    if (
+        inferred in {"INTEGER", "VARCHAR"}
+        and field_name
+        and _is_boolean_field_name(field_name)
+        and all(v.lower() in _BOOLEAN_STRINGS for v in non_empty)
+    ):
+        return "BOOLEAN"
 
-    return best_type if ratio >= 0.6 else "VARCHAR"
+    return inferred
 
 
 def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_samples: int = 50) -> list[dict]:
@@ -145,7 +188,7 @@ def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_sa
         columns.append(
             {
                 "name": name.strip() or f"column_{i + 1}",
-                "inferred_type": infer_type(samples),
+                "inferred_type": infer_type(samples, field_name=name),
                 "nullable": any(not str(s).strip() for s in samples),
                 "samples": [s for s in samples[:5] if str(s).strip()],
             }

@@ -132,6 +132,29 @@ def write_mapped_rows(
                 column_types=column_types,
                 error_policy=policy,
             )
+
+            # Convert base64-encoded strings to raw bytes for BYTEA columns
+            if any(t == "BYTEA" for t in target_types):
+                from base64 import b64decode
+
+                bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
+                converted: list[tuple] = []
+                for row in mapped_rows:
+                    row_list = list(row)
+                    for idx in bytea_positions:
+                        val = row_list[idx]
+                        if isinstance(val, str):
+                            try:
+                                row_list[idx] = b64decode(val, validate=True)
+                            except Exception:
+                                row_list[idx] = val.encode("utf-8")
+                        elif isinstance(val, bytes):
+                            row_list[idx] = val
+                        elif val is not None:
+                            row_list[idx] = str(val).encode("utf-8")
+                    converted.append(tuple(row_list))
+                mapped_rows = converted
+
             rejected_rows = len(data_rows) - len(mapped_rows)
             if transform_errors and policy == "fail":
                 return WriteResult(

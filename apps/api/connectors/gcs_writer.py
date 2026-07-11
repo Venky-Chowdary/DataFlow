@@ -46,13 +46,27 @@ def write_mapped_rows(
     error_policy: str | None = None,
 ) -> WriteResult:
     del port, ssl, create_table, error_policy, username
-    bucket = database or connection_string
+    bucket = database
+    if not bucket:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error="GCS bucket is required (set the Database field).",
+        )
     key = table_name or schema or "exports/dataflow_export.json"
     if not key.endswith((".json", ".jsonl", ".csv")):
         key = f"{key.rstrip('/')}/export.json"
 
-    cfg = {"host": host, "connection_string": connection_string or password, "password": password}
-    target_cols = resolve_target_columns(mappings, headers)
+    cfg = {
+        "host": host,
+        "connection_string": connection_string,
+        "password": password,
+    }
+    target_cols, _ = resolve_target_columns(mappings, column_types)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
