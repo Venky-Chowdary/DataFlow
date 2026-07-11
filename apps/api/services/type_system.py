@@ -187,8 +187,22 @@ DEFAULT_DDL: Final[dict[str, str]] = {
 
 def normalize_logical_type(inferred: str | None) -> str:
     """Return a canonical logical type for parser, DB, and warehouse types."""
-    key = (inferred or "").strip().lower()
-    key = re.sub(r"\([^)]*\)", "", key).strip()
+    raw = (inferred or "").strip()
+    if not raw:
+        return LOGICAL_STRING
+
+    # Numeric DDL such as NUMBER(38,0) or DECIMAL(10,0) is integer when scale is 0,
+    # while NUMBER(38,10) stays decimal.
+    m = re.match(r"^([A-Za-z_ ]+?)\s*\(\s*\d+\s*(?:,\s*(\d+))?\s*\)$", raw)
+    if m:
+        base = m.group(1).strip().lower()
+        if base in {"number", "numeric", "decimal"}:
+            scale = m.group(2)
+            if scale is not None and int(scale) == 0:
+                return LOGICAL_INTEGER
+            return LOGICAL_DECIMAL
+
+    key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
     key = key.replace("_", " ")
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 

@@ -91,7 +91,7 @@ def build_mapped_rows(
             row_map[tgt] = converted
         if row_has_error and policy in {"fail", "quarantine"}:
             continue
-        mapped.append(tuple(row_map.get(c) for c in target_cols))
+        mapped.append(tuple(row_map.get(sanitize_identifier(c)) for c in target_cols))
 
     return mapped, errors
 

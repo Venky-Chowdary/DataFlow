@@ -201,24 +201,43 @@ def infer_transform_for_mapping(
 
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type) if target_type else None
-    src_upper = source_type.upper()
     tgt_name = target_col.lower()
 
-    if tgt == "integer" or (tgt is None and src_upper in {"INTEGER", "BIGINT", "INT", "SMALLINT"}):
+    # Explicit, non-generic target type wins.
+    if tgt and tgt not in {"string", "text"}:
+        if tgt == "integer":
+            return "integer"
+        if tgt == "decimal":
+            return "decimal"
+        if tgt == "boolean":
+            return "boolean"
+        if tgt in {"json", "array"}:
+            return "json"
+        if tgt == "binary":
+            return "binary"
+        if tgt == "datetime":
+            return "datetime"
+        if tgt == "date":
+            return "date"
+        if tgt == "uuid":
+            return "uuid"
+
+    # Source type is the pivot when the target is generic (e.g., VARCHAR).
+    if src == "integer":
         return "integer"
-    if tgt == "decimal" or (tgt is None and src_upper in {"DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"}):
+    if src == "decimal":
         return "decimal"
-    if tgt == "boolean" or (tgt is None and src_upper in {"BOOLEAN", "BOOL"}):
+    if src == "boolean":
         return "boolean"
-    if tgt == "json" or src_upper in {"JSON", "JSONB", "ARRAY", "OBJECT", "VARIANT"}:
+    if src in {"json", "array"}:
         return "json"
-    if tgt == "binary" or src_upper in {"BINARY", "BLOB", "BYTEA", "BYTES"}:
+    if src == "binary":
         return "binary"
-    if tgt == "datetime" or src_upper in {"TIMESTAMP", "DATETIMETZ", "TIMESTAMP_TZ"}:
+    if src == "datetime":
         return "datetime"
-    if tgt == "date" or src_upper == "DATE":
+    if src == "date":
         return "date"
-    if tgt == "uuid" or src_upper == "UUID":
+    if src == "uuid":
         return "uuid"
 
     src_col = source_col.upper()
@@ -232,13 +251,12 @@ def infer_transform_for_mapping(
         or tgt_name.endswith("_dt")
         or src_col.endswith("_DT")
         or src_col in {"TXN_DT", "PAY_DT", "PAYMENT_DT", "TRANS_DT"}
-        or src_upper in {"DATE", "TIMESTAMP"}
     ):
-        return "datetime" if src_upper == "TIMESTAMP" or "epoch" in src_lower else "date"
+        return "datetime" if src == "datetime" or "epoch" in src_lower else "date"
     if tgt_name.endswith("_id") or tgt_name.endswith("id") or src_col.endswith("_ID"):
         return "trim_id"
     if "qty" in tgt_name or "quantity" in tgt_name:
-        return "decimal"
+        return "integer" if src == "integer" else "decimal"
     return "trim"
 
 

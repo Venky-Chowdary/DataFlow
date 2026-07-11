@@ -34,7 +34,7 @@ class DataTransferEmbeddingService:
             from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer(self.MODEL_NAME)
             self._backend = "sentence_transformers"
-        except ImportError:
+        except (ImportError, OSError, RuntimeError):
             self._backend = "tfidf_fallback"
 
     @property

@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import get_connection, normalize_account
+from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
@@ -103,8 +105,7 @@ def write_mapped_rows(
     try:
         import snowflake.connector  # noqa: F401
     except ImportError:
-        from connectors.driver_guard import require_driver, stub_writes_allowed
-        from connectors.stub_writer import simulate_stub_write
+        from connectors.driver_guard import require_driver
 
         if not stub_writes_allowed():
             return WriteResult(
@@ -163,6 +164,27 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_rows=rejected_rows,
+            warnings=transform_errors,
+            rejected_details=rejected_details,
+        )
+
+    if stub_writes_allowed():
+        rows, checksum, chunks = simulate_stub_write(
+            data_rows=mapped_rows,
+            table_name=table_name,
+            target_schema=schema,
+            on_checkpoint=on_checkpoint,
+        )
+        return WriteResult(
+            ok=True,
+            rows_written=rows,
+            table_name=table_name,
+            target_schema=schema,
+            checksum=checksum,
+            chunks_completed=chunks,
+            driver="stub",
+            load_method="stub",
             rejected_rows=rejected_rows,
             warnings=transform_errors,
             rejected_details=rejected_details,

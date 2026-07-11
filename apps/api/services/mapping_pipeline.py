@@ -26,12 +26,12 @@ def classify_format(source_columns: list[str], file_format: str | None = None) -
     payment_tokens = {"AMT", "CUST_ID", "TXN_DT", "ACCT_NO", "CCY", "REF_NO", "PAY_AMT"}
     overlap = len(set(hints) & payment_tokens)
 
-    if domain_profile["domain"] != "general" and domain_profile["confidence"] >= 0.4:
-        fmt = f"{domain_profile['domain']}_feed"
-        confidence = domain_profile["confidence"]
-    elif overlap >= 2:
+    if overlap >= 2:
         fmt = "payment_feed"
         confidence = min(0.95, 0.75 + overlap * 0.05)
+    elif domain_profile["domain"] != "general" and domain_profile["confidence"] >= 0.4:
+        fmt = f"{domain_profile['domain']}_feed"
+        confidence = domain_profile["confidence"]
     elif semantic_hits >= max(2, len(source_columns[:8]) // 2):
         fmt = "semantic_tabular"
         confidence = min(0.92, 0.7 + semantic_hits * 0.04)

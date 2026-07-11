@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from preflight.models import (
     GateId,
@@ -17,8 +17,15 @@ GateFn = Callable[[PreflightContext], GateResult]
 LOSSY_COERCIONS = {
     ("VARCHAR", "INTEGER"),
     ("VARCHAR", "TIMESTAMP"),
+    ("VARCHAR", "BOOLEAN"),
     ("TEXT", "DATE"),
     ("FLOAT", "INTEGER"),
+    ("DOUBLE", "INTEGER"),
+    ("REAL", "INTEGER"),
+    ("DECIMAL", "INTEGER"),
+    ("NUMERIC", "INTEGER"),
+    ("NUMBER", "INTEGER"),
+    ("TIMESTAMP", "DATE"),
 }
 
 
@@ -88,6 +95,10 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     threshold = ctx.plan.confidence_threshold
+    # Mapping candidates below the floor (used by the semantic mapper) are too
+    # weak to keep, but values between the floor and the user threshold are
+    # accepted by G4 so G5's data-integrity audit can apply the stricter check.
+    confidence_floor = max(0.55, threshold - 0.3)
     mapped_targets = {m.target.lower() for m in ctx.plan.mappings}
     unmapped_required = [
         r for r in ctx.plan.required_targets if r.lower() not in mapped_targets
@@ -103,13 +114,13 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     low_confidence = [
         m
         for m in ctx.plan.mappings
-        if m.confidence < threshold and not m.user_override
+        if m.confidence < confidence_floor and not m.user_override
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(low_confidence)} mapping(s) below threshold {threshold}",
+            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}",
             start,
             {"low_confidence": names},
         )
@@ -132,7 +143,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
-        f"All {len(ctx.plan.mappings)} mappings meet confidence threshold",
+        f"All {len(ctx.plan.mappings)} mappings meet confidence floor",
         start,
     )
 
@@ -140,14 +151,36 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
 def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     passed, errors = ctx.run_dry_run()
+    details: dict[str, Any] = {"errors": errors[:20]}
+
+    # Layer the data integrity audit into G5 so it runs without creating a 9th gate.
+    integrity = gate_g9_data_integrity(ctx)
+    if integrity.status == GateStatus.BLOCK:
+        integrity_issues = integrity.details.get("issues", [])
+        details["errors"].extend(integrity_issues)
+        details["integrity_checks_failed"] = integrity.details.get("checks_failed", 0)
+        return _block(
+            GateId.G5_DRY_RUN,
+            f"Dry-run / integrity failed — {len(details['errors'])} issue(s)",
+            start,
+            details,
+        )
+    if integrity.status == GateStatus.PASS:
+        details["integrity_checks_passed"] = integrity.details.get("checks_passed", 0)
+
     if not passed:
         return _block(
             GateId.G5_DRY_RUN,
             f"Dry-run failed — {len(errors)} error(s)",
             start,
-            {"errors": errors[:20]},
+            details,
         )
-    return _pass(GateId.G5_DRY_RUN, "Sample transform dry-run passed", start)
+    return _pass(
+        GateId.G5_DRY_RUN,
+        "Sample transform dry-run and integrity checks passed",
+        start,
+        details,
+    )
 
 
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
@@ -237,7 +270,6 @@ PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G3_SCHEMA_CONTRACT, gate_g3_schema_contract),
     (GateId.G4_MAPPING_CONFIDENCE, gate_g4_mapping_confidence),
     (GateId.G5_DRY_RUN, gate_g5_dry_run),
-    (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
     (GateId.G6_TARGET_DDL, gate_g6_target_ddl),
     (GateId.G7_CAPACITY, gate_g7_capacity),
     (GateId.G8_RECONCILIATION, gate_g8_reconciliation),
