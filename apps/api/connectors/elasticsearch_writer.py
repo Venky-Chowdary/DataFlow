@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -21,6 +22,26 @@ class WriteResult:
     driver: str = "elasticsearch-py"
     rejected_rows: int = 0
     warnings: list[str] = field(default_factory=list)
+
+
+def _to_es_value(value: Any, source_type: str) -> Any:
+    """Convert transform-engine values to Elasticsearch-native JSON shapes."""
+    if value is None:
+        return None
+    upper = source_type.upper()
+    if upper in {"DECIMAL", "NUMERIC"}:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return value
+    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
+        # ES dynamic mapping can only assign one JSON kind per field; storing the
+        # JSON as a string keeps the transfer lossless and avoids object/array
+        # collisions when the same logical column contains mixed JSON shapes.
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return value
+    return value
 
 
 def write_mapped_rows(
@@ -48,7 +69,7 @@ def write_mapped_rows(
         "host": host, "port": port, "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl,
     }
-    target_cols, _ = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
@@ -66,7 +87,11 @@ def write_mapped_rows(
 
         def gen_actions():
             for row in mapped_rows:
-                yield {"_index": index, "_source": dict(zip(target_cols, row))}
+                source = {
+                    target_cols[i]: _to_es_value(value, source_types[i])
+                    for i, value in enumerate(row)
+                }
+                yield {"_index": index, "_source": source}
 
         written, bulk_errors = bulk(client, gen_actions(), raise_on_error=False)
         if on_checkpoint:

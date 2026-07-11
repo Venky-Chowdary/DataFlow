@@ -19,6 +19,9 @@ def test_elasticsearch(
 ) -> ConnectResult:
     del schema, warehouse
 
+    if not host and not connection_string:
+        return ConnectResult(ok=False, tables=[], error="Elasticsearch host or URL is required.")
+
     if connection_string.strip():
         url = connection_string.strip()
     else:
@@ -31,8 +34,6 @@ def test_elasticsearch(
         from elasticsearch import Elasticsearch
     except ImportError:
         from connectors.driver_guard import require_driver
-        if not host and not connection_string:
-            return ConnectResult(ok=False, tables=[], error="Elasticsearch host or URL is required.")
         return ConnectResult(
             ok=False,
             tables=[],
