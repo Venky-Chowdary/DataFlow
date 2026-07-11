@@ -62,6 +62,8 @@ class ColumnMapping:
     transform: str | None = None
     user_override: bool = False
     reasoning: str = ""
+    requires_review: bool = False
+    score_gap: float = 1.0
 
 
 @dataclass

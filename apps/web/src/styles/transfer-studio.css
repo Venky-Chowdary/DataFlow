@@ -1,0 +1,211 @@
+/* ═══════════════════════════════════════════════════════════
+   Transfer Studio — natural scroll (content grows, no traps)
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-content-studio {
+  min-height: min-content;
+  overflow: visible;
+}
+
+.df2-content-studio > div {
+  min-height: min-content;
+  overflow: visible;
+}
+
+.df2-content-studio .df2-page {
+  min-height: min-content;
+  overflow: visible;
+  padding: 0;
+  max-width: none;
+  margin: 0;
+  width: 100%;
+}
+
+.df2-page-transfer-studio {
+  padding: 12px var(--df-page-gutter, 20px) 32px;
+}
+
+.df2-page-transfer-studio .df2-page-head-enterprise {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+.df2-page-transfer-studio .df2-page-body {
+  overflow: visible;
+  min-height: min-content;
+  gap: 16px;
+}
+
+/* When not using fit, studio content is direct child of page */
+.df2-page-transfer-studio > .df2-transfer-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: min-content;
+  padding-bottom: 8px;
+}
+
+.df2-transfer-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: min-content;
+  padding-bottom: 8px;
+}
+
+.df2-transfer-studio-chrome {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.df2-transfer-studio-workspace {
+  overflow: visible;
+  min-height: min-content;
+  padding-bottom: 24px;
+}
+
+.df2-transfer-studio-workspace .df2-transfer-grid {
+  align-items: start;
+  gap: 16px;
+}
+
+.df2-transfer-studio-workspace .df2-assurance-rail {
+  position: sticky;
+  top: 12px;
+  align-self: start;
+}
+
+.df2-page-transfer-studio .df2-transfer-panel,
+.df2-page-transfer-studio .df2-card,
+.df2-page-transfer-studio .df2-card-body {
+  overflow: visible;
+  min-width: 0;
+}
+
+.df2-page-transfer-studio .df2-mapping {
+  overflow: visible;
+}
+
+.df2-page-transfer-studio .df2-mapping-evidence {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  line-height: 1.45;
+}
+
+.df2-page-transfer-studio .df2-route-node strong {
+  max-width: none;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.df2-page-transfer-studio .df2-column-sample {
+  max-width: 220px;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.df2-page-transfer-studio .df2-column-reason {
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.df2-page-transfer-studio .df2-column-review-table th {
+  white-space: normal;
+}
+
+.df2-page-transfer-studio .df2-policy-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+.df2-page-transfer-studio .df2-form-row {
+  flex-wrap: wrap;
+}
+
+.df2-page-transfer-studio .df2-control-metric {
+  min-height: var(--df-tile-min-h, 88px);
+}
+
+.df2-result-banner {
+  padding: 20px 22px;
+  border-radius: var(--df-radius-card, 12px);
+  border: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-result-banner.success {
+  border-color: #bbf7d0;
+  background: linear-gradient(180deg, #f0fdf4 0%, #fff 100%);
+}
+
+.df2-result-banner.error {
+  border-color: #fecaca;
+  background: linear-gradient(180deg, #fef2f2 0%, #fff 100%);
+}
+
+.df2-result-stat {
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: #0f172a;
+}
+
+.df2-result-meta {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0;
+  line-height: 1.45;
+}
+
+.df2-result-ddl {
+  font-size: 13px;
+  color: #64748b;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.45;
+}
+
+.df2-result-badge {
+  display: inline-flex;
+  margin-bottom: 12px;
+}
+
+.df2-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.df2-connector-hint {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 1100px) {
+  .df2-transfer-studio-workspace .df2-transfer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-transfer-studio-workspace .df2-assurance-rail {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .df2-page-transfer-studio .df2-transfer-command {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-control-plane {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

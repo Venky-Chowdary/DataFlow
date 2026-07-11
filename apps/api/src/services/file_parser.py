@@ -26,28 +26,40 @@ class ParseResult:
 class FileParser:
     """Universal file parser for DataTransfer platform"""
     
-    SUPPORTED_TYPES = ["json", "csv", "tsv", "jsonl", "ndjson"]
+    SUPPORTED_TYPES = ["json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet"]
     
     @staticmethod
-    def detect_file_type(filename: str, content: bytes = None) -> str:
-        """Detect file type from filename or content"""
-        filename_lower = filename.lower()
-        
+    def detect_file_type(filename: str, content: bytes | None = None) -> str:
+        """Detect file type from filename, with content sniffing as fallback."""
+        filename_lower = (filename or "").lower()
+
         if filename_lower.endswith(".json"):
             return "json"
-        elif filename_lower.endswith(".csv"):
+        if filename_lower.endswith(".csv"):
             return "csv"
-        elif filename_lower.endswith(".tsv"):
+        if filename_lower.endswith(".tsv"):
             return "tsv"
-        elif filename_lower.endswith(".jsonl") or filename_lower.endswith(".ndjson"):
-            return "jsonl"
-        elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
+        if filename_lower.endswith((".jsonl", ".ndjson")):
+            return "jsonl" if filename_lower.endswith(".jsonl") else "ndjson"
+        if filename_lower.endswith((".xlsx", ".xls")):
             return "excel"
-        elif filename_lower.endswith(".parquet"):
+        if filename_lower.endswith(".parquet"):
             return "parquet"
-        elif filename_lower.endswith(".xml"):
+        if filename_lower.endswith(".xml"):
             return "xml"
-        
+
+        if content:
+            sample = content[:4096]
+            stripped = sample.lstrip()
+            if stripped[:1] in (b"{", b"["):
+                return "json"
+            if b"\n{" in sample or b"\n[" in sample:
+                return "jsonl"
+            if b"," in sample[:512]:
+                return "csv"
+            if b"\t" in sample[:512]:
+                return "tsv"
+
         return "unknown"
     
     @staticmethod
@@ -88,9 +100,31 @@ class FileParser:
                 )
             
             columns = set()
+            object_rows = 0
             for record in records:
                 if isinstance(record, dict):
+                    object_rows += 1
                     columns.update(record.keys())
+
+            if object_rows == 0:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error="JSON must be an array of objects — each record needs column keys",
+                    file_type="json",
+                )
+
+            if not columns:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error="No columns detected — ensure each JSON object has consistent field names",
+                    file_type="json",
+                )
             
             return ParseResult(
                 success=True,
@@ -180,16 +214,100 @@ class FileParser:
                 file_type="csv"
             )
     
+    @staticmethod
+    def parse_excel(content: bytes, max_rows: int = 100_000) -> ParseResult:
+        """Parse Excel (.xlsx) workbook — first sheet, header row."""
+        try:
+            import sys
+            from pathlib import Path
+
+            root = Path(__file__).resolve().parents[2]
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+            from services.excel_parser import iter_excel_batches
+
+            records: list[dict] = []
+            columns: list[str] = []
+            for batch in iter_excel_batches(content, chunk_size=5000):
+                if not columns and batch:
+                    columns = list(batch[0].keys())
+                records.extend(batch)
+                if len(records) >= max_rows:
+                    records = records[:max_rows]
+                    break
+            if not columns:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error="Excel sheet is empty or has no header row",
+                    file_type="excel",
+                )
+            return ParseResult(
+                success=True,
+                data=records,
+                columns=columns,
+                row_count=len(records),
+                file_type="excel",
+            )
+        except ValueError as exc:
+            return ParseResult(
+                success=False, data=[], columns=[], row_count=0, error=str(exc), file_type="excel",
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False, data=[], columns=[], row_count=0,
+                error=f"Excel parse error: {exc}", file_type="excel",
+            )
+
+    @staticmethod
+    def parse_parquet(content: bytes, max_rows: int = 100_000) -> ParseResult:
+        try:
+            import io
+
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(io.BytesIO(content))
+            df = table.to_pandas().head(max_rows)
+            records = df.to_dict(orient="records")
+            columns = [str(c) for c in df.columns.tolist()]
+            for rec in records:
+                for k, v in list(rec.items()):
+                    if hasattr(v, "item"):
+                        rec[k] = v.item()
+                    elif v != v:  # NaN
+                        rec[k] = None
+            return ParseResult(
+                success=True,
+                data=records,
+                columns=columns,
+                row_count=len(records),
+                file_type="parquet",
+            )
+        except ImportError:
+            return ParseResult(
+                success=False, data=[], columns=[], row_count=0,
+                error="Parquet import is not ready on this platform node. DataFlow bundles file parsers — retry shortly.",
+                file_type="parquet",
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False, data=[], columns=[], row_count=0,
+                error=f"Parquet parse error: {exc}", file_type="parquet",
+            )
+
     @classmethod
     def parse(cls, content: str | bytes, filename: str) -> ParseResult:
         """Parse file based on type detection"""
-        file_type = cls.detect_file_type(filename)
-        
+        raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+        file_type = cls.detect_file_type(filename, raw_bytes)
+
         if isinstance(content, bytes):
             try:
-                content = content.decode('utf-8')
+                content = content.decode("utf-8")
             except UnicodeDecodeError:
-                content = content.decode('latin-1')
+                content = content.decode("latin-1")
         
         if file_type == "json":
             return cls.parse_json(content)
@@ -199,6 +317,12 @@ class FileParser:
             return cls.parse_csv(content, delimiter=",")
         elif file_type == "tsv":
             return cls.parse_csv(content, delimiter="\t")
+        elif file_type == "ndjson":
+            return cls.parse_jsonl(content)
+        elif file_type == "excel":
+            return cls.parse_excel(raw_bytes)
+        elif file_type == "parquet":
+            return cls.parse_parquet(raw_bytes)
         else:
             return ParseResult(
                 success=False,

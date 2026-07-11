@@ -1,0 +1,399 @@
+/* ═══════════════════════════════════════════════════════════
+   Settings — enterprise workspace layout
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-page-settings .df2-settings-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.df2-settings-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.df2-settings-summary-item {
+  padding: 14px 16px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: #fff;
+}
+
+.df2-settings-summary-item span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.df2-settings-summary-item strong {
+  font-size: 15px;
+  color: #0f172a;
+}
+
+.df2-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 280px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.df2-settings-nav {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: #fff;
+  box-shadow: var(--df-shadow-xs, 0 1px 2px rgba(15, 23, 42, 0.04));
+}
+
+.df2-settings-nav button {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.df2-settings-nav button .df2-settings-nav-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df2-settings-nav button .df2-settings-nav-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.df2-settings-nav button .df2-settings-nav-desc {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.df2-settings-nav button.active {
+  background: #f0fdfa;
+  border-color: #99f6e4;
+}
+
+.df2-settings-nav button.active .df2-settings-nav-label {
+  color: #0f766e;
+}
+
+.df2-settings-nav button:hover:not(.active) {
+  background: #f8fafc;
+}
+
+.df2-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.df2-settings-section {
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: #fff;
+  overflow: visible;
+}
+
+.df2-settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-settings-section-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  color: #0f172a;
+}
+
+.df2-settings-section-head p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.df2-settings-section-body {
+  padding: 20px 22px;
+}
+
+.df2-settings-section-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--df-line, #e2e8f0);
+  background: #fafbfc;
+  border-radius: 0 0 var(--df-radius-card, 12px) var(--df-radius-card, 12px);
+}
+
+.df2-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 22px;
+}
+
+.df2-settings-grid--single {
+  grid-template-columns: 1fr;
+}
+
+.df2-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-settings-field label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.df2-settings-field input,
+.df2-settings-field select,
+.df2-settings-field textarea {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 8px;
+  background: #fff;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.df2-settings-field input:focus,
+.df2-settings-field select:focus,
+.df2-settings-field textarea:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.28);
+  border-color: #0f766e;
+}
+
+.df2-settings-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.df2-settings-policy-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.df2-settings-policy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.df2-settings-policy-row h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.df2-settings-policy-row p {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.df2-settings-sso-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.df2-settings-sso-card {
+  padding: 18px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 12px;
+  background: #fafbfc;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.df2-settings-sso-card.ready {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.df2-settings-field--full {
+  grid-column: 1 / -1;
+}
+
+.df2-settings-key-reveal {
+  margin: 8px 0 12px;
+  word-break: break-all;
+}
+
+.df2-settings-key-reveal code {
+  font-size: 12px;
+}
+
+.df2-settings-sso-card h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.df2-settings-sso-card p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.df2-settings-team-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.df2-settings-team-table th,
+.df2-settings-team-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-settings-team-table th {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  background: #f8fafc;
+}
+
+.df2-settings-team-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.df2-settings-logs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.df2-settings-logs-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 10px;
+}
+
+.df2-settings-logs-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.df2-settings-logs-table th,
+.df2-settings-logs-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.df2-settings-logs-table th {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  background: #f8fafc;
+}
+
+.df2-settings-logs-table tr:last-child td {
+  border-bottom: none;
+}
+
+.df2-settings-log-level {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.df2-settings-log-level--info {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.df2-settings-log-level--success {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.df2-settings-log-level--warn {
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.df2-settings-log-level--error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+@media (max-width: 960px) {
+  .df2-settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-settings-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .df2-settings-nav button {
+    flex: 1 1 200px;
+  }
+
+  .df2-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}

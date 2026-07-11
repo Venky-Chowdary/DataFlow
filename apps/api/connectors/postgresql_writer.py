@@ -53,15 +53,17 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
+    write_mode: str = "insert",
+    conflict_columns: list[str] | None = None,
 ) -> WriteResult:
     try:
         import psycopg2
         from psycopg2 import sql
     except ImportError:
-        from connectors.driver_guard import allow_stub_writes, require_driver
+        from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 
-        if not allow_stub_writes():
+        if not stub_writes_allowed():
             return WriteResult(
                 ok=False, rows_written=0, table_name=table_name, target_schema=schema or "public",
                 checksum="", chunks_completed=0,
@@ -154,12 +156,48 @@ def write_mapped_rows(
                     break
 
                 placeholders = sql.SQL(", ").join(sql.Placeholder() * len(target_cols))
-                insert = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
-                    sql.Identifier(schema),
-                    sql.Identifier(table_name),
-                    sql.SQL(", ").join(map(sql.Identifier, target_cols)),
-                    placeholders,
-                )
+                if write_mode == "upsert" and conflict_columns:
+                    conflict = [c for c in conflict_columns if c in target_cols]
+                    if conflict:
+                        update_cols = [c for c in target_cols if c not in conflict]
+                        if update_cols:
+                            insert = sql.SQL(
+                                "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
+                            ).format(
+                                sql.Identifier(schema),
+                                sql.Identifier(table_name),
+                                sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                                placeholders,
+                                sql.SQL(", ").join(map(sql.Identifier, conflict)),
+                                sql.SQL(", ").join(
+                                    sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
+                                    for c in update_cols
+                                ),
+                            )
+                        else:
+                            insert = sql.SQL(
+                                "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"
+                            ).format(
+                                sql.Identifier(schema),
+                                sql.Identifier(table_name),
+                                sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                                placeholders,
+                                sql.SQL(", ").join(map(sql.Identifier, conflict)),
+                            )
+                    else:
+                        insert = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                            sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                            placeholders,
+                        )
+                else:
+                    insert = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table_name),
+                        sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                        placeholders,
+                    )
                 cur.executemany(insert, batch)
                 conn.commit()
                 written += len(batch)

@@ -53,6 +53,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     dest_by_name = {c.name.lower(): c for c in ctx.plan.destination.target_columns}
     issues: list[str] = []
 
+    try:
+        from services.type_system import is_lossy_coercion
+    except ImportError:
+        is_lossy_coercion = None
+
     for m in ctx.plan.mappings:
         target = dest_by_name.get(m.target.lower())
         if not target:
@@ -61,7 +66,10 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         if not source_col:
             continue
         pair = (source_col.inferred_type.upper(), target.inferred_type.upper())
-        if pair in LOSSY_COERCIONS:
+        lossy = pair in LOSSY_COERCIONS
+        if not lossy and is_lossy_coercion:
+            lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
+        if lossy:
             issues.append(
                 f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
                 f"{m.target} ({target.inferred_type})"
@@ -105,6 +113,23 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             start,
             {"low_confidence": names},
         )
+
+    ambiguous = [
+        m
+        for m in ctx.plan.mappings
+        if m.requires_review and not m.user_override
+    ]
+    if ambiguous:
+        names = [
+            f"{m.source}→{m.target} (gap {m.score_gap:.2f})"
+            for m in ambiguous
+        ]
+        return _block(
+            GateId.G4_MAPPING_CONFIDENCE,
+            f"{len(ambiguous)} ambiguous mapping(s) require review",
+            start,
+            {"ambiguous_mappings": names},
+        )
     return _pass(
         GateId.G4_MAPPING_CONFIDENCE,
         f"All {len(ctx.plan.mappings)} mappings meet confidence threshold",
@@ -127,6 +152,14 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
 
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
+    if not ctx.plan.destination.connected:
+        return GateResult(
+            gate_id=GateId.G6_TARGET_DDL,
+            status=GateStatus.SKIP,
+            message="Skipped — verify destination connectivity first (G2)",
+            details={"reason": ctx.plan.destination.error or "not_connected"},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
     if not ctx.plan.ddl_compatible:
         return _block(
             GateId.G6_TARGET_DDL,

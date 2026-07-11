@@ -19,10 +19,10 @@ const CATEGORY_LABELS: Record<string, string> = {
 };
 
 const STATUS_FILTERS = [
-  { id: "", label: "All" },
-  { id: "live", label: "Live" },
-  { id: "beta", label: "Beta" },
-  { id: "planned", label: "Planned" },
+  { id: "live", label: "Transfer ready" },
+  { id: "connect_only", label: "Test only" },
+  { id: "", label: "All catalog" },
+  { id: "planned", label: "Roadmap" },
 ];
 
 function catalogType(id: string) {
@@ -42,12 +42,23 @@ function highlightMatch(text: string, query: string) {
   );
 }
 
+function statusBadge(item: CatalogConnector) {
+  const eff = item.effective_status || item.status;
+  if (item.transfer_ready || eff === "live") return { cls: "df2-badge-live", label: item.capability_label || "Full transfer" };
+  if (item.connect_only || eff === "connect_only") return { cls: "df2-badge-run", label: item.capability_label || "Test only" };
+  return { cls: "df2-badge-muted", label: "Roadmap" };
+}
+
 interface ConnectorCatalogPanelProps {
   role?: "source" | "destination" | "all";
   onSelect: (connector: CatalogConnector) => void;
   limit?: number;
-  /** Hide category sidebar — use in modals */
   compact?: boolean;
+  /** Block planned + connect-only when picking for transfer */
+  transferOnly?: boolean;
+  /** When true, only live transfer connectors are clickable */
+  requireAvailable?: boolean;
+  initialStatus?: string;
 }
 
 export function ConnectorCatalogPanel({
@@ -55,15 +66,19 @@ export function ConnectorCatalogPanel({
   onSelect,
   limit = 96,
   compact = false,
+  transferOnly = false,
+  requireAvailable = true,
+  initialStatus = "live",
 }: ConnectorCatalogPanelProps) {
   const [query, setQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [category, setCategory] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState(initialStatus);
   const [connectors, setConnectors] = useState<CatalogConnector[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [filtered, setFiltered] = useState(0);
   const [total, setTotal] = useState(0);
+  const [transferLive, setTransferLive] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,17 +97,19 @@ export function ConnectorCatalogPanel({
         category: category || undefined,
         status: status || undefined,
         limit,
+        transferOnly: transferOnly || (requireAvailable && status === "live"),
       });
       setConnectors(data.connectors || []);
       setCategories(data.categories || []);
       setFiltered(data.filtered ?? data.connectors?.length ?? 0);
       setTotal(data.total ?? 0);
+      setTransferLive(data.transfer_live ?? 0);
     } catch {
       setConnectors([]);
       setError("Could not load connector catalog. Start the API with npm run dev:api and refresh.");
     }
     setLoading(false);
-  }, [debouncedQ, role, category, status, limit]);
+  }, [debouncedQ, role, category, status, limit, transferOnly, requireAvailable]);
 
   useEffect(() => {
     void load();
@@ -128,7 +145,7 @@ export function ConnectorCatalogPanel({
           <span className="df2-search-icon"><DtIcon name="search" size={16} /></span>
           <input
             type="search"
-            placeholder={total ? `Search ${total}+ connectors…` : "Search connectors…"}
+            placeholder={transferLive ? `Search ${total} catalog · ${transferLive} transfer-ready…` : "Search connectors…"}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search connector catalog"
@@ -136,7 +153,7 @@ export function ConnectorCatalogPanel({
           />
         </div>
 
-        <div className="df2-chips" role="group" aria-label="Filter by status">
+        <div className="df2-chips" role="group" aria-label="Filter by capability">
           {STATUS_FILTERS.map((f) => (
             <button
               key={f.id || "all"}
@@ -164,8 +181,8 @@ export function ConnectorCatalogPanel({
           </div>
         )}
 
-        <p style={{ fontSize: 13, color: "#64748b", margin: "0 0 16px" }}>
-          {loading ? "Loading…" : `${connectors.length} of ${filtered} · ${total} total`}
+        <p className="df2-catalog-meta">
+          {loading ? "Loading…" : `${connectors.length} shown · ${transferLive || "—"} transfer-ready · ${total} in catalog`}
         </p>
 
         {error ? (
@@ -182,29 +199,45 @@ export function ConnectorCatalogPanel({
             ))}
           </div>
         ) : connectors.length === 0 ? (
-          <p style={{ color: "#64748b" }}>No connectors match. Try a different search or filter.</p>
+          <p style={{ color: "#64748b" }}>No connectors match. Try &quot;Transfer ready&quot; or a different search.</p>
         ) : (
           <div className="df2-connector-grid">
-            {connectors.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className="df2-connector-tile"
-                onClick={() => onSelect(item)}
-                title={item.description}
-              >
-                <div className="df2-connector-tile-icon">
-                  <ConnectorIcon id={catalogType(item.id)} size={28} />
-                </div>
-                <span className="df2-connector-tile-name">{highlightMatch(item.name, debouncedQ)}</span>
-                {item.description && (
-                  <span className="df2-connector-tile-desc">{item.description}</span>
-                )}
-                <span className={`df2-badge df2-badge-${item.status === "live" ? "live" : item.status === "beta" ? "beta" : "muted"}`}>
-                  {item.status || "planned"}
-                </span>
-              </button>
-            ))}
+            {connectors.map((item) => {
+              const badge = statusBadge(item);
+              const clickable = item.transfer_ready || (!requireAvailable && (item.connect_only || item.status === "beta"));
+              const blocked = requireAvailable && !item.transfer_ready && !item.connect_only;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`df2-connector-tile ${!item.transfer_ready ? "is-planned" : ""} ${item.transfer_ready ? "is-live" : ""}`}
+                  onClick={() => {
+                    if (blocked && !item.connect_only) return;
+                    onSelect(item);
+                  }}
+                  disabled={blocked && !item.connect_only}
+                  title={
+                    item.transfer_ready
+                      ? `${item.name} — ${item.description}`
+                      : item.connect_only
+                        ? `${item.name} — connection test only, transfer not yet supported`
+                        : `${item.name} — on roadmap`
+                  }
+                >
+                  <div className="df2-connector-tile-icon">
+                    <ConnectorIcon id={catalogType(item.id)} size={28} />
+                  </div>
+                  <span className="df2-connector-tile-name">{highlightMatch(item.name, debouncedQ)}</span>
+                  {item.description && (
+                    <span className="df2-connector-tile-desc">{item.description}</span>
+                  )}
+                  <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
+                  {!clickable && !item.connect_only && (
+                    <span className="df2-connector-tile-lock">Roadmap</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

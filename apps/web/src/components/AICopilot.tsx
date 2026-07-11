@@ -10,6 +10,7 @@ import {
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { Screen } from "../lib/types";
+import { renderSafeMarkdown } from "../lib/safeMarkdown";
 
 interface Message {
   role: "user" | "assistant";
@@ -30,13 +31,6 @@ interface AICopilotProps {
   onNavigate?: (screen: Screen) => void;
   variant?: "fab" | "rail";
   onClose?: () => void;
-}
-
-function renderMarkdown(text: string) {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/`(.+?)`/g, "<code>$1</code>")
-    .replace(/\n/g, "<br/>");
 }
 
 const SCREEN_LABELS: Record<string, string> = {
@@ -197,7 +191,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       <div className="df2-copilot-msgs">
         {messages.map((msg, i) => (
           <div key={i} className={`df2-copilot-msg ${msg.role}`}>
-            <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+            <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
             {(msg.method || msg.toolsUsed?.length) && (
               <div className="df2-copilot-evidence">
                 {msg.method && <span>{msg.method}</span>}

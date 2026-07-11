@@ -1,0 +1,46 @@
+# DataFlow API — production image (Railway / Docker)
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DATAFLOW_ENV=production \
+    DATAFLOW_AUTO_INSTALL_DRIVERS=0 \
+    DATAFLOW_TRAINING=off \
+    DATAFLOW_REQUIRE_AUTH=1 \
+    DATAFLOW_ENABLE_DOCS=0 \
+    PORT=8000
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY apps/api/requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+
+COPY packages/preflight /app/packages/preflight
+RUN pip install -e "/app/packages/preflight[dev]" || pip install -e /app/packages/preflight
+
+COPY apps/api /app/apps/api
+COPY scripts/start-api.sh /app/scripts/start-api.sh
+RUN chmod +x /app/scripts/start-api.sh
+
+WORKDIR /app/apps/api
+
+RUN mkdir -p /data/data /data/uploads /data/vector_store
+
+ENV DATAFLOW_DATA_DIR=/data/data \
+    DATAFLOW_UPLOAD_DIR=/data/uploads \
+    DATAFLOW_VECTOR_STORE_DIR=/data/vector_store \
+    RAILWAY_VOLUME_MOUNT_PATH=/data
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+  CMD curl -f "http://127.0.0.1:${PORT:-8000}/health" || exit 1
+
+CMD ["/app/scripts/start-api.sh"]

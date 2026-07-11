@@ -7,6 +7,7 @@ types intentionally fall back to lossless text/JSON representations.
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 LOGICAL_STRING = "string"
@@ -158,6 +159,20 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "array",
         LOGICAL_BINARY: "binData",
     },
+    "redshift": {
+        LOGICAL_STRING: "VARCHAR(65535)",
+        LOGICAL_TEXT: "VARCHAR(65535)",
+        LOGICAL_INTEGER: "BIGINT",
+        LOGICAL_DECIMAL: "DECIMAL(38,10)",
+        LOGICAL_BOOLEAN: "BOOLEAN",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "TIMESTAMP",
+        LOGICAL_TIME: "TIME",
+        LOGICAL_UUID: "VARCHAR(36)",
+        LOGICAL_JSON: "SUPER",
+        LOGICAL_ARRAY: "SUPER",
+        LOGICAL_BINARY: "VARBYTE",
+    },
 }
 
 DEFAULT_DDL: Final[dict[str, str]] = {
@@ -166,12 +181,14 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "snowflake": "VARCHAR",
     "bigquery": "STRING",
     "mongodb": "string",
+    "redshift": "VARCHAR(65535)",
 }
 
 
 def normalize_logical_type(inferred: str | None) -> str:
     """Return a canonical logical type for parser, DB, and warehouse types."""
     key = (inferred or "").strip().lower()
+    key = re.sub(r"\([^)]*\)", "", key).strip()
     key = key.replace("_", " ")
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
@@ -189,6 +206,31 @@ def is_structural_type(inferred: str | None) -> bool:
 
 def is_binary_type(inferred: str | None) -> bool:
     return normalize_logical_type(inferred) == LOGICAL_BINARY
+
+
+def is_lossy_coercion(source_type: str, target_type: str) -> bool:
+    """True when converting source→target may lose precision or fail silently."""
+    src = normalize_logical_type(source_type)
+    tgt = normalize_logical_type(target_type)
+    if src == tgt:
+        return False
+    if tgt in LOSSLESS_TEXT_TYPES or tgt == LOGICAL_JSON:
+        return False
+    if src in {LOGICAL_JSON, LOGICAL_ARRAY} and tgt in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN}:
+        return True
+    if src == LOGICAL_BINARY and tgt != LOGICAL_BINARY:
+        return True
+    if src in {LOGICAL_DATETIME, LOGICAL_DATE} and tgt == LOGICAL_DATE and src == LOGICAL_DATETIME:
+        return True
+    if src == LOGICAL_DECIMAL and tgt == LOGICAL_INTEGER:
+        return True
+    if src in LOSSLESS_TEXT_TYPES and tgt in {
+        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_BINARY,
+    }:
+        return True
+    if src == LOGICAL_DATETIME and tgt == LOGICAL_DATE:
+        return True
+    return False
 
 
 def build_column_types(columns: list[str], schema: dict[str, str]) -> dict[str, str]:

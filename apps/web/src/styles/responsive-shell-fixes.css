@@ -1,0 +1,280 @@
+/* ═══════════════════════════════════════════════════════════
+   Responsive shell fixes — sidebar, pilot, transfer studio
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  --df-header-height: 60px;
+  --df-viewport-h: 100dvh;
+}
+
+/* ─── Sidebar: nav scrolls, foot stays pinned ─── */
+@media (min-width: 1025px) {
+  .df2-app .df2-sidebar {
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  .df2-app .df2-nav {
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-gutter: stable;
+  }
+}
+
+/* ─── Fit pages: allow inner scroll regions ─── */
+.df2-page-fit {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.df2-page-fit .df2-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── Pilot: single scroll surface, stable viewport ─── */
+.df2-content-inner.df2-content-flush {
+  height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
+  max-height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.df2-content-flush .df2-page-pilot {
+  flex: 1;
+  min-height: 0;
+  height: auto !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-content-flush .df2-pilot-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.df2-pilot-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.df2-pilot-status-bar strong {
+  color: #0f172a;
+}
+
+.df2-pilot-status-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.df2-pilot-status-metrics span {
+  white-space: nowrap;
+}
+
+.df2-pilot-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  gap: 12px;
+}
+
+.df2-pilot-aside {
+  width: clamp(200px, 22vw, 260px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+}
+
+.df2-pilot-aside-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.df2-pilot-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.df2-pilot-main-inner,
+.df2-pilot-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: clamp(12px, 2vw, 20px);
+}
+
+.df2-pilot-tool-registry-details {
+  margin-top: 8px;
+}
+
+.df2-pilot-tool-registry-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  padding: 6px 0;
+}
+
+/* Stable skeleton heights — prevent layout shift */
+.df2-model-mini-strip {
+  min-height: 72px;
+}
+
+.df2-pilot-capability-grid {
+  min-height: 88px;
+}
+
+.df2-pilot-metrics-skeleton {
+  min-height: 20px;
+}
+
+/* ─── Transfer Studio: 12–14" laptops ─── */
+@media (max-width: 1440px) {
+  .df2-page-transfer-studio {
+    --df-studio-rail-w: clamp(200px, 18vw, 240px);
+    --df-studio-panel-min-h: clamp(260px, 42vh, 480px);
+  }
+
+  .df2-transfer-studio-body {
+    grid-template-columns: minmax(0, 1fr) var(--df-studio-rail-w);
+  }
+
+  .df2-transfer-step-split {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-transfer-step-secondary {
+    border-left: none;
+    padding-left: 0;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 16px;
+  }
+}
+
+@media (max-width: 1280px) {
+  .df2-page-transfer-studio {
+    --df-studio-panel-min-h: clamp(240px, 38vh, 420px);
+  }
+
+  .df2-transfer-studio-body {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-studio-inspector {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+  }
+
+  /* Map step keeps internal scroll — do not expand to page scroll */
+  .df2-transfer-studio-body:not(.is-map-step) .df2-transfer-step-panel {
+    overflow: visible;
+    min-height: auto;
+  }
+
+  .df2-transfer-studio-body:not(.is-map-step) .df2-transfer-step-panel .df2-card-body {
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+
+  .df2-transfer-studio-body:not(.is-map-step) .df2-transfer-main-panel {
+    min-height: auto;
+  }
+}
+
+@media (max-width: 1024px) {
+  .df2-pilot-body {
+    flex-direction: column;
+  }
+
+  .df2-pilot-aside {
+    width: 100%;
+    max-height: min(220px, 32vh);
+    flex-shrink: 0;
+  }
+}
+
+/* ─── Navigation: no layout-shift animation ─── */
+.df2-content-inner > .df2-screen-panel {
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .df2-content-inner.is-first-screen > .df2-screen-panel {
+    animation: df2-panel-in 0.2s ease;
+  }
+}
+
+.df2-pilot-status-bar .df2-pilot-status-message {
+  display: inline;
+}
+
+@media (max-width: 1100px) {
+  .df2-pilot-status-bar .df2-pilot-status-message {
+    display: none;
+  }
+
+  .df2-pilot-status-bar {
+    gap: 8px;
+  }
+}
+
+@media (max-width: 768px) {
+  .df2-pilot-status-metrics {
+    width: 100%;
+  }
+}
+
+/* ─── Lazy route loader ─── */
+.df2-route-suspense {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: min(480px, 60vh);
+  padding: 32px 16px;
+}

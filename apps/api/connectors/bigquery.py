@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from connectors.base import ConnectResult
+from connectors.driver_guard import platform_driver_unavailable
 
 
 def test_bigquery(
@@ -29,7 +30,7 @@ def test_bigquery(
         return ConnectResult(
             ok=False,
             tables=[],
-            error="BigQuery driver not installed — pip install google-cloud-bigquery",
+            error=platform_driver_unavailable("BigQuery"),
             driver="none",
         )
 

@@ -48,6 +48,11 @@ ABBREVIATIONS: dict[str, str] = {
     "txn": "transaction",
     "txn_dt": "transaction_date",
     "trans_dt": "transaction_date",
+    "trans_date": "transaction_date",
+    "created_at": "created_timestamp",
+    "updated_at": "updated_timestamp",
+    "mod_dt": "modified_date",
+    "cust_nm": "customer_name",
     "cust": "customer",
     "cust_id": "customer_id",
     "acct": "account",
@@ -68,6 +73,7 @@ ABBREVIATIONS: dict[str, str] = {
     "inv_no": "invoice_number",
     "sku": "product_sku",
     "prod": "product",
+    "prod_id": "product_id",
     "sts": "status",
     "stat": "status",
     "bal": "balance",
@@ -88,6 +94,28 @@ ABBREVIATIONS: dict[str, str] = {
     "created": "created_at",
     "updated": "updated_at",
     "mod_dt": "modified_at",
+    "email": "email_address",
+    "e_mail": "email_address",
+    "phone": "phone_number",
+    "tel": "phone_number",
+    "mob": "mobile_number",
+    "zipcode": "postal_code",
+    "postal": "postal_code",
+    "country_cd": "country_code",
+    "cntry": "country_code",
+    "curr_cd": "currency_code",
+    "iso_curr": "currency_code",
+    "ord": "order",
+    "ord_id": "order_id",
+    "order_no": "order_number",
+    "ship_dt": "ship_date",
+    "del_dt": "delivery_date",
+    "qty_ord": "quantity_ordered",
+    "unit_prc": "unit_price",
+    "unit_price": "unit_price",
+    "line_amt": "line_amount",
+    "net_amt": "net_amount",
+    "gross_amt": "gross_amount",
 }
 
 
@@ -196,6 +224,34 @@ def _type_aware_boost(src_type: str, tgt_type: str) -> float:
     return 0.0
 
 
+def _sample_consistency_boost(samples: list[str] | None, source_type: str, target_type: str) -> float:
+    """Boost score when sample values parse cleanly for target logical type."""
+    if not samples or len(samples) < 2:
+        return 0.0
+    from services.transform_engine import apply_transform, infer_transform_for_mapping
+
+    transform = infer_transform_for_mapping("col", "col", source_type, target_type)
+    ok = 0
+    checked = 0
+    for raw in samples[:8]:
+        if raw is None or str(raw).strip() == "":
+            continue
+        checked += 1
+        _, err = apply_transform(str(raw), transform)
+        if not err:
+            ok += 1
+    if checked < 2:
+        return 0.0
+    rate = ok / checked
+    if rate >= 0.9:
+        return 0.06
+    if rate >= 0.7:
+        return 0.03
+    if rate < 0.4:
+        return -0.08
+    return 0.0
+
+
 def _score_pair(
     source: str,
     target: str,
@@ -205,6 +261,7 @@ def _score_pair(
     target_role: str | None = None,
     source_type: str = "VARCHAR",
     target_type: str = "VARCHAR",
+    source_samples: list[str] | None = None,
 ) -> tuple[float, str]:
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
@@ -271,14 +328,15 @@ def _score_pair(
 
     type_penalty = _type_compat_penalty(source_type, target_type)
     type_boost = _type_aware_boost(source_type, target_type)
+    sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
 
     if src_sem in tgt_sem or tgt_sem in src_sem:
         if min(len(src_sem), len(tgt_sem)) >= 4:
-            return max(0.92, 0.85 + bm25_norm * 0.1) - type_penalty + type_boost, "Partial semantic overlap + BM25"
+            return max(0.92, 0.85 + bm25_norm * 0.1) - type_penalty + type_boost + sample_boost, "Partial semantic overlap + BM25"
 
     overlap = len(set(src_sem.split("_")) & set(tgt_sem.split("_")))
     if overlap >= 2:
-        return 0.82 + overlap * 0.03 + bm25_norm * 0.05 - type_penalty + type_boost + ml_boost, f"Shared tokens ({overlap}) + BM25"
+        return 0.82 + overlap * 0.03 + bm25_norm * 0.05 - type_penalty + type_boost + ml_boost + sample_boost, f"Shared tokens ({overlap}) + BM25"
 
     fuzzy = _similarity(src_sem, tgt_sem)
     
@@ -290,12 +348,12 @@ def _score_pair(
     if s_ngrams or t_ngrams:
         jaccard = len(s_ngrams & t_ngrams) / len(s_ngrams | t_ngrams)
 
-    combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) - type_penalty + type_boost + ml_boost
+    combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) - type_penalty + type_boost + ml_boost + sample_boost
     
     if combined >= 0.78:
         return min(combined, 0.99), "BM25 / Jaccard lexical retrieval"
     if overlap == 1 and len(src_sem.split("_")) > 1:
-        return min(0.78 - type_penalty + type_boost + ml_boost, 0.99), "Single token overlap"
+        return min(0.78 - type_penalty + type_boost + ml_boost + sample_boost, 0.99), "Single token overlap"
     return min(combined, 0.99), "Character similarity"
 
 
@@ -437,12 +495,15 @@ def map_columns(
     tgt_roles: dict[str, str] = {}
     src_types: dict[str, str] = {}
     tgt_types: dict[str, str] = {}
+    src_samples: dict[str, list[str]] = {}
 
     if source_schemas:
         for s in source_schemas:
             analyzed = analyze_column(s.get("name", ""), s.get("inferred_type", "VARCHAR"), s.get("samples", []))
             src_roles[s["name"]] = analyzed["semantic_role"]
             src_types[s["name"]] = s.get("inferred_type", "VARCHAR")
+            if s.get("samples"):
+                src_samples[s["name"]] = [str(x) for x in s["samples"][:8]]
     if target_schemas:
         for t in target_schemas:
             analyzed = analyze_column(t.get("name", ""), t.get("inferred_type", "VARCHAR"), t.get("samples", []))
@@ -484,6 +545,7 @@ def map_columns(
                 tgt_roles.get(target),
                 src_types.get(source, "VARCHAR"),
                 tgt_types.get(target, "VARCHAR"),
+                src_samples.get(source),
             )
             pair_scores[(source, target)] = (score, reason)
 
@@ -533,14 +595,17 @@ def map_columns(
                 tgt_roles.get(target),
                 src_types.get(source, "VARCHAR"),
                 tgt_types.get(target, "VARCHAR"),
+                src_samples.get(source),
             )
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
         alternatives = _alternatives(source, target_columns, pair_scores)
         if not best_target:
+            if target_columns:
+                continue
             best_target = _semantic_form(source)
-            best_score = 0.65
-            best_reason = "No target match — inferred semantic name"
+            best_score = 0.55
+            best_reason = "No target match — inferred semantic name (no destination schema)"
             alternatives = []
         else:
             used_targets.add(best_target)
@@ -550,7 +615,7 @@ def map_columns(
             {
                 "source": source,
                 "target": best_target,
-                "confidence": round(min(max(best_score, 0.65), 0.99), 3),
+                "confidence": round(min(max(best_score, 0.55), 0.99), 3),
                 "reasoning": best_reason,
                 "user_override": False,
                 "assignment_strategy": "fallback_best_available",

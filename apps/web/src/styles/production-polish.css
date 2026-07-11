@@ -1,0 +1,399 @@
+/**
+ * Production polish — settings, cards, alerts, tables, actions
+ * Final pass before go-live
+ */
+
+/* ─── Spacing utilities ─── */
+.df2-mb-md { margin-bottom: 16px; }
+.df2-mb-lg { margin-bottom: 24px; }
+
+/* ─── Alerts ─── */
+.df2-app .df2-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.df2-app .df2-alert-success {
+  border-color: #6ee7b7;
+  background: linear-gradient(135deg, #ecfdf5 0%, #f0fdfa 100%);
+  color: #065f46;
+}
+
+.df2-app .df2-alert-success strong {
+  color: #047857;
+}
+
+.df2-app .df2-alert-banner {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.df2-app .df2-alert-banner-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-app .df2-alert-banner-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ─── Settings layout hardening ─── */
+.df2-page-settings .df2-settings-panel {
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-page-settings .df2-settings-section {
+  overflow: visible;
+  box-shadow: var(--df-shadow-xs, 0 1px 2px rgba(15, 23, 42, 0.04));
+}
+
+.df2-page-settings .df2-settings-section-head {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.df2-page-settings .df2-settings-section-head > .df2-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.df2-page-settings .df2-settings-section-body {
+  min-width: 0;
+}
+
+/* ─── API key cards (replaces clipped table actions) ─── */
+.df2-api-key-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-api-key-toolbar .df2-settings-field {
+  flex: 1;
+  min-width: min(100%, 240px);
+  max-width: 360px;
+}
+
+.df2-api-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.df2-api-key-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 10px;
+  background: #fafbfc;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.df2-api-key-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: var(--df-shadow-xs);
+}
+
+.df2-api-key-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.df2-api-key-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: #f0fdfa;
+  color: #0f766e;
+  border: 1px solid #99f6e4;
+}
+
+.df2-api-key-card-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.df2-api-key-card-copy strong {
+  font-size: 14px;
+  font-weight: 650;
+  color: #0f172a;
+}
+
+.df2-api-key-card-copy code {
+  font-size: 12px;
+  color: #475569;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+}
+
+.df2-api-key-card-meta {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.df2-api-key-card-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-api-key-card-actions .df2-btn {
+  min-width: 72px;
+}
+
+.df2-settings-key-reveal {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px dashed #6ee7b7;
+  word-break: break-all;
+}
+
+.df2-settings-key-reveal code {
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #065f46;
+}
+
+/* ─── SSO cards — pinned actions ─── */
+.df2-settings-sso-card {
+  min-height: 168px;
+}
+
+.df2-settings-sso-card .df2-btn {
+  margin-top: auto;
+  align-self: flex-start;
+}
+
+.df2-settings-sso-card .df2-badge {
+  align-self: flex-start;
+}
+
+/* ─── Model cards — consistent footer ─── */
+.df2-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.df2-app .df2-model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 220px;
+  padding: 18px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: var(--df-shadow-xs);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.df2-app .df2-model-card:hover {
+  border-color: #cbd5e1;
+}
+
+.df2-app .df2-model-card.ready {
+  border-color: #99f6e4;
+  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
+}
+
+.df2-app .df2-model-card .df2-btn {
+  margin-top: auto;
+  align-self: flex-start;
+}
+
+.df2-app .df2-model-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* ─── Settings tables — scroll + sticky actions ─── */
+.df2-settings-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.df2-settings-table-wrap .df2-settings-team-table,
+.df2-settings-table-wrap .df2-settings-logs-table {
+  margin: 0;
+}
+
+.df2-settings-team-table th:last-child,
+.df2-settings-team-table td:last-child {
+  position: sticky;
+  right: 0;
+  min-width: 96px;
+  text-align: right;
+  background: inherit;
+  box-shadow: -8px 0 12px -8px rgba(15, 23, 42, 0.08);
+}
+
+.df2-settings-team-table thead th:last-child {
+  background: #f8fafc;
+}
+
+.df2-settings-team-table tbody td:last-child {
+  background: #fff;
+}
+
+/* ─── Modals on settings ─── */
+.df2-page-settings .dt-modal-overlay {
+  z-index: 1200;
+}
+
+.df2-page-settings .dt-modal {
+  max-height: min(90vh, 720px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-page-settings .dt-modal-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ─── Section empty states ─── */
+.df2-settings-section-body .df2-empty-compact {
+  padding: 28px 20px;
+  border: 1px dashed #e2e8f0;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+/* ─── Danger button ─── */
+.df2-app .df2-btn-danger {
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.df2-app .df2-btn-danger:hover {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .df2-api-key-card,
+  .df2-app .df2-model-card {
+    transition: none;
+  }
+}
+
+/* ─── Global shell polish ─── */
+.df2-app .df2-sidebar-foot {
+  border-top: 1px solid var(--df-line, #e2e8f0);
+  padding-top: 12px;
+}
+
+.df2-app .df2-sidebar-user {
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.df2-app .df2-page-head-enterprise .df2-page-title {
+  letter-spacing: -0.02em;
+}
+
+.df2-app .df2-page-insight {
+  border-radius: 10px;
+}
+
+.df2-app .df2-stats .df2-stat,
+.df2-app .df2-control-metric {
+  transition: box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.df2-app .df2-stats .df2-stat:hover,
+.df2-app .df2-control-metric:hover {
+  box-shadow: var(--df-shadow-sm);
+}
+
+/* ─── Buttons — consistent hit targets ─── */
+.df2-app .df2-btn-sm {
+  min-height: 34px;
+  padding: 6px 12px;
+}
+
+.df2-app .df2-btn {
+  min-height: 38px;
+}
+
+/* ─── Form focus ring consistency ─── */
+.df2-app .df2-settings-field textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .df2-api-key-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .df2-api-key-card-actions {
+    justify-content: flex-end;
+    padding-top: 8px;
+    border-top: 1px solid #f1f5f9;
+  }
+
+  .df2-api-key-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .df2-api-key-toolbar .df2-settings-field {
+    max-width: none;
+  }
+
+  .df2-alert-banner {
+    flex-direction: column;
+  }
+
+  .df2-alert-banner-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

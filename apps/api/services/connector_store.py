@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STORE_PATH = Path(__file__).resolve().parents[1] / "data" / "connectors.json"
+from services.platform_config import data_dir
+from services.secret_vault import decrypt_secret, encrypt_secret
+
+STORE_PATH = data_dir() / "connectors.json"
 
 
 @dataclass
@@ -38,6 +41,8 @@ class SavedConnector:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SavedConnector:
+        password = decrypt_secret(data.get("password", "") or "")
+        conn_str = decrypt_secret(data.get("connection_string", "") or "")
         return cls(
             id=data["id"],
             name=data["name"],
@@ -47,9 +52,9 @@ class SavedConnector:
             port=int(data.get("port", 5432)),
             database=data.get("database", ""),
             username=data.get("username", ""),
-            password=data.get("password", ""),
+            password=password,
             schema=data.get("schema", "public"),
-            connection_string=data.get("connection_string", ""),
+            connection_string=conn_str,
             ssl=bool(data.get("ssl", True)),
             warehouse=data.get("warehouse", ""),
             last_tested_at=data.get("last_tested_at"),
@@ -82,8 +87,16 @@ def _seed_enabled() -> bool:
 
 def _save_all(connectors: list[SavedConnector]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = []
+    for c in connectors:
+        d = c.to_dict()
+        if d.get("password"):
+            d["password"] = encrypt_secret(d["password"])
+        if d.get("connection_string"):
+            d["connection_string"] = encrypt_secret(d["connection_string"])
+        payload.append(d)
     STORE_PATH.write_text(
-        json.dumps({"connectors": [c.to_dict() for c in connectors]}, indent=2),
+        json.dumps({"connectors": payload}, indent=2),
         encoding="utf-8",
     )
 

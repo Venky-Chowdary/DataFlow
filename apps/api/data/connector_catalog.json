@@ -1,6 +1,6 @@
 {
  "version": 1,
- "total": 623,
+ "total": 726,
  "connectors": [
   {
    "id": "postgresql",
@@ -4361,7 +4361,728 @@
    "name": "Amazon S3",
    "category": "cloud_storage",
    "status": "beta",
-   "description": "Amazon S3 buckets \u2014 credential test, object ingest and export"
+   "description": "Amazon S3 buckets — credential test, object ingest and export"
+  },
+  {
+   "id": "apache_iceberg",
+   "name": "Apache Iceberg",
+   "category": "lake",
+   "status": "planned",
+   "description": "Open table format for data lakes"
+  },
+  {
+   "id": "delta_lake",
+   "name": "Delta Lake",
+   "category": "lake",
+   "status": "planned",
+   "description": "ACID transactions on data lakes"
+  },
+  {
+   "id": "clickhouse",
+   "name": "ClickHouse",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "Column-oriented OLAP database"
+  },
+  {
+   "id": "cockroachdb",
+   "name": "CockroachDB",
+   "category": "database",
+   "status": "planned",
+   "description": "Distributed SQL database"
+  },
+  {
+   "id": "cassandra",
+   "name": "Apache Cassandra",
+   "category": "database",
+   "status": "planned",
+   "description": "Wide-column NoSQL store"
+  },
+  {
+   "id": "neo4j",
+   "name": "Neo4j",
+   "category": "database",
+   "status": "planned",
+   "description": "Graph database platform"
+  },
+  {
+   "id": "duckdb",
+   "name": "DuckDB",
+   "category": "database",
+   "status": "planned",
+   "description": "In-process analytical database"
+  },
+  {
+   "id": "trino",
+   "name": "Trino",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "Fast distributed SQL engine"
+  },
+  {
+   "id": "apache_kafka",
+   "name": "Apache Kafka",
+   "category": "streaming",
+   "status": "planned",
+   "description": "Distributed event streaming"
+  },
+  {
+   "id": "azure_synapse",
+   "name": "Azure Synapse",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "Microsoft analytics service"
+  },
+  {
+   "id": "azure_cosmos_db",
+   "name": "Azure Cosmos DB",
+   "category": "database",
+   "status": "planned",
+   "description": "Multi-model Azure database"
+  },
+  {
+   "id": "workday",
+   "name": "Workday",
+   "category": "saas",
+   "status": "planned",
+   "description": "HR and finance cloud data"
+  },
+  {
+   "id": "netsuite",
+   "name": "NetSuite",
+   "category": "saas",
+   "status": "planned",
+   "description": "ERP and financial data"
+  },
+  {
+   "id": "servicenow",
+   "name": "ServiceNow",
+   "category": "saas",
+   "status": "planned",
+   "description": "IT service management data"
+  },
+  {
+   "id": "avro",
+   "name": "Avro",
+   "category": "file",
+   "status": "planned",
+   "description": "Row-based binary serialization format"
+  },
+  {
+   "id": "orc",
+   "name": "ORC",
+   "category": "file",
+   "status": "planned",
+   "description": "Columnar file format for Hive"
+  },
+  {
+   "id": "xml",
+   "name": "XML",
+   "category": "file",
+   "status": "planned",
+   "description": "Structured XML document parsing"
+  },
+  {
+   "id": "google_sheets",
+   "name": "Google Sheets",
+   "category": "saas",
+   "status": "planned",
+   "description": "Spreadsheet source and destination"
+  },
+  {
+   "id": "airtable",
+   "name": "Airtable",
+   "category": "saas",
+   "status": "planned",
+   "description": "Spreadsheet-database hybrid"
+  },
+  {
+   "id": "notion",
+   "name": "Notion",
+   "category": "saas",
+   "status": "planned",
+   "description": "Workspace database export"
+  },
+  {
+   "id": "github",
+   "name": "GitHub",
+   "category": "saas",
+   "status": "planned",
+   "description": "Repository and issue metadata"
+  },
+  {
+   "id": "jira",
+   "name": "Jira",
+   "category": "saas",
+   "status": "planned",
+   "description": "Issue and project data export"
+  },
+  {
+   "id": "zendesk",
+   "name": "Zendesk",
+   "category": "saas",
+   "status": "planned",
+   "description": "Support ticket and user sync"
+  },
+  {
+   "id": "segment",
+   "name": "Segment",
+   "category": "saas",
+   "status": "planned",
+   "description": "Customer data platform"
+  },
+  {
+   "id": "firebolt",
+   "name": "Firebolt",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "Cloud data warehouse"
+  },
+  {
+   "id": "motherduck",
+   "name": "MotherDuck",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "DuckDB in the cloud"
+  },
+  {
+   "id": "dremio",
+   "name": "Dremio",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "Data lakehouse engine"
+  },
+  {
+   "id": "greenplum",
+   "name": "Greenplum",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "MPP analytics database"
+  },
+  {
+   "id": "planetscale",
+   "name": "PlanetScale",
+   "category": "database",
+   "status": "planned",
+   "description": "Serverless MySQL platform"
+  },
+  {
+   "id": "neon",
+   "name": "Neon",
+   "category": "database",
+   "status": "planned",
+   "description": "Serverless Postgres"
+  },
+  {
+   "id": "supabase",
+   "name": "Supabase",
+   "category": "database",
+   "status": "planned",
+   "description": "Postgres development platform"
+  },
+  {
+   "id": "jsonl",
+   "name": "JSON Lines",
+   "category": "file",
+   "status": "planned",
+   "description": "Newline-delimited JSON records"
+  },
+  {
+   "id": "protobuf",
+   "name": "Protocol Buffers",
+   "category": "file",
+   "status": "planned",
+   "description": "Binary structured data format"
+  },
+  {
+   "id": "amazon_kinesis",
+   "name": "Amazon Kinesis",
+   "category": "streaming",
+   "status": "planned",
+   "description": "AWS real-time data streaming"
+  },
+  {
+   "id": "google_pubsub",
+   "name": "Google Pub/Sub",
+   "category": "streaming",
+   "status": "planned",
+   "description": "GCP messaging service"
+  },
+  {
+   "id": "azure_event_hubs",
+   "name": "Azure Event Hubs",
+   "category": "streaming",
+   "status": "planned",
+   "description": "Azure streaming ingestion"
+  },
+  {
+   "id": "minio",
+   "name": "MinIO",
+   "category": "lake",
+   "status": "planned",
+   "description": "S3-compatible object storage"
+  },
+  {
+   "id": "apache_spark",
+   "name": "Apache Spark",
+   "category": "lake",
+   "status": "planned",
+   "description": "Unified analytics engine"
+  },
+  {
+   "id": "datadog",
+   "name": "Datadog",
+   "category": "saas",
+   "status": "planned",
+   "description": "Monitoring and metrics export"
+  },
+  {
+   "id": "splunk",
+   "name": "Splunk",
+   "category": "saas",
+   "status": "planned",
+   "description": "Observability and log analytics"
+  },
+  {
+   "id": "hightouch",
+   "name": "Hightouch",
+   "category": "saas",
+   "status": "planned",
+   "description": "Reverse ETL platform"
+  },
+  {
+   "id": "fivetran",
+   "name": "Fivetran",
+   "category": "saas",
+   "status": "planned",
+   "description": "ELT connector marketplace reference"
+  },
+  {
+   "id": "airbyte",
+   "name": "Airbyte",
+   "category": "saas",
+   "status": "planned",
+   "description": "Open-source ELT reference"
+  },
+  {
+   "id": "dbt_cloud",
+   "name": "dbt Cloud",
+   "category": "saas",
+   "status": "planned",
+   "description": "Analytics engineering platform"
+  },
+  {
+   "id": "sap_hana",
+   "name": "SAP HANA",
+   "category": "database",
+   "status": "planned",
+   "description": "In-memory enterprise database"
+  },
+  {
+   "id": "teradata_vantage",
+   "name": "Teradata Vantage",
+   "category": "warehouse",
+   "status": "planned",
+   "description": "Enterprise analytics platform"
+  },
+  {
+   "id": "mariadb",
+   "name": "MariaDB",
+   "category": "database",
+   "status": "planned",
+   "description": "Open-source relational database"
+  },
+  {
+   "id": "influxdb",
+   "name": "InfluxDB",
+   "category": "database",
+   "status": "planned",
+   "description": "Time-series database"
+  },
+  {
+   "id": "timescaledb",
+   "name": "TimescaleDB",
+   "category": "database",
+   "status": "planned",
+   "description": "Time-series on PostgreSQL"
+  },
+  {
+   "id": "parquet",
+   "name": "Parquet",
+   "category": "file",
+   "status": "live",
+   "description": "Columnar file ingest with schema inference"
+  },
+  {
+   "id": "ndjson",
+   "name": "NDJSON",
+   "category": "file",
+   "status": "live",
+   "description": "Newline-delimited JSON ingest"
+  },
+  {
+   "id": "gcs",
+   "name": "Google Cloud Storage",
+   "category": "cloud_storage",
+   "status": "live",
+   "description": "GCS buckets — credential test, object ingest and export"
+  },
+  {
+   "id": "opensearch",
+   "name": "OpenSearch",
+   "category": "database",
+   "status": "live",
+   "description": "OpenSearch cluster — Elasticsearch-compatible driver"
+  },
+  {
+   "id": "amazon_elasticsearch",
+   "name": "Amazon OpenSearch Service",
+   "category": "database",
+   "status": "live",
+   "description": "Managed Elasticsearch/OpenSearch on AWS"
+  },
+  {
+   "id": "elastic_cloud",
+   "name": "Elastic Cloud",
+   "category": "database",
+   "status": "live",
+   "description": "Hosted Elasticsearch on Elastic Cloud"
+  },
+  {
+   "id": "amazon_redshift",
+   "name": "Amazon Redshift",
+   "category": "warehouse",
+   "status": "live",
+   "description": "AWS Redshift warehouse — batched load and unload"
+  },
+  {
+   "id": "google_bigquery",
+   "name": "Google BigQuery",
+   "category": "warehouse",
+   "status": "live",
+   "description": "GCP BigQuery analytics warehouse"
+  },
+  {
+   "id": "amazon_dynamodb",
+   "name": "Amazon DynamoDB",
+   "category": "database",
+   "status": "live",
+   "description": "AWS DynamoDB table sync"
+  },
+  {
+   "id": "redis_enterprise",
+   "name": "Redis Enterprise",
+   "category": "database",
+   "status": "live",
+   "description": "Redis-compatible enterprise cache and KV store"
+  },
+  {
+   "id": "amazon_elasticache_redis",
+   "name": "Amazon ElastiCache Redis",
+   "category": "database",
+   "status": "live",
+   "description": "Managed Redis on AWS"
+  },
+  {
+   "id": "azure_cache_redis",
+   "name": "Azure Cache for Redis",
+   "category": "database",
+   "status": "live",
+   "description": "Managed Redis on Azure"
+  },
+  {
+   "id": "google_memorystore_redis",
+   "name": "Google Memorystore Redis",
+   "category": "database",
+   "status": "live",
+   "description": "Managed Redis on GCP"
+  },
+  {
+   "id": "snowflake_aws",
+   "name": "Snowflake on AWS",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Snowflake deployment on Amazon Web Services"
+  },
+  {
+   "id": "snowflake_azure",
+   "name": "Snowflake on Azure",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Snowflake deployment on Microsoft Azure"
+  },
+  {
+   "id": "snowflake_gcp",
+   "name": "Snowflake on GCP",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Snowflake deployment on Google Cloud"
+  },
+  {
+   "id": "bigquery_us",
+   "name": "BigQuery (US)",
+   "category": "warehouse",
+   "status": "live",
+   "description": "BigQuery datasets in US multi-region"
+  },
+  {
+   "id": "bigquery_eu",
+   "name": "BigQuery (EU)",
+   "category": "warehouse",
+   "status": "live",
+   "description": "BigQuery datasets in EU multi-region"
+  },
+  {
+   "id": "redshift_serverless",
+   "name": "Amazon Redshift Serverless",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Serverless Redshift warehouse"
+  },
+  {
+   "id": "postgresql_rds",
+   "name": "PostgreSQL on RDS",
+   "category": "database",
+   "status": "live",
+   "description": "Managed PostgreSQL on Amazon RDS"
+  },
+  {
+   "id": "mysql_rds",
+   "name": "MySQL on RDS",
+   "category": "database",
+   "status": "live",
+   "description": "Managed MySQL on Amazon RDS"
+  },
+  {
+   "id": "postgresql_cloud_sql",
+   "name": "PostgreSQL on Cloud SQL",
+   "category": "database",
+   "status": "live",
+   "description": "Managed PostgreSQL on Google Cloud SQL"
+  },
+  {
+   "id": "mysql_cloud_sql",
+   "name": "MySQL on Cloud SQL",
+   "category": "database",
+   "status": "live",
+   "description": "Managed MySQL on Google Cloud SQL"
+  },
+  {
+   "id": "postgresql_azure",
+   "name": "PostgreSQL on Azure",
+   "category": "database",
+   "status": "live",
+   "description": "Managed PostgreSQL on Azure Database"
+  },
+  {
+   "id": "mysql_azure",
+   "name": "MySQL on Azure",
+   "category": "database",
+   "status": "live",
+   "description": "Managed MySQL on Azure Database"
+  },
+  {
+   "id": "mongodb_atlas",
+   "name": "MongoDB Atlas",
+   "category": "database",
+   "status": "live",
+   "description": "Managed MongoDB Atlas clusters"
+  },
+  {
+   "id": "csv_upload",
+   "name": "CSV Upload",
+   "category": "file",
+   "status": "live",
+   "description": "Delimiter-separated file upload and parse"
+  },
+  {
+   "id": "tsv_upload",
+   "name": "TSV Upload",
+   "category": "file",
+   "status": "live",
+   "description": "Tab-separated file upload and parse"
+  },
+  {
+   "id": "json_documents",
+   "name": "JSON Documents",
+   "category": "file",
+   "status": "live",
+   "description": "JSON document files with nested flattening"
+  },
+  {
+   "id": "excel_workbook",
+   "name": "Excel Workbook",
+   "category": "file",
+   "status": "live",
+   "description": "XLSX multi-sheet workbook ingest"
+  },
+  {
+   "id": "parquet_lake",
+   "name": "Parquet Data Lake",
+   "category": "lake",
+   "status": "live",
+   "description": "Parquet files on object storage"
+  },
+  {
+   "id": "jsonl_stream",
+   "name": "JSON Lines Stream",
+   "category": "file",
+   "status": "live",
+   "description": "Streaming JSONL file ingest"
+  },
+  {
+   "id": "s3_us_east_1",
+   "name": "Amazon S3 (US East)",
+   "category": "cloud_storage",
+   "status": "live",
+   "description": "S3 buckets in us-east-1"
+  },
+  {
+   "id": "s3_eu_west_1",
+   "name": "Amazon S3 (EU West)",
+   "category": "cloud_storage",
+   "status": "live",
+   "description": "S3 buckets in eu-west-1"
+  },
+  {
+   "id": "s3_ap_southeast_1",
+   "name": "Amazon S3 (AP Southeast)",
+   "category": "cloud_storage",
+   "status": "live",
+   "description": "S3 buckets in ap-southeast-1"
+  },
+  {
+   "id": "gcs_us_central1",
+   "name": "GCS (US Central)",
+   "category": "cloud_storage",
+   "status": "live",
+   "description": "GCS buckets in us-central1"
+  },
+  {
+   "id": "gcs_europe_west1",
+   "name": "GCS (Europe West)",
+   "category": "cloud_storage",
+   "status": "live",
+   "description": "GCS buckets in europe-west1"
+  },
+  {
+   "id": "elasticsearch_aws",
+   "name": "Elasticsearch on AWS",
+   "category": "database",
+   "status": "live",
+   "description": "Self-managed Elasticsearch on EC2"
+  },
+  {
+   "id": "elasticsearch_gcp",
+   "name": "Elasticsearch on GCP",
+   "category": "database",
+   "status": "live",
+   "description": "Self-managed Elasticsearch on Compute Engine"
+  },
+  {
+   "id": "postgresql_supabase",
+   "name": "Supabase Postgres",
+   "category": "database",
+   "status": "live",
+   "description": "Supabase hosted PostgreSQL"
+  },
+  {
+   "id": "postgresql_neon",
+   "name": "Neon Postgres",
+   "category": "database",
+   "status": "live",
+   "description": "Neon serverless PostgreSQL"
+  },
+  {
+   "id": "mysql_planetscale",
+   "name": "PlanetScale MySQL",
+   "category": "database",
+   "status": "live",
+   "description": "PlanetScale serverless MySQL"
+  },
+  {
+   "id": "mysql_aurora_global",
+   "name": "Aurora MySQL Global",
+   "category": "database",
+   "status": "live",
+   "description": "Amazon Aurora global MySQL database"
+  },
+  {
+   "id": "postgresql_aurora_global",
+   "name": "Aurora PostgreSQL Global",
+   "category": "database",
+   "status": "live",
+   "description": "Amazon Aurora global PostgreSQL database"
+  },
+  {
+   "id": "dynamodb_global_tables",
+   "name": "DynamoDB Global Tables",
+   "category": "database",
+   "status": "live",
+   "description": "Multi-region DynamoDB global tables"
+  },
+  {
+   "id": "redshift_ra3",
+   "name": "Redshift RA3",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Redshift RA3 node clusters"
+  },
+  {
+   "id": "bigquery_reservations",
+   "name": "BigQuery Reservations",
+   "category": "warehouse",
+   "status": "live",
+   "description": "BigQuery capacity-based pricing"
+  },
+  {
+   "id": "snowflake_standard",
+   "name": "Snowflake Standard",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Snowflake standard edition warehouse"
+  },
+  {
+   "id": "snowflake_enterprise",
+   "name": "Snowflake Enterprise",
+   "category": "warehouse",
+   "status": "live",
+   "description": "Snowflake enterprise edition warehouse"
+  },
+  {
+   "id": "mongodb_replica_set",
+   "name": "MongoDB Replica Set",
+   "category": "database",
+   "status": "live",
+   "description": "Self-managed MongoDB replica set"
+  },
+  {
+   "id": "mongodb_sharded_cluster",
+   "name": "MongoDB Sharded Cluster",
+   "category": "database",
+   "status": "live",
+   "description": "Self-managed MongoDB sharded cluster"
+  },
+  {
+   "id": "redis_cluster",
+   "name": "Redis Cluster",
+   "category": "database",
+   "status": "live",
+   "description": "Redis cluster mode deployment"
+  },
+  {
+   "id": "csv_sftp",
+   "name": "CSV over SFTP",
+   "category": "file",
+   "status": "live",
+   "description": "CSV files delivered via SFTP pickup"
+  },
+  {
+   "id": "json_api_export",
+   "name": "JSON API Export",
+   "category": "file",
+   "status": "live",
+   "description": "JSON export from REST API snapshots"
   }
  ]
 }

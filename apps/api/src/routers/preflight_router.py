@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ..services.preflight_service import (
     apply_policy_gates,
     confidence_threshold_for_mode,
+    inspect_destination_for_preflight,
     run_file_preflight,
     run_transfer_policy_gates,
 )
@@ -23,6 +24,10 @@ class MappingItem(BaseModel):
     target: str
     confidence: float = 0.9
     reason: str = ""
+    transform: str | None = None
+    requires_review: bool = False
+    score_gap: float = 1.0
+    user_override: bool = False
 
 
 class PreflightRequest(BaseModel):
@@ -32,6 +37,14 @@ class PreflightRequest(BaseModel):
     mappings: list[MappingItem]
     connector_id: Optional[str] = None
     source_connector_id: Optional[str] = None
+    dest_kind: str = "database"
+    dest_type: Optional[str] = None
+    dest_host: Optional[str] = None
+    dest_port: Optional[int] = None
+    dest_database: Optional[str] = None
+    dest_username: Optional[str] = None
+    dest_password: Optional[str] = None
+    dest_connection_string: Optional[str] = None
     sample_rows: Optional[list[dict[str, Any]]] = None
     estimated_bytes: int = 0
     sync_mode: str = "full_refresh_overwrite"
@@ -39,42 +52,67 @@ class PreflightRequest(BaseModel):
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
+    destination_column_types: dict[str, str] = Field(default_factory=dict)
+    dest_schema: Optional[str] = None
+    dest_warehouse: Optional[str] = None
+    dest_table: Optional[str] = None
+    dest_collection: Optional[str] = None
+
+
+def _schema_default(db_type: str) -> str:
+    return "PUBLIC" if db_type == "snowflake" else "public"
+
+
+def _default_port(db_type: str) -> int:
+    from ..transfer.connector_capabilities import default_port
+
+    return default_port(db_type)
+
+
+def _probe_inline_destination(body: PreflightRequest) -> tuple[bool, str]:
+    """Probe destination using inline connection settings when no saved connector is selected."""
+    from ..transfer.connector_registry import run_probe
+
+    db_type = (body.dest_type or "mongodb").lower()
+    cfg = {
+        "host": body.dest_host or "localhost",
+        "port": body.dest_port or _default_port(db_type),
+        "database": body.dest_database or "",
+        "username": body.dest_username or "",
+        "password": body.dest_password or "",
+        "connection_string": body.dest_connection_string or "",
+        "schema": body.dest_schema or _schema_default(db_type),
+        "ssl": False,
+        "warehouse": body.dest_warehouse or "",
+        "type": db_type,
+    }
+    return run_probe(db_type, cfg)
 
 
 def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
     """Live connectivity probe for any saved connector type."""
-    import sys
-    from pathlib import Path
+    from ..transfer.adapters import _lookup_saved_connector, probe_mongodb
 
-    api_root = Path(__file__).resolve().parents[2]
-    if str(api_root) not in sys.path:
-        sys.path.insert(0, str(api_root))
-
-    from services.connector_store import get_connector
-
-    conn = get_connector(connector_id)
+    conn = _lookup_saved_connector(connector_id)
     if not conn:
         return False, f"Connector '{connector_id}' not found"
 
-    db_type = (conn.type or "").lower()
+    db_type = (conn.get("type") or "").lower()
 
     if db_type == "mongodb":
-        try:
-            from pymongo import MongoClient
-
-            conn_str = conn.connection_string or f"mongodb://{conn.host}:{conn.port or 27017}/"
-            client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
-            client.admin.command("ping")
-            client.close()
-            return True, "MongoDB reachable"
-        except Exception as exc:
-            return False, str(exc)
+        return probe_mongodb(conn)
 
     probes = {
         "postgresql": ("connectors.postgresql", "test_postgresql"),
         "mysql": ("connectors.mysql", "test_mysql"),
         "snowflake": ("connectors.snowflake", "test_snowflake"),
         "bigquery": ("connectors.bigquery", "test_bigquery"),
+        "redshift": ("connectors.redshift", "test_redshift"),
+        "dynamodb": ("connectors.dynamodb", "test_dynamodb"),
+        "s3": ("connectors.s3", "test_s3"),
+        "gcs": ("connectors.gcs", "test_gcs"),
+        "redis": ("connectors.redis_kv", "test_redis"),
+        "elasticsearch": ("connectors.elasticsearch", "test_elasticsearch"),
     }
     if db_type not in probes:
         return False, f"No connectivity probe for connector type '{db_type}'"
@@ -83,15 +121,15 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
     mod = importlib.import_module(mod_name)
     probe_fn = getattr(mod, fn_name)
     result = probe_fn(
-        host=conn.host or "",
-        port=int(conn.port or (443 if db_type in ("snowflake", "bigquery") else 5432)),
-        database=conn.database or "",
-        username=conn.username or "",
-        password=conn.password or "",
-        schema=conn.schema or ("PUBLIC" if db_type == "snowflake" else "dataflow" if db_type == "bigquery" else "public"),
-        connection_string=conn.connection_string or "",
-        ssl=conn.ssl,
-        warehouse=conn.warehouse or "",
+        host=conn.get("host") or "",
+        port=int(conn.get("port") or _default_port(db_type)),
+        database=conn.get("database") or "",
+        username=conn.get("username") or "",
+        password=conn.get("password") or "",
+        schema=conn.get("schema") or ("PUBLIC" if db_type == "snowflake" else "dataflow" if db_type == "bigquery" else "public"),
+        connection_string=conn.get("connection_string") or "",
+        ssl=conn.get("ssl", False),
+        warehouse=conn.get("warehouse") or "",
     )
     if result.ok:
         return True, result.message or "Connected"
@@ -111,13 +149,33 @@ async def run_preflight(body: PreflightRequest):
 
     destination_connected = False
     dest_error: str | None = None
+    dest_meta: dict = {}
 
-    if body.connector_id:
-        destination_connected, msg = _probe_saved_connector(body.connector_id)
-        if not destination_connected:
-            dest_error = msg
+    dest_meta = inspect_destination_for_preflight(
+        connector_id=body.connector_id,
+        dest_type=body.dest_type,
+        dest_host=body.dest_host,
+        dest_port=body.dest_port,
+        dest_database=body.dest_database,
+        dest_table=body.dest_table,
+        dest_collection=body.dest_collection,
+        dest_schema=body.dest_schema,
+        dest_username=body.dest_username,
+        dest_password=body.dest_password,
+        dest_connection_string=body.dest_connection_string,
+        dest_warehouse=body.dest_warehouse,
+        dest_kind=body.dest_kind,
+    )
+
+    if body.dest_kind == "file_export":
+        destination_connected = True
+    elif dest_meta.get("connected"):
+        destination_connected = True
+    elif body.connector_id or body.dest_host or body.dest_connection_string:
+        destination_connected = False
+        dest_error = dest_meta.get("message") or "Destination unreachable"
     else:
-        dest_error = "Destination connector not selected — configure one in Connectors"
+        dest_error = "Destination not configured — select a saved connector or enter connection settings"
 
     source_connected = True
     source_error: str | None = None
@@ -125,6 +183,8 @@ async def run_preflight(body: PreflightRequest):
         source_connected, msg = _probe_saved_connector(body.source_connector_id)
         if not source_connected:
             source_error = msg
+
+    dest_column_types = body.destination_column_types or dest_meta.get("column_types") or {}
 
     result = run_file_preflight(
         columns=body.columns,
@@ -139,6 +199,9 @@ async def run_preflight(body: PreflightRequest):
         sample_rows=body.sample_rows,
         estimated_bytes=body.estimated_bytes,
         confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
+        destination_column_types=dest_column_types,
+        destination_table_exists=dest_meta.get("table_exists"),
+        destination_can_create=dest_meta.get("can_create_table"),
     )
     return apply_policy_gates(
         result,

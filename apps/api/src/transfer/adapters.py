@@ -20,6 +20,23 @@ from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
 
 
+def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_name: str = "import") -> str:
+    """Resolve destination object name — table, key, index, or collection."""
+    base = re.sub(
+        r"[^a-zA-Z0-9_]",
+        "_",
+        (destination.table or destination.collection or fallback_name).lower(),
+    )[:40]
+    dt = dest_type.lower()
+    if dt == "dynamodb":
+        return destination.table or destination.collection or destination.database or f"dt_{base}"
+    if dt in ("s3", "gcs"):
+        return destination.table or destination.collection or destination.schema or f"exports/dt_{base}.json"
+    if dt == "elasticsearch":
+        return destination.database or destination.table or destination.collection or f"dt_{base}"
+    return destination.table or destination.collection or f"dt_{base}"
+
+
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
@@ -38,19 +55,88 @@ def parse_file_content(content: bytes, filename: str) -> tuple[list[dict], list[
     return result.data, result.columns, schema
 
 
+def parse_file_route_sample(
+    content: bytes,
+    filename: str,
+    preview_rows: int = 200,
+) -> tuple[list[str], dict[str, str], int]:
+    """Headers + schema for route analysis without loading entire files."""
+    ftype = FileParser.detect_file_type(filename, content)
+    if ftype in ("csv", "tsv"):
+        from services.csv_profiler import count_csv_rows, detect_encoding, parse_csv_preview
+
+        enc = detect_encoding(content)
+        headers, rows, _enc, _delim = parse_csv_preview(content, encoding=enc, preview_rows=preview_rows)
+        if not headers:
+            raise ValueError("CSV/TSV has no header row")
+        records = [
+            {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
+            for row in rows[:preview_rows]
+        ]
+        schema = FileParser.infer_schema(records) if records else {h: "string" for h in headers}
+        return headers, schema, count_csv_rows(content, enc)
+
+    result = FileParser.parse(content, filename)
+    if not result.success:
+        raise ValueError(result.error or "File parse failed")
+    sample = result.data[:preview_rows]
+    schema = FileParser.infer_schema(sample) if sample else {c: "string" for c in result.columns}
+    return result.columns, schema, result.row_count
+
+
+def _matrix_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=str)
+    return str(value)
+
+
 def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[str]]]:
     headers = columns or (list(records[0].keys()) if records else [])
-    rows = [[str(rec.get(h, "") if rec.get(h) is not None else "") for h in headers] for rec in records]
+    rows = [[_matrix_cell(rec.get(h)) for h in headers] for rec in records]
     return headers, rows
+
+
+def mongodb_connection_string(cfg: dict[str, Any]) -> str:
+    if cfg.get("connection_string"):
+        return cfg["connection_string"]
+    host = cfg.get("host") or "localhost"
+    port = int(cfg.get("port") or 27017)
+    if cfg.get("username") and cfg.get("password"):
+        return f"mongodb://{cfg['username']}:{cfg['password']}@{host}:{port}/"
+    return f"mongodb://{host}:{port}/"
+
+
+def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
+    """Ping MongoDB using resolved connector or inline host/port credentials."""
+    try:
+        from pymongo import MongoClient
+
+        client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000)
+        client.admin.command("ping")
+        client.close()
+        return True, "MongoDB reachable"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
+    fmt = (endpoint.format or "").lower()
+    default_port = (
+        27017 if fmt == "mongodb" else
+        3306 if fmt == "mysql" else
+        6379 if fmt == "redis" else
+        9200 if fmt == "elasticsearch" else
+        5439 if fmt == "redshift" else
+        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs") else 5432
+    )
     cfg = {
         "host": endpoint.host or "localhost",
-        "port": endpoint.port or 5432,
+        "port": endpoint.port or default_port,
         "database": endpoint.database,
-        "schema": endpoint.schema or "public",
+        "schema": endpoint.schema or ("PUBLIC" if fmt == "snowflake" else "public"),
         "username": endpoint.username,
         "password": endpoint.password,
         "connection_string": endpoint.connection_string,
@@ -127,19 +213,33 @@ def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, head
     return {h: "TEXT" for h in headers}
 
 
+_NON_STREAMING_ROW_LIMIT = 100_000
+
+
+def _guard_truncated_read(batch, db_type: str, name: str) -> None:
+    """Fail closed when a non-streaming read would silently drop rows."""
+    if batch.total_rows > len(batch.rows):
+        raise ValueError(
+            f"Source {db_type}.{name} has {batch.total_rows:,} rows but non-streaming reads "
+            f"are capped at {len(batch.rows):,}. Use database-to-database transfer (async) "
+            "for large tables."
+        )
+
+
 def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str], dict[str, str]]:
     cfg = resolve_connector_config(endpoint)
     db_type = endpoint.format.lower()
 
-    if db_type == "postgresql":
+    if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
 
         table = endpoint.table
         if not table:
-            raise ValueError("Source PostgreSQL table name required")
+            raise ValueError(f"Source {db_type} table name required")
+        pg_port = cfg["port"] or (5439 if db_type == "redshift" else 5432)
         batch = read_table_batch(
             host=cfg["host"],
-            port=cfg["port"] or 5432,
+            port=pg_port,
             database=cfg["database"],
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
@@ -147,35 +247,31 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             table=table,
-            limit=100_000,
+            limit=_NON_STREAMING_ROW_LIMIT,
         )
+        _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema("postgresql", cfg, table, batch.headers)
         return records, batch.headers, schema
 
     if db_type == "mongodb":
-        from pymongo import MongoClient
+        from connectors.mongodb_reader import read_collection_batch
 
-        if cfg.get("connection_string"):
-            conn_str = cfg["connection_string"]
-        elif cfg.get("username") and cfg.get("password"):
-            conn_str = f"mongodb://{cfg['username']}:{cfg['password']}@{cfg['host']}:{cfg['port'] or 27017}/"
-        else:
-            conn_str = f"mongodb://{cfg['host']}:{cfg['port'] or 27017}/"
-        client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
-        db = client[endpoint.database or cfg["database"] or "test"]
         coll_name = endpoint.collection
         if not coll_name:
             raise ValueError("Source MongoDB collection name required")
-        coll = db[coll_name]
-        records = list(coll.find().limit(100_000))
-        client.close()
-        for r in records:
-            if "_id" in r:
-                r["_id"] = str(r["_id"])
-        columns = list(records[0].keys()) if records else []
-        schema = {c: "string" for c in columns}
-        return records, columns, schema
+        db_name = endpoint.database or cfg["database"] or "test"
+        batch = read_collection_batch(
+            cfg=cfg,
+            database=db_name,
+            collection=coll_name,
+            offset=0,
+            limit=_NON_STREAMING_ROW_LIMIT,
+        )
+        _guard_truncated_read(batch, "mongodb", coll_name)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
 
     if db_type == "mysql":
         from connectors.mysql_reader import read_table_batch
@@ -193,8 +289,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             table=table,
-            limit=100_000,
+            limit=_NON_STREAMING_ROW_LIMIT,
         )
+        _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
@@ -216,8 +313,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
             table=table,
-            limit=100_000,
+            limit=_NON_STREAMING_ROW_LIMIT,
         )
+        _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
@@ -238,10 +336,71 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             warehouse=cfg.get("warehouse", ""),
             table=table,
-            limit=100_000,
+            limit=_NON_STREAMING_ROW_LIMIT,
         )
+        _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        return records, batch.headers, schema
+
+    if db_type == "gcs":
+        from connectors.gcs_reader import read_object
+
+        bucket = cfg["database"]
+        key = endpoint.table or endpoint.collection or endpoint.schema or ""
+        if not bucket or not key:
+            raise ValueError("GCS source requires bucket (database) and object key (table/collection)")
+        batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=_NON_STREAMING_ROW_LIMIT)
+        _guard_truncated_read(batch, db_type, key)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
+    if db_type == "s3":
+        from connectors.s3_reader import read_object
+
+        bucket = cfg["database"]
+        key = endpoint.table or endpoint.collection or endpoint.schema or ""
+        if not bucket or not key:
+            raise ValueError("S3 source requires bucket (database) and object key (table/collection)")
+        batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=_NON_STREAMING_ROW_LIMIT)
+        _guard_truncated_read(batch, db_type, key)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
+    if db_type == "dynamodb":
+        from connectors.dynamodb_reader import read_all_paginated
+
+        table = endpoint.database or endpoint.table
+        if not table:
+            raise ValueError("DynamoDB table name required (database field)")
+        batch = read_all_paginated(cfg, table, limit=_NON_STREAMING_ROW_LIMIT)
+        _guard_truncated_read(batch, db_type, table)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
+    if db_type == "elasticsearch":
+        from connectors.elasticsearch_reader import read_index_batch
+
+        index = endpoint.database or endpoint.table or endpoint.collection
+        if not index:
+            raise ValueError("Elasticsearch index name required (database field)")
+        batch, _ = read_index_batch(cfg=cfg, index=index, limit=_NON_STREAMING_ROW_LIMIT)
+        _guard_truncated_read(batch, db_type, index)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
+    if db_type == "redis":
+        from connectors.redis_reader import read_keys_batch
+
+        pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
+        batch, _ = read_keys_batch(cfg=cfg, pattern=pattern, limit=_NON_STREAMING_ROW_LIMIT)
+        _guard_truncated_read(batch, db_type, pattern)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
     raise ValueError(f"Database source '{db_type}' read not implemented")
@@ -266,12 +425,12 @@ def write_destination_database(
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
-    base = re.sub(r"[^a-zA-Z0-9_]", "_", (endpoint.table or endpoint.collection or "dt_import").lower())[:40]
-    table_name = endpoint.table or endpoint.collection or f"dt_{base}"
+    table_name = resolve_dest_table(db_type, endpoint, "dt_import")
 
     common = {
         "host": cfg["host"],
         "port": cfg["port"] or (
+            5439 if db_type == "redshift" else
             5432 if db_type == "postgresql" else
             3306 if db_type == "mysql" else 443
         ),
@@ -305,17 +464,19 @@ def write_destination_database(
             **_writer_diagnostics(result),
         }
 
-    if db_type == "postgresql":
+    if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         common["schema"] = cfg.get("schema", "public")
+        if db_type == "redshift":
+            common["port"] = cfg["port"] or 5439
         for col in columns:
             ddl_log.append(f"PG COLUMN {col} {ddl_type('postgresql', schema.get(col, 'string'))}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "PostgreSQL write failed")
+            raise RuntimeError(result.error or f"{db_type} write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
         return result.rows_written, ddl_log, {
-            "type": "postgresql", "schema": result.target_schema, "table": result.table_name,
+            "type": db_type, "schema": result.target_schema, "table": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
             **_writer_diagnostics(result),
         }
@@ -364,6 +525,76 @@ def write_destination_database(
             **_writer_diagnostics(result),
         }
 
+    if db_type == "gcs":
+        from connectors.gcs_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"GCS FIELD {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "GCS write failed")
+        ddl_log.insert(0, f"PUT gs://{cfg['database']}/{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "gcs", "bucket": cfg["database"], "key": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "s3":
+        from connectors.s3_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"S3 FIELD {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "S3 write failed")
+        ddl_log.insert(0, f"PUT s3://{cfg['database']}/{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "s3", "bucket": cfg["database"], "key": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "dynamodb":
+        from connectors.dynamodb_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"DYNAMODB ATTR {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "DynamoDB write failed")
+        ddl_log.insert(0, f"BATCH WRITE DynamoDB table {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "dynamodb", "table": result.table_name, "region": result.target_schema,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "elasticsearch":
+        from connectors.elasticsearch_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"ES FIELD {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Elasticsearch write failed")
+        ddl_log.insert(0, f"BULK INDEX {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "elasticsearch", "index": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "redis":
+        from connectors.redis_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"REDIS FIELD {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Redis write failed")
+        ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "redis", "prefix": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
     raise ValueError(f"Database destination '{db_type}' write not implemented")
 
 
@@ -371,20 +602,87 @@ def write_destination_file(
     endpoint: EndpointConfig,
     records: list[dict],
     columns: list[str],
+    *,
+    source_format: str | None = None,
+    mappings: list[dict] | None = None,
+    column_types: dict[str, str] | None = None,
 ) -> tuple[bytes, str, dict]:
-    fmt = endpoint.format.lower() or "json"
+    """Write records to CSV, JSON, JSONL, or TSV using unified format converter."""
+    import sys
+    from pathlib import Path
+
+    _api_root = Path(__file__).resolve().parents[2]
+    if str(_api_root) not in sys.path:
+        sys.path.insert(0, str(_api_root))
+    from connectors.writer_common import build_mapped_rows, resolve_target_columns
+    from services.format_converter import can_convert, convert_rows
+
+    fmt = (endpoint.format or "json").lower()
+    src_fmt = (source_format or fmt).lower()
+    types = column_types or {}
+
+    export_columns = columns
+    export_records = records
+    transform_errors: list[str] = []
+
+    if mappings:
+        headers = columns
+        data_rows = [[str(rec.get(col, "")) for col in headers] for rec in records]
+        target_cols, _ = resolve_target_columns(mappings, types)
+        mapped_rows, transform_errors = build_mapped_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=types,
+        )
+        export_columns = target_cols
+        export_records = [
+            dict(zip(target_cols, row))
+            for row in mapped_rows
+        ]
+
+    grid = [[str(rec.get(col, "")) for col in export_columns] for rec in export_records]
+
+    if can_convert(src_fmt, fmt) and grid:
+        content, mime = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
+        ext = "tsv" if fmt == "tsv" else fmt if fmt in ("csv", "jsonl") else "json"
+        filename = f"export.{ext}"
+        return content, filename, {
+            "format": fmt,
+            "filename": filename,
+            "rows": len(export_records),
+            "mime": mime,
+            "converted_from": src_fmt if src_fmt != fmt else None,
+            "transform_errors": transform_errors[:10],
+            "mapped": bool(mappings),
+        }
+
     if fmt == "csv":
         buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(records)
+        writer.writerows(export_records)
         content = buf.getvalue().encode("utf-8")
-        filename = f"export.{fmt}"
+        filename = "export.csv"
+    elif fmt == "tsv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(export_records)
+        content = buf.getvalue().encode("utf-8")
+        filename = "export.tsv"
     elif fmt == "jsonl":
-        lines = [json.dumps(r, default=str) for r in records]
+        lines = [json.dumps(r, default=str) for r in export_records]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
     else:
-        content = json.dumps(records, indent=2, default=str).encode("utf-8")
+        content = json.dumps(export_records, indent=2, default=str).encode("utf-8")
         filename = "export.json"
-    return content, filename, {"format": fmt, "filename": filename, "rows": len(records)}
+    return content, filename, {
+        "format": fmt,
+        "filename": filename,
+        "rows": len(export_records),
+        "transform_errors": transform_errors[:10],
+        "mapped": bool(mappings),
+    }

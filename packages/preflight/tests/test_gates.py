@@ -76,6 +76,23 @@ def test_g4_allows_override():
     assert result.passed
 
 
+def test_g4_blocks_ambiguous_mapping():
+    plan = _happy_plan()
+    plan.mappings[0].requires_review = True
+    plan.mappings[0].score_gap = 0.03
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    assert any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
+
+
+def test_g4_allows_ambiguous_with_override():
+    plan = _happy_plan()
+    plan.mappings[0].requires_review = True
+    plan.mappings[0].user_override = True
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert result.passed
+
+
 def test_fail_fast_stops_at_first_blocker():
     plan = _happy_plan()
     plan.source.parseable = False

@@ -10,7 +10,9 @@ export interface Connector {
   port: number;
   database: string;
   status: string;
+  role?: string;
   created_at: string;
+  last_test_ok?: boolean;
 }
 
 export interface TransferJob {
@@ -38,6 +40,18 @@ export interface JobProgress extends TransferJob {
   phase?: string;
   message?: string;
   error?: string;
+  rejected_rows?: number;
+  rejected_details?: { row?: number; column?: string; reason?: string; value?: string }[];
+  destination_summary?: Record<string, unknown>;
+}
+
+export interface CsvValidationReport {
+  ok: boolean;
+  rows_scanned: number;
+  total_rows?: number;
+  full_scan?: boolean;
+  issues: string[];
+  issue_count: number;
 }
 
 export interface ParsedUpload {
@@ -47,6 +61,7 @@ export interface ParsedUpload {
   sample_data?: Record<string, unknown>[];
   data?: Record<string, unknown>[];
   schema?: Record<string, string>;
+  validation?: CsvValidationReport | null;
 }
 
 export interface ActiveDataContext {

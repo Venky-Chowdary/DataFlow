@@ -1,14 +1,13 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { DataTransferApp } from "./DataTransferApp";
-import "./styles/tokens.css";
-import "./styles/jarvis-ui.css";
-import "./styles/landing.css";
-import "./styles/datatransfer-design.css";
-import "./styles/dataflow-ui.css";
+import { PageErrorBoundary } from "./components/PageErrorBoundary";
+import "./styles/app-styles.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <DataTransferApp />
+    <PageErrorBoundary label="DataFlow">
+      <DataTransferApp />
+    </PageErrorBoundary>
   </React.StrictMode>
 );

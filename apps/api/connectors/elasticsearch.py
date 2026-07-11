@@ -30,13 +30,14 @@ def test_elasticsearch(
     try:
         from elasticsearch import Elasticsearch
     except ImportError:
+        from connectors.driver_guard import require_driver
         if not host and not connection_string:
             return ConnectResult(ok=False, tables=[], error="Elasticsearch host or URL is required.")
         return ConnectResult(
-            ok=True,
-            tables=[index_hint] if index_hint else [],
-            message=f"Config validated for {url} (install elasticsearch-py for live probe).",
-            driver="validation",
+            ok=False,
+            tables=[],
+            error=require_driver("elasticsearch", "elasticsearch"),
+            driver="none",
         )
 
     try:

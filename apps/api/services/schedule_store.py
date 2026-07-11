@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-STORE_PATH = Path(__file__).resolve().parents[1] / "data" / "schedules.json"
+from services.platform_config import data_dir
+
+STORE_PATH = data_dir() / "schedules.json"
 
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
 

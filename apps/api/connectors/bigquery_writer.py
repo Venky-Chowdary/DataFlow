@@ -62,10 +62,10 @@ def write_mapped_rows(
     try:
         from google.cloud import bigquery  # noqa: F401
     except ImportError:
-        from connectors.driver_guard import allow_stub_writes, require_driver
+        from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 
-        if not allow_stub_writes():
+        if not stub_writes_allowed():
             return WriteResult(
                 ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
                 checksum="", chunks_completed=0,

@@ -53,15 +53,17 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
+    write_mode: str = "insert",
+    conflict_columns: list[str] | None = None,
 ) -> WriteResult:
     del schema
     try:
         import pymysql
     except ImportError:
-        from connectors.driver_guard import allow_stub_writes, require_driver
+        from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 
-        if not allow_stub_writes():
+        if not stub_writes_allowed():
             return WriteResult(
                 ok=False, rows_written=0, table_name=table_name, target_schema=database,
                 checksum="", chunks_completed=0,
@@ -124,7 +126,24 @@ def write_mapped_rows(
             written = 0
             placeholders = ", ".join(["%s"] * len(target_cols))
             col_names = ", ".join(f"`{c}`" for c in target_cols)
-            insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
+            if write_mode == "upsert" and conflict_columns:
+                conflict = [c for c in conflict_columns if c in target_cols]
+                if conflict:
+                    update_cols = [c for c in target_cols if c not in conflict]
+                    if update_cols:
+                        updates = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in update_cols)
+                        insert_sql = (
+                            f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders}) "
+                            f"ON DUPLICATE KEY UPDATE {updates}"
+                        )
+                    else:
+                        insert_sql = (
+                            f"INSERT IGNORE INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
+                        )
+                else:
+                    insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
+            else:
+                insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE

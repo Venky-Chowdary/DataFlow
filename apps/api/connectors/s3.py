@@ -37,11 +37,12 @@ def test_s3(
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError:
+        from connectors.driver_guard import require_driver
         return ConnectResult(
-            ok=True,
-            tables=[bucket],
-            message=f"Credentials validated for bucket `{bucket}` in {region} (install boto3 for live probe).",
-            driver="validation",
+            ok=False,
+            tables=[],
+            error=require_driver("boto3"),
+            driver="none",
         )
 
     try:
@@ -52,10 +53,18 @@ def test_s3(
             aws_secret_access_key=secret_key,
         )
         client.head_bucket(Bucket=bucket)
+        keys: list[str] = []
+        try:
+            from connectors.s3_reader import list_objects
+
+            keys = list_objects({"host": region, "username": access_key, "password": secret_key}, bucket)
+        except Exception:
+            keys = []
+        objects = keys or [bucket]
         return ConnectResult(
             ok=True,
-            tables=[bucket],
-            message=f"S3 bucket `{bucket}` reachable in {region}.",
+            tables=objects,
+            message=f"S3 bucket `{bucket}` reachable — {len(keys) or 1} object(s) listed.",
             driver="boto3",
         )
     except ClientError as exc:

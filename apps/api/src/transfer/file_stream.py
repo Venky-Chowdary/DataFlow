@@ -6,7 +6,6 @@ import csv
 import io
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -21,10 +20,10 @@ if str(_api_root) not in sys.path:
 from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
 
-from .adapters import records_to_matrix, resolve_connector_config
+from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_table
 from .stream import _write_batch
 
-STREAMABLE_TYPES = {"csv", "tsv", "jsonl"}
+STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet"}
 STREAM_THRESHOLD = int(os.getenv("DATAFLOW_STREAM_FILE_ROWS", "1"))
 
 
@@ -54,7 +53,7 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
 
-    if file_type == "jsonl":
+    if file_type in ("jsonl", "ndjson"):
         text = _decode(content)
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
@@ -69,6 +68,63 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
         headers = sorted(columns)
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, len(lines), sample_objs[:100]
+
+    if file_type == "excel":
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from services.excel_parser import count_excel_rows, parse_excel_preview
+
+        headers, rows, _preview_total = parse_excel_preview(content, preview_rows=100)
+        if not headers:
+            raise ValueError("Excel file has no header row")
+        total = count_excel_rows(content)
+        sample = [dict(zip(headers, row)) for row in rows[:100]]
+        schema = FileParser.infer_schema(sample)
+        return headers, schema, total, sample
+
+    if file_type == "parquet":
+        import io
+
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(io.BytesIO(content))
+        df = table.to_pandas()
+        total = len(df)
+        sample_df = df.head(100)
+        headers = [str(c) for c in sample_df.columns.tolist()]
+        sample = sample_df.to_dict(orient="records")
+        for rec in sample:
+            for k, v in list(rec.items()):
+                if hasattr(v, "item"):
+                    rec[k] = v.item()
+                elif v != v:
+                    rec[k] = None
+        schema = FileParser.infer_schema(sample)
+        return headers, schema, total, sample
+
+    if file_type == "json":
+        import ijson
+
+        bio = io.BytesIO(content)
+        sample_objs: list[dict] = []
+        columns: set[str] = set()
+        total = 0
+        for obj in ijson.items(bio, "item"):
+            if not isinstance(obj, dict):
+                continue
+            total += 1
+            if len(sample_objs) < 100:
+                sample_objs.append(obj)
+                columns.update(obj.keys())
+        if total == 0:
+            raise ValueError("JSON file must be an array of objects")
+        headers = sorted(columns)
+        schema = FileParser.infer_schema(sample_objs)
+        return headers, schema, total, sample_objs[:100]
 
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
@@ -105,6 +161,21 @@ def _iter_jsonl_batches(content: bytes, chunk_size: int):
         yield batch
 
 
+def _iter_json_array_batches(content: bytes, chunk_size: int):
+    import ijson
+
+    batch: list[dict] = []
+    for obj in ijson.items(io.BytesIO(content), "item"):
+        if not isinstance(obj, dict):
+            continue
+        batch.append(obj)
+        if len(batch) >= chunk_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def stream_file_to_database(
     content: bytes,
     filename: str,
@@ -126,8 +197,7 @@ def stream_file_to_database(
     dest_type = destination.format.lower()
     dest_cfg = resolve_connector_config(destination)
     chunks = max(1, (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE)
-    base = re.sub(r"[^a-zA-Z0-9_]", "_", (destination.table or destination.collection or "import").lower())[:40]
-    dest_table = destination.table or destination.collection or f"dt_{base}"
+    dest_table = resolve_dest_table(dest_type, destination, "import")
 
     ddl_log: list[str] = [
         f"STREAM FILE {filename} → {dest_type}.{dest_table} ({total_rows:,} rows, {chunks} batches)",
@@ -137,6 +207,39 @@ def stream_file_to_database(
 
     if file_type in ("csv", "tsv"):
         batch_iter = _iter_csv_batches(content, CHUNK_SIZE)
+    elif file_type == "json":
+        batch_iter = _iter_json_array_batches(content, CHUNK_SIZE)
+    elif file_type == "excel":
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from services.excel_parser import iter_excel_batches
+
+        batch_iter = iter_excel_batches(content, CHUNK_SIZE)
+    elif file_type == "parquet":
+        import io
+
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(io.BytesIO(content))
+
+        def _parquet_batches():
+            batch: list[dict] = []
+            for rg in range(pf.num_row_groups):
+                chunk = pf.read_row_group(rg).to_pandas()
+                for _, row in chunk.iterrows():
+                    rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk.columns}
+                    batch.append(rec)
+                    if len(batch) >= CHUNK_SIZE:
+                        yield batch
+                        batch = []
+            if batch:
+                yield batch
+
+        batch_iter = _parquet_batches()
     else:
         batch_iter = _iter_jsonl_batches(content, CHUNK_SIZE)
 
@@ -147,6 +250,7 @@ def stream_file_to_database(
     last_checksum = ""
     rejected_total = 0
     warning_samples: list[str] = []
+    rejected_details: list[dict] = []
 
     for batch in batch_iter:
         if not batch:
@@ -171,6 +275,7 @@ def stream_file_to_database(
         written += batch_written
         rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
         warning_samples.extend(dest_summary.get("warnings", []) or [])
+        rejected_details.extend(dest_summary.get("rejected_details", []) or [])
         if on_checkpoint:
             on_checkpoint(chunk_idx, chunks, written)
 
@@ -179,6 +284,7 @@ def stream_file_to_database(
 
     dest_summary["checksum"] = last_checksum
     dest_summary["rejected_rows"] = rejected_total
+    dest_summary["rejected_details"] = rejected_details[:200]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if rejected_total else "none"
     return written, ddl_log, dest_summary, columns

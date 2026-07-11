@@ -2,27 +2,35 @@
  * DataFlow — Universal Data Platform
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { AICopilot } from "./components/AICopilot";
-import { ConnectorModal } from "./components/ConnectorModal";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
-import { PageLoader } from "./components/LoadingState";
+import { PageErrorBoundary } from "./components/PageErrorBoundary";
+import { SectionLoader } from "./components/LoadingState";
 import { ToastProvider, useToast } from "./components/Toast";
+import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { DataProvider } from "./lib/DataContext";
-import { deleteConnector, fetchConnectors, fetchJobs } from "./lib/api";
+import { deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
+import { clearSession, readSession, writeSession } from "./lib/session";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
-import { Connector, Screen, TransferJob } from "./lib/types";
-import { ConnectorsPage } from "./pages/ConnectorsPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { JobsPage } from "./pages/JobsPage";
-import { LandingPage } from "./pages/LandingPage";
+import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
-import { McpPage } from "./pages/McpPage";
-import { PilotPage } from "./pages/PilotPage";
-import { SchedulesPage } from "./pages/SchedulesPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { TransferPage } from "./pages/TransferPage";
+import { LandingPage } from "./pages/LandingPage";
+import { metaForLogin, metaForScreen } from "./lib/seo";
+import { usePageMeta } from "./lib/usePageMeta";
+import { readAppHash, writeAppHash } from "./lib/appNavigation";
+import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
+
+const DashboardPage = lazy(() => import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
+const PilotPage = lazy(() => import("./pages/PilotPage").then((m) => ({ default: m.PilotPage })));
+const TransferPage = lazy(() => import("./pages/TransferPage").then((m) => ({ default: m.TransferPage })));
+const ConnectorsPage = lazy(() => import("./pages/ConnectorsPage").then((m) => ({ default: m.ConnectorsPage })));
+const SchedulesPage = lazy(() => import("./pages/SchedulesPage").then((m) => ({ default: m.SchedulesPage })));
+const JobsPage = lazy(() => import("./pages/JobsPage").then((m) => ({ default: m.JobsPage })));
+const McpPage = lazy(() => import("./pages/McpPage").then((m) => ({ default: m.McpPage })));
+const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const AICopilot = lazy(() => import("./components/AICopilot").then((m) => ({ default: m.AICopilot })));
+const ConnectorModal = lazy(() => import("./components/ConnectorModal").then((m) => ({ default: m.ConnectorModal })));
 
 const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology" },
@@ -36,14 +44,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
 ];
 
 function readStoredUser() {
-  try {
-    const raw = localStorage.getItem("df2.session") || sessionStorage.getItem("df2.session");
-    if (!raw) return "";
-    const data = JSON.parse(raw) as { email?: string };
-    return data.email || "";
-  } catch {
-    return "";
-  }
+  return readSession()?.email ?? "";
 }
 
 function AppShell({
@@ -56,22 +57,73 @@ function AppShell({
   onSignOut: () => void;
 }) {
   const { toast } = useToast();
-  const [screen, setScreen] = useState<Screen>(initialScreen === "landing" ? "dashboard" : initialScreen);
+  const [screen, setScreenState] = useState<Screen>(() => {
+    const fromHash = readAppHash();
+    if (fromHash) return fromHash;
+    return initialScreen === "landing" ? "dashboard" : initialScreen;
+  });
+
+  const setScreen = useCallback((next: Screen) => {
+    setScreenState(next);
+    writeAppHash(next);
+  }, []);
+
+  useEffect(() => {
+    const onHash = () => {
+      const fromHash = readAppHash();
+      if (fromHash) setScreenState(fromHash);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [jobs, setJobs] = useState<TransferJob[]>([]);
+  const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
+  const [apiOnline, setApiOnline] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState("");
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarNavCompact, setSidebarNavCompact] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
+  const [connectorsViewToken, setConnectorsViewToken] = useState(0);
+  const [firstScreenPaint, setFirstScreenPaint] = useState(true);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  usePageMeta(metaForScreen(screen));
+
+  useEffect(() => {
+    if (!bootLoading) {
+      const t = window.setTimeout(() => setFirstScreenPaint(false), 400);
+      return () => window.clearTimeout(t);
+    }
+    return undefined;
+  }, [bootLoading]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.key === "Escape" && document.activeElement === searchRef.current) {
+        searchRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const loadConnectors = useCallback(async (notifyOnError = true) => {
     try {
       setConnectors(await fetchConnectors());
+      setApiOnline(true);
     } catch {
+      setApiOnline(false);
       if (notifyOnError) {
-        toast({ title: "Could not load connectors", message: "Check that the API is running.", tone: "error" });
+        toast({ title: "Could not load connectors", message: "Check that the API is running on port 8001.", tone: "error" });
       }
     }
   }, [toast]);
@@ -86,13 +138,33 @@ function AppShell({
     }
   }, [toast]);
 
+  const loadSchedules = useCallback(async () => {
+    try {
+      setSchedules(await fetchSchedules());
+    } catch {
+      setSchedules([]);
+    }
+  }, []);
+
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       setBootLoading(true);
-      await Promise.all([loadConnectors(false), loadJobs(false)]);
-      setBootLoading(false);
+      const timeout = window.setTimeout(() => {
+        if (!cancelled) setBootLoading(false);
+      }, 2500);
+      await Promise.allSettled([
+        loadConnectors(false),
+        loadJobs(false),
+        loadSchedules(),
+      ]);
+      if (!cancelled) {
+        window.clearTimeout(timeout);
+        setBootLoading(false);
+      }
     })();
-  }, [loadConnectors, loadJobs]);
+    return () => { cancelled = true; };
+  }, [loadConnectors, loadJobs, loadSchedules]);
 
   useEffect(() => {
     if (screen === "jobs" || screen === "dashboard") {
@@ -109,6 +181,30 @@ function AppShell({
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  useEffect(() => {
+    const poll = window.setInterval(() => {
+      void loadConnectors(false);
+    }, 30000);
+    return () => window.clearInterval(poll);
+  }, [loadConnectors]);
+
+  const navigateFromSearch = (target: SearchNavigateTarget) => {
+    setScreen(target.screen);
+    setSearchFocus(target);
+    if (target.screen === "connectors") setConnectorsViewToken((n) => n + 1);
+    setSearchQuery("");
+    searchRef.current?.blur();
+  };
+
+  useEffect(() => {
+    if (!searchFocus) return;
+    const timer = window.setTimeout(() => setSearchFocus(null), 800);
+    return () => window.clearTimeout(timer);
+  }, [searchFocus]);
+
+  const userInitial = userEmail ? userEmail.charAt(0).toUpperCase() : "U";
+  const userShort = userEmail ? userEmail.split("@")[0] : "User";
+
   const openModal = (type?: string) => {
     setEditingConnector(null);
     setModalType(type ? resolveCatalogIdToType(type) : "");
@@ -123,9 +219,11 @@ function AppShell({
 
   const showCopilotRail = screen !== "pilot" && copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
+  const envLabel = apiEnvLabel(apiOnline);
+  const offlineCopy = apiOfflineMessage();
 
   return (
-    <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""}`}>
+    <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
       {mobileNavOpen && (
         <div className="df2-overlay" onClick={() => setMobileNavOpen(false)} role="presentation" />
       )}
@@ -137,6 +235,15 @@ function AppShell({
             <div className="df2-brand-name">DataFlow</div>
             <div className="df2-brand-tag">Universal data platform</div>
           </div>
+          <button
+            type="button"
+            className="df2-sidebar-collapse-btn"
+            onClick={() => setSidebarNavCompact((c) => !c)}
+            aria-label={sidebarNavCompact ? "Expand menu labels" : "Compact menu icons"}
+            title={sidebarNavCompact ? "Expand menu labels" : "Compact menu icons"}
+          >
+            <DtIcon name={sidebarNavCompact ? "chevron-right" : "chevron-left"} size={16} />
+          </button>
         </div>
 
         <nav className="df2-nav">
@@ -149,7 +256,9 @@ function AppShell({
               onClick={() => { setScreen(item.id); setMobileNavOpen(false); }}
               title={item.desc}
             >
-              <DtIcon name={item.icon} size={18} />
+              <span className="dt-nav-icon" aria-hidden>
+                <DtIcon name={item.icon} size={18} />
+              </span>
               <span>{item.label}</span>
               {item.id === "connectors" && connectors.length > 0 && (
                 <span className="df2-nav-badge">{connectors.length}</span>
@@ -169,7 +278,9 @@ function AppShell({
               onClick={() => { setScreen(item.id); setMobileNavOpen(false); }}
               title={item.desc}
             >
-              <DtIcon name={item.icon} size={18} />
+              <span className="dt-nav-icon" aria-hidden>
+                <DtIcon name={item.icon} size={18} />
+              </span>
               <span>{item.label}</span>
             </button>
           ))}
@@ -177,8 +288,38 @@ function AppShell({
 
         <div className="df2-sidebar-foot">
           <button type="button" className="df2-sidebar-cta" onClick={() => setScreen("transfer")}>
-            <DtIcon name="transfer" size={16} /> New transfer
+            <DtIcon name="transfer" size={16} />
+            <span className="df2-sidebar-collapse-label">New transfer</span>
           </button>
+          <div className={`df2-sidebar-env ${apiOnline ? "" : "offline"}`} title="Control plane health">
+            <span className="df2-system-dot" />
+            <strong>{apiOnline ? "API connected" : "API offline"}</strong>
+            <small>{apiOnline ? envLabel : "Check API service"}</small>
+          </div>
+          <div className="df2-sidebar-user">
+            <button
+              type="button"
+              className="df2-user-row"
+              onClick={() => setScreen("settings")}
+              title={userEmail || "Account settings"}
+            >
+              <span className="df2-user-avatar" aria-hidden>{userInitial}</span>
+              <span className="df2-user-meta">
+                <strong>{userShort}</strong>
+                <small>{userEmail || "Workspace"}</small>
+              </span>
+            </button>
+            <div className="df2-user-actions">
+              <button type="button" onClick={() => setScreen("settings")} title="Settings">
+                <DtIcon name="settings" size={14} />
+                <span className="df2-sidebar-collapse-label">Settings</span>
+              </button>
+              <button type="button" onClick={onSignOut} title="Sign out">
+                <DtIcon name="gate" size={14} />
+                <span className="df2-sidebar-collapse-label">Sign out</span>
+              </button>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -197,25 +338,22 @@ function AppShell({
               <span>Workspace</span>
               <strong>{currentNav?.label ?? "DataFlow"}</strong>
             </div>
-            <label className="df2-command-search" aria-label="Search workspace">
-              <DtIcon name="search" size={15} />
-              <input type="search" placeholder="Search connections, jobs, datasets..." />
-            </label>
+            <WorkspaceSearch
+              query={searchQuery}
+              onQueryChange={setSearchQuery}
+              onNavigate={navigateFromSearch}
+              navItems={NAV}
+              connectors={connectors}
+              jobs={jobs}
+              schedules={schedules}
+              inputRef={searchRef}
+            />
           </div>
           <div className="df2-topbar-actions">
-            <div className="df2-system-pill" title="Control plane status">
+            <div className={`df2-system-pill ${apiOnline ? "" : "degraded"}`} title="Control plane status">
               <span className="df2-system-dot" />
-              <span>Control plane</span>
+              <span className="df2-topbar-pill-text">{apiOnline ? "Online" : "Offline"}</span>
             </div>
-            <button
-              type="button"
-              className="df2-account-pill"
-              onClick={() => toast({ title: "Signed in", message: userEmail || "Workspace session active.", tone: "info" })}
-              title={userEmail || "Workspace session"}
-            >
-              <DtIcon name="users" size={15} />
-              <span>{userEmail ? userEmail.split("@")[0] : "Workspace"}</span>
-            </button>
             {screen !== "pilot" && (
               <button
                 type="button"
@@ -223,78 +361,171 @@ function AppShell({
                 onClick={() => setCopilotOpen((o) => !o)}
                 aria-label="Toggle Data Pilot"
               >
-                <DtIcon name="sparkle" size={16} /> Pilot
+                <DtIcon name="sparkle" size={16} />
+                <span className="df2-topbar-btn-text">Pilot</span>
               </button>
             )}
             <button type="button" className="df2-btn df2-btn-primary" onClick={() => setScreen("transfer")}>
-              <DtIcon name="plus" size={16} /> Transfer
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost" onClick={onSignOut}>
-              Sign out
+              <DtIcon name="plus" size={16} />
+              <span className="df2-topbar-btn-text">Transfer</span>
             </button>
           </div>
         </header>
 
-        <div className={`df2-content ${screen === "pilot" ? "df2-content-flush" : ""}`}>
-          {bootLoading ? (
-            <PageLoader />
-          ) : (
-            <div key={screen}>
-              {screen === "dashboard" && (
-                <DashboardPage
-                  connectors={connectors}
-                  jobs={jobs}
-                  onNewTransfer={() => setScreen("transfer")}
-                  onOpenPilot={() => setScreen("pilot")}
-                  onOpenConnectors={() => setScreen("connectors")}
-                  onOpenJobs={() => setScreen("jobs")}
-                />
+        {!apiOnline && (
+          <div className="df2-api-offline-banner df2-alert df2-alert-error" role="alert">
+            <DtIcon name="alert" size={18} />
+            <div>
+              <strong>{offlineCopy.title}</strong>
+              <p>{offlineCopy.body}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="df2-content">
+        {bootLoading && (
+          <div className="df2-boot-progress" role="progressbar" aria-label="Loading workspace">
+            <div className="df2-boot-progress-fill" />
+          </div>
+        )}
+        <div
+          className={`df2-content-inner ${
+            screen === "pilot"
+              ? "df2-content-flush"
+              : screen === "transfer"
+                ? "df2-content-studio"
+                : "df2-content-fit"
+          } ${bootLoading ? "is-booting" : ""} ${firstScreenPaint ? "is-first-screen" : ""}`}
+        >
+          <div className="df2-screen-panel">
+            <Suspense
+              fallback={(
+                <div className="df2-route-suspense">
+                  <SectionLoader title="Loading workspace…" hint="Preparing this view." />
+                </div>
               )}
-              {screen === "pilot" && <PilotPage onNavigate={setScreen} />}
+            >
+              {screen === "dashboard" && (
+                <PageErrorBoundary label="Overview">
+                  <DashboardPage
+                    connectors={connectors}
+                    jobs={jobs}
+                    schedules={schedules}
+                    onNewTransfer={() => setScreen("transfer")}
+                    onOpenPilot={() => setScreen("pilot")}
+                    onOpenConnectors={() => setScreen("connectors")}
+                    onOpenJobs={() => setScreen("jobs")}
+                  />
+                </PageErrorBoundary>
+              )}
+              {screen === "pilot" && (
+                <PageErrorBoundary label="Data Pilot">
+                  <PilotPage onNavigate={setScreen} />
+                </PageErrorBoundary>
+              )}
               {screen === "transfer" && (
-                <TransferPage
-                  connectors={connectors}
-                  onTransferComplete={() => {
-                    loadJobs();
-                    setScreen("jobs");
-                    toast({ title: "Transfer complete", message: "View progress in Job Theater.", tone: "success" });
-                  }}
-                />
+                <PageErrorBoundary label="Transfer Studio">
+                  <TransferPage
+                    connectors={connectors}
+                    onOpenSchedules={() => setScreen("schedules")}
+                    onTransferComplete={() => {
+                      loadJobs();
+                      void loadSchedules();
+                      setScreen("jobs");
+                      toast({ title: "Transfer complete", message: "View progress in Job Theater.", tone: "success" });
+                    }}
+                  />
+                </PageErrorBoundary>
               )}
               {screen === "connectors" && (
-                <ConnectorsPage
-                  connectors={connectors}
-                  onAdd={openModal}
-                  onEdit={openEditModal}
-                  onDelete={handleDeleteConnector}
-                />
+                <PageErrorBoundary label="Connectors">
+                  <ConnectorsPage
+                    connectors={connectors}
+                    jobs={jobs}
+                    schedules={schedules}
+                    onAdd={openModal}
+                    onEdit={openEditModal}
+                    onDelete={handleDeleteConnector}
+                    onRefresh={loadConnectors}
+                    showConnectionsTab={connectorsViewToken}
+                    highlightConnectorId={
+                      searchFocus?.screen === "connectors" ? searchFocus.connectorId : undefined
+                    }
+                  />
+                </PageErrorBoundary>
               )}
               {screen === "schedules" && (
-                <SchedulesPage connectors={connectors} onViewJobs={() => setScreen("jobs")} />
+                <PageErrorBoundary label="Pipelines">
+                  <SchedulesPage
+                    connectors={connectors}
+                    onViewJobs={() => setScreen("jobs")}
+                    onSchedulesChange={loadSchedules}
+                    highlightScheduleId={
+                      searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined
+                    }
+                  />
+                </PageErrorBoundary>
               )}
               {screen === "jobs" && (
-                <JobsPage jobs={jobs} onRefresh={loadJobs} onStartTransfer={() => setScreen("transfer")} />
+                <PageErrorBoundary label="Job Theater">
+                  <JobsPage
+                    jobs={jobs}
+                    onRefresh={loadJobs}
+                    onStartTransfer={() => setScreen("transfer")}
+                    initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
+                  />
+                </PageErrorBoundary>
               )}
-              {screen === "mcp" && <McpPage />}
-              {screen === "settings" && <SettingsPage />}
-            </div>
-          )}
+              {screen === "mcp" && (
+                <PageErrorBoundary label="MCP Server">
+                  <McpPage />
+                </PageErrorBoundary>
+              )}
+              {screen === "settings" && (
+                <PageErrorBoundary label="Settings">
+                  <SettingsPage />
+                </PageErrorBoundary>
+              )}
+            </Suspense>
+          </div>
+        </div>
         </div>
       </div>
 
       {showCopilotRail && (
         <aside className="df2-copilot-rail" aria-label="Data Pilot">
-          <AICopilot variant="rail" onNavigate={setScreen} onClose={() => setCopilotOpen(false)} />
+          <Suspense fallback={<SectionLoader title="Loading Pilot…" size="md" />}>
+            <AICopilot variant="rail" onNavigate={setScreen} onClose={() => setCopilotOpen(false)} />
+          </Suspense>
         </aside>
       )}
 
       {showModal && (
-        <ConnectorModal
+        <Suspense fallback={null}>
+          <ConnectorModal
           initialType={modalType}
           editing={editingConnector}
           onClose={() => { setShowModal(false); setEditingConnector(null); }}
-          onSaved={loadConnectors}
-        />
+          onSaved={async () => {
+            await loadConnectors();
+            setConnectorsViewToken((n) => n + 1);
+            setScreen("connectors");
+            toast({ title: "Connection saved", message: "Visible in My connections.", tone: "success" });
+          }}
+          />
+        </Suspense>
+      )}
+
+      {screen !== "pilot" && !copilotOpen && (
+        <button
+          type="button"
+          className="df2-copilot-fab"
+          onClick={() => setCopilotOpen(true)}
+          aria-label="Open Data Pilot"
+          title="Data Pilot"
+        >
+          <DtIcon name="sparkle" size={22} />
+        </button>
       )}
     </div>
   );
@@ -315,6 +546,30 @@ export function DataTransferApp() {
   const [entryScreen, setEntryScreen] = useState<Screen>("dashboard");
   const [userEmail, setUserEmail] = useState(readStoredUser);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("sso_token");
+    const expiresRaw = params.get("expires_at");
+    const email = params.get("sso_email");
+    if (!token || !expiresRaw || !email) return;
+
+    const expires_at = Number(expiresRaw);
+    writeSession(
+      {
+        email,
+        name: email.split("@")[0] || email,
+        role: "member",
+        token,
+        expires_at,
+        signed_in_at: Date.now(),
+      },
+      true,
+    );
+    window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+    setUserEmail(email);
+    setStage("app");
+  }, []);
+
   const requestApp = (target: Screen) => {
     setEntryScreen(target);
     setStage(userEmail ? "app" : "login");
@@ -322,20 +577,26 @@ export function DataTransferApp() {
 
   const handleAuthenticated = (email: string) => {
     setUserEmail(email);
+    writeAppHash(entryScreen, true);
     setStage("app");
   };
 
   const signOut = () => {
-    try {
-      localStorage.removeItem("df2.session");
-      sessionStorage.removeItem("df2.session");
-    } catch {
-      /* storage unavailable */
-    }
+    clearSession();
     setUserEmail("");
     setEntryScreen("dashboard");
     setStage("login");
   };
+
+  const publicMeta =
+    stage === "landing" ? metaForScreen("landing") : stage === "login" ? metaForLogin() : metaForScreen("dashboard");
+  usePageMeta(publicMeta);
+
+  useEffect(() => {
+    if (stage === "app") {
+      writeAppHash(entryScreen, true);
+    }
+  }, [stage, entryScreen]);
 
   return (
     <ToastProvider>
@@ -344,6 +605,7 @@ export function DataTransferApp() {
           onEnterApp={() => requestApp("dashboard")}
           onStartTransfer={() => requestApp("transfer")}
           onOpenPilot={() => requestApp("pilot")}
+          onOpenMcp={() => requestApp("mcp")}
       />
       )}
 

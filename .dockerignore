@@ -1,0 +1,14 @@
+node_modules
+.git
+.env
+.env.*
+!.env.production.example
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+apps/api/uploads
+apps/api/data/vector_store
+apps/api/data/training
+.cursor
+*.md
+!docs/DEPLOYMENT.md

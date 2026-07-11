@@ -24,7 +24,11 @@ def get_connection(
     warehouse: str,
     connection_string: str,
 ) -> Any:
-    import snowflake.connector
+    try:
+        import snowflake.connector
+    except ImportError as exc:
+        from connectors.driver_guard import require_driver
+        raise RuntimeError(require_driver("snowflake.connector", "snowflake-connector-python")) from exc
 
     if connection_string.strip():
         return snowflake.connector.connect(connection_string, login_timeout=10)

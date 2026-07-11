@@ -57,14 +57,16 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
+    write_mode: str = "insert",
+    conflict_columns: list[str] | None = None,
 ) -> WriteResult:
     try:
         from pymongo import MongoClient
     except ImportError:
-        from connectors.driver_guard import allow_stub_writes, require_driver
+        from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 
-        if not allow_stub_writes():
+        if not stub_writes_allowed():
             return WriteResult(
                 ok=False, rows_written=0, table_name=table_name, target_schema=schema or "db",
                 checksum="", chunks_completed=0,
@@ -138,11 +140,28 @@ def write_mapped_rows(
             if not batch:
                 break
             
-            # Convert row tuples to dictionaries
+            # Convert row tuples to documents
             docs = [dict(zip(target_cols, row)) for row in batch]
 
-            coll.insert_many(docs, ordered=False)
-            written += len(batch)
+            if write_mode == "upsert" and conflict_columns:
+                from pymongo import ReplaceOne
+
+                pk = conflict_columns[0]
+                if pk in target_cols:
+                    ops = [
+                        ReplaceOne({pk: doc[pk]}, doc, upsert=True)
+                        for doc in docs
+                        if doc.get(pk) not in (None, "")
+                    ]
+                    if ops:
+                        coll.bulk_write(ops, ordered=False)
+                    written += len(ops)
+                else:
+                    coll.insert_many(docs, ordered=False)
+                    written += len(docs)
+            else:
+                coll.insert_many(docs, ordered=False)
+                written += len(docs)
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 

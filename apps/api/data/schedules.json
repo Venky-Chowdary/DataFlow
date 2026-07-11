@@ -1,0 +1,19 @@
+{
+  "schedules": [
+    {
+      "id": "62bac6e0-685a-4382-accd-42a4cb3542da",
+      "name": "Test",
+      "source_connector_id": "fdb1b557-5535-40be-a440-22bfdff75720",
+      "source_table": "airports",
+      "dest_connector_id": "b6c0dde5-27eb-4d27-926b-8353cb7291b8",
+      "dest_table": "data",
+      "interval": "daily",
+      "enabled": true,
+      "last_run_at": "2026-07-10T23:42:58.157564+00:00",
+      "next_run_at": "2026-07-11T23:42:58.157564+00:00",
+      "last_job_id": "6a518381c496940a95973365",
+      "run_count": 2,
+      "created_at": "2026-07-09T23:42:01.127408+00:00"
+    }
+  ]
+}

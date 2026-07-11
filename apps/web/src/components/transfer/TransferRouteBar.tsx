@@ -1,0 +1,42 @@
+import { ConnectorIcon } from "../../app/brand-icons";
+
+interface TransferRouteBarProps {
+  sourceLabel: string;
+  destLabel: string;
+  sourceType?: string;
+  destType?: string;
+  rowCount?: number;
+  live?: boolean;
+}
+
+/** Compact source → destination strip — not a second stepper. */
+export function TransferRouteBar({
+  sourceLabel,
+  destLabel,
+  sourceType = "file",
+  destType = "database",
+  rowCount,
+  live = false,
+}: TransferRouteBarProps) {
+  const hasSource = sourceLabel !== "Choose source" && !sourceLabel.startsWith("Cloud source") && sourceLabel !== "Database source";
+  const hasDest = destLabel !== "Choose destination";
+
+  if (!hasSource && !hasDest && !rowCount) return null;
+
+  return (
+    <div className={`df2-route-bar ${live ? "df2-route-bar-live" : ""}`} aria-label="Current route">
+      <div className="df2-route-bar-endpoint">
+        <ConnectorIcon id={sourceType} size={18} />
+        <span className="df2-route-bar-label" title={sourceLabel}>{sourceLabel}</span>
+      </div>
+      <span className="df2-route-bar-arrow" aria-hidden>→</span>
+      <div className="df2-route-bar-endpoint">
+        <ConnectorIcon id={destType} size={18} />
+        <span className="df2-route-bar-label" title={destLabel}>{destLabel}</span>
+      </div>
+      {rowCount != null && rowCount > 0 && (
+        <span className="df2-route-bar-meta">{rowCount.toLocaleString()} rows</span>
+      )}
+    </div>
+  );
+}

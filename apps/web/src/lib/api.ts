@@ -1,13 +1,35 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
+import { getAuthToken } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 120000;
 
 type TimedRequestInit = RequestInit & { timeoutMs?: number };
 
+async function parseApiError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json();
+    const detail = data.detail ?? data.error ?? data.message;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object") {
+      if (typeof detail.error === "string") return detail.error;
+      if (typeof detail.message === "string") return detail.message;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
-  if (timeoutMs <= 0) return fetch(input, { ...requestInit, signal });
+  const headers = new Headers(requestInit.headers);
+  const token = getAuthToken();
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const mergedInit = { ...requestInit, headers };
+  if (timeoutMs <= 0) return fetch(input, { ...mergedInit, signal });
 
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -18,7 +40,7 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   }
 
   try {
-    return await fetch(input, { ...requestInit, signal: controller.signal });
+    return await fetch(input, { ...mergedInit, signal: controller.signal });
   } catch (error) {
     if (controller.signal.aborted) throw new Error("Request timed out");
     throw error;
@@ -68,8 +90,9 @@ export async function analyzeSchemaEnhanced(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ columns }),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error("AI analysis failed");
+  if (!res.ok) throw new Error(await parseApiError(res, "AI analysis failed"));
   return res.json();
 }
 
@@ -80,6 +103,16 @@ export async function runPreflight(payload: {
   mappings: { source: string; target: string; confidence: number; reason?: string }[];
   connector_id?: string;
   source_connector_id?: string;
+  dest_type?: string;
+  dest_host?: string;
+  dest_port?: number;
+  dest_database?: string;
+  dest_username?: string;
+  dest_password?: string;
+  dest_connection_string?: string;
+  dest_schema?: string;
+  dest_warehouse?: string;
+  dest_kind?: string;
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
@@ -92,8 +125,9 @@ export async function runPreflight(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error("Preflight failed");
+  if (!res.ok) throw new Error(await parseApiError(res, "Preflight failed"));
   return res.json();
 }
 
@@ -133,8 +167,26 @@ export async function analyzeDbTransfer(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error("Database route analysis failed");
+  if (!res.ok) throw new Error(await parseApiError(res, "Route analysis failed"));
+  return res.json();
+}
+
+/** Build transfer plan from known schema — no file re-upload (fast for large CSVs). */
+export async function analyzeTransferRoute(payload: {
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+  source_columns?: string[];
+  source_schema?: Record<string, string>;
+}): Promise<TransferPlan> {
+  const res = await apiFetch(`${API_BASE}/transfer/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Route analysis failed"));
   return res.json();
 }
 
@@ -283,6 +335,17 @@ export interface CatalogConnector {
   category: string;
   status: string;
   description: string;
+  driver_type?: string;
+  effective_status?: string;
+  transfer_ready?: boolean;
+  connect_only?: boolean;
+  capability_label?: string;
+  capabilities?: {
+    test?: boolean;
+    read?: boolean;
+    write?: boolean;
+    file_source?: boolean;
+  };
 }
 
 export async function fetchCatalogConnectors(options: {
@@ -291,6 +354,7 @@ export async function fetchCatalogConnectors(options: {
   category?: string;
   status?: string;
   limit?: number;
+  transferOnly?: boolean;
 } = {}) {
   const params = new URLSearchParams();
   if (options.q) params.set("q", options.q);
@@ -298,6 +362,7 @@ export async function fetchCatalogConnectors(options: {
   if (options.category) params.set("category", options.category);
   if (options.status) params.set("status", options.status);
   if (options.limit) params.set("limit", String(options.limit));
+  if (options.transferOnly) params.set("transfer_only", "true");
   const res = await apiFetch(`${API_BASE}/catalog/connectors?${params}`);
   if (!res.ok) throw new Error("Catalog fetch failed");
   return res.json();
@@ -309,6 +374,9 @@ export async function fetchCatalogStats(): Promise<{
   beta: number;
   planned: number;
   categories: number;
+  transfer_live?: number;
+  connect_only?: number;
+  roadmap?: number;
 }> {
   const res = await apiFetch(`${API_BASE}/catalog/stats`);
   if (!res.ok) throw new Error("Catalog stats fetch failed");
@@ -316,32 +384,50 @@ export async function fetchCatalogStats(): Promise<{
 }
 
 export async function fetchConnectors(): Promise<Connector[]> {
-  const normalize = (c: Record<string, unknown>): Connector => ({
-    id: String(c.id ?? c._id ?? ""),
-    name: String(c.name ?? ""),
-    type: String(c.type ?? ""),
-    host: String(c.host ?? ""),
-    port: Number(c.port ?? 0),
-    database: String(c.database ?? ""),
-    status: String(c.status ?? "configured"),
-    created_at: String(c.created_at ?? new Date().toISOString()),
-  });
+  const normalize = (c: Record<string, unknown>): Connector | null => {
+    const id = String(c.id ?? c._id ?? "");
+    if (!id) return null;
+    return {
+      id,
+      name: String(c.name ?? ""),
+      type: String(c.type ?? ""),
+      host: String(c.host ?? ""),
+      port: Number(c.port ?? 0),
+      database: String(c.database ?? ""),
+      status: c.last_test_ok === false ? "error" : String(c.status ?? "configured"),
+      role: c.role ? String(c.role) : undefined,
+      created_at: String(c.created_at ?? new Date().toISOString()),
+      last_test_ok: c.last_test_ok === true,
+    };
+  };
 
-  const seen = new Map<string, Connector>();
-  for (const url of [`${API_BASE}/connectors/saved`, `${API_BASE}/connectors/`]) {
-    try {
-      const res = await apiFetch(url);
-      if (!res.ok) continue;
+  // File-backed store is canonical — always prefer /connectors/saved
+  try {
+    const res = await apiFetch(`${API_BASE}/connectors/saved`);
+    if (res.ok) {
       const data = await res.json();
-      for (const raw of data.connectors || []) {
-        const c = normalize(raw as Record<string, unknown>);
-        if (c.id) seen.set(c.id, c);
-      }
-    } catch {
-      /* try next */
+      const list = (data.connectors || [])
+        .map((raw: Record<string, unknown>) => normalize(raw))
+        .filter(Boolean) as Connector[];
+      return list;
     }
+  } catch {
+    /* fall through */
   }
-  return Array.from(seen.values());
+
+  // Legacy MongoDB list (optional fallback when saved route unavailable)
+  try {
+    const res = await apiFetch(`${API_BASE}/connectors/`);
+    if (res.ok) {
+      const data = await res.json();
+      return (data.connectors || [])
+        .map((raw: Record<string, unknown>) => normalize(raw))
+        .filter(Boolean) as Connector[];
+    }
+  } catch {
+    /* empty */
+  }
+  return [];
 }
 
 export async function fetchJobs(): Promise<TransferJob[]> {
@@ -408,6 +494,11 @@ export function streamJobProgress(
     error: raw.error ? String(raw.error) : undefined,
     chunk_current: raw.chunk_current != null ? Number(raw.chunk_current) : undefined,
     chunk_total: raw.chunk_total != null ? Number(raw.chunk_total) : undefined,
+    rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
+    rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
+    destination_summary: raw.destination_summary && typeof raw.destination_summary === "object"
+      ? raw.destination_summary as Record<string, unknown>
+      : undefined,
     created_at: String(raw.created_at ?? new Date().toISOString()),
   });
 
@@ -426,7 +517,7 @@ export function streamJobProgress(
       }
     };
     poll();
-    pollTimer = setInterval(poll, 800);
+    pollTimer = setInterval(poll, 3000);
   };
 
   try {
@@ -462,11 +553,9 @@ export function streamJobProgress(
 }
 
 export async function deleteConnector(id: string): Promise<void> {
-  for (const url of [`${API_BASE}/connectors/saved/${id}`, `${API_BASE}/connectors/${id}`]) {
-    const res = await apiFetch(url, { method: "DELETE" });
-    if (res.ok) return;
-  }
-  throw new Error("Failed to delete connector");
+  const res = await apiFetch(`${API_BASE}/connectors/saved/${id}`, { method: "DELETE" });
+  if (res.ok) return;
+  throw new Error(await parseApiError(res, "Failed to delete connector"));
 }
 
 export async function testSavedConnector(id: string): Promise<{ success: boolean; message: string }> {
@@ -555,21 +644,33 @@ export async function saveConnector(payload: {
   host: string;
   port: number;
   database: string;
+  role?: string;
   username?: string;
   password?: string;
   schema?: string;
   connection_string?: string;
   warehouse?: string;
+  ssl?: boolean;
 }): Promise<Connector> {
-  for (const url of [`${API_BASE}/connectors/saved`, `${API_BASE}/connectors/`]) {
-    const res = await apiFetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) return res.json();
-  }
-  throw new Error("Failed to save connector");
+  const body = { role: "both", ssl: false, ...payload };
+  const res = await apiFetch(`${API_BASE}/connectors/saved`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save connector"));
+  const data = await res.json();
+  return {
+    id: String(data.id ?? ""),
+    name: String(data.name ?? payload.name),
+    type: String(data.type ?? payload.type),
+    host: String(data.host ?? payload.host),
+    port: Number(data.port ?? payload.port),
+    database: String(data.database ?? payload.database),
+    status: String(data.status ?? "configured"),
+    created_at: String(data.created_at ?? new Date().toISOString()),
+    last_test_ok: data.last_test_ok === true,
+  };
 }
 
 export async function updateConnector(
@@ -580,35 +681,210 @@ export async function updateConnector(
     host: string;
     port: number;
     database: string;
+    role?: string;
     username?: string;
     password?: string;
     schema?: string;
     connection_string?: string;
     warehouse?: string;
+    ssl?: boolean;
   },
 ): Promise<Connector> {
-  for (const url of [`${API_BASE}/connectors/saved/${id}`, `${API_BASE}/connectors/${id}`]) {
-    const res = await apiFetch(url, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) return res.json();
-  }
-  throw new Error("Failed to update connector");
+  const body = { role: "both", ssl: false, ...payload };
+  const res = await apiFetch(`${API_BASE}/connectors/saved/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to update connector"));
+  return res.json();
 }
 
 export async function uploadFile(file: File): Promise<ParsedUpload> {
   const formData = new FormData();
   formData.append("file", file);
   const res = await apiFetch(`${API_BASE}/connectors/upload`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
-  if (!res.ok) throw new Error("Upload failed");
+  if (!res.ok) throw new Error(await parseApiError(res, "Upload failed"));
   return res.json();
 }
 
 export async function fetchTransferCapabilities() {
   const res = await apiFetch(`${API_BASE}/transfer/capabilities`);
   if (!res.ok) throw new Error("Failed to load capabilities");
+  return res.json();
+}
+
+export interface EndpointIntrospection {
+  connected: boolean;
+  columns: string[];
+  schema: Record<string, string>;
+  objects?: { name: string; type: string }[];
+  row_estimate?: number;
+  table_exists?: boolean;
+  message: string;
+}
+
+export async function introspectTransferEndpoints(payload: {
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+}): Promise<{ source: EndpointIntrospection; destination: EndpointIntrospection }> {
+  const res = await apiFetch(`${API_BASE}/transfer/introspect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
+  return res.json();
+}
+
+export async function fetchRouteAnalysis(payload: {
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+}): Promise<{
+  supported: boolean;
+  score: number;
+  operation: string;
+  conversion_needed?: boolean;
+  conversion_supported?: boolean;
+  hints?: string[];
+  warnings?: string[];
+  alternatives?: Array<{ dest_kind: string; dest_format: string; reason: string }>;
+}> {
+  const res = await apiFetch(`${API_BASE}/transfer/route`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Route analysis failed"));
+  return res.json();
+}
+
+export async function fetchPlatformStatus(): Promise<{
+  catalog_total: number;
+  transfer_ready: number;
+  connect_test_only: number;
+  roadmap: number;
+  live_route_combinations: number;
+  llm_mapping_available: boolean;
+  live_drivers: string[];
+  preflight_gates: number;
+}> {
+  const res = await apiFetch(`${API_BASE}/transfer/platform`);
+  if (!res.ok) throw new Error("Failed to load platform status");
+  return res.json();
+}
+
+export async function mapTransferColumns(payload: {
+  source_columns: string[];
+  source_schema?: Record<string, string>;
+  target_columns?: string[];
+  target_schema?: Record<string, string>;
+  validation_mode?: string;
+  file_format?: string;
+  use_llm?: boolean;
+  source_samples?: Record<string, string[]>;
+}): Promise<{
+  mappings: Array<{
+    source: string;
+    target: string;
+    confidence: number;
+    reasoning?: string;
+    requires_review?: boolean;
+    score_gap?: number;
+  }>;
+  validation: { passed: boolean; issues: string[] };
+  destination_aware: boolean;
+  confidence_threshold: number;
+  llm?: { llm_used?: boolean; llm_provider?: string; strategy?: string };
+  plan_summary?: Record<string, unknown>;
+  coercion_issues?: Array<Record<string, unknown>>;
+}> {
+  const res = await apiFetch(`${API_BASE}/transfer/map`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Column mapping failed"));
+  return res.json();
+}
+
+export async function createTransferPlan(payload: {
+  name?: string;
+  source?: Record<string, unknown>;
+  destination?: Record<string, unknown>;
+  source_columns: string[];
+  source_schema?: Record<string, string>;
+  target_columns?: string[];
+  target_schema?: Record<string, string>;
+  row_count_estimate?: number;
+  sample_rows?: Record<string, unknown>[];
+  policies?: Record<string, unknown>;
+}): Promise<{ plan: { id: string; status: string } }> {
+  const res = await apiFetch(`${API_BASE}/transfer/plans`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create transfer plan"));
+  return res.json();
+}
+
+export async function mapTransferPlan(
+  planId: string,
+  payload: { validation_mode?: string; use_llm?: boolean; source_samples?: Record<string, string[]> } = {},
+) {
+  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/map`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Plan mapping failed"));
+  return res.json();
+}
+
+export async function preflightTransferPlan(planId: string) {
+  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
+    method: "POST",
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
+  return res.json();
+}
+
+export async function approveTransferPlan(planId: string, version?: number) {
+  const qs = version != null ? `?version=${version}` : "";
+  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/approve${qs}`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Plan approval failed"));
+  return res.json();
+}
+
+export async function updateTransferPlan(
+  planId: string,
+  payload: Record<string, unknown>,
+) {
+  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to update transfer plan"));
+  return res.json();
+}
+
+export async function syncTransferPlanMappings(
+  planId: string,
+  mappings: { source: string; target: string; confidence: number; reason?: string; transform?: string }[],
+) {
+  const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/mappings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mappings }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to sync plan mappings"));
   return res.json();
 }
 
@@ -653,6 +929,7 @@ export async function runUniversalTransfer(options: {
   destPort?: number;
   destUsername?: string;
   destPassword?: string;
+  destConnectionString?: string;
   destWarehouse?: string;
   skipPreflight?: boolean;
   mappings?: { source: string; target: string; confidence: number; reason?: string }[];
@@ -661,6 +938,7 @@ export async function runUniversalTransfer(options: {
   validationMode?: string;
   backfillNewFields?: boolean;
   streamContracts?: Record<string, unknown>[];
+  planId?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -686,6 +964,7 @@ export async function runUniversalTransfer(options: {
   if (options.destPort) formData.append("dest_port", String(options.destPort));
   if (options.destUsername) formData.append("dest_username", options.destUsername);
   if (options.destPassword) formData.append("dest_password", options.destPassword);
+  if (options.destConnectionString) formData.append("dest_connection_string", options.destConnectionString);
   if (options.destWarehouse) formData.append("dest_warehouse", options.destWarehouse);
   if (options.mappings?.length) {
     formData.append("mappings_json", JSON.stringify(options.mappings));
@@ -693,6 +972,7 @@ export async function runUniversalTransfer(options: {
   if (options.streamContracts?.length) {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
+  if (options.planId) formData.append("plan_id", options.planId);
   const res = await apiFetch(`${API_BASE}/transfer/run`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   const data = await res.json();
   if (!res.ok) {
@@ -705,6 +985,7 @@ export async function runUniversalTransfer(options: {
   return { success: true, async: data.async === true, ...data };
 }
 
+/** @deprecated Use runUniversalTransfer — legacy /connectors/transfer route */
 export async function transferFile(
   file: File,
   destinationDatabase: string,
@@ -718,12 +999,14 @@ export async function transferFile(
     destSchema?: string;
     destUsername?: string;
     destPassword?: string;
+    destConnectionString?: string;
     destWarehouse?: string;
     syncMode?: string;
     schemaPolicy?: string;
     validationMode?: string;
     backfillNewFields?: boolean;
     streamContracts?: Record<string, unknown>[];
+    mappings?: { source: string; target: string; confidence: number; reason?: string }[];
   } = {}
 ) {
   const formData = new FormData();
@@ -742,9 +1025,13 @@ export async function transferFile(
   if (options.destSchema) formData.append("dest_schema", options.destSchema);
   if (options.destUsername) formData.append("dest_username", options.destUsername);
   if (options.destPassword) formData.append("dest_password", options.destPassword);
+  if (options.destConnectionString) formData.append("dest_connection_string", options.destConnectionString);
   if (options.destWarehouse) formData.append("dest_warehouse", options.destWarehouse);
   if (options.streamContracts?.length) {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
+  }
+  if (options.mappings?.length) {
+    formData.append("mappings_json", JSON.stringify(options.mappings));
   }
   const res = await apiFetch(`${API_BASE}/connectors/transfer`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   const data = await res.json();
@@ -756,4 +1043,200 @@ export async function transferFile(
     return { success: false, error: errMsg, preflight: detail?.preflight };
   }
   return { success: true, async: data.async === true, ...data };
+}
+
+export async function fetchMcpLogs(limit = 50): Promise<Array<{
+  id: string;
+  time: string;
+  tool: string;
+  client: string;
+  status: string;
+  ms: number;
+  error?: string | null;
+}>> {
+  const res = await apiFetch(`${API_BASE}/mcp/logs?limit=${limit}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.logs ?? [];
+}
+
+export async function fetchWorkspaceSettings(): Promise<{
+  org_name: string;
+  timezone: string;
+  retention_days: number;
+  updated_at?: string | null;
+  updated_by?: string | null;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/settings`);
+  if (!res.ok) {
+    return { org_name: "DataFlow", timezone: "UTC", retention_days: 90 };
+  }
+  return res.json();
+}
+
+export async function updateWorkspaceSettings(body: {
+  org_name?: string;
+  timezone?: string;
+  retention_days?: number;
+}): Promise<{
+  org_name: string;
+  timezone: string;
+  retention_days: number;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Failed to save workspace settings"));
+  }
+  return res.json();
+}
+
+export async function fetchAuditEvents(limit = 50, level?: string): Promise<Array<{
+  id: string;
+  time: string;
+  actor: string;
+  action: string;
+  resource: string;
+  level: string;
+  details?: Record<string, unknown>;
+}>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (level && level !== "all") params.set("level", level);
+  const res = await apiFetch(`${API_BASE}/audit/events?${params}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.events ?? [];
+}
+
+export type SsoType = "saml" | "oidc" | "azure_ad";
+
+export type SsoConfig = {
+  enabled: boolean;
+  entity_id?: string;
+  sso_url?: string;
+  x509_cert?: string;
+  email_attribute?: string;
+  issuer?: string;
+  client_id?: string;
+  client_secret?: string;
+  redirect_uri?: string;
+  scopes?: string;
+  tenant_id?: string;
+};
+
+export function resolveApiBase(): string {
+  if (API_BASE.startsWith("http")) return API_BASE.replace(/\/$/, "");
+  return `${window.location.origin}${API_BASE}`.replace(/\/$/, "");
+}
+
+export function ssoStartUrl(type: SsoType): string {
+  return `${resolveApiBase()}/auth/sso/${type}/start`;
+}
+
+export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+  const res = await apiFetch(`${API_BASE}/workspace/sso`);
+  if (!res.ok) throw new Error("Failed to load SSO settings");
+  const data = await res.json();
+  return data.providers;
+}
+
+export async function updateSsoConfig(type: SsoType, body: Partial<SsoConfig>): Promise<{ config: SsoConfig; validation: { ok: boolean; message: string; missing_fields: string[] } }> {
+  const res = await apiFetch(`${API_BASE}/workspace/sso/${type}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save SSO settings"));
+  return res.json();
+}
+
+export async function testSsoConfig(type: SsoType): Promise<{ ok: boolean; message: string; missing_fields: string[] }> {
+  const res = await apiFetch(`${API_BASE}/workspace/sso/${type}/test`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "SSO test failed"));
+  return res.json();
+}
+
+export async function fetchSsoProviders(): Promise<Array<{ type: SsoType; label: string; login_path: string }>> {
+  const res = await fetch(`${resolveApiBase()}/auth/sso/providers`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.providers ?? [];
+}
+
+export async function fetchAiProviderSettings(): Promise<Record<string, {
+  enabled: boolean;
+  api_key: string;
+  model: string;
+  base_url?: string;
+  configured: boolean;
+}>> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers`);
+  if (!res.ok) throw new Error("Failed to load AI provider settings");
+  const data = await res.json();
+  return data.providers;
+}
+
+export async function updateAiProviderSettings(provider: string, body: {
+  enabled?: boolean;
+  api_key?: string;
+  model?: string;
+  base_url?: string;
+}): Promise<Record<string, unknown>> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save AI provider settings"));
+  return res.json();
+}
+
+export type WorkspaceApiKey = {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at?: string;
+  created_by?: string;
+  last_used_at?: string | null;
+};
+
+export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
+  const res = await apiFetch(`${API_BASE}/workspace/api-keys`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.keys ?? [];
+}
+
+export async function createWorkspaceApiKey(name: string): Promise<WorkspaceApiKey & { key: string }> {
+  const res = await apiFetch(`${API_BASE}/workspace/api-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create API key"));
+  return res.json();
+}
+
+export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/workspace/api-keys/${keyId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
+}
+
+export async function loginWorkspace(email: string, password: string): Promise<{
+  token: string;
+  expires_at: number;
+  user: { email: string; name: string; role: string };
+}> {
+  const res = await apiFetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    throw new Error(await parseApiError(res, "Sign-in failed"));
+  }
+  return res.json();
 }

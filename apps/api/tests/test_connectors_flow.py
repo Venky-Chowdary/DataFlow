@@ -56,6 +56,24 @@ def test_dynamodb_test_requires_table():
     assert "table" in (result.error or "").lower()
 
 
+def test_dynamodb_local_endpoint_resolution():
+    from connectors.aws_common import is_local_endpoint, resolve_endpoint_url
+
+    cfg = {"host": "us-east-1", "connection_string": "http://localhost:8000"}
+    assert resolve_endpoint_url(cfg) == "http://localhost:8000"
+    assert is_local_endpoint(cfg) is True
+
+    cfg2 = {"host": "http://localhost:8000", "port": 8000}
+    assert resolve_endpoint_url(cfg2) == "http://localhost:8000"
+
+
+def test_dynamodb_pick_hash_key():
+    from connectors.dynamodb_writer import _pick_hash_key
+
+    assert _pick_hash_key(["name", "order_id", "amount"], []) == "order_id"
+    assert _pick_hash_key(["name", "amount"], [{"target": "uuid"}]) == "uuid"
+
+
 def test_dynamodb_test_requires_credentials():
     from connectors.dynamodb import test_dynamodb
 

@@ -15,7 +15,11 @@ def get_connection(
     connection_string: str,
     ssl: bool,
 ) -> Any:
-    import psycopg2
+    try:
+        import psycopg2
+    except ImportError as exc:
+        from connectors.driver_guard import require_driver
+        raise RuntimeError(require_driver("psycopg2", "psycopg2-binary")) from exc
 
     if connection_string.strip():
         return psycopg2.connect(connection_string, connect_timeout=10)

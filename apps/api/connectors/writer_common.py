@@ -7,7 +7,8 @@ import os
 import re
 from typing import Any, Callable
 
-from services.transform_engine import apply_transform, infer_transform
+from services.transform_engine import apply_transform, infer_transform, infer_transform_for_mapping
+from services.transform_resolver import resolve_transform
 
 # Configurable batch size — default 5 000 rows per commit (enterprise scale)
 CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "5000"))
@@ -58,8 +59,12 @@ def build_mapped_rows(
             idx = source_indices.get(m["source"])
             val = raw[idx] if idx is not None and idx < len(raw) else None
             tgt = sanitize_identifier(m["target"])
-            transform = m.get("transform") or infer_transform(
-                m["source"], m["target"], column_types.get(m["source"], "VARCHAR")
+            src_type = column_types.get(m["source"], "VARCHAR")
+            tgt_type = m.get("target_type") or column_types.get(m["target"])
+            transform = resolve_transform(
+                m,
+                column_types=column_types,
+                dest_types=column_types,
             )
             converted, err = apply_transform(val, transform)
             if err and len(errors) < 10:

@@ -14,7 +14,11 @@
 }
 
 .dt-connection-hub-hero {
-  min-height: clamp(380px, 50vh, 560px);
+  min-height: clamp(280px, 36vh, 480px);
+}
+
+.df2-topology-card .dt-connection-hub-hero {
+  min-height: 0;
 }
 
 .dt-connection-hub-glow {
@@ -32,17 +36,54 @@
   width: 100%;
   height: 100%;
   min-height: inherit;
-  padding: 48px 32px;
   box-sizing: border-box;
+}
+
+.dt-connection-hub-canvas-aligned {
+  /* No padding: node and SVG path coordinates share the same border-box space. */
+  min-height: clamp(280px, 36vh, 420px);
+  padding: 0;
 }
 
 .dt-connection-hub-svg {
   position: absolute;
-  inset: 48px 32px;
-  width: calc(100% - 64px);
-  height: calc(100% - 96px);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
   z-index: 1;
+}
+
+.dt-connection-hub-real .dt-connection-hub-glow {
+  display: none;
+}
+
+.dt-connection-hub-path-linked {
+  stroke-dasharray: none;
+  animation: none;
+  opacity: 0.9;
+}
+
+.dt-connection-hub-path-linked.active {
+  opacity: 1;
+  filter: drop-shadow(0 0 4px rgba(15, 118, 110, 0.35));
+}
+
+.dt-hub-node-anchor {
+  transform: translate(-50%, -50%);
+  width: auto;
+  max-width: 120px;
+  animation: none;
+}
+
+.dt-hub-node-anchor .dt-connection-hub-node-glass {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto;
+}
+
+.dt-connection-hub-core-glow {
+  pointer-events: none;
 }
 
 .dt-connection-hub-orbit {

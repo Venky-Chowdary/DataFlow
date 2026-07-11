@@ -1,0 +1,187 @@
+/* ═══════════════════════════════════════════════════════════
+   UI consistency — unified tiles, cards, spacing
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  --df-tile-min-h: 88px;
+  --df-card-head-pad: 16px 20px;
+  --df-card-pad: 20px;
+  --df-page-section-gap: 16px;
+  --df-grid-gap: 14px;
+}
+
+/* Form controls — consistent sizing, no border clip */
+.df2-app .df2-input,
+.df2-app select.df2-input,
+.df2-app select.df2-select {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  border-radius: 8px;
+}
+
+.df2-app .df2-field {
+  min-width: 0;
+  width: 100%;
+}
+
+.df2-app .df2-input:focus,
+.df2-app select.df2-input:focus,
+.df2-app select.df2-select:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.25);
+  outline-offset: 0;
+  border-color: #0f766e;
+}
+
+/* Cards — show full content, never clip children */
+.df2-app .df2-card {
+  overflow: visible !important;
+  border-radius: var(--df-radius-card, 12px);
+}
+
+.df2-app .df2-card-head {
+  min-height: 56px;
+  align-items: center !important;
+}
+
+.df2-app .df2-card-body {
+  padding: var(--df-card-pad) !important;
+}
+
+/* Stat tiles — equal height in every grid */
+.df2-stats,
+.df2-overview-metrics-deck,
+.df2-transfer-control-plane {
+  align-items: stretch;
+}
+
+.df2-stats .df2-stat,
+.df2-overview-kpis .df2-stat {
+  min-height: var(--df-tile-min-h);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+}
+
+.df2-control-metric {
+  min-height: var(--df-tile-min-h);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 14px 16px !important;
+  border-radius: var(--df-radius-card, 12px);
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #fff;
+  box-shadow: var(--df-shadow-xs, 0 1px 2px rgba(15, 23, 42, 0.04));
+}
+
+.df2-metric-glass {
+  min-height: var(--df-tile-min-h);
+}
+
+.df2-stats--compact .df2-stat {
+  min-height: 76px;
+  padding: 12px 14px;
+}
+
+/* Page padding when not using fit wrapper */
+.df2-page-fluid:not(.df2-page-fit) {
+  padding: 12px var(--df-page-gutter, 20px) 32px;
+}
+
+.df2-page-fluid:not(.df2-page-fit) .df2-page-head-enterprise {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+/* Section rhythm */
+.df2-page-fit {
+  padding-bottom: 32px;
+}
+
+.df2-stack {
+  gap: var(--df-page-section-gap) !important;
+}
+
+.df2-page-section {
+  margin-bottom: var(--df-page-section-gap);
+}
+
+/* Transfer panels match card system */
+.df2-transfer-panel.df2-card-elevated {
+  border-radius: var(--df-radius-card, 12px);
+}
+
+.df2-transfer-hero {
+  border-radius: var(--df-radius-card, 12px);
+}
+
+.df2-transfer-command {
+  border-radius: var(--df-radius-card, 12px);
+}
+
+/* Pipeline / connector cards equal minimum */
+.df2-connector-card,
+.df2-pipeline-card {
+  min-height: 196px;
+  border-radius: var(--df-radius-card, 12px);
+}
+
+.df2-glass-panel {
+  border-radius: var(--df-radius-card, 12px);
+  overflow: visible;
+}
+
+/* Glass metric deck alignment */
+.df2-overview-metrics-deck {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--df-grid-gap);
+}
+
+@media (max-width: 900px) {
+  .df2-overview-metrics-deck {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .df2-overview-metrics-deck {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Workspace pages — shared vertical rhythm */
+.df2-page-workspace.df2-pilot-workspace,
+.df2-page-workspace.df2-transfer-studio-shell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-page-section-gap, 16px);
+  min-height: 0;
+}
+
+.df2-pilot-workspace .df2-pilot-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.df2-btn-block {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Pilot inside app shell — fill content area */
+.df2-content-flush .df2-page-pilot {
+  height: 100%;
+  min-height: 0;
+}
+
+.df2-content-flush .df2-pilot-workspace {
+  flex: 1;
+  min-height: 0;
+}
+
+.df2-content-studio .df2-transfer-studio-shell {
+  flex: 1;
+  min-height: 0;
+}

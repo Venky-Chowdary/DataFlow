@@ -24,6 +24,29 @@ export const BrandIcons: Record<string, React.FC<{ size?: number }>> = {
       <circle cx="16" cy="16" r="3" fill="#29B5E8"/>
     </svg>
   ),
+  dynamodb: ({ size = 32 }) => (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
+      <rect x="4" y="6" width="24" height="20" rx="3" fill="#4053D6"/>
+      <path d="M10 12h12v2H10v-2zm0 4h12v2H10v-2zm0 4h8v2h-8v-2z" fill="white"/>
+    </svg>
+  ),
+  elasticsearch: ({ size = 32 }) => (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
+      <circle cx="16" cy="16" r="12" fill="#FEC514"/>
+      <path d="M12 11h8l-2 10h-4l2-10z" fill="#343741"/>
+    </svg>
+  ),
+  clickhouse: ({ size = 32 }) => (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
+      <rect x="4" y="4" width="24" height="24" rx="4" fill="#FFCC01"/>
+      <path d="M10 10h4v12h-4V10zm8 0h4v12h-4V10z" fill="#1A1A1A"/>
+    </svg>
+  ),
+  redshift: ({ size = 32 }) => (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
+      <path d="M16 4l12 7v10l-12 7L4 21V11l12-7z" fill="#8C4FFF"/>
+    </svg>
+  ),
   bigquery: ({ size = 32 }) => (
     <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
       <path d="M6 8v16l10 4V12L6 8z" fill="#4386FA"/>

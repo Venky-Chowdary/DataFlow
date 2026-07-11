@@ -3,6 +3,9 @@ DataTransfer.space — MongoDB Service
 Handles all MongoDB operations for persistence and data transfer
 """
 
+from __future__ import annotations
+
+import os
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 from typing import Optional, Any
@@ -13,8 +16,17 @@ import json
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
     
-    def __init__(self, connection_string: str = "mongodb://localhost:27017/"):
-        self.connection_string = connection_string
+    def __init__(self, connection_string: str | None = None):
+        if connection_string:
+            self.connection_string = connection_string
+        else:
+            try:
+                from services.platform_config import mongodb_uri
+                self.connection_string = mongodb_uri()
+            except ImportError:
+                self.connection_string = os.environ.get(
+                    "MONGODB_URI", "mongodb://localhost:27017/"
+                )
         self.client: Optional[MongoClient] = None
         self.db_name = "datatransfer"
     
@@ -145,20 +157,15 @@ class MongoDBService:
             return {"success": False, "error": str(e)}
     
     def get_client_for_connector(self, connector_id: str):
-        """Build MongoClient from saved connector config"""
+        """Build MongoClient from saved connector config (file store or platform MongoDB)."""
         from pymongo import MongoClient
-        connector = self.get_connector(connector_id)
+
+        from ..transfer.adapters import _lookup_saved_connector, mongodb_connection_string
+
+        connector = _lookup_saved_connector(connector_id) or self.get_connector(connector_id)
         if not connector:
             return None, None
-        if connector.get("connection_string"):
-            conn_str = connector["connection_string"]
-        elif connector.get("username") and connector.get("password"):
-            conn_str = (
-                f"mongodb://{connector['username']}:{connector['password']}"
-                f"@{connector['host']}:{connector['port']}/"
-            )
-        else:
-            conn_str = f"mongodb://{connector['host']}:{connector['port']}/"
+        conn_str = mongodb_connection_string(connector)
         return MongoClient(conn_str, serverSelectionTimeoutMS=10000), connector
 
     def create_collection_from_schema(self, database: str, collection: str, schema: dict, client=None) -> dict:
@@ -216,6 +223,11 @@ class MongoDBService:
         job_data["completed_at"] = None
         job_data["records_processed"] = 0
         job_data["errors"] = []
+        try:
+            from services.job_phases import initial_phases
+            job_data["phases"] = initial_phases()
+        except Exception:
+            pass
         
         result = collection.insert_one(job_data)
         return str(result.inserted_id)
@@ -230,9 +242,28 @@ class MongoDBService:
         updates.update(kwargs)
         
         if status == "running":
-            updates["started_at"] = datetime.utcnow()
+            updates.setdefault("started_at", datetime.utcnow())
         elif status in ("completed", "failed"):
             updates["completed_at"] = datetime.utcnow()
+
+        phase_label = kwargs.get("phase")
+        message = kwargs.get("message", "")
+        if phase_label:
+            try:
+                from services.job_phases import advance_phase, complete_phases, initial_phases, phase_from_engine_label
+
+                existing = collection.find_one({"_id": ObjectId(job_id)}, {"phases": 1})
+                phases = (existing or {}).get("phases") or initial_phases()
+                mapped = phase_from_engine_label(str(phase_label))
+                if status in ("completed",):
+                    phases = complete_phases(phases, success=True, message=message or "")
+                elif status == "failed":
+                    phases = complete_phases(phases, success=False, message=kwargs.get("error") or message or "")
+                else:
+                    phases = advance_phase(phases, mapped, status="active", message=message or "")
+                updates["phases"] = phases
+            except Exception:
+                pass
         
         result = collection.update_one(
             {"_id": ObjectId(job_id)},

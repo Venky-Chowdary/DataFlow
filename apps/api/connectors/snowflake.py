@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from connectors.base import ConnectResult
+from connectors.driver_guard import platform_driver_unavailable
 from connectors.snowflake_conn import normalize_account
 
 
@@ -80,6 +81,6 @@ def _stub_fallback(
     return ConnectResult(
         ok=False,
         tables=[],
-        error="Snowflake driver not installed — pip install snowflake-connector-python",
+        error=platform_driver_unavailable("Snowflake"),
         driver="none",
     )

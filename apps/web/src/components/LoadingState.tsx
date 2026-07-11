@@ -1,12 +1,21 @@
+import { BrandLoader } from "./BrandLoader";
+
 interface SpinnerProps {
   size?: "sm" | "md" | "lg";
   label?: string;
   className?: string;
+  premium?: boolean;
 }
 
-export function Spinner({ size = "md", label, className = "" }: SpinnerProps) {
+export function Spinner({ size = "md", label, className = "", premium }: SpinnerProps) {
+  const px = size === "sm" ? 18 : size === "lg" ? 56 : 36;
   return (
-    <span className={`dt-spinner dt-spinner--${size} ${className}`.trim()} role="status" aria-label={label ?? "Loading"} />
+    <BrandLoader
+      size={px}
+      label={label ?? "Loading"}
+      className={className}
+      variant={premium || size === "lg" ? "premium" : "default"}
+    />
   );
 }
 
@@ -14,38 +23,76 @@ interface LoadingBlockProps {
   title?: string;
   hint?: string;
   size?: "sm" | "md" | "lg";
+  /** Transparent glass — no card border; centered in section */
+  variant?: "glass" | "card";
 }
 
-/** Centered loading state for cards, tables, and sections */
-export function LoadingBlock({ title = "Loading", hint, size = "lg" }: LoadingBlockProps) {
+/** Centered loading state for cards, tables, grids, and sections */
+export function LoadingBlock({
+  title = "Loading",
+  hint,
+  size = "lg",
+  variant = "glass",
+}: LoadingBlockProps) {
   return (
-    <div className="dt-loading-block">
-      <Spinner size={size} />
+    <div
+      className={`dt-loading-block ${variant === "glass" ? "dt-loading-block--glass" : "dt-loading-block--card"}`}
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div className="dt-loading-block-visual">
+        <Spinner size={size} premium />
+        <span className="dt-loading-block-pulse" aria-hidden />
+      </div>
       <p className="dt-loading-block-title">{title}</p>
       {hint && <p className="dt-loading-block-hint">{hint}</p>}
     </div>
   );
 }
 
-interface PageLoaderProps {
-  title?: string;
+/** Full-width centered loader for grid layouts (pipelines, catalogs) */
+export function SectionLoader(props: LoadingBlockProps) {
+  return (
+    <div className="df-section-loader">
+      <LoadingBlock {...props} variant="glass" />
+    </div>
+  );
 }
 
-/** Full-page skeleton while app data loads */
-export function PageLoader({ title = "Loading platform…" }: PageLoaderProps) {
+interface PageLoaderProps {
+  title?: string;
+  hint?: string;
+}
+
+/** Full-page overlay while app data loads */
+export function PageLoader({
+  title = "Loading platform…",
+  hint = "Connecting to your data plane and loading connectors.",
+}: PageLoaderProps) {
+  return <AppBootOverlay title={title} hint={hint} />;
+}
+
+/** Centered full-application boot overlay — transparent glass, no card */
+export function AppBootOverlay({
+  title = "Loading workspace…",
+  hint = "Connecting to your data plane and loading connectors.",
+}: {
+  title?: string;
+  hint?: string;
+}) {
   return (
-    <div className="dt-page-loader">
-      <Spinner size="lg" />
-      <p className="dt-page-loader-title">{title}</p>
-      <div className="dt-page-loader-skeleton">
-        <div className="dt-skeleton dt-skeleton-header" />
-        <div className="dt-skeleton-grid">
-          <div className="dt-skeleton dt-skeleton-stat" />
-          <div className="dt-skeleton dt-skeleton-stat" />
-          <div className="dt-skeleton dt-skeleton-stat" />
-          <div className="dt-skeleton dt-skeleton-stat" />
+    <div className="df-app-boot-overlay" role="status" aria-live="polite" aria-busy="true">
+      <div className="df-app-boot-glass">
+        <div className="dt-loading-block-visual dt-loading-block-visual--hero">
+          <BrandLoader size={64} label={title} variant="premium" />
+          <span className="dt-loading-block-pulse dt-loading-block-pulse--hero" aria-hidden />
         </div>
-        <div className="dt-skeleton dt-skeleton-card" />
+        <p className="df-app-boot-title">{title}</p>
+        {hint && <p className="df-app-boot-hint">{hint}</p>}
+        <div className="df-app-boot-progress" aria-hidden="true">
+          <span />
+        </div>
       </div>
     </div>
   );

@@ -44,3 +44,29 @@ def test_dry_run_catches_bad_decimal():
     )
     assert not ok
     assert errors
+
+
+def test_apply_hash_pii_is_deterministic():
+    val, err = apply_transform("secret@email.com", "hash_pii")
+    assert err is None
+    assert val
+    assert len(val) == 32
+    again, _ = apply_transform("secret@email.com", "hash_pii")
+    assert again == val
+
+
+def test_apply_uuid_validates():
+    val, err = apply_transform("550e8400-e29b-41d4-a716-446655440000", "uuid")
+    assert err is None
+    assert val == "550e8400-e29b-41d4-a716-446655440000"
+
+    bad, err2 = apply_transform("not-a-uuid", "uuid")
+    assert bad is None
+    assert "Invalid UUID" in err2
+
+
+def test_unknown_transform_fails_closed():
+    val, err = apply_transform("hello", "bogus_transform")
+    assert val is None
+    assert "Unknown transform" in err
+

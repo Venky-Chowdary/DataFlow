@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
+from connectors.driver_guard import require_driver
+
+
+def _ensure_psycopg2() -> None:
+    try:
+        import psycopg2  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(require_driver("psycopg2", "psycopg2-binary")) from exc
 
 
 @dataclass
@@ -68,6 +76,7 @@ def read_table_batch(
     columns: list[str] | None = None,
     offset: int = 0,
     limit: int = 500,
+    known_total_rows: int | None = None,
 ) -> ReadBatch:
     import psycopg2
     from psycopg2 import sql
@@ -84,17 +93,20 @@ def read_table_batch(
     )
     try:
         with conn.cursor() as cur:
-            total = count_table_rows(
-                host=host,
-                port=port,
-                database=database,
-                username=username,
-                password=password,
-                schema=schema,
-                connection_string=connection_string,
-                ssl=ssl,
-                table=table,
-            )
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                total = count_table_rows(
+                    host=host,
+                    port=port,
+                    database=database,
+                    username=username,
+                    password=password,
+                    schema=schema,
+                    connection_string=connection_string,
+                    ssl=ssl,
+                    table=table,
+                )
             if columns:
                 col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
                 query = sql.SQL("SELECT {} FROM {}.{} ORDER BY 1 LIMIT %s OFFSET %s").format(
@@ -143,3 +155,68 @@ def read_table_sample(
         limit=limit,
     )
     return batch.headers, batch.rows
+
+
+def read_table_cursor_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    cursor_column: str,
+    cursor_after: str | None = None,
+    columns: list[str] | None = None,
+    limit: int = 500,
+) -> ReadBatch:
+    """Read rows with cursor_column > watermark — for incremental sync."""
+    import psycopg2
+    from psycopg2 import sql
+
+    schema = schema or "public"
+    conn = get_connection(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+        ssl=ssl,
+    )
+    try:
+        with conn.cursor() as cur:
+            if columns:
+                col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
+                base = sql.SQL("SELECT {} FROM {}.{}").format(
+                    col_sql,
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                )
+            else:
+                base = sql.SQL("SELECT * FROM {}.{}").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                )
+            if cursor_after:
+                query = sql.SQL("{} WHERE {} > %s ORDER BY {} LIMIT %s").format(
+                    base,
+                    sql.Identifier(cursor_column),
+                    sql.Identifier(cursor_column),
+                )
+                cur.execute(query, (cursor_after, limit))
+            else:
+                query = sql.SQL("{} ORDER BY {} LIMIT %s").format(
+                    base,
+                    sql.Identifier(cursor_column),
+                )
+                cur.execute(query, (limit,))
+            fetched = cur.fetchall()
+            headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
+            rows = [["" if v is None else str(v) for v in row] for row in fetched]
+            return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
+    finally:
+        conn.close()

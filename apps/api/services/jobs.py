@@ -28,6 +28,7 @@ class JobRecord:
     driver: str = ""
     reconciliation: dict[str, Any] | None = None
     checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    rejected_details: list[dict[str, Any]] = field(default_factory=list)
     workflow_phase: str = "queued"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     message: str = ""
@@ -75,6 +76,12 @@ class MemoryJobStore:
                 job.checkpoints.append(
                     {"chunk": chunk, "total": total, "rows": rows, "at": datetime.now(timezone.utc).isoformat()}
                 )
+
+    def add_rejected_rows(self, job_id: str, details: list[dict[str, Any]]) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job and details:
+                job.rejected_details.extend(details[:200])
 
     def set_workflow_phase(self, job_id: str, phase: str) -> None:
         with self._lock:

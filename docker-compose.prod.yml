@@ -1,0 +1,76 @@
+# Production stack (API + Web + MongoDB)
+#   cp .env.production.example .env && ./scripts/generate-production-secrets.sh
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-dataflow}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env}
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    profiles: ["full"]
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dataflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dataflow}
+      POSTGRES_DB: ${POSTGRES_DB:-dataflow}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dataflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATAFLOW_ENV: production
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      DATAFLOW_DATA_DIR: /data/data
+      DATAFLOW_UPLOAD_DIR: /data/uploads
+      DATAFLOW_VECTOR_STORE_DIR: /data/vector_store
+    volumes:
+      - dataflow_data:/data/data
+      - dataflow_uploads:/data/uploads
+      - dataflow_vectors:/data/vector_store
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        VITE_API_BASE: /api/v1
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      - api
+
+volumes:
+  mongodata:
+  pgdata:
+  dataflow_data:
+  dataflow_uploads:
+  dataflow_vectors:

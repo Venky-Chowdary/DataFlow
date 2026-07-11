@@ -1,0 +1,26 @@
+# DataFlow Web — static UI + nginx API reverse proxy
+FROM node:20-alpine AS build
+
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY apps/web/package.json apps/web/
+COPY packages/design-system/package.json packages/design-system/
+COPY packages/design-system packages/design-system
+COPY apps/web apps/web
+
+RUN npm ci --workspace=@dataflow/web 2>/dev/null || npm install --workspace=@dataflow/web
+
+ARG VITE_API_BASE=/api/v1
+ENV VITE_API_BASE=$VITE_API_BASE
+
+RUN npm run build --workspace=@dataflow/web
+
+FROM nginx:1.27-alpine
+
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1/health || exit 1

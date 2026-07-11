@@ -47,6 +47,14 @@ def run_in_background(fn: Callable[[], None]) -> None:
 
 
 def simulate_chunk_delay(chunk: int, total_chunks: int) -> None:
-    """Brief pause so UI polling can observe checkpoint progress."""
-    if total_chunks > 1:
-        time.sleep(0.15)
+    """Brief pause so UI polling can observe checkpoint progress (dev only)."""
+    if total_chunks <= 1:
+        return
+    try:
+        from services.platform_config import is_production
+
+        if is_production():
+            return
+    except Exception:
+        pass
+    time.sleep(0.15)

@@ -19,7 +19,7 @@ def introspect_schema(
     warehouse: str = "",
     table: str | None = None,
 ) -> dict[str, Any]:
-    if db_type == "postgresql":
+    if db_type == "postgresql" or db_type == "redshift":
         return _introspect_postgresql(
             host=host,
             port=port,
@@ -60,7 +60,126 @@ def introspect_schema(
             connection_string=connection_string,
             table=table,
         )
+    if db_type == "mongodb":
+        return _introspect_mongodb(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            table=table,
+        )
+    if db_type == "dynamodb":
+        return _introspect_dynamodb(
+            host=host,
+            username=username,
+            password=password,
+            database=database,
+            table=table,
+        )
+    if db_type == "elasticsearch":
+        return _introspect_elasticsearch(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+            database=database,
+            table=table,
+        )
+    if db_type in ("s3", "amazon_s3"):
+        return _introspect_object_store("s3", host=host, database=database, table=table, schema=schema, **{
+            "username": username, "password": password, "connection_string": connection_string,
+        })
+    if db_type in ("gcs", "google_cloud_storage"):
+        return _introspect_object_store("gcs", host=host, database=database, table=table, schema=schema, **{
+            "username": username, "password": password, "connection_string": connection_string,
+        })
+    if db_type == "redis":
+        return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
     return {"ok": False, "error": f"Schema introspection not implemented for {db_type}", "columns": [], "tables": []}
+
+
+def _introspect_object_store(
+    store_type: str,
+    *,
+    host: str = "",
+    database: str = "",
+    table: str | None = None,
+    schema: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    **_: Any,
+) -> dict[str, Any]:
+    cfg = {
+        "host": host,
+        "database": database,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+    }
+    bucket = database or ""
+    key = table or ""
+    prefix = schema or ""
+    try:
+        from services.object_store_introspect import introspect_gcs_object, introspect_s3_object
+
+        if store_type == "gcs":
+            result = introspect_gcs_object(cfg, bucket=bucket, key=key or None, prefix=prefix)
+        else:
+            result = introspect_s3_object(cfg, bucket=bucket, key=key or None, prefix=prefix)
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "error": result.get("error", "Object introspection failed"),
+                "columns": result.get("columns", []),
+                "tables": result.get("tables", []),
+            }
+        return {
+            "ok": True,
+            "columns": result.get("columns", []),
+            "column_types": result.get("schema", {}),
+            "tables": result.get("tables", []),
+            "row_estimate": result.get("total_rows", 0),
+            "object_key": result.get("object_key"),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+
+def _introspect_redis(
+    *,
+    host: str = "",
+    port: int = 6379,
+    password: str = "",
+    table: str | None = None,
+    connection_string: str = "",
+) -> dict[str, Any]:
+    cfg = {
+        "host": host or "localhost",
+        "port": port or 6379,
+        "password": password,
+        "connection_string": connection_string,
+    }
+    pattern = table or "*"
+    try:
+        from services.object_store_introspect import introspect_redis_keys
+
+        result = introspect_redis_keys(cfg, pattern=pattern)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error", "Redis introspection failed"), "columns": []}
+        return {
+            "ok": True,
+            "columns": result.get("columns", []),
+            "column_types": result.get("schema", {}),
+            "tables": [pattern],
+            "row_estimate": result.get("total_rows", 0),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 
 def _introspect_postgresql(**kwargs) -> dict[str, Any]:
@@ -321,4 +440,148 @@ def _sf_to_logical(dtype: str) -> str:
         return "DATE"
     if "TIMESTAMP" in d:
         return "TIMESTAMP"
+    return "TEXT"
+
+
+def _sample_logical_type(value: Any) -> str:
+    if value is None:
+        return "TEXT"
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INTEGER"
+    if isinstance(value, float):
+        return "DECIMAL"
+    if isinstance(value, list):
+        return "ARRAY"
+    if isinstance(value, dict):
+        return "OBJECT"
+    return "TEXT"
+
+
+def _introspect_mongodb(**kwargs) -> dict[str, Any]:
+    table = kwargs.get("table")
+    try:
+        from pymongo import MongoClient
+
+        if kwargs.get("connection_string"):
+            conn_str = kwargs["connection_string"]
+        elif kwargs.get("username") and kwargs.get("password"):
+            conn_str = (
+                f"mongodb://{kwargs['username']}:{kwargs['password']}"
+                f"@{kwargs.get('host', 'localhost')}:{kwargs.get('port', 27017)}/"
+            )
+        else:
+            conn_str = f"mongodb://{kwargs.get('host', 'localhost')}:{kwargs.get('port', 27017)}/"
+        client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
+        db_name = kwargs.get("database") or "test"
+        db = client[db_name]
+        tables = db.list_collection_names()[:100]
+        columns: list[dict] = []
+        target = table or (tables[0] if tables else None)
+        if target:
+            for doc in db[target].find().limit(50):
+                if "_id" in doc:
+                    doc["_id"] = str(doc["_id"])
+                for key, val in doc.items():
+                    existing = next((c for c in columns if c["name"] == key), None)
+                    inferred = _sample_logical_type(val)
+                    if existing is None:
+                        columns.append({"name": key, "inferred_type": inferred, "nullable": True})
+        client.close()
+        return {"ok": True, "tables": tables, "columns": columns, "schema": db_name}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+
+def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
+    table = kwargs.get("table") or kwargs.get("database")
+    if not table:
+        return {"ok": False, "error": "DynamoDB table name required", "columns": [], "tables": []}
+    try:
+        from connectors.dynamodb_reader import describe_table_schema, estimate_item_count, list_tables
+
+        cfg = {
+            "host": kwargs.get("host") or "us-east-1",
+            "port": kwargs.get("port") or 443,
+            "username": kwargs.get("username") or "",
+            "password": kwargs.get("password") or "",
+            "connection_string": kwargs.get("connection_string") or "",
+        }
+        names, types = describe_table_schema(cfg, table)
+        columns = [
+            {"name": name, "inferred_type": types.get(name, "TEXT"), "nullable": True}
+            for name in names
+        ]
+        tables = [table]
+        try:
+            tables = list_tables(cfg) or [table]
+        except Exception:
+            pass
+        row_estimate = 0
+        try:
+            row_estimate = estimate_item_count(cfg, table)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "tables": tables,
+            "columns": columns,
+            "schema": table,
+            "row_estimate": row_estimate,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+
+def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
+    index = kwargs.get("table") or kwargs.get("database")
+    if not index:
+        return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
+    try:
+        from connectors.elasticsearch_reader import _client
+
+        cfg = {
+            "host": kwargs.get("host") or "localhost",
+            "port": kwargs.get("port") or 9200,
+            "username": kwargs.get("username") or "",
+            "password": kwargs.get("password") or "",
+            "connection_string": kwargs.get("connection_string") or "",
+            "ssl": kwargs.get("ssl", False),
+        }
+        client = _client(cfg)
+        try:
+            if not client.indices.exists(index=index):
+                return {"ok": False, "error": f"Index `{index}` not found", "columns": [], "tables": []}
+            mapping = client.indices.get_mapping(index=index)
+            props = (
+                mapping.get(index, {})
+                .get("mappings", {})
+                .get("properties", {})
+            )
+            columns = [
+                {
+                    "name": name,
+                    "inferred_type": _es_mapping_type(info.get("type", "text")),
+                    "nullable": True,
+                }
+                for name, info in props.items()
+            ]
+            return {"ok": True, "tables": [index], "columns": columns, "schema": index}
+        finally:
+            client.close()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+
+def _es_mapping_type(es_type: str) -> str:
+    t = (es_type or "text").lower()
+    if t in ("long", "integer", "short", "byte"):
+        return "INTEGER"
+    if t in ("float", "double", "scaled_float"):
+        return "DECIMAL"
+    if t == "boolean":
+        return "BOOLEAN"
+    if t == "date":
+        return "DATE"
     return "TEXT"

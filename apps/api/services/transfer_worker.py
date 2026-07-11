@@ -74,7 +74,7 @@ def dispatch_file_to_database(
                 from connectors.postgresql_writer import write_mapped_rows
                 verify_schema = common["schema"]
 
-            chunks_generator = get_file_chunks(file_id, chunk_size=10000)
+            chunks_generator = get_file_chunks(file_id, chunk_size=25000)
             rows_written = 0
             rejected_rows = 0
             final_checksum_list = []
@@ -84,14 +84,16 @@ def dispatch_file_to_database(
             driver_out = ""
 
             chunk_idx = 0
-            # Rough estimation of total chunks, assuming chunk_size is 10000
-            estimated_chunks = max(1, (total_rows + 9999) // 10000)
+            # Rough estimation of total chunks for progress UI
+            estimated_chunks = max(1, (total_rows + 24999) // 25000)
             
             for headers, data_rows in chunks_generator:
                 is_first = (chunk_idx == 0)
                 common["headers"] = headers
                 common["data_rows"] = data_rows
                 common["create_table"] = is_first
+                if db_type == "snowflake":
+                    common["create_table"] = is_first
                 common["on_checkpoint"] = _wrap_checkpoint(job_id, lambda c, t, r: None)
                 
                 result = write_mapped_rows(**common)
@@ -100,6 +102,8 @@ def dispatch_file_to_database(
                     
                 rows_written += result.rows_written
                 rejected_rows += int(getattr(result, "rejected_rows", 0) or 0)
+                if getattr(result, "rejected_details", None):
+                    job_store.add_rejected_rows(job_id, result.rejected_details)
                 final_checksum_list.append(result.checksum)
                 target_schema_out = result.target_schema
                 table_name_out = result.table_name

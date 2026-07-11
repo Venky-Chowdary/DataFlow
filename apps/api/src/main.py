@@ -8,8 +8,21 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+import logging
+import os
 import time
+import uuid
 import asyncio
+
+from services.platform_config import (
+    apply_railway_defaults,
+    cors_origins,
+    docs_enabled,
+    enforce_production_config,
+    is_production,
+    vector_store_dir,
+)
+from services.health_service import aggregate_health
 
 from .routers.ai_router import router as ai_router
 from .routers.connectors_router import router as connectors_router
@@ -22,16 +35,44 @@ from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.schedules_router import router as schedules_router
 from .routers.saved_connectors_router import router as saved_connectors_router
+from .routers.auth_router import router as auth_router
+from .routers.audit_router import router as audit_router
+from .routers.workspace_router import router as workspace_router
+from .middleware.auth_middleware import AuthMiddleware
+
+logger = logging.getLogger("dataflow.api")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management"""
-    import os
+    apply_railway_defaults()
+    enforce_production_config()
+    os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
+    try:
+        from services.integrations_store import apply_integrations_to_env
 
-    print("[*] DataTransfer.space API starting...")
-    print("[+] AI Semantic Engine initialized")
-    training_enabled = os.getenv("DATAFLOW_TRAINING", "on").lower() not in ("off", "0", "false")
+        apply_integrations_to_env()
+    except Exception as ie:
+        print(f"[!] Integrations bootstrap warning: {ie}")
+
+    print(f"[*] DataTransfer.space API starting (env={'production' if is_production() else 'development'})…")
+    try:
+        from .services.driver_bootstrap import ensure_platform_drivers
+
+        driver_report = ensure_platform_drivers()
+        app.state.driver_report = driver_report
+        if driver_report["ready"]:
+            print("[+] Platform connector drivers ready")
+        else:
+            missing = ", ".join(m["package"] for m in driver_report["missing"])
+            print(f"[!] Platform drivers incomplete: {missing}")
+    except Exception as de:
+        print(f"[!] Driver bootstrap warning: {de}")
+
+    training_enabled = os.getenv("DATAFLOW_TRAINING", "off" if is_production() else "on").lower() not in (
+        "off", "0", "false",
+    )
     try:
         from .ai.rag.pipeline import get_rag_pipeline
         from .ai.knowledge.semantic_patterns import get_pattern_count
@@ -44,7 +85,6 @@ async def lifespan(app: FastAPI):
         print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
         async def _background_training():
-            # Defer heavy training so the API is responsive immediately after boot
             await asyncio.sleep(120)
             try:
                 from .ai.training.training_agent import get_training_agent
@@ -58,17 +98,19 @@ async def lifespan(app: FastAPI):
 
         if training_enabled:
             app.state.training_task = asyncio.create_task(_background_training())
-            print("[+] Training Agent scheduled (starts 120s after boot; set DATAFLOW_TRAINING=off to disable)")
             asyncio.create_task(run_training_loop())
-            print("[+] Training Agent scheduler started (retrain every 30 min)")
+            print("[+] Training Agent enabled")
         else:
             print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
+
         from .services.schedule_runner import run_schedule_loop
         asyncio.create_task(run_schedule_loop())
-        print("[+] Pipeline scheduler started (recurring syncs every 60s)")
+        print("[+] Pipeline scheduler started")
     except Exception as e:
         print(f"[!] RAG initialization warning: {e}")
+
     yield
+
     task = getattr(app, "state", None) and getattr(app.state, "training_task", None)
     if task:
         task.cancel()
@@ -76,53 +118,65 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
-    print("[*] DataTransfer.space API shutting down...")
+    print("[*] DataTransfer.space API shutting down…")
 
+
+_docs = "/docs" if docs_enabled() else None
+_redoc = "/redoc" if docs_enabled() else None
 
 app = FastAPI(
     title="DataTransfer.space API",
-    description="""
-    ## Universal Data Transfer Platform API
-    
-    Enterprise-grade data movement and transformation with AI-powered intelligence.
-    
-    ### Core Capabilities
-    
-    - **AI Semantic Analysis**: Automatically understand data types, detect PII, and ensure compliance
-    - **Smart Mapping**: Intelligent column mapping between source and target schemas
-    - **Universal Connectors**: Connect to any database, warehouse, file, or API
-    - **Enterprise Security**: SOC2, GDPR, HIPAA, PCI-DSS compliant
-    
-    ### Key Features
-    
-    - 🔍 **Semantic Type Detection**: Recognize 60+ data types including email, phone, SSN, credit cards
-    - 🔐 **PII Detection**: Automatically identify personally identifiable information
-    - 📋 **Compliance Mapping**: GDPR, CCPA, HIPAA, PCI-DSS, SOX, GLBA requirements
-    - 🎯 **Smart Mapping**: 99%+ accuracy in column matching
-    - ⚡ **Real-time Analysis**: Instant schema analysis and validation
-    """,
+    description="Universal Data Transfer Platform API",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=_docs,
+    redoc_url=_redoc,
+    openapi_url="/openapi.json" if docs_enabled() else None,
     lifespan=lifespan,
 )
 
+_cors_origins = cors_origins()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.add_middleware(AuthMiddleware)
+
 
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
-    """Add response timing header"""
     start_time = time.time()
+    correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+    request.state.correlation_id = correlation_id
     response = await call_next(request)
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
+    response.headers["X-Correlation-ID"] = correlation_id
+
+    path = request.url.path
+    if (
+        request.method != "GET"
+        and path.startswith("/api/v1/")
+        and "/health" not in path
+    ):
+        try:
+            from services.audit_log import append_audit_event
+            actor = getattr(request.state, "user_email", None) or "anonymous"
+            append_audit_event(
+                action=f"http.{request.method.lower()}",
+                resource=path,
+                actor=actor,
+                level="error" if response.status_code >= 500 else "info",
+                correlation_id=correlation_id,
+                details={"status": response.status_code, "ms": round(process_time * 1000, 1)},
+            )
+        except Exception:
+            pass
+
     return response
 
 
@@ -137,93 +191,48 @@ app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")
 app.include_router(saved_connectors_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(audit_router, prefix="/api/v1")
+app.include_router(workspace_router, prefix="/api/v1")
 
 
 @app.get("/")
 async def root():
-    """API root endpoint"""
-    return {
+    payload = {
         "name": "DataTransfer.space",
-        "tagline": "Universal Data Freedom — Move Any Data, Anywhere",
         "version": "1.0.0",
         "status": "operational",
-        "endpoints": {
-            "docs": "/docs",
-            "redoc": "/redoc",
-            "ai": "/api/v1/ai",
-        },
-        "features": [
-            "AI-Powered Semantic Analysis",
-            "PII Detection",
-            "Compliance Mapping",
-            "Smart Column Mapping",
-            "60+ Semantic Types",
-            "600+ Connectors",
-        ],
+        "environment": "production" if is_production() else "development",
     }
+    if docs_enabled():
+        payload["docs"] = "/docs"
+    return payload
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "services": {
-            "api": "up",
-            "ai_engine": "up",
-            "database": "up",
-        }
-    }
+    return aggregate_health()
 
 
 @app.get("/api/v1")
 async def api_info():
-    """API version info"""
-    return {
-        "version": "1.0.0",
-        "endpoints": [
-            {
-                "path": "/api/v1/ai/analyze/column",
-                "method": "POST",
-                "description": "Analyze a single column"
-            },
-            {
-                "path": "/api/v1/ai/analyze/schema",
-                "method": "POST",
-                "description": "Analyze a complete schema"
-            },
-            {
-                "path": "/api/v1/ai/map",
-                "method": "POST",
-                "description": "Generate column mappings"
-            },
-            {
-                "path": "/api/v1/ai/detect-pii",
-                "method": "POST",
-                "description": "Detect PII in columns"
-            },
-            {
-                "path": "/api/v1/ai/semantic-types",
-                "method": "GET",
-                "description": "List all semantic types"
-            },
-        ]
-    }
+    return {"version": "1.0.0", "status": "ok"}
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Global exception handler"""
+    logger.exception("Unhandled error on %s", request.url.path)
+    detail = str(exc) if not is_production() else "An unexpected error occurred"
     return JSONResponse(
         status_code=500,
         content={
             "error": "Internal Server Error",
-            "detail": str(exc),
-            "path": str(request.url),
-        }
+            "detail": detail,
+        },
     )
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

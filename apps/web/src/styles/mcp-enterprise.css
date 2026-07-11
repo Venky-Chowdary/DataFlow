@@ -1,0 +1,204 @@
+/* ═══════════════════════════════════════════════════════════
+   MCP Server — enterprise agent integration page
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-mcp-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: linear-gradient(135deg, #f0fdfa 0%, #fff 55%);
+}
+
+.df2-mcp-hero-copy h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 650;
+  color: #0f172a;
+}
+
+.df2-mcp-hero-copy p {
+  margin: 0;
+  font-size: 14px;
+  color: #64748b;
+  max-width: 56ch;
+  line-height: 1.5;
+}
+
+.df2-mcp-hero-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-mcp-hero-status strong {
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.df2-mcp-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.df2-mcp-panel {
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: #fff;
+  overflow: visible;
+}
+
+.df2-mcp-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-mcp-panel-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.df2-mcp-panel-body {
+  padding: 16px 18px;
+}
+
+.df2-mcp-integration-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.df2-mcp-integration-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.df2-mcp-integration-row .df2-cell-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.df2-mcp-snippet {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.df2-mcp-tools-section {
+  margin-top: 16px;
+}
+
+.df2-mcp-tools-section h2 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.df2-mcp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.df2-mcp-tile {
+  padding: 14px 16px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 10px;
+  background: #fff;
+  min-height: 96px;
+}
+
+.df2-mcp-tile code {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f766e;
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.df2-mcp-logs-table-wrap {
+  overflow-x: auto;
+  max-height: min(420px, 50vh);
+  overflow-y: auto;
+}
+
+.df2-mcp-logs-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.df2-mcp-logs-table th,
+.df2-mcp-logs-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.df2-mcp-logs-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  background: #f8fafc;
+}
+
+.df2-mcp-log-status {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.df2-mcp-log-status--ok {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.df2-mcp-log-status--err {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+@media (max-width: 1100px) {
+  .df2-mcp-layout {
+    grid-template-columns: 1fr;
+  }
+}

@@ -5,15 +5,15 @@
     "/Users/venkychowdary/DataFlow/apps/api/tests/fixtures",
     "/Users/venkychowdary/DataFlow/apps/api/uploads"
   ],
-  "total_schemas": 5689,
-  "from_uploads": 4433,
+  "total_schemas": 6089,
+  "from_uploads": 4673,
   "from_industry": 10,
-  "from_catalog": 1246,
-  "total_columns": 49271,
+  "from_catalog": 1406,
+  "total_columns": 53091,
   "registry": {
-    "connector_sources": 623,
+    "connector_sources": 726,
     "industry_templates": 10,
-    "estimated_schema_profiles": 1879,
+    "estimated_schema_profiles": 2188,
     "description": "620+ connectors \u00d7 variants + industry templates"
   },
   "schemas": [

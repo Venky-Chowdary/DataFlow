@@ -67,6 +67,21 @@ export function ConnectorModal({
   };
 
   const handleCatalogPick = (item: CatalogConnector) => {
+    if (item.effective_status === "planned" || (!item.transfer_ready && !item.connect_only && item.status !== "live" && item.status !== "beta")) {
+      toast({
+        title: "Not available yet",
+        message: `${item.name} is on the roadmap — no driver registered yet.`,
+        tone: "info",
+      });
+      return;
+    }
+    if (item.connect_only) {
+      toast({
+        title: "Connection test only",
+        message: `${item.name} can be saved and tested, but full transfer routes are not implemented yet.`,
+        tone: "warning",
+      });
+    }
     applyType(resolveCatalogIdToType(item.id));
   };
 
@@ -80,8 +95,9 @@ export function ConnectorModal({
         setFieldError(isS3 ? "Bucket name is required." : "Table name is required.");
         return false;
       }
-      if (!username.trim() || !password.trim()) {
-        setFieldError("AWS Access Key ID and Secret Access Key are required.");
+      const localEndpoint = (host || connectionString).includes("localhost") || (host || connectionString).startsWith("http");
+      if (!localEndpoint && (!username.trim() || !password.trim())) {
+        setFieldError("AWS Access Key ID and Secret Access Key are required for cloud DynamoDB/S3.");
         return false;
       }
     } else if (!isBigQuery && !host.trim()) {
@@ -107,7 +123,7 @@ export function ConnectorModal({
     username: username || undefined,
     password: password || undefined,
     schema: isBigQuery || isSnowflake ? schema : undefined,
-    connection_string: isBigQuery || isMongo ? connectionString : connectionString || undefined,
+    connection_string: connectionString || undefined,
     warehouse: isSnowflake ? warehouse : undefined,
   });
 
@@ -124,7 +140,7 @@ export function ConnectorModal({
         schema: isBigQuery ? schema : undefined,
         username: username || undefined,
         password: password || undefined,
-        connection_string: isBigQuery ? connectionString : connectionString || undefined,
+        connection_string: connectionString || undefined,
       });
       setTestResult(result);
       toast({
@@ -175,7 +191,7 @@ export function ConnectorModal({
             </h2>
             <p className="dt-modal-subtitle">
               {step === "pick"
-                ? "Search 620+ sources and destinations — DynamoDB, Postgres, Snowflake, and more"
+                ? "Transfer-ready connectors support full migration. Test-only entries save credentials but cannot transfer yet."
                 : `${catalogItem?.label ?? type} · test once, use everywhere`}
             </p>
           </div>
@@ -186,7 +202,7 @@ export function ConnectorModal({
 
         <div className="dt-modal-body">
           {step === "pick" ? (
-            <ConnectorCatalogPanel role="all" onSelect={handleCatalogPick} limit={120} compact />
+            <ConnectorCatalogPanel role="all" onSelect={handleCatalogPick} limit={120} compact requireAvailable initialStatus="live" />
           ) : (
             <>
               {!editing && (
@@ -217,22 +233,41 @@ export function ConnectorModal({
                 <>
                   <div className="df2-form-row">
                     <div className="df2-field">
-                      <label className="df2-label">AWS region</label>
-                      <input className="df2-input" placeholder="us-east-1" value={host} onChange={(e) => setHost(e.target.value)} />
+                      <label className="df2-label">{isDynamo ? "AWS region or local endpoint" : "AWS region"}</label>
+                      <input
+                        className="df2-input"
+                        placeholder={isDynamo ? "us-east-1 or http://localhost:8000" : "us-east-1"}
+                        value={host}
+                        onChange={(e) => setHost(e.target.value)}
+                      />
                     </div>
                     <div className="df2-field">
                       <label className="df2-label">{isS3 ? "Bucket name" : "Table name"}</label>
                       <input className="df2-input" placeholder={isS3 ? "my-data-bucket" : "orders"} value={database} onChange={(e) => setDatabase(e.target.value)} />
                     </div>
                   </div>
+                  {isDynamo && (
+                    <div className="df2-field">
+                      <label className="df2-label">Local endpoint URL (optional)</label>
+                      <input
+                        className="df2-input"
+                        placeholder="http://localhost:8000 for DynamoDB Local"
+                        value={connectionString}
+                        onChange={(e) => setConnectionString(e.target.value)}
+                      />
+                      <p className="df2-label-hint df2-field-note">
+                        Use DynamoDB Local or a private cloud endpoint. Dummy credentials (local/local) work for local mode.
+                      </p>
+                    </div>
+                  )}
                   <div className="df2-form-row">
                     <div className="df2-field">
                       <label className="df2-label">Access Key ID</label>
-                      <input className="df2-input" autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} />
+                      <input className="df2-input" autoComplete="off" placeholder={isDynamo ? "AKIA… or local" : undefined} value={username} onChange={(e) => setUsername(e.target.value)} />
                     </div>
                     <div className="df2-field">
                       <label className="df2-label">Secret Access Key</label>
-                      <input type="password" className="df2-input" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                      <input type="password" className="df2-input" autoComplete="new-password" placeholder={isDynamo ? "Optional for DynamoDB Local" : undefined} value={password} onChange={(e) => setPassword(e.target.value)} />
                     </div>
                   </div>
                 </>

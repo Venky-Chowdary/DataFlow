@@ -25,6 +25,7 @@ from .registry import validate_transfer
 from .file_stream import peek_file_source, should_stream_file, stream_file_to_database
 from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
+from ..ai.training.training_scheduler import schedule_training_on_transfer
 
 import sys
 from pathlib import Path
@@ -32,6 +33,39 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 from connectors.writer_common import CHUNK_SIZE  # noqa: E402
+from services.batch_progress import ThrottledCheckpoint  # noqa: E402
+
+
+def _destination_schema_types(destination: EndpointConfig) -> dict[str, str]:
+    """Introspect destination column types for schema-aware preflight and transforms."""
+    if destination.kind != "database":
+        return {}
+    try:
+        from .endpoint_intelligence import introspect_endpoint
+
+        info = introspect_endpoint(destination)
+        return dict(info.get("schema") or {})
+    except Exception:
+        return {}
+
+
+def _enrich_mappings_with_types(mappings: list[dict], dest_types: dict[str, str]) -> list[dict]:
+    if not mappings:
+        return mappings
+    try:
+        from services.transform_resolver import attach_transforms_to_mappings
+
+        return attach_transforms_to_mappings(mappings, dest_types=dest_types)
+    except Exception:
+        pass
+    out = []
+    for m in mappings:
+        enriched = dict(m)
+        tgt = m.get("target")
+        if tgt and tgt in dest_types:
+            enriched["target_type"] = dest_types[tgt]
+        out.append(enriched)
+    return out
 
 
 class UniversalTransferEngine:
@@ -58,6 +92,9 @@ class UniversalTransferEngine:
             request.destination.kind, dst_fmt,
         )
         if not ok:
+            from .connector_capabilities import transfer_live_driver_types
+            live = ", ".join(transfer_live_driver_types())
+            msg = f"{msg}. Transfer-live drivers: {live}."
             mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
             return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
 
@@ -89,7 +126,10 @@ class UniversalTransferEngine:
             total_rows = len(records)
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
 
-            mappings = request.mappings or default_mappings(columns)
+            mappings = _enrich_mappings_with_types(
+                request.mappings or default_mappings(columns),
+                _destination_schema_types(request.destination),
+            )
             column_types = request.column_types or build_column_types(columns, schema)
 
             mongo.update_job_status(
@@ -104,9 +144,11 @@ class UniversalTransferEngine:
                     row_count=len(records),
                     mappings=mappings,
                     destination_connected=dest_ok,
+                    destination_error=None if dest_ok else dest_msg,
                     source_kind=request.source.kind,
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                    destination_column_types=_destination_schema_types(request.destination),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -162,16 +204,23 @@ class UniversalTransferEngine:
                     message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
                 )
 
+            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+
             if request.destination.kind == "database":
                 rows_written, ddl_log, dest_summary = write_destination_database(
                     request.destination, records, columns, schema, mappings,
-                    on_checkpoint=on_checkpoint,
+                    on_checkpoint=throttled_checkpoint,
                 )
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
             elif request.destination.kind == "file_export":
                 export_bytes, export_name, dest_summary = write_destination_file(
-                    request.destination, records, columns,
+                    request.destination,
+                    records,
+                    columns,
+                    source_format=src_fmt,
+                    mappings=mappings,
+                    column_types=request.column_types,
                 )
                 rows_written = len(records)
                 export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")
@@ -197,6 +246,7 @@ class UniversalTransferEngine:
                 rows_written=rows_written,
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
+                mappings=mappings,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -223,10 +273,11 @@ class UniversalTransferEngine:
                 message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+                rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                rejected_details=(dest_summary.get("rejected_details") or [])[:200],
+                destination_summary=dest_summary,
             )
-
             try:
-                from ..ai.training.training_scheduler import schedule_training_on_transfer
                 samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
                 schedule_training_on_transfer(
                     request.source_filename or dest_summary.get("table", "transfer"),
@@ -285,7 +336,10 @@ class UniversalTransferEngine:
                 )
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
-            mappings = request.mappings or default_mappings(columns)
+            mappings = _enrich_mappings_with_types(
+                request.mappings or default_mappings(columns),
+                _destination_schema_types(request.destination),
+            )
             column_types = request.column_types or build_column_types(columns, schema)
 
             mongo.update_job_status(
@@ -300,9 +354,11 @@ class UniversalTransferEngine:
                     row_count=total_rows,
                     mappings=mappings,
                     destination_connected=dest_ok,
+                    destination_error=None if dest_ok else dest_msg,
                     source_kind=request.source.kind,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                    destination_column_types=_destination_schema_types(request.destination),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -349,6 +405,8 @@ class UniversalTransferEngine:
                     message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
                 )
 
+            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+
             mongo.update_job_status(
                 job_id, "running", phase="writing", progress_pct=25,
                 message=f"Streaming {total_rows:,} rows in batches…",
@@ -359,7 +417,10 @@ class UniversalTransferEngine:
                 request.destination,
                 mappings,
                 schema,
-                on_checkpoint=on_checkpoint,
+                on_checkpoint=throttled_checkpoint,
+                sync_mode=request.sync_mode,
+                stream_contracts=request.stream_contracts,
+                job_id=job_id,
             )
 
             mongo.update_job_status(
@@ -374,6 +435,7 @@ class UniversalTransferEngine:
                 rows_written=rows_written,
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
+                mappings=mappings,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -400,6 +462,9 @@ class UniversalTransferEngine:
                 message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+                rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                rejected_details=(dest_summary.get("rejected_details") or [])[:200],
+                destination_summary=dest_summary,
             )
 
             return TransferResult(
@@ -456,7 +521,10 @@ class UniversalTransferEngine:
                 )
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
-            mappings = request.mappings or default_mappings(columns)
+            mappings = _enrich_mappings_with_types(
+                request.mappings or default_mappings(columns),
+                _destination_schema_types(request.destination),
+            )
             column_types = request.column_types or build_column_types(columns, schema)
 
             mongo.update_job_status(
@@ -471,9 +539,11 @@ class UniversalTransferEngine:
                     row_count=total_rows,
                     mappings=mappings,
                     destination_connected=dest_ok,
+                    destination_error=None if dest_ok else dest_msg,
                     source_kind=request.source.kind,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                    destination_column_types=_destination_schema_types(request.destination),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -520,6 +590,8 @@ class UniversalTransferEngine:
                     message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
                 )
 
+            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+
             mongo.update_job_status(
                 job_id, "running", phase="writing", progress_pct=25,
                 message=f"Streaming {total_rows:,} rows in batches…",
@@ -531,7 +603,7 @@ class UniversalTransferEngine:
                 request.destination,
                 mappings,
                 schema,
-                on_checkpoint=on_checkpoint,
+                on_checkpoint=throttled_checkpoint,
             )
 
             mongo.update_job_status(
@@ -546,6 +618,7 @@ class UniversalTransferEngine:
                 rows_written=rows_written,
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
+                mappings=mappings,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -572,6 +645,9 @@ class UniversalTransferEngine:
                 message=recon.get("message", f"Transferred {rows_written:,} rows successfully"),
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
+                rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                rejected_details=(dest_summary.get("rejected_details") or [])[:200],
+                destination_summary=dest_summary,
             )
 
             return TransferResult(
@@ -638,15 +714,30 @@ class UniversalTransferEngine:
         destination: EndpointConfig,
         sample_content: bytes | None = None,
         filename: str = "",
+        source_columns: list[str] | None = None,
+        source_schema: dict[str, str] | None = None,
     ) -> dict:
         """Understand source + destination and recommend auto-creation plan."""
         from .endpoint_intelligence import build_transfer_plan, introspect_endpoint
+        from services.universal_router import analyze_route
 
         source_info = introspect_endpoint(source, sample_content, filename)
+        if source_columns and not source_info.get("columns"):
+            source_info["columns"] = source_columns
+            source_info["schema"] = source_schema or {}
+            source_info["connected"] = True
+            source_info["message"] = f"Schema ready — {len(source_columns)} columns"
+        elif source_columns:
+            source_info["columns"] = source_columns
+            if source_schema:
+                source_info["schema"] = source_schema
         plan = build_transfer_plan(source, destination, source_info)
         if source_info.get("columns"):
             plan["source_columns"] = source_info["columns"]
             plan["source_schema"] = source_info["schema"]
+        src_fmt = source.format or ("csv" if source.kind == "file" else source.format or "")
+        dst_fmt = destination.format or ("mongodb" if destination.kind == "database" else "json")
+        plan["route_analysis"] = analyze_route(source.kind, src_fmt, destination.kind, dst_fmt)
         return plan
 
 

@@ -2,7 +2,7 @@
  * DataFlow design tokens — unified light enterprise theme
  */
 
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
 
 :root {
   --dt-flow-start: #134e4a;
@@ -39,14 +39,15 @@
   --df-text-primary: #111827;
   --df-text-secondary: #4b5563;
   --df-text-tertiary: #9ca3af;
+  --df-text-muted: #64748b;
   --df-focus-ring: var(--df-brand-ring);
 
   --df-font-sans: "Inter", system-ui, -apple-system, sans-serif;
   --df-font-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  --df-header-height: 56px;
+  --df-header-height: 60px;
   --df-sidebar-width: 260px;
-  --df-content-max: 1280px;
+  --df-content-max: none;
   --df-rail-width: 360px;
   --dt-copilot-rail-width: 360px;
 
@@ -54,6 +55,17 @@
   --df-radius-md: 8px;
   --df-radius-lg: 12px;
   --df-radius-xl: 16px;
+  --df-radius-card: 12px;
+  --df-radius-panel: 12px;
+  --df-radius-tile: 14px;
+
+  --df-card-pad: 20px;
+  --df-card-head-pad: 16px 20px;
+  --df-card-footer-pad: 16px 20px;
+  --df-grid-gap: 16px;
+  --df-grid-gap-lg: 20px;
+  --df-page-section-gap: 20px;
+  --df-rail-column: minmax(260px, 320px);
 
   --df-space-1: 4px;
   --df-space-2: 8px;

@@ -1,0 +1,46 @@
+{
+  "sso": {
+    "saml": {
+      "enabled": false,
+      "entity_id": "",
+      "sso_url": "",
+      "x509_cert": "",
+      "email_attribute": "email",
+      "client_secret": ""
+    },
+    "oidc": {
+      "enabled": false,
+      "issuer": "",
+      "client_id": "",
+      "client_secret": "",
+      "redirect_uri": "",
+      "scopes": "openid email profile"
+    },
+    "azure_ad": {
+      "enabled": false,
+      "tenant_id": "",
+      "client_id": "",
+      "client_secret": "",
+      "redirect_uri": ""
+    }
+  },
+  "ai_providers": {
+    "openai": {
+      "enabled": true,
+      "api_key": "",
+      "model": "gpt-4o-mini"
+    },
+    "anthropic": {
+      "enabled": true,
+      "api_key": "",
+      "model": "claude-sonnet-4-20250514"
+    },
+    "ollama": {
+      "enabled": true,
+      "api_key": "",
+      "base_url": "http://localhost:11434",
+      "model": "llama3.2"
+    }
+  },
+  "api_keys": []
+}

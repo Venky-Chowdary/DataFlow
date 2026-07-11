@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import uuid
 from pathlib import Path
@@ -9,10 +10,48 @@ from pathlib import Path
 from services.csv_profiler import count_csv_rows, parse_csv_preview
 from services.schema_inference import infer_columns_from_rows
 
-UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+from services.platform_config import data_dir, upload_dir
+
+UPLOAD_DIR = upload_dir()
+REGISTRY_PATH = data_dir() / "upload_registry.json"
 
 _file_registry: dict[str, dict] = {}
+
+
+def _registry_record_for_disk(record: dict) -> dict:
+    """Persist metadata only — preview rows stay in memory until restart."""
+    out = dict(record)
+    out.pop("preview_rows", None)
+    return out
+
+
+def _load_registry() -> None:
+    global _file_registry
+    if not REGISTRY_PATH.exists():
+        return
+    try:
+        raw = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        items = raw.get("files", []) if isinstance(raw, dict) else []
+    except Exception:
+        return
+    for item in items:
+        if not isinstance(item, dict) or not item.get("file_id"):
+            continue
+        path = Path(item.get("path", ""))
+        if path.exists():
+            _file_registry[item["file_id"]] = item
+
+
+def _save_registry() -> None:
+    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "files": [_registry_record_for_disk(r) for r in _file_registry.values()],
+        "count": len(_file_registry),
+    }
+    REGISTRY_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+_load_registry()
 
 
 def detect_format(filename: str, content: bytes) -> str:
@@ -70,6 +109,25 @@ def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
     raise ValueError("JSON must be an array of objects")
 
 
+def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ValueError("Parquet support requires pyarrow") from exc
+    table = pq.read_table(io.BytesIO(content))
+    row_count = table.num_rows
+    slice_table = table.slice(0, min(preview_rows, row_count))
+    headers = [str(name) for name in slice_table.column_names]
+    rows: list[list[str]] = []
+    for i in range(slice_table.num_rows):
+        row = []
+        for col in slice_table.column_names:
+            val = slice_table.column(col)[i].as_py()
+            row.append("" if val is None else str(val))
+        rows.append(row)
+    return headers, rows, row_count
+
+
 def store_upload(filename: str, content: bytes) -> dict:
     fmt = detect_format(filename, content)
     file_id = uuid.uuid4().hex[:16]
@@ -95,6 +153,8 @@ def store_upload(filename: str, content: bytes) -> dict:
         from services.excel_parser import parse_excel_preview
 
         headers, rows, row_count = parse_excel_preview(content)
+    elif fmt == "parquet":
+        headers, rows, row_count = _parse_parquet_preview(content)
     else:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
         row_count = count_csv_rows(content, encoding)
@@ -104,6 +164,13 @@ def store_upload(filename: str, content: bytes) -> dict:
     preview_rows = rows[:5]
     path = UPLOAD_DIR / f"{file_id}_{filename}"
     path.write_bytes(content)
+
+    validation_report: dict | None = None
+    if fmt in ("csv", "tsv"):
+        from services.csv_validator import validate_csv_content
+
+        schema_map = {c["name"]: c.get("inferred_type", "VARCHAR") for c in columns}
+        validation_report = validate_csv_content(content, headers, schema_map)
 
     from services.object_store import stage_bytes
 
@@ -121,8 +188,10 @@ def store_upload(filename: str, content: bytes) -> dict:
         "preview_rows": preview_rows,
         "path": str(path),
         "object_uri": object_uri,
+        "validation": validation_report,
     }
     _file_registry[file_id] = record
+    _save_registry()
     return record
 
 

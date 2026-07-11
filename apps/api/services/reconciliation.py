@@ -35,6 +35,8 @@ def reconcile(
     source_checksum: str,
     target_checksum: str,
     rejected_rows: int = 0,
+    strict_checksum: bool = False,
+    sample_compare: dict[str, Any] | None = None,
 ) -> ReconciliationReport:
     expected_rows = max(source_rows - max(rejected_rows, 0), 0)
     if expected_rows != target_rows:
@@ -50,10 +52,34 @@ def reconcile(
             ),
             rejected_rows=rejected_rows,
         )
+
+    if sample_compare and not sample_compare.get("passed", True):
+        mismatches = sample_compare.get("mismatches") or []
+        detail = mismatches[0] if mismatches else "value mismatch in read-back sample"
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=f"Read-back sample verification failed: {detail}",
+            rejected_rows=rejected_rows,
+        )
+
     if source_checksum != target_checksum:
-        # Counts match; checksums legitimately differ across engines because
-        # drivers render types differently (Decimal 1250.5000 vs "1250.50",
-        # datetime objects vs strings) and read-back ordering may vary.
+        if strict_checksum:
+            return ReconciliationReport(
+                passed=False,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Checksum mismatch in strict mode: source {source_checksum} "
+                    f"vs target {target_checksum}"
+                ),
+                rejected_rows=rejected_rows,
+            )
         return ReconciliationReport(
             passed=True,
             source_rows=source_rows,
@@ -272,3 +298,132 @@ def verify_target(
     if count >= 0:
         return count, chk
     return fallback_rows, fallback_checksum
+
+
+def normalize_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return f"{value:.10g}"
+    return str(value).strip()
+
+
+def sample_compare_rows(
+    source_records: list[dict[str, Any]],
+    target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
+    mappings: list[dict[str, Any]],
+    *,
+    target_columns: list[str] | None = None,
+    sample_size: int = 50,
+) -> dict[str, Any]:
+    """
+    Compare mapped column values between source records and destination read-back.
+    Uses normalized string comparison to tolerate driver formatting differences.
+    """
+    if not source_records or not target_rows or not mappings:
+        return {"passed": True, "compared": 0, "mismatches": [], "skipped": True}
+
+    mismatches: list[dict[str, str]] = []
+    compared = 0
+    limit = min(sample_size, len(source_records), len(target_rows))
+
+    for idx in range(limit):
+        src = source_records[idx]
+        tgt_raw = target_rows[idx]
+        if isinstance(tgt_raw, dict):
+            tgt = tgt_raw
+        elif target_columns and isinstance(tgt_raw, (list, tuple)):
+            tgt = {col: tgt_raw[i] if i < len(tgt_raw) else None for i, col in enumerate(target_columns)}
+        else:
+            continue
+
+        for m in mappings:
+            src_col = str(m.get("source") or "")
+            tgt_col = str(m.get("target") or "")
+            if not src_col or not tgt_col:
+                continue
+            src_val = normalize_cell(src.get(src_col))
+            tgt_val = normalize_cell(tgt.get(tgt_col))
+            compared += 1
+            if src_val != tgt_val:
+                mismatches.append({
+                    "row": str(idx),
+                    "source": src_col,
+                    "target": tgt_col,
+                    "source_value": src_val[:120],
+                    "target_value": tgt_val[:120],
+                })
+                if len(mismatches) >= 10:
+                    return {
+                        "passed": False,
+                        "compared": compared,
+                        "mismatches": mismatches,
+                    }
+
+    return {
+        "passed": len(mismatches) == 0,
+        "compared": compared,
+        "mismatches": mismatches,
+    }
+
+
+def read_target_sample(
+    db_type: str,
+    dest: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    columns: list[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Read a small ordered sample from destination for value reconciliation."""
+    cols = columns or ["*"]
+    col_sql = ", ".join(f'"{c}"' for c in cols) if cols != ["*"] else "*"
+    try:
+        if db_type == "postgresql":
+            import psycopg2
+            from connectors.postgresql_conn import get_connection
+
+            conn = get_connection(
+                host=dest.get("host", ""),
+                port=dest.get("port", 5432),
+                database=dest.get("database", ""),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+                connection_string=dest.get("connection_string", ""),
+                ssl=dest.get("ssl", True),
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'SELECT {col_sql} FROM "{schema}"."{table_name}" ORDER BY 1 LIMIT %s',
+                    (limit,),
+                )
+                names = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            conn.close()
+            return [dict(zip(names, row)) for row in rows]
+
+        if db_type == "mysql":
+            from connectors.mysql_conn import get_connection
+
+            mysql_col_sql = ", ".join(f"`{c}`" for c in cols) if cols != ["*"] else "*"
+            conn = get_connection(
+                host=dest.get("host", ""),
+                port=int(dest.get("port", 3306)),
+                database=dest.get("database", ""),
+                username=dest.get("username", ""),
+                password=dest.get("password", ""),
+                connection_string=dest.get("connection_string", ""),
+                ssl=dest.get("ssl", False),
+            )
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {mysql_col_sql} FROM `{table_name}` ORDER BY 1 LIMIT %s", (limit,))
+                names = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            conn.close()
+            return [dict(zip(names, row)) for row in rows]
+    except Exception:
+        return []
+    return []

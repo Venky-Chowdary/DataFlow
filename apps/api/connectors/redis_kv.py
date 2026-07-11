@@ -22,13 +22,14 @@ def test_redis(
     try:
         import redis
     except ImportError:
+        from connectors.driver_guard import require_driver
         if not (host or connection_string):
             return ConnectResult(ok=False, tables=[], error="Redis host is required.")
         return ConnectResult(
-            ok=True,
+            ok=False,
             tables=[],
-            message=f"Config validated for {host}:{port or 6379} (install redis-py for live probe).",
-            driver="validation",
+            error=require_driver("redis", "redis"),
+            driver="none",
         )
 
     try:

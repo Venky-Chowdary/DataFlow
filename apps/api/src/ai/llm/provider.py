@@ -42,13 +42,15 @@ class DataTransferLLMProvider(ABC):
 class DataTransferOpenAIProvider(DataTransferLLMProvider):
     name = "openai"
 
-    def __init__(self, model: str = "gpt-4o-mini"):
-        self.model = model
+    def __init__(self, model: str | None = None):
+        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self._client = None
         self._init_client()
 
     def _init_client(self):
-        api_key = os.environ.get("OPENAI_API_KEY")
+        from services.integrations_store import resolve_provider_api_key
+
+        api_key = resolve_provider_api_key("openai")
         if api_key:
             try:
                 from openai import OpenAI
@@ -90,13 +92,17 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
 class DataTransferAnthropicProvider(DataTransferLLMProvider):
     name = "anthropic"
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514"):
-        self.model = model
+    def __init__(self, model: str | None = None):
+        from services.integrations_store import resolve_provider_model
+
+        self.model = model or resolve_provider_model("anthropic", "claude-sonnet-4-20250514")
         self._client = None
         self._init_client()
 
     def _init_client(self):
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        from services.integrations_store import resolve_provider_api_key
+
+        api_key = resolve_provider_api_key("anthropic")
         if api_key:
             try:
                 import anthropic
@@ -182,9 +188,11 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
 class DataTransferOllamaProvider(DataTransferLLMProvider):
     name = "ollama"
 
-    def __init__(self, model: str = "llama3.2", base_url: str = "http://localhost:11434"):
-        self.model = model
-        self.base_url = base_url
+    def __init__(self, model: str | None = None, base_url: str | None = None):
+        from services.integrations_store import resolve_ollama_base_url, resolve_provider_model
+
+        self.model = model or resolve_provider_model("ollama", "llama3.2")
+        self.base_url = base_url or resolve_ollama_base_url()
         self._available = None
 
     def is_available(self) -> bool:
@@ -331,6 +339,9 @@ def _package_available(package: str) -> bool:
 
 def get_model_capabilities() -> dict:
     """Expose model/provider readiness without making network calls to cloud APIs."""
+    from services.integrations_store import get_ai_provider_configs
+
+    stored = get_ai_provider_configs()
     providers = {
         "anthropic": DataTransferAnthropicProvider(),
         "openai": DataTransferOpenAIProvider(),
@@ -341,7 +352,12 @@ def get_model_capabilities() -> dict:
     for item in MODEL_CAPABILITY_MATRIX:
         provider = providers[item["provider"]]
         env_key = item.get("env_key") or ""
+        persisted = stored.get(item["provider"], {})
         configured = bool(os.environ.get(env_key)) if env_key else item["provider"] in {"ollama", "local"}
+        if env_key and persisted.get("configured"):
+            configured = True
+        if item["provider"] == "ollama" and persisted.get("base_url"):
+            configured = True
         installed = _package_available(item.get("package", ""))
         available = provider.is_available()
         rows.append({

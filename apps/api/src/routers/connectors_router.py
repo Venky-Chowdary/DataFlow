@@ -132,6 +132,14 @@ async def test_connection(request: TestConnectionRequest):
                 warehouse="",
             )
             return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
+        if request.type == "redshift":
+            from connectors.redshift import test_redshift
+            probe = test_redshift(
+                host=request.host or "localhost", port=request.port or 5439, database=request.database,
+                username=request.username or "", password=request.password or "",
+                schema=request.schema or "public", connection_string=request.connection_string or "", ssl=True,
+            )
+            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
         if request.type == "dynamodb":
             from connectors.dynamodb import test_dynamodb
             probe = test_dynamodb(
@@ -156,6 +164,14 @@ async def test_connection(request: TestConnectionRequest):
                 schema="", connection_string=request.connection_string or "", ssl=True,
             )
             return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
+        if request.type in ("gcs", "google_cloud_storage"):
+            from connectors.gcs import test_gcs
+            probe = test_gcs(
+                host=request.host or "", port=request.port or 443, database=request.database,
+                username=request.username or "", password=request.password or "",
+                schema="", connection_string=request.connection_string or "", ssl=True,
+            )
+            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
         if request.type == "elasticsearch":
             from connectors.elasticsearch import test_elasticsearch
             probe = test_elasticsearch(
@@ -164,11 +180,18 @@ async def test_connection(request: TestConnectionRequest):
                 schema="", connection_string=request.connection_string or "", ssl=False,
             )
             return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        else:
+
+        if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             return {
-                "success": False,
-                "message": f"Connector type '{request.type}' not yet implemented",
+                "success": True,
+                "message": f"{request.type.upper()} file format supported — upload a sample file to validate parsing",
+                "details": {"format": request.type, "mode": "file_source"},
             }
+
+        return {
+            "success": False,
+            "message": f"Connector type '{request.type}' not yet implemented",
+        }
             
     except Exception as e:
         return {
@@ -179,25 +202,50 @@ async def test_connection(request: TestConnectionRequest):
 
 @router.post("/", response_model=ConnectorResponse)
 async def create_connector(config: ConnectorConfig):
-    """Create and save a new connector configuration"""
+    """Create and save a new connector configuration (file store + MongoDB when available)."""
+    connector_data = {
+        "name": config.name,
+        "type": config.type,
+        "host": config.host,
+        "port": config.port,
+        "database": config.database,
+        "schema": config.schema,
+        "username": config.username,
+        "password": config.password,
+        "connection_string": config.connection_string,
+        "options": config.options,
+        "role": "both",
+        "ssl": False,
+        "status": "configured",
+    }
+
+    # Canonical persistence: file-backed store (always works without MongoDB)
+    try:
+        import sys
+        from pathlib import Path
+        _api_root = Path(__file__).resolve().parents[2]
+        if str(_api_root) not in sys.path:
+            sys.path.insert(0, str(_api_root))
+        from services.connector_store import create_connector as fs_create
+        saved = fs_create(connector_data)
+        return ConnectorResponse(
+            id=saved.id,
+            name=saved.name,
+            type=saved.type,
+            host=saved.host,
+            port=saved.port,
+            database=saved.database,
+            status="configured",
+            created_at=saved.created_at,
+        )
+    except Exception as fs_err:
+        pass  # fall through to MongoDB
+
     try:
         mongo = get_mongodb_service()
         
-        connector_data = {
-            "name": config.name,
-            "type": config.type,
-            "host": config.host,
-            "port": config.port,
-            "database": config.database,
-            "schema": config.schema,
-            "username": config.username,
-            "password": config.password,
-            "connection_string": config.connection_string,
-            "options": config.options,
-            "status": "configured",
-        }
-        
-        connector_id = mongo.save_connector(connector_data)
+        mongo_data = {k: v for k, v in connector_data.items() if k != "role" and k != "ssl"}
+        connector_id = mongo.save_connector(mongo_data)
         connector = mongo.get_connector(connector_id)
         
         return ConnectorResponse(
@@ -217,7 +265,36 @@ async def create_connector(config: ConnectorConfig):
 
 @router.get("/")
 async def list_connectors():
-    """List all saved connectors"""
+    """List all saved connectors (file store first, MongoDB fallback)."""
+    try:
+        import sys
+        from pathlib import Path
+        _api_root = Path(__file__).resolve().parents[2]
+        if str(_api_root) not in sys.path:
+            sys.path.insert(0, str(_api_root))
+        from services.connector_store import list_connectors as fs_list, mask_connector
+        items = fs_list()
+        if items:
+            return {
+                "connectors": [
+                    {
+                        "id": c.id,
+                        "name": c.name,
+                        "type": c.type,
+                        "host": c.host,
+                        "port": c.port,
+                        "database": c.database,
+                        "status": "configured" if c.last_test_ok else ("error" if c.last_tested_at and not c.last_test_ok else "configured"),
+                        "created_at": c.created_at,
+                        "last_test_ok": c.last_test_ok,
+                    }
+                    for c in items
+                ],
+                "count": len(items),
+            }
+    except Exception:
+        pass
+
     try:
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
@@ -392,8 +469,36 @@ async def upload_file(file: UploadFile = File(...)):
         
         if not result.success:
             raise HTTPException(status_code=400, detail=result.error)
+
+        if result.row_count == 0:
+            raise HTTPException(status_code=400, detail="File contains no records")
+
+        if not result.columns:
+            raise HTTPException(
+                status_code=400,
+                detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
+            )
         
         schema = FileParser.infer_schema(result.data)
+        try:
+            from services.data_profiler import merge_profiler_schema, profile_dataset
+
+            profile = profile_dataset(result.columns, result.data)
+            schema = merge_profiler_schema(schema, profile["schema"])
+        except Exception:
+            profile = None
+        sample_cap = 100
+        sample = result.data[:sample_cap]
+
+        validation_report = None
+        if result.file_type in ("csv", "tsv"):
+            import sys
+            from pathlib import Path
+            _api_root = Path(__file__).resolve().parents[2]
+            if str(_api_root) not in sys.path:
+                sys.path.insert(0, str(_api_root))
+            from services.csv_validator import validate_csv_content
+            validation_report = validate_csv_content(content, result.columns, schema)
         
         return {
             "success": True,
@@ -402,8 +507,10 @@ async def upload_file(file: UploadFile = File(...)):
             "row_count": result.row_count,
             "columns": result.columns,
             "schema": schema,
-            "sample_data": result.data[:5],
-            "data": result.data,
+            "sample_data": sample,
+            "data": sample,
+            "validation": validation_report,
+            "profile": profile,
         }
         
     except HTTPException:
@@ -426,6 +533,7 @@ async def transfer_data(
     dest_schema: str = Form("public"),
     dest_username: str = Form(""),
     dest_password: str = Form(""),
+    dest_connection_string: str = Form(""),
     dest_warehouse: str = Form(""),
     async_mode: str = Form("true"),
     sync_mode: str = Form("full_refresh_overwrite"),
@@ -433,6 +541,7 @@ async def transfer_data(
     validation_mode: str = Form("strict"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
+    mappings_json: str = Form(""),
 ):
     """Universal file transfer — delegates to UniversalTransferEngine."""
     try:
@@ -441,7 +550,9 @@ async def transfer_data(
         from ..transfer.background import run_transfer_async
 
         content = await file.read()
-        src_fmt = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "csv"
+        src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
+        if src_fmt == "unknown":
+            src_fmt = "csv"
 
         request = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
@@ -457,6 +568,7 @@ async def transfer_data(
                 table=destination_collection,
                 username=dest_username,
                 password=dest_password,
+                connection_string=dest_connection_string,
                 warehouse=dest_warehouse,
             ),
             skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
@@ -473,6 +585,14 @@ async def transfer_data(
                 parsed = _json.loads(stream_contracts_json)
                 if isinstance(parsed, list):
                     request.stream_contracts = parsed
+            except Exception:
+                pass
+        if mappings_json.strip():
+            try:
+                import json as _json
+                parsed = _json.loads(mappings_json)
+                if isinstance(parsed, list):
+                    request.mappings = parsed
             except Exception:
                 pass
         engine = get_transfer_engine()

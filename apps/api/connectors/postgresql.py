@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from connectors.base import ConnectResult
+from connectors.driver_guard import platform_driver_unavailable
 
 
 def test_postgresql(
@@ -65,6 +66,6 @@ def _stub_fallback(host: str, database: str, username: str, connection_string: s
     return ConnectResult(
         ok=False,
         tables=[],
-        error="PostgreSQL driver not installed — pip install psycopg2-binary",
+        error=platform_driver_unavailable("PostgreSQL"),
         driver="none",
     )

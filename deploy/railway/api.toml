@@ -1,0 +1,16 @@
+# Railway — API service
+# In Railway dashboard: New Service → GitHub repo → Settings:
+#   Config file path: deploy/railway/api.toml
+# Add MongoDB plugin to the project and link MONGO_URL → API service.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.api"
+watchPatterns = ["apps/api/**", "packages/preflight/**", "Dockerfile.api"]
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+numReplicas = 1

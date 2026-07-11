@@ -13,16 +13,16 @@ interface EmptyStateProps {
 export function EmptyState({ icon = "activity", title, description, action, compact }: EmptyStateProps) {
   return (
     <div
-      className={`dt-empty ${compact ? "dt-empty-compact" : ""}`}
+      className={`df2-empty ${compact ? "df2-empty-compact" : ""}`}
       role="status"
       aria-label={title}
     >
-      <div className="dt-empty-icon">
+      <div className="df2-empty-icon" aria-hidden>
         <DtIcon name={icon} size={compact ? 22 : 28} />
       </div>
-      <h3 className="dt-empty-title">{title}</h3>
-      {description && <p className="dt-empty-text">{description}</p>}
-      {action}
+      <h3 className="df2-empty-title">{title}</h3>
+      {description && <p className="df2-empty-desc">{description}</p>}
+      {action && <div className="df2-empty-action">{action}</div>}
     </div>
   );
 }

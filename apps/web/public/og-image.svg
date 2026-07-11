@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <rect width="1200" height="630" fill="#0f172a"/>
+  <rect x="80" y="80" width="1040" height="470" rx="28" fill="#111827" stroke="#1e293b" stroke-width="2"/>
+  <rect x="120" y="120" width="72" height="72" rx="18" fill="url(#g)"/>
+  <path d="M140 168V144M140 144h12l4 8 8-16h8" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="140" cy="168" r="5" fill="#F59E0B"/>
+  <circle cx="140" cy="144" r="5" fill="#2DD4BF"/>
+  <circle cx="172" cy="136" r="5" fill="#A7F3D0"/>
+  <text x="210" y="168" fill="#f8fafc" font-family="Inter, system-ui, sans-serif" font-size="52" font-weight="700">DataFlow</text>
+  <text x="120" y="260" fill="#94a3b8" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="500">Universal data transfer platform</text>
+  <text x="120" y="330" fill="#e2e8f0" font-family="Inter, system-ui, sans-serif" font-size="28">Any source · any destination · 8 preflight gates · semantic mapping</text>
+  <rect x="120" y="380" width="220" height="56" rx="12" fill="#0f766e"/>
+  <text x="152" y="416" fill="#fff" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="600">Connect · Map · Transfer</text>
+  <rect x="360" y="380" width="180" height="56" rx="12" fill="#1e293b" stroke="#334155"/>
+  <text x="392" y="416" fill="#cbd5e1" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="500">650+ connectors</text>
+  <defs>
+    <linearGradient id="g" x1="120" y1="120" x2="192" y2="192" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#134E4A"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+  </defs>
+</svg>

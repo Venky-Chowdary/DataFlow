@@ -1,71 +1,35 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { EmptyState } from "../components/EmptyState";
+import { SectionLoader } from "../components/LoadingState";
+import { FilterTabs } from "../components/ui/FilterTabs";
+import { PageFrame } from "../components/ui/PageFrame";
+import { PageInsightStrip } from "../components/ui/PageInsightStrip";
+import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
-import { fetchModelCapabilities, ModelCapabilities } from "../lib/api";
+import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 
 const TABS = [
-  { id: "general", label: "General", icon: "settings" },
-  { id: "security", label: "Security", icon: "shield" },
-  { id: "auth", label: "SSO", icon: "gate" },
-  { id: "team", label: "Team", icon: "connectors" },
-  { id: "models", label: "AI Models", icon: "sparkle" },
-  { id: "api", label: "API Keys", icon: "zap" },
+  { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
+  { id: "security", label: "Security", desc: "Policies & compliance", icon: "shield" },
+  { id: "auth", label: "SSO", desc: "Identity providers", icon: "gate" },
+  { id: "team", label: "Team", desc: "Members & roles", icon: "connectors" },
+  { id: "models", label: "AI Models", desc: "Provider routing", icon: "sparkle" },
+  { id: "api", label: "API Keys", desc: "Programmatic access", icon: "zap" },
+  { id: "logs", label: "Audit Logs", desc: "Activity trail", icon: "activity" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
-type ModelProviderRow = ModelCapabilities["providers"][number];
 
-const MODEL_PROVIDER_FALLBACKS: ModelProviderRow[] = [
-  {
-    provider: "anthropic",
-    label: "Anthropic Claude",
-    default_model: "claude-sonnet-4-20250514",
-    tier: "cloud",
-    roles: ["agent_tool_use", "schema_reasoning", "migration_planning", "policy_explanation"],
-    best_for: "Long-horizon Data Pilot agent runs, tool use, schema-policy reasoning, and migration plan review.",
-    configured: false,
-    package_installed: false,
-    available: false,
-    status: "configure",
-  },
-  {
-    provider: "openai",
-    label: "OpenAI",
-    default_model: "gpt-4o-mini",
-    tier: "cloud",
-    roles: ["copilot_chat", "rag_answering", "mapping_explanation", "fallback_generation"],
-    best_for: "Fast grounded chat, mapping explanation, RAG answers, and second-line cloud fallback.",
-    configured: false,
-    package_installed: false,
-    available: false,
-    status: "configure",
-  },
-  {
-    provider: "ollama",
-    label: "Ollama",
-    default_model: "llama3.2",
-    tier: "local",
-    roles: ["private_local_generation", "offline_assist", "fallback_generation"],
-    best_for: "Private/local assistant mode when cloud credentials are unavailable.",
-    configured: true,
-    package_installed: true,
-    available: false,
-    status: "offline",
-  },
-  {
-    provider: "local",
-    label: "Local deterministic engine",
-    default_model: "local_knowledge",
-    tier: "deterministic",
-    roles: ["semantic_rules", "rag_retrieval", "preflight_gates", "mapping_assignment"],
-    best_for: "Always-on fail-closed semantic analysis, RAG retrieval, preflight, and deterministic mapping safeguards.",
-    configured: true,
-    package_installed: true,
-    available: true,
-    status: "ready",
-  },
-];
+type AuditLog = {
+  id: string;
+  time: string;
+  actor: string;
+  action: string;
+  resource: string;
+  level: "info" | "success" | "warn" | "error";
+};
 
 export function SettingsPage() {
   const { toast } = useToast();
@@ -73,215 +37,771 @@ export function SettingsPage() {
   const [orgName, setOrgName] = useState("DataFlow");
   const [timezone, setTimezone] = useState("UTC");
   const [retention, setRetention] = useState("90");
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
+  const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
+  const [ssoConfigs, setSsoConfigs] = useState<Record<SsoType, SsoConfig> | null>(null);
+  const [ssoEditor, setSsoEditor] = useState<SsoType | null>(null);
+  const [ssoDraft, setSsoDraft] = useState<SsoConfig | null>(null);
+  const [ssoSaving, setSsoSaving] = useState(false);
+  const [aiEditor, setAiEditor] = useState<string | null>(null);
+  const [aiDraft, setAiDraft] = useState({ api_key: "", model: "", base_url: "", enabled: true });
+  const [aiSaving, setAiSaving] = useState(false);
+  const [apiKeys, setApiKeys] = useState<WorkspaceApiKey[]>([]);
+  const [apiKeysLoading, setApiKeysLoading] = useState(false);
+  const [apiKeyGenerating, setApiKeyGenerating] = useState(false);
+  const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
+  const [newKeyName, setNewKeyName] = useState("Production key");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [security, setSecurity] = useState<Record<string, boolean>>({
+    "Encryption at rest": true,
+    "Audit logging": true,
+    "PII detection": true,
+    "IP allowlisting": false,
+    "Session timeout (8h)": true,
+    "MFA required for admins": false,
+  });
+
+  const toggleSecurity = (title: string) => {
+    const enabled = !security[title];
+    setSecurity((prev) => ({ ...prev, [title]: enabled }));
+    toast({
+      title: enabled ? `${title} enabled` : `${title} disabled`,
+      tone: enabled ? "success" : "info",
+    });
+  };
 
   useEffect(() => {
     fetchModelCapabilities().then(setModelCapabilities).catch(() => setModelCapabilities(null));
+    fetchSsoConfigs().then(setSsoConfigs).catch(() => setSsoConfigs(null));
+    fetchWorkspaceSettings()
+      .then((ws) => {
+        setOrgName(ws.org_name);
+        setTimezone(ws.timezone);
+        setRetention(String(ws.retention_days));
+      })
+      .catch(() => {})
+      .finally(() => setSettingsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (tab !== "api") return;
+    setApiKeysLoading(true);
+    fetchWorkspaceApiKeys()
+      .then(setApiKeys)
+      .catch(() => setApiKeys([]))
+      .finally(() => setApiKeysLoading(false));
+  }, [tab]);
+
+  const openSsoEditor = (type: SsoType) => {
+    const cfg = ssoConfigs?.[type];
+    const defaultRedirect = `${resolveApiBase()}/auth/sso/${type}/callback`;
+    setSsoDraft({
+      enabled: cfg?.enabled ?? false,
+      entity_id: cfg?.entity_id ?? "",
+      sso_url: cfg?.sso_url ?? "",
+      x509_cert: "",
+      email_attribute: cfg?.email_attribute ?? "email",
+      issuer: cfg?.issuer ?? "",
+      client_id: cfg?.client_id ?? "",
+      client_secret: "",
+      redirect_uri: cfg?.redirect_uri || defaultRedirect,
+      scopes: cfg?.scopes ?? "openid email profile",
+      tenant_id: cfg?.tenant_id ?? "",
+    });
+    setSsoEditor(type);
+  };
+
+  const saveSsoConfig = async () => {
+    if (!ssoEditor || !ssoDraft) return;
+    setSsoSaving(true);
+    try {
+      const result = await updateSsoConfig(ssoEditor, ssoDraft);
+      setSsoConfigs((prev) => ({ ...(prev ?? {} as Record<SsoType, SsoConfig>), [ssoEditor]: result.config }));
+      toast({
+        title: result.validation.ok ? "SSO configured" : "SSO saved — needs attention",
+        message: result.validation.message,
+        tone: result.validation.ok ? "success" : "warning",
+      });
+      setSsoEditor(null);
+    } catch (err) {
+      toast({
+        title: "SSO save failed",
+        message: err instanceof Error ? err.message : "Could not save SSO settings.",
+        tone: "error",
+      });
+    } finally {
+      setSsoSaving(false);
+    }
+  };
+
+  const openAiEditor = async (provider: string, defaultModel: string) => {
+    try {
+      const settings = await fetchAiProviderSettings();
+      const cfg = settings[provider];
+      setAiDraft({
+        api_key: "",
+        model: cfg?.model ?? defaultModel,
+        base_url: cfg?.base_url ?? "http://localhost:11434",
+        enabled: cfg?.enabled ?? true,
+      });
+      setAiEditor(provider);
+    } catch {
+      setAiDraft({ api_key: "", model: defaultModel, base_url: "http://localhost:11434", enabled: true });
+      setAiEditor(provider);
+    }
+  };
+
+  const saveAiProvider = async () => {
+    if (!aiEditor) return;
+    setAiSaving(true);
+    try {
+      await updateAiProviderSettings(aiEditor, aiDraft);
+      setModelCapabilities(await fetchModelCapabilities());
+      toast({ title: "AI provider updated", message: `${aiEditor} settings saved and applied.`, tone: "success" });
+      setAiEditor(null);
+    } catch (err) {
+      toast({
+        title: "Save failed",
+        message: err instanceof Error ? err.message : "Could not save AI provider settings.",
+        tone: "error",
+      });
+    } finally {
+      setAiSaving(false);
+    }
+  };
+
+  const generateApiKey = async () => {
+    if (apiKeyGenerating) return;
+    setApiKeyGenerating(true);
+    try {
+      const created = await createWorkspaceApiKey(newKeyName.trim() || "API key");
+      const optimistic: WorkspaceApiKey = {
+        id: created.id,
+        name: created.name,
+        prefix: created.prefix,
+        created_at: created.created_at,
+        last_used_at: null,
+      };
+      setApiKeys((prev) => [optimistic, ...prev.filter((k) => k.id !== created.id)]);
+      setRevealedKey(created.key);
+      toast({ title: "API key created", message: "Copy it now — it won't be shown again.", tone: "success" });
+      fetchWorkspaceApiKeys().then(setApiKeys).catch(() => {});
+    } catch (err) {
+      toast({
+        title: "Generation failed",
+        message: err instanceof Error ? err.message : "Could not create API key.",
+        tone: "error",
+      });
+    } finally {
+      setApiKeyGenerating(false);
+    }
+  };
+
+  const revokeKey = async (keyId: string, keyName: string) => {
+    if (revokingKeyId) return;
+    if (!window.confirm(`Revoke "${keyName}"? Applications using this key will stop working immediately.`)) return;
+    setRevokingKeyId(keyId);
+    try {
+      await revokeWorkspaceApiKey(keyId);
+      setApiKeys((prev) => prev.filter((k) => k.id !== keyId));
+      if (revealedKey) setRevealedKey(null);
+      toast({ title: "API key revoked", tone: "info" });
+    } catch (err) {
+      toast({
+        title: "Revoke failed",
+        message: err instanceof Error ? err.message : "Could not revoke API key.",
+        tone: "error",
+      });
+    } finally {
+      setRevokingKeyId(null);
+    }
+  };
+
+  const saveWorkspaceSettings = async () => {
+    setSettingsSaving(true);
+    try {
+      const ws = await updateWorkspaceSettings({
+        org_name: orgName,
+        timezone,
+        retention_days: Number(retention) || 90,
+      });
+      setOrgName(ws.org_name);
+      setTimezone(ws.timezone);
+      setRetention(String(ws.retention_days));
+      toast({ title: "Settings saved", message: "Organization preferences updated.", tone: "success" });
+    } catch (err) {
+      toast({
+        title: "Save failed",
+        message: err instanceof Error ? err.message : "Could not persist workspace settings.",
+        tone: "error",
+      });
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab !== "logs") return;
+    setAuditLoading(true);
+    fetchAuditEvents(100, logFilter === "all" ? undefined : logFilter)
+      .then((events) =>
+        setAuditEvents(
+          events.map((ev) => ({
+            id: ev.id,
+            time: new Date(ev.time).toLocaleString(),
+            actor: ev.actor,
+            action: ev.action,
+            resource: ev.resource,
+            level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
+          })),
+        ),
+      )
+      .catch(() => setAuditEvents([]))
+      .finally(() => setAuditLoading(false));
+  }, [tab, logFilter]);
+
+  const filteredLogs = useMemo(
+    () => auditEvents,
+    [auditEvents],
+  );
+
+  const activeTab = TABS.find((t) => t.id === tab)!;
 
   return (
     <PageShell
       wide
+      className="df2-page-settings"
+      kicker="Workspace"
       title="Settings"
-      description="Organization, security, SSO, team access, and API configuration."
+      description="Organization profile, security, SSO, team access, API keys, and audit logs."
     >
-      <div className="df2-settings-layout">
-        <nav className="df2-settings-nav" role="tablist" aria-label="Settings sections">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === t.id}
-              className={tab === t.id ? "active" : ""}
-              onClick={() => setTab(t.id)}
-            >
-              <DtIcon name={t.icon} size={18} />
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </nav>
+      <PageFrame className="df2-settings-workspace" showHonesty>
+        <PageInsightStrip
+          tone={tab === "logs" && auditEvents.some((e) => e.level === "error") ? "warn" : "info"}
+          pill={activeTab.label}
+          message={`${activeTab.desc}. Changes apply workspace-wide across Transfer Studio, jobs, and connectors.`}
+        />
+        <PageMetricsRow
+          compact
+          columns={4}
+          metrics={[
+            { label: "Organization", value: orgName, icon: "settings" },
+            { label: "Retention", value: `${retention}d`, icon: "activity" },
+            { label: "AI provider", value: modelCapabilities?.active_provider ?? "local", icon: "sparkle" },
+            { label: "Audit events", value: tab === "logs" && !auditLoading ? auditEvents.length : "—", icon: "activity" },
+          ]}
+        />
 
-        <div>
-          {tab === "general" && (
-            <div className="df2-card">
-              <div className="df2-card-head"><h2 className="df2-card-title">General</h2></div>
-              <div className="df2-card-body">
-                <div className="df2-settings-grid">
-                  <div className="df2-field">
-                    <label className="df2-label" htmlFor="org-name">Organization name</label>
-                    <input id="org-name" className="df2-input" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
+        <div className="df2-settings-layout">
+          <nav className="df2-settings-nav" role="tablist" aria-label="Settings sections">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === t.id}
+                className={`df2-settings-nav-item${tab === t.id ? " active" : ""}`}
+                onClick={() => setTab(t.id)}
+              >
+                <span className="df2-settings-nav-icon" aria-hidden>
+                  <DtIcon name={t.icon} size={18} />
+                </span>
+                <span className="df2-settings-nav-text">
+                  <span className="df2-settings-nav-label">{t.label}</span>
+                  <span className="df2-settings-nav-desc">{t.desc}</span>
+                </span>
+              </button>
+            ))}
+          </nav>
+
+          <div className="df2-settings-panel" role="tabpanel" aria-label={activeTab.label}>
+            {tab === "general" && (
+              <>
+                <section className="df2-settings-section">
+                  <div className="df2-settings-section-head">
+                    <div>
+                      <h2>Organization profile</h2>
+                      <p>Defaults applied across Transfer Studio, jobs, and connectors.</p>
+                    </div>
                   </div>
-                  <div className="df2-field">
-                    <label className="df2-label" htmlFor="timezone">Default timezone</label>
-                    <select id="timezone" className="df2-select" value={timezone} onChange={(e) => setTimezone(e.target.value)}>
-                      <option value="UTC">UTC</option>
-                      <option value="America/New_York">Eastern Time</option>
-                      <option value="America/Los_Angeles">Pacific Time</option>
-                      <option value="Europe/London">London</option>
-                    </select>
+                  <div className="df2-settings-section-body">
+                    <div className="df2-settings-grid">
+                      <div className="df2-settings-field">
+                        <label htmlFor="org-name">Organization name</label>
+                        <input id="org-name" className="df2-input" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
+                      </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="timezone">Default timezone</label>
+                        <select id="timezone" className="df2-select" value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+                          <option value="UTC">UTC</option>
+                          <option value="America/New_York">Eastern Time</option>
+                          <option value="America/Los_Angeles">Pacific Time</option>
+                          <option value="Europe/London">London</option>
+                        </select>
+                      </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="retention">Job retention (days)</label>
+                        <input id="retention" className="df2-input" type="number" value={retention} onChange={(e) => setRetention(e.target.value)} />
+                        <p className="df2-settings-hint">Completed jobs older than this are archived automatically.</p>
+                      </div>
+                      <div className="df2-settings-field">
+                        <label>Default destination</label>
+                        <input className="df2-input" placeholder="Configure via Connectors" disabled />
+                        <p className="df2-settings-hint">Managed on the Connectors page when saving connections.</p>
+                      </div>
+                    </div>
                   </div>
-                  <div className="df2-field">
-                    <label className="df2-label" htmlFor="retention">Job retention (days)</label>
-                    <input id="retention" type="number" className="df2-input" value={retention} onChange={(e) => setRetention(e.target.value)} />
+                  <div className="df2-settings-section-footer">
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-primary"
+                      disabled={settingsLoading || settingsSaving}
+                      onClick={() => void saveWorkspaceSettings()}
+                    >
+                      {settingsSaving ? "Saving…" : "Save changes"}
+                    </button>
                   </div>
-                  <div className="df2-field">
-                    <label className="df2-label">Default destination</label>
-                    <input className="df2-input" placeholder="Configure via Connectors" disabled />
-                    <p style={{ margin: 0, fontSize: 12, color: "#94a3b8" }}>Managed on the Connectors page</p>
+                </section>
+              </>
+            )}
+
+            {tab === "security" && (
+              <section className="df2-settings-section">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>Security & compliance</h2>
+                    <p>Platform-wide controls for data protection and access governance.</p>
+                  </div>
+                  <span className="df2-badge df2-badge-live">SOC 2 ready</span>
+                </div>
+                <div className="df2-settings-section-body">
+                  <div className="df2-settings-policy-grid">
+                    {[
+                      { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts." },
+                      { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access." },
+                      { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review." },
+                      { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges." },
+                      { title: "Session timeout (8h)", desc: "Automatically sign out idle workspace sessions." },
+                      { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles." },
+                    ].map((item) => (
+                      <div key={item.title} className="df2-settings-policy-row">
+                        <div>
+                          <h3>{item.title}</h3>
+                          <p>{item.desc}</p>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={security[item.title]}
+                          aria-label={`Toggle ${item.title}`}
+                          className={`df2-switch ${security[item.title] ? "on" : ""}`}
+                          onClick={() => toggleSecurity(item.title)}
+                        >
+                          <span className="df2-switch-thumb" />
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 </div>
+              </section>
+            )}
+
+            {tab === "auth" && (
+              <section className="df2-settings-section">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>Authentication & SSO</h2>
+                    <p>Connect your identity provider for enterprise single sign-on.</p>
+                  </div>
+                </div>
+                <div className="df2-settings-section-body">
+                  <div className="df2-settings-sso-grid">
+                    {([
+                      { type: "saml" as SsoType, name: "SAML 2.0", desc: "Okta, Azure AD, OneLogin", action: "Configure SAML" },
+                      { type: "oidc" as SsoType, name: "OpenID Connect", desc: "Google Workspace, Auth0", action: "Configure OIDC" },
+                      { type: "azure_ad" as SsoType, name: "Azure AD", desc: "Microsoft Entra ID", action: "Connect Azure" },
+                    ]).map((provider) => {
+                      const cfg = ssoConfigs?.[provider.type];
+                      const enabled = cfg?.enabled;
+                      return (
+                      <div key={provider.name} className={`df2-settings-sso-card ${enabled ? "ready" : ""}`}>
+                        <h3>{provider.name}</h3>
+                        <p>{provider.desc}</p>
+                        <span className={`df2-badge ${enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
+                          {enabled ? "Enabled" : "Not configured"}
+                        </span>
+                        <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => openSsoEditor(provider.type)}>
+                          {provider.action}
+                        </button>
+                      </div>
+                    );})}
+                  </div>
+                  <p className="df2-settings-hint df2-mt-md">
+                    Set the callback URL in your IdP to <code>{resolveApiBase()}/auth/sso/&lt;type&gt;/callback</code>.
+                    Enabled providers appear on the sign-in page.
+                  </p>
+                </div>
+              </section>
+            )}
+
+            {tab === "team" && (
+              <section className="df2-settings-section">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>Team members</h2>
+                    <p>Manage who can configure connectors, run transfers, and view audit logs.</p>
+                  </div>
+                </div>
+                <div className="df2-settings-section-body">
+                  <EmptyState
+                    icon="connectors"
+                    title="Team management not connected"
+                    description="Member invites and role assignments require an identity provider integration. Connect SSO under the SSO tab to enable team provisioning."
+                  />
+                </div>
+              </section>
+            )}
+
+            {tab === "models" && (
+              <>
+                <section className="df2-settings-section">
+                  <div className="df2-settings-section-head">
+                    <div>
+                      <h2>Active model route</h2>
+                      <p>Cloud models are used only when credentials are configured.</p>
+                    </div>
+                  </div>
+                  <div className="df2-settings-section-body">
+                    <div className="df2-model-ops">
+                      <div>
+                        <span className="df2-rail-kicker">Agent mode</span>
+                        <h2 className="df2-settings-model-title">{modelCapabilities?.agent_mode ?? "local_tools"}</h2>
+                        <p className="df2-settings-hint">
+                          {modelCapabilities
+                            ? `${modelCapabilities.active_provider} · ${modelCapabilities.active_model}`
+                            : "Local deterministic engine active while model status loads."}
+                        </p>
+                      </div>
+                      <div className="df2-model-route">
+                        {(modelCapabilities?.fallback_order ?? ["anthropic", "openai", "ollama", "rag", "local"]).map((provider, index) => (
+                          <span key={provider}>
+                            {index > 0 && <i />}
+                            <strong>{provider}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <div className="df2-model-grid">
+                  {!modelCapabilities ? (
+                    <p className="df2-cell-meta">Loading model providers…</p>
+                  ) : modelCapabilities.providers.length === 0 ? (
+                    <p className="df2-cell-meta">No model providers reported by the API.</p>
+                  ) : modelCapabilities.providers.map((provider) => (
+                    <article key={provider.provider} className={`df2-model-card ${provider.available ? "ready" : ""}`}>
+                      <div className="df2-model-card-head">
+                        <div>
+                          <h3>{provider.label}</h3>
+                          <p>{provider.default_model}</p>
+                        </div>
+                        <span className={`df2-badge ${provider.available ? "df2-badge-live" : provider.tier === "cloud" ? "df2-badge-run" : "df2-badge-muted"}`}>
+                          {provider.available ? "Ready" : provider.status}
+                        </span>
+                      </div>
+                      <p className="df2-model-best">{provider.best_for}</p>
+                      <div className="df2-model-roles">
+                        {provider.roles.slice(0, 4).map((role) => (
+                          <span key={role}>{role.replace(/_/g, " ")}</span>
+                        ))}
+                      </div>
+                      {provider.provider !== "local" && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-primary"
+                          onClick={() => void openAiEditor(provider.provider, provider.default_model)}
+                        >
+                          {provider.available ? "Update credentials" : "Configure"}
+                        </button>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {tab === "api" && (
+              <section className="df2-settings-section">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>API keys</h2>
+                    <p>Authenticate programmatic transfers, schedules, and MCP agent calls.</p>
+                  </div>
+                </div>
+                <div className="df2-settings-section-body">
+                  <div className="df2-api-key-toolbar">
+                    <div className="df2-settings-field">
+                      <label htmlFor="api-key-name">Key name</label>
+                      <input
+                        id="api-key-name"
+                        className="df2-input"
+                        value={newKeyName}
+                        onChange={(e) => setNewKeyName(e.target.value)}
+                        placeholder="e.g. Production ETL"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-primary"
+                      disabled={apiKeyGenerating}
+                      onClick={() => void generateApiKey()}
+                    >
+                      <DtIcon name="plus" size={14} />
+                      {apiKeyGenerating ? "Generating…" : "Generate key"}
+                    </button>
+                  </div>
+
+                  {revealedKey && (
+                    <div className="df2-alert df2-alert-success df2-alert-banner df2-mb-md" role="status">
+                      <div className="df2-alert-banner-body">
+                        <strong>Copy your new API key</strong>
+                        <p className="df2-settings-hint">This is the only time the full key is shown. Store it in your secrets manager.</p>
+                        <p className="df2-settings-key-reveal"><code>{revealedKey}</code></p>
+                      </div>
+                      <div className="df2-alert-banner-actions">
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-primary"
+                          onClick={() => { void navigator.clipboard.writeText(revealedKey); toast({ title: "Copied to clipboard", tone: "success" }); }}
+                        >
+                          Copy
+                        </button>
+                        <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setRevealedKey(null)}>
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {apiKeysLoading ? (
+                    <SectionLoader title="Loading API keys" hint="Fetching workspace keys…" />
+                  ) : apiKeys.length === 0 ? (
+                    <EmptyState
+                      compact
+                      icon="key"
+                      title="No API keys yet"
+                      description="Generate a production key to authenticate programmatic transfers and MCP calls."
+                      action={
+                        <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" disabled={apiKeyGenerating} onClick={() => void generateApiKey()}>
+                          {apiKeyGenerating ? "Generating…" : "Generate key"}
+                        </button>
+                      }
+                    />
+                  ) : (
+                    <div className="df2-api-key-list" role="list" aria-label="Workspace API keys">
+                      {apiKeys.map((key) => (
+                        <article key={key.id} className="df2-api-key-card" role="listitem">
+                          <div className="df2-api-key-card-main">
+                            <div className="df2-api-key-card-icon" aria-hidden>
+                              <DtIcon name="key" size={18} />
+                            </div>
+                            <div className="df2-api-key-card-copy">
+                              <strong>{key.name}</strong>
+                              <code>{key.prefix}…</code>
+                              <span className="df2-api-key-card-meta">
+                                Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
+                                {" · "}
+                                Last used {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="df2-api-key-card-actions">
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-sm df2-btn-danger"
+                              disabled={revokingKeyId === key.id}
+                              onClick={() => void revokeKey(key.id, key.name)}
+                            >
+                              {revokingKeyId === key.id ? "Revoking…" : "Revoke"}
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {tab === "logs" && (
+              <section className="df2-settings-section">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>Audit logs</h2>
+                    <p>Configuration changes, transfers, connector tests, and MCP activity.</p>
+                  </div>
+                </div>
+                <div className="df2-settings-section-body">
+                  <FilterTabs
+                    ariaLabel="Filter audit logs"
+                    value={logFilter}
+                    onChange={setLogFilter}
+                    items={([
+                      { id: "all", label: "All events" },
+                      { id: "info", label: "Info" },
+                      { id: "success", label: "Success" },
+                      { id: "warn", label: "Warnings" },
+                      { id: "error", label: "Errors" },
+                    ] as const)}
+                  />
+                  <div className="df2-settings-logs-table-wrap">
+                    {auditLoading ? (
+                      <SectionLoader title="Loading audit events" hint="Fetching workspace activity…" />
+                    ) : filteredLogs.length === 0 ? (
+                      <EmptyState
+                        compact
+                        icon="activity"
+                        title="No audit events yet"
+                        description="Transfer plans, preflight runs, MCP calls, and API mutations are recorded here."
+                      />
+                    ) : (
+                    <div className="df2-settings-table-wrap">
+                    <table className="df2-settings-logs-table">
+                      <thead>
+                        <tr>
+                          <th>Time</th>
+                          <th>Actor</th>
+                          <th>Action</th>
+                          <th>Resource</th>
+                          <th>Level</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredLogs.map((log) => (
+                          <tr key={log.id}>
+                            <td>{log.time}</td>
+                            <td>{log.actor}</td>
+                            <td>{log.action}</td>
+                            <td>{log.resource}</td>
+                            <td>
+                              <span className={`df2-settings-log-level df2-settings-log-level--${log.level}`}>
+                                {log.level}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
+          </div>
+        </div>
+
+        {ssoEditor && ssoDraft && (
+          <div className="dt-modal-overlay" onClick={() => setSsoEditor(null)} role="presentation">
+            <div className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+              <div className="dt-modal-header">
+                <div>
+                  <h2 className="dt-modal-title">Configure {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
+                  <p className="dt-modal-subtitle">Settings are persisted and used for workspace sign-in.</p>
+                </div>
+                <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setSsoEditor(null)} aria-label="Close">
+                  <DtIcon name="x" />
+                </button>
+              </div>
+              <div className="dt-modal-body">
+                <label className="df2-settings-policy-row">
+                  <div><h3>Enable provider</h3><p>When enabled, this provider appears on the sign-in page.</p></div>
+                  <button type="button" role="switch" aria-checked={ssoDraft.enabled} className={`df2-switch ${ssoDraft.enabled ? "on" : ""}`} onClick={() => setSsoDraft({ ...ssoDraft, enabled: !ssoDraft.enabled })}>
+                    <span className="df2-switch-thumb" />
+                  </button>
+                </label>
+                {ssoEditor === "saml" && (
+                  <div className="df2-settings-grid df2-mt-md">
+                    <div className="df2-settings-field"><label>Entity ID</label><input className="df2-input" value={ssoDraft.entity_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, entity_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>SSO URL</label><input className="df2-input" value={ssoDraft.sso_url ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, sso_url: e.target.value })} /></div>
+                    <div className="df2-settings-field df2-settings-field--full"><label>IdP X.509 certificate</label><textarea className="df2-input" rows={4} placeholder="Paste certificate PEM" value={ssoDraft.x509_cert ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, x509_cert: e.target.value })} /></div>
+                  </div>
+                )}
+                {ssoEditor === "oidc" && (
+                  <div className="df2-settings-grid df2-mt-md">
+                    <div className="df2-settings-field"><label>Issuer URL</label><input className="df2-input" placeholder="https://accounts.google.com" value={ssoDraft.issuer ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, issuer: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client ID</label><input className="df2-input" value={ssoDraft.client_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client secret</label><input className="df2-input" type="password" placeholder="Leave blank to keep existing" value={ssoDraft.client_secret ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_secret: e.target.value })} /></div>
+                    <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
+                  </div>
+                )}
+                {ssoEditor === "azure_ad" && (
+                  <div className="df2-settings-grid df2-mt-md">
+                    <div className="df2-settings-field"><label>Tenant ID</label><input className="df2-input" value={ssoDraft.tenant_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, tenant_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client ID</label><input className="df2-input" value={ssoDraft.client_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client secret</label><input className="df2-input" type="password" placeholder="Leave blank to keep existing" value={ssoDraft.client_secret ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_secret: e.target.value })} /></div>
+                    <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
+                  </div>
+                )}
               </div>
               <div className="df2-card-footer">
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-primary"
-                  onClick={() => toast({ title: "Settings saved", message: "Organization preferences updated.", tone: "success" })}
-                >
-                  Save changes
+                <button type="button" className="df2-btn df2-btn-ghost" onClick={() => void testSsoConfig(ssoEditor).then((r) => toast({ title: r.ok ? "SSO ready" : "SSO incomplete", message: r.message, tone: r.ok ? "success" : "warning" }))}>
+                  Test configuration
+                </button>
+                <button type="button" className="df2-btn df2-btn-primary" disabled={ssoSaving} onClick={() => void saveSsoConfig()}>
+                  {ssoSaving ? "Saving…" : "Save SSO settings"}
                 </button>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
-          {tab === "security" && (
-            <div className="df2-card">
-              <div className="df2-card-head"><h2 className="df2-card-title">Security & compliance</h2></div>
-              <div className="df2-card-body df2-stack" style={{ gap: 16 }}>
-                {[
-                  { title: "Encryption at rest", desc: "AES-256 for stored connector credentials", on: true },
-                  { title: "Audit logging", desc: "Transfer and configuration event trail", on: true },
-                  { title: "PII detection", desc: "Sensitive column tagging at ingest", on: true },
-                  { title: "IP allowlisting", desc: "Restrict API access to approved ranges", on: false },
-                ].map((item) => (
-                  <div key={item.title} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{item.title}</div>
-                      <div style={{ fontSize: 13, color: "#64748b" }}>{item.desc}</div>
-                    </div>
-                    <span className={`df2-badge ${item.on ? "df2-badge-live" : "df2-badge-muted"}`}>
-                      {item.on ? "Enabled" : "Disabled"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {tab === "auth" && (
-            <div className="df2-card">
-              <div className="df2-card-head"><h2 className="df2-card-title">Authentication & SSO</h2></div>
-              <div className="df2-empty">
-                <DtIcon name="shield" size={28} />
-                <h3 className="df2-empty-title">Enterprise SSO</h3>
-                <p className="df2-empty-desc">Configure SAML 2.0 or OIDC with Azure AD, Okta, or Google Workspace.</p>
-                <button type="button" className="df2-btn df2-btn-primary">Configure SSO provider</button>
-              </div>
-            </div>
-          )}
-
-          {tab === "team" && (
-            <div className="df2-card">
-              <div className="df2-card-head">
-                <h2 className="df2-card-title">Team members</h2>
-                <button type="button" className="df2-btn df2-btn-sm"><DtIcon name="plus" size={14} /> Invite</button>
-              </div>
-              <div className="df2-card-body">
-                <div className="df2-cell-main">
-                  <div className="df2-cell-icon">A</div>
-                  <div style={{ flex: 1 }}>
-                    <div className="df2-cell-title">Admin</div>
-                    <div className="df2-cell-meta">admin@dataflow.local</div>
-                  </div>
-                  <span className="df2-badge df2-badge-beta">Owner</span>
-                  <span className="df2-badge df2-badge-live">Active</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {tab === "models" && (
-            <div className="df2-stack">
-              <div className="df2-model-ops">
+        {aiEditor && (
+          <div className="dt-modal-overlay" onClick={() => setAiEditor(null)} role="presentation">
+            <div className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+              <div className="dt-modal-header">
                 <div>
-                  <span className="df2-rail-kicker">Active model route</span>
-                  <h2>{modelCapabilities?.agent_mode ?? "local_tools"}</h2>
-                  <p>
-                    {modelCapabilities
-                      ? `${modelCapabilities.active_provider} · ${modelCapabilities.active_model}`
-                      : "Local deterministic engine active while model status loads."}
-                  </p>
+                  <h2 className="dt-modal-title">Configure {aiEditor}</h2>
+                  <p className="dt-modal-subtitle">API keys are encrypted at rest. Leave key blank to keep the existing value.</p>
                 </div>
-                <div className="df2-model-route">
-                  {(modelCapabilities?.fallback_order ?? ["anthropic", "openai", "ollama", "rag", "local"]).map((provider, index) => (
-                    <span key={provider}>
-                      {index > 0 && <i />}
-                      <strong>{provider}</strong>
-                    </span>
-                  ))}
+                <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setAiEditor(null)} aria-label="Close">
+                  <DtIcon name="x" />
+                </button>
+              </div>
+              <div className="dt-modal-body">
+                <div className="df2-settings-grid">
+                  {aiEditor !== "ollama" && (
+                    <div className="df2-settings-field df2-settings-field--full">
+                      <label>API key</label>
+                      <input className="df2-input" type="password" placeholder="sk-… or leave blank to keep existing" value={aiDraft.api_key} onChange={(e) => setAiDraft({ ...aiDraft, api_key: e.target.value })} />
+                    </div>
+                  )}
+                  <div className="df2-settings-field">
+                    <label>Model</label>
+                    <input className="df2-input" value={aiDraft.model} onChange={(e) => setAiDraft({ ...aiDraft, model: e.target.value })} />
+                  </div>
+                  {aiEditor === "ollama" && (
+                    <div className="df2-settings-field">
+                      <label>Base URL</label>
+                      <input className="df2-input" value={aiDraft.base_url} onChange={(e) => setAiDraft({ ...aiDraft, base_url: e.target.value })} />
+                    </div>
+                  )}
                 </div>
               </div>
-
-              <div className="df2-model-grid">
-                {(modelCapabilities?.providers ?? MODEL_PROVIDER_FALLBACKS).map((provider) => (
-                  <article key={provider.provider} className={`df2-model-card ${provider.available ? "ready" : ""}`}>
-                    <div className="df2-model-card-head">
-                      <div>
-                        <h3>{provider.label}</h3>
-                        <p>{provider.default_model}</p>
-                      </div>
-                      <span className={`df2-badge ${provider.available ? "df2-badge-live" : provider.tier === "cloud" ? "df2-badge-run" : "df2-badge-muted"}`}>
-                        {provider.available ? "Ready" : provider.status}
-                      </span>
-                    </div>
-                    <p className="df2-model-best">{provider.best_for}</p>
-                    <div className="df2-model-roles">
-                      {provider.roles.slice(0, 4).map((role) => (
-                        <span key={role}>{role.replace(/_/g, " ")}</span>
-                      ))}
-                    </div>
-                    <div className="df2-model-checks">
-                      <span>{provider.configured ? "Key configured" : provider.tier === "cloud" ? "Key missing" : "No key needed"}</span>
-                      <span>{provider.package_installed ? "SDK installed" : "SDK missing"}</span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-
-              <div className="df2-card">
-                <div className="df2-card-head">
-                  <h2 className="df2-card-title">Model governance guarantees</h2>
-                </div>
-                <div className="df2-card-body df2-cap-list">
-                  {(modelCapabilities?.guarantees ?? [
-                    "Cloud models are used only when credentials are configured.",
-                    "Preflight and schema blockers remain deterministic.",
-                    "Ambiguous mappings require review.",
-                  ]).map((item) => (
-                    <div key={item} className="df2-cap-item"><DtIcon name="shield" size={16} /> {item}</div>
-                  ))}
-                </div>
+              <div className="df2-card-footer">
+                <button type="button" className="df2-btn df2-btn-primary" disabled={aiSaving} onClick={() => void saveAiProvider()}>
+                  {aiSaving ? "Saving…" : "Save provider settings"}
+                </button>
               </div>
             </div>
-          )}
-
-          {tab === "api" && (
-            <div className="df2-card">
-              <div className="df2-card-head">
-                <h2 className="df2-card-title">API keys</h2>
-                <button type="button" className="df2-btn df2-btn-primary df2-btn-sm"><DtIcon name="plus" size={14} /> Generate key</button>
-              </div>
-              <div className="df2-card-body">
-                <div className="df2-field">
-                  <label className="df2-label">Production API key</label>
-                  <input className="df2-input" style={{ fontFamily: "var(--df-font-mono)" }} readOnly value="df_live_••••••••••••••••••••••••" />
-                  <p style={{ margin: 0, fontSize: 12, color: "#94a3b8" }}>Authorization: Bearer &lt;key&gt;</p>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+          </div>
+        )}
+      </PageFrame>
     </PageShell>
   );
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from connectors.base import ConnectResult
+from connectors.driver_guard import platform_driver_unavailable
 
 
 def test_mysql(
@@ -58,6 +59,6 @@ def _stub_fallback(host: str, database: str, username: str) -> ConnectResult:
     return ConnectResult(
         ok=False,
         tables=[],
-        error="MySQL driver not installed — pip install pymysql",
+        error=platform_driver_unavailable("MySQL"),
         driver="none",
     )

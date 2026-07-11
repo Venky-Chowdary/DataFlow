@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .adapters import parse_file_content, read_source_database, resolve_connector_config
+from .adapters import mongodb_connection_string, parse_file_content, probe_mongodb, read_source_database, resolve_connector_config
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 
@@ -75,17 +75,13 @@ def introspect_endpoint(
 
     if fmt == "mongodb":
         try:
-            from ..services.mongodb_service import get_mongodb_service
+            from pymongo import MongoClient
 
-            mongo = get_mongodb_service()
-            if endpoint.connector_id:
-                client, _ = mongo.get_client_for_connector(endpoint.connector_id)
-            else:
-                mongo.connect()
-                client = mongo.client
-            if not client:
-                out["message"] = "MongoDB connection failed"
+            ok, msg = probe_mongodb(cfg)
+            if not ok:
+                out["message"] = msg
                 return out
+            client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
             db_name = endpoint.database or cfg["database"] or "test"
             db = client[db_name]
             colls = db.list_collection_names()
@@ -94,8 +90,7 @@ def introspect_endpoint(
             out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
             if endpoint.collection:
                 _attach_db_sample(out, endpoint)
-            if endpoint.connector_id and client:
-                client.close()
+            client.close()
         except Exception as e:
             out["message"] = str(e)
         return out
@@ -162,18 +157,213 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
+    if fmt == "redshift":
+        from connectors.redshift import test_redshift
+
+        probe = test_redshift(
+            host=cfg["host"], port=cfg["port"] or 5439, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", "public"), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if endpoint.table and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "s3":
+        from connectors.s3 import test_s3
+
+        probe = test_s3(
+            host=cfg["host"], port=cfg["port"] or 443, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "object"} for t in probe.tables]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        key = endpoint.table or endpoint.collection
+        if key and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "gcs":
+        from connectors.gcs import test_gcs
+
+        probe = test_gcs(
+            host=cfg["host"], port=cfg["port"] or 443, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "object"} for t in probe.tables]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        key = endpoint.table or endpoint.collection
+        if key and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "dynamodb":
+        from connectors.dynamodb import test_dynamodb
+
+        probe = test_dynamodb(
+            host=cfg["host"], port=cfg["port"] or 443, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "redis":
+        from connectors.redis_kv import test_redis
+
+        probe = test_redis(
+            host=cfg["host"], port=cfg["port"] or 6379, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "keyspace"} for t in probe.tables]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        return out
+
+    if fmt == "elasticsearch":
+        from connectors.elasticsearch import test_elasticsearch
+
+        probe = test_elasticsearch(
+            host=cfg["host"], port=cfg["port"] or 9200, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "index"} for t in probe.tables if not t.startswith("(")]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if endpoint.database and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
 
 
-def _attach_db_sample(out: dict, endpoint: EndpointConfig) -> None:
+def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 200) -> None:
+    """Bounded schema discovery — safe for million-row tables."""
     try:
-        records, columns, schema = read_source_database(endpoint)
-        out["columns"] = columns
-        out["schema"] = schema
-        out["row_estimate"] = len(records)
+        cfg = resolve_connector_config(endpoint)
+        fmt = (endpoint.format or "").lower()
+
+        if fmt == "mongodb":
+            from pymongo import MongoClient
+
+            coll_name = endpoint.collection
+            if not coll_name:
+                return
+            client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
+            db = client[endpoint.database or cfg["database"] or "test"]
+            coll = db[coll_name]
+            records = list(coll.find().limit(sample_limit))
+            for r in records:
+                if "_id" in r:
+                    r["_id"] = str(r["_id"])
+            columns = list(records[0].keys()) if records else []
+            out["columns"] = columns
+            out["schema"] = {c: "string" for c in columns}
+            out["row_estimate"] = coll.estimated_document_count() if columns else 0
+            out["table_exists"] = bool(columns)
+            client.close()
+            return
+
+        if fmt == "redis":
+            from connectors.redis_reader import read_keys_batch
+
+            pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
+            batch = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
+            out["columns"] = batch.headers
+            out["schema"] = {c: "string" for c in batch.headers}
+            out["row_estimate"] = batch.total_rows
+            out["table_exists"] = batch.total_rows > 0
+            return
+
+        if fmt == "s3":
+            from connectors.s3_reader import read_object
+
+            bucket = cfg["database"]
+            key = endpoint.table or endpoint.collection or ""
+            if bucket and key:
+                batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
+                out["columns"] = batch.headers
+                out["schema"] = {c: "string" for c in batch.headers}
+                out["row_estimate"] = batch.total_rows
+                out["table_exists"] = True
+            return
+
+        if fmt == "gcs":
+            from connectors.gcs_reader import read_object
+
+            bucket = cfg["database"]
+            key = endpoint.table or endpoint.collection or ""
+            if bucket and key:
+                batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
+                out["columns"] = batch.headers
+                out["schema"] = {c: "string" for c in batch.headers}
+                out["row_estimate"] = batch.total_rows
+                out["table_exists"] = True
+            return
+
+        if fmt == "dynamodb":
+            from connectors.dynamodb_reader import describe_table_schema, estimate_item_count
+
+            table = endpoint.database or endpoint.table
+            if table:
+                try:
+                    names, schema_map = describe_table_schema(cfg, table)
+                    out["columns"] = names
+                    out["schema"] = schema_map
+                    out["row_estimate"] = estimate_item_count(cfg, table)
+                    out["table_exists"] = True
+                except Exception:
+                    from connectors.dynamodb_reader import read_all_paginated
+
+                    batch = read_all_paginated(cfg, table, limit=sample_limit)
+                    out["columns"] = batch.headers
+                    out["schema"] = {c: "string" for c in batch.headers}
+                    out["row_estimate"] = batch.total_rows
+                    out["table_exists"] = batch.total_rows > 0
+            return
+
+        if fmt == "elasticsearch":
+            from connectors.elasticsearch_reader import read_index_batch
+
+            index = endpoint.database or endpoint.table
+            if index:
+                batch = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
+                out["columns"] = batch.headers
+                out["schema"] = {c: "string" for c in batch.headers}
+                out["row_estimate"] = batch.total_rows
+                out["table_exists"] = batch.total_rows > 0
+            return
+
+        table = endpoint.table or endpoint.collection
+        if not table:
+            return
+        schema_map = _introspect_table_schema(fmt, cfg, table, [])
+        if schema_map:
+            out["columns"] = list(schema_map.keys())
+            out["schema"] = schema_map
+            out["table_exists"] = True
     except Exception as e:
-        out["message"] = f"{out.get('message', '')} · sample read failed: {e}"
+        out["message"] = f"{out.get('message', '')} · schema probe: {e}"
 
 
 def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, source_info: dict) -> dict:
@@ -222,6 +412,44 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
     elif destination.kind == "file_export":
         plan["destination"] = introspect_endpoint(destination)
         plan["auto_create"].append(f"Export file as `{dst_fmt}` in server exports folder")
+        try:
+            from services.format_converter import can_convert
+            from services.universal_router import analyze_route
+
+            route = analyze_route(source.kind, src_fmt, destination.kind, dst_fmt)
+            plan["route"] = route
+            if route.get("conversion_needed"):
+                plan["format_conversion"] = {
+                    "from": src_fmt,
+                    "to": dst_fmt,
+                    "supported": can_convert(src_fmt, dst_fmt),
+                }
+        except Exception:
+            pass
+
+    if columns:
+        try:
+            from services.mapping_pipeline import run_mapping_pipeline
+
+            dest_cols = plan.get("destination", {}).get("columns") or []
+            preview = run_mapping_pipeline(
+                columns,
+                dest_cols,
+                source_schemas=[
+                    {"name": c, "inferred_type": schema.get(c, "VARCHAR"), "samples": []}
+                    for c in columns
+                ],
+                target_schemas=[
+                    {"name": c, "inferred_type": plan.get("destination", {}).get("schema", {}).get(c, "VARCHAR"), "samples": []}
+                    for c in dest_cols
+                ] if dest_cols else None,
+                file_format=src_fmt if source.kind == "file" else None,
+                confidence_threshold=0.75,
+            )
+            plan["mapping_preview"] = preview["mappings"][:20]
+            plan["mapping_agents"] = preview.get("agents_used", [])
+        except Exception:
+            pass
 
     return plan
 
