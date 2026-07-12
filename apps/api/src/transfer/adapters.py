@@ -749,10 +749,10 @@ def write_destination_file(
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
     elif fmt == "excel":
-        content, _ = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
+        content, _ = convert_rows(export_columns, grid, source_format="csv", target_format=fmt)
         filename = "export.xlsx"
     elif fmt == "parquet":
-        content, _ = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
+        content, _ = convert_rows(export_columns, grid, source_format="csv", target_format=fmt)
         filename = "export.parquet"
     else:
         records = [{c: _to_json_value(v) for c, v in r.items()} for r in export_records]
