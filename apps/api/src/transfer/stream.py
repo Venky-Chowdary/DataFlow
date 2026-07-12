@@ -43,7 +43,7 @@ def _source_name(source: EndpointConfig) -> str:
     if fmt == "mongodb":
         return source.collection or source.table or ""
     if fmt == "dynamodb":
-        return source.database or source.table or ""
+        return source.table or source.collection or source.database or ""
     if fmt == "elasticsearch":
         return source.database or source.table or source.collection or ""
     if fmt == "s3":

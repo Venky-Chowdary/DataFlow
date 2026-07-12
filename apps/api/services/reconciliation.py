@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+from services.transform_engine import _parse_date, _parse_datetime
 
 
 @dataclass
@@ -339,10 +343,30 @@ def normalize_cell(value: Any) -> str:
         return str(value)
     if isinstance(value, Decimal):
         return _canonicalize_number(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True, default=str)
     text = str(value).strip()
     canonical = _canonicalize_number(text)
     if canonical is not None:
         return canonical
+    # Normalize JSON payloads (e.g. jsonb) to a canonical string.
+    if text.startswith(("{", "[")):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(parsed, sort_keys=True, default=str)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Normalize date/time formatting differences ("T" vs " ", "Z" vs "+00:00", etc.).
+    if text:
+        dt = _parse_date(text)
+        if dt:
+            return dt
+        dtm = _parse_datetime(text)
+        if dtm:
+            return dtm
     return text
 
 

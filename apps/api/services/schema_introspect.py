@@ -522,7 +522,7 @@ def _sf_to_logical(dtype: str) -> str:
     return "TEXT"
 
 
-def _sample_logical_type(value: Any) -> str:
+def _sample_logical_type(value: Any, key: str = "") -> str:
     if value is None:
         return "TEXT"
     if isinstance(value, bool):
@@ -541,23 +541,37 @@ def _sample_logical_type(value: Any) -> str:
         return "ARRAY"
     if isinstance(value, dict):
         return "OBJECT"
+    if isinstance(value, str):
+        from services.schema_inference import infer_type
+
+        inferred = infer_type([value], field_name=key)
+        if inferred == "JSON":
+            return "OBJECT"
+        if inferred == "VARCHAR":
+            return "TEXT"
+        return inferred
     return "TEXT"
 
 
 def _widen_mongodb_type(current: str, observed: str) -> str:
     """Widen inferred type across sampled documents; prefer more specific type.
 
-    TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE.
+    TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE,
+    UUID/BINARY/OBJECT are retained when observed.
     """
     order = {
         "TEXT": 0,
+        "VARCHAR": 0,
         "BOOLEAN": 1,
         "INTEGER": 2,
         "DECIMAL": 3,
         "DATE": 4,
-        "TIMESTAMP": 5,
-        "ARRAY": 6,
-        "OBJECT": 7,
+        "UUID": 5,
+        "TIMESTAMP": 6,
+        "BINARY": 7,
+        "ARRAY": 8,
+        "OBJECT": 9,
+        "JSON": 9,
     }
     return observed if order.get(observed, 0) > order.get(current, 0) else current
 
@@ -587,7 +601,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                 if "_id" in doc:
                     doc["_id"] = str(doc["_id"])
                 for key, val in doc.items():
-                    inferred = _sample_logical_type(val)
+                    inferred = _sample_logical_type(val, key)
                     if key not in columns:
                         columns[key] = {"name": key, "inferred_type": inferred, "nullable": True}
                     else:

@@ -136,9 +136,17 @@ def analyze_dataset_quality(
     all_issues: list[str] = []
     blocking = False
 
+    def _hash(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list, tuple, set)):
+            import json as _json
+            return _json.dumps(value, sort_keys=True, default=str)
+        return str(value)
+
     key_signature_counts: dict[tuple[Any, ...], int] = {}
     for row in sample:
-        signature = tuple(row.get(col, "") for col in columns)
+        signature = tuple(_hash(row.get(col, "")) for col in columns)
         key_signature_counts[signature] = key_signature_counts.get(signature, 0) + 1
     duplicate_row_count = sum(count - 1 for count in key_signature_counts.values() if count > 1)
     if duplicate_row_count > 0:

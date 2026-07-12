@@ -60,6 +60,9 @@ def _is_base64(value: str) -> bool:
         return False
     if s.isalpha() and len(s) > 32:
         return False
+    # Pure hex strings (e.g. ObjectId, hashes) are not base64 payloads.
+    if all(c in "0123456789abcdefABCDEF" for c in s):
+        return False
     return True
 
 
