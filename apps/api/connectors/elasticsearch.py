@@ -53,11 +53,8 @@ def test_elasticsearch(
             if client.indices.exists(index=index_hint):
                 indices = [index_hint]
             else:
-                return ConnectResult(
-                    ok=False,
-                    tables=[],
-                    error=f"Index `{index_hint}` not found (cluster status: {status}).",
-                )
+                # The writer will create the index on demand; allow destination probes to pass.
+                indices = [index_hint]
         else:
             cat = client.cat.indices(format="json", h="index")
             indices = [row["index"] for row in cat[:20] if not row["index"].startswith(".")]
