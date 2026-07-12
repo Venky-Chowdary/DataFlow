@@ -9,10 +9,10 @@
       "dest_table": "data",
       "interval": "daily",
       "enabled": true,
-      "last_run_at": "2026-07-10T23:42:58.157564+00:00",
-      "next_run_at": "2026-07-11T23:42:58.157564+00:00",
-      "last_job_id": "6a518381c496940a95973365",
-      "run_count": 2,
+      "last_run_at": "2026-07-12T01:48:32.215484+00:00",
+      "next_run_at": "2026-07-13T01:48:32.215484+00:00",
+      "last_job_id": "6a52f2705484ffa4ac00f990",
+      "run_count": 3,
       "created_at": "2026-07-09T23:42:01.127408+00:00"
     }
   ]

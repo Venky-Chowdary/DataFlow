@@ -319,6 +319,10 @@ def _logical_type_from_sa(col_type: Any) -> str:
     if isinstance(col_type, (sa.Boolean,)):
         return "boolean"
 
+    # MySQL-style TINYINT(1) is conventionally boolean.
+    if "tinyint" in repr_ and getattr(col_type, "display_width", 0) == 1:
+        return "boolean"
+
     if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
         return "integer"
 
