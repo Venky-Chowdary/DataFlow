@@ -235,7 +235,7 @@ class UniversalTransferEngine:
                     columns,
                     source_format=src_fmt,
                     mappings=mappings,
-                    column_types=request.column_types,
+                    column_types=request.column_types or schema,
                 )
                 rows_written = len(records)
                 export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")

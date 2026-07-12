@@ -427,6 +427,8 @@ def _pg_to_logical(dtype: str) -> str:
         return "DATE"
     if "timestamp" in d:
         return "TIMESTAMP"
+    if "json" in d:
+        return "JSON"
     return "TEXT"
 
 

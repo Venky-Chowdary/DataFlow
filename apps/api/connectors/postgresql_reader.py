@@ -16,6 +16,17 @@ def _ensure_psycopg2() -> None:
         raise RuntimeError(require_driver("psycopg2", "psycopg2-binary")) from exc
 
 
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        import json
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
 @dataclass
 class ReadBatch:
     headers: list[str]
@@ -122,7 +133,7 @@ def read_table_batch(
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            rows = [["" if v is None else str(v) for v in row] for row in fetched]
+            rows = [[_cell(v) for v in row] for row in fetched]
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -216,7 +227,7 @@ def read_table_cursor_batch(
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            rows = [["" if v is None else str(v) for v in row] for row in fetched]
+            rows = [[_cell(v) for v in row] for row in fetched]
             return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
     finally:
         conn.close()

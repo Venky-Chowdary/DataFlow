@@ -716,6 +716,19 @@ def write_destination_file(
             "mapped": bool(mappings),
         }
 
+    def _to_json_value(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return value
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return value
+        return value
+
     if fmt == "csv":
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
@@ -731,7 +744,8 @@ def write_destination_file(
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
     elif fmt == "jsonl":
-        lines = [json.dumps(r, default=str) for r in export_records]
+        records = [{c: _to_json_value(v) for c, v in r.items()} for r in export_records]
+        lines = [json.dumps(r, default=str, ensure_ascii=False) for r in records]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
     elif fmt == "excel":
@@ -741,7 +755,8 @@ def write_destination_file(
         content, _ = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
         filename = "export.parquet"
     else:
-        content = json.dumps(export_records, indent=2, default=str).encode("utf-8")
+        records = [{c: _to_json_value(v) for c, v in r.items()} for r in export_records]
+        content = json.dumps(records, indent=2, default=str, ensure_ascii=False).encode("utf-8")
         filename = "export.json"
     return content, filename, {
         "format": fmt,
