@@ -283,9 +283,12 @@ def _schema_name(cfg: dict[str, Any]) -> str | None:
     schema = cfg.get("schema") or ""
     db_type = (cfg.get("type") or "").lower()
     connection_string = (cfg.get("connection_string") or "").lower()
-    # SQLite and DuckDB do not support a 'public' schema; use the default schema.
+    # MySQL, MariaDB, SQLite and DuckDB do not use schemas; database is in the URL.
     if (
-        db_type == "sqlite"
+        db_type == "mysql"
+        or db_type == "mariadb"
+        or connection_string.startswith("mysql")
+        or db_type == "sqlite"
         or connection_string.startswith("sqlite://")
         or db_type == "duckdb"
         or connection_string.startswith("duckdb:")
