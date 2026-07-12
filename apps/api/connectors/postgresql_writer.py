@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import json
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.postgresql_conn import get_connection
@@ -33,6 +36,40 @@ class WriteResult:
 
 def pg_type(inferred: str) -> str:
     return ddl_type("postgresql", inferred)
+
+
+def _copy_text_value(value: Any) -> str:
+    if value is None:
+        return "\\N"
+    if isinstance(value, bool):
+        return "t" if value else "f"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bytes):
+        return "\\x" + value.hex()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def _copy_rows(cur, schema: str, table_name: str, columns: list[str], rows: list[tuple]) -> None:
+    from psycopg2 import sql
+
+    cols_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
+    copy_sql = sql.SQL("COPY {}.{} ({}) FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')").format(
+        sql.Identifier(schema),
+        sql.Identifier(table_name),
+        cols_sql,
+    )
+    buf = io.StringIO()
+    for row in rows:
+        buf.write("\t".join(_copy_text_value(v) for v in row))
+        buf.write("\n")
+    buf.seek(0)
+    cur.copy_expert(copy_sql, buf)
 
 
 def write_mapped_rows(
@@ -171,6 +208,12 @@ def write_mapped_rows(
             total = len(mapped_rows)
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
             written = 0
+            use_copy = (
+                write_mode == "insert"
+                and not conflict_columns
+                and not any(t == "BYTEA" for t in target_types)
+                and port != 5439
+            )
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE
@@ -178,34 +221,44 @@ def write_mapped_rows(
                 if not batch:
                     break
 
-                placeholders = sql.SQL(", ").join(sql.Placeholder() * len(target_cols))
-                if write_mode == "upsert" and conflict_columns:
-                    conflict = [c for c in conflict_columns if c in target_cols]
-                    if conflict:
-                        update_cols = [c for c in target_cols if c not in conflict]
-                        if update_cols:
-                            insert = sql.SQL(
-                                "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
-                            ).format(
-                                sql.Identifier(schema),
-                                sql.Identifier(table_name),
-                                sql.SQL(", ").join(map(sql.Identifier, target_cols)),
-                                placeholders,
-                                sql.SQL(", ").join(map(sql.Identifier, conflict)),
-                                sql.SQL(", ").join(
-                                    sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
-                                    for c in update_cols
-                                ),
-                            )
+                if use_copy:
+                    _copy_rows(cur, schema, table_name, target_cols, batch)
+                else:
+                    placeholders = sql.SQL(", ").join(sql.Placeholder() * len(target_cols))
+                    if write_mode == "upsert" and conflict_columns:
+                        conflict = [c for c in conflict_columns if c in target_cols]
+                        if conflict:
+                            update_cols = [c for c in target_cols if c not in conflict]
+                            if update_cols:
+                                insert = sql.SQL(
+                                    "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
+                                ).format(
+                                    sql.Identifier(schema),
+                                    sql.Identifier(table_name),
+                                    sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                                    placeholders,
+                                    sql.SQL(", ").join(map(sql.Identifier, conflict)),
+                                    sql.SQL(", ").join(
+                                        sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
+                                        for c in update_cols
+                                    ),
+                                )
+                            else:
+                                insert = sql.SQL(
+                                    "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"
+                                ).format(
+                                    sql.Identifier(schema),
+                                    sql.Identifier(table_name),
+                                    sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                                    placeholders,
+                                    sql.SQL(", ").join(map(sql.Identifier, conflict)),
+                                )
                         else:
-                            insert = sql.SQL(
-                                "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"
-                            ).format(
+                            insert = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
                                 sql.Identifier(schema),
                                 sql.Identifier(table_name),
                                 sql.SQL(", ").join(map(sql.Identifier, target_cols)),
                                 placeholders,
-                                sql.SQL(", ").join(map(sql.Identifier, conflict)),
                             )
                     else:
                         insert = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
@@ -214,14 +267,7 @@ def write_mapped_rows(
                             sql.SQL(", ").join(map(sql.Identifier, target_cols)),
                             placeholders,
                         )
-                else:
-                    insert = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
-                        sql.Identifier(schema),
-                        sql.Identifier(table_name),
-                        sql.SQL(", ").join(map(sql.Identifier, target_cols)),
-                        placeholders,
-                    )
-                cur.executemany(insert, batch)
+                    cur.executemany(insert, batch)
                 conn.commit()
                 written += len(batch)
                 if on_checkpoint:
