@@ -401,8 +401,9 @@ def infer_expectations_for_schema(
             # primary `_id`; other `*_id` fields are normal FKs and may repeat.
             if schemaless and not is_primary and col.lower() != "_id":
                 continue
-            specs.append({"fn": "expect_column_unique", "column": col, "severity": "block"})
-            specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.0})
+            severity = "block" if is_primary else "warn"
+            specs.append({"fn": "expect_column_unique", "column": col, "severity": severity})
+            specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.0, "severity": severity})
         if t in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "NUMBER"}:
             if re.search(r"amount|price|total|balance|amt|revenue", col, re.I):
                 specs.append({
