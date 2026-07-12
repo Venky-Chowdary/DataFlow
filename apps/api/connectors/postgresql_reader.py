@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
@@ -27,6 +28,11 @@ def _cell(value: Any) -> str:
     if isinstance(value, (bytes, memoryview)):
         import base64
         return base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, Decimal):
+        try:
+            return format(value.normalize(), "f")
+        except Exception:
+            return str(value)
     return str(value)
 
 

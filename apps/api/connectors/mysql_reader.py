@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from connectors.mysql_conn import get_connection
@@ -20,6 +21,11 @@ def _cell(value: Any) -> str:
         import base64
 
         return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Decimal):
+        try:
+            return format(value.normalize(), "f")
+        except Exception:
+            return str(value)
     return str(value)
 
 

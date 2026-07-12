@@ -458,8 +458,8 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         if db_type == "questdb":
             return sa.Float()
         if db_type == "presto":
-            return sa.DECIMAL(38, 10)
-        return _maybe_nullable(sa.Numeric(38, 10))
+            return sa.DECIMAL(38, 15)
+        return _maybe_nullable(sa.Numeric(38, 15))
     if t == "boolean":
         return _maybe_nullable(sa.Boolean())
     if t == "date":
@@ -659,7 +659,12 @@ def _cell_to_string(value: Any) -> str:
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, Decimal):
-        return str(value)
+        # Normalize trailing fractional zeros so MySQL DECIMAL(38,15) padding
+        # does not propagate as a data change to other targets.
+        try:
+            return format(value.normalize(), "f")
+        except Exception:
+            return str(value)
     if isinstance(value, datetime) and value.tzinfo is None and value.time() == time():
         return value.date().isoformat()
     return str(value)
