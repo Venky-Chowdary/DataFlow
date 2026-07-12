@@ -64,6 +64,7 @@ interface TransferPageProps {
   connectors: Connector[];
   onTransferComplete: () => void;
   onOpenSchedules?: () => void;
+  onOpenJobs?: () => void;
 }
 
 const STEP_SOURCE = 1;
@@ -162,7 +163,7 @@ function analysisFromPipeline(
   };
 }
 
-export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }: TransferPageProps) {
+export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, onOpenJobs }: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
@@ -1398,14 +1399,13 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         planId: persistedPlanId ?? undefined,
       });
       if (data.job_id && (data as { async?: boolean }).async) {
-        setTransferLaunch({
-          jobId: data.job_id,
-          rows: parsed?.row_count ?? sourceRowEstimate ?? 0,
-        });
+        setTransferLaunch(null);
+        setActiveJobId(data.job_id);
+        setStep(STEP_RUN);
         setTransferring(false);
         toast({
           title: "Transfer started",
-          message: "Review the summary, then open live progress when ready.",
+          message: "Live progress is streaming in the Run step.",
           tone: "success",
         });
         return;
@@ -1429,6 +1429,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
   const handleJobComplete = (job: JobProgress) => {
     setActiveJobId(null);
+    setTransferLaunch(null);
     setResult({
       success: job.status === "completed",
       records_transferred: job.records_processed,
@@ -1440,6 +1441,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       },
       destination_summary: job.destination_summary as TransferResult["destination_summary"],
     });
+    setStep(STEP_RUN);
     if (job.status === "completed") onTransferComplete();
   };
 
@@ -1694,6 +1696,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           mappingReviewCount={mappingReviewCount}
           confidenceThreshold={confidenceThreshold}
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
+          sampleRows={samplePreviewRows}
           sourceColumnCount={mapSourceColumnCount}
           llmUsed={llmMappingUsed}
           onChangeMappings={setColumnMappings}
@@ -2723,6 +2726,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 <button type="button" className="df2-btn df2-btn-primary" onClick={() => setStep(STEP_SOURCE)}>
                   <DtIcon name="plus" size={14} /> New transfer
                 </button>
+                {onOpenJobs && (
+                  <button type="button" className="df2-btn" onClick={() => onOpenJobs()}>
+                    <DtIcon name="jobs" size={14} /> View Job Theater
+                  </button>
+                )}
                 <button
                   type="button"
                   className="df2-btn"

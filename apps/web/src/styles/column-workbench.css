@@ -244,6 +244,46 @@
   padding-top: 8px;
 }
 
+.df2-column-review-data-preview {
+  flex-shrink: 0;
+  min-height: 0;
+  max-height: min(460px, 42vh);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.df2-column-review-data-preview .df2-structure-preview {
+  padding: 10px 12px;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-column-review-data-preview .df2-structure-preview-head {
+  margin-bottom: 8px;
+}
+
+.df2-column-review-data-preview .df2-structure-preview-head h4 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.df2-column-review-data-preview .df2-structure-preview-head p {
+  font-size: 11px;
+  margin: 2px 0 0;
+  color: #64748b;
+}
+
+.df2-column-review-data-preview .df2-structure-table-wrap {
+  flex: 1;
+  min-height: 0;
+  max-height: min(420px, 38vh);
+  overflow: auto;
+}
+
 .df2-column-review.is-editor .df2-column-workbench-filters {
   margin-bottom: 6px;
 }

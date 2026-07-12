@@ -8,6 +8,10 @@ interface StructurePreviewProps {
   rowCount?: number;
   title?: string;
   subtitle?: string;
+  maxRows?: number;
+  maxCols?: number;
+  showFieldStrip?: boolean;
+  showBadge?: boolean;
 }
 
 export function StructurePreview({
@@ -17,9 +21,13 @@ export function StructurePreview({
   rowCount,
   title = "Structure preview",
   subtitle,
+  maxRows = 10,
+  maxCols = 10,
+  showFieldStrip = true,
+  showBadge = false,
 }: StructurePreviewProps) {
-  const previewCols = columns.slice(0, 8);
-  const previewRows = rows.slice(0, 5);
+  const previewCols = columns.slice(0, maxCols);
+  const previewRows = rows.slice(0, maxRows);
 
   if (!columns.length) {
     return (
@@ -40,22 +48,26 @@ export function StructurePreview({
               ?? `${columns.length} fields${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""} · sample below`}
           </p>
         </div>
-        <span className="df2-badge df2-badge-live">
-          <DtIcon name="check" size={12} /> Detected
-        </span>
-      </div>
-
-      <div className="df2-structure-field-strip" aria-label="Detected fields">
-        {columns.slice(0, 12).map((col) => (
-          <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}>
-            <strong>{col}</strong>
-            <small className="df2-type-badge">{schema[col] || "string"}</small>
+        {showBadge && (
+          <span className="df2-badge df2-badge-live">
+            <DtIcon name="check" size={12} /> Detected
           </span>
-        ))}
-        {columns.length > 12 && (
-          <span className="df2-structure-field-chip muted">+{columns.length - 12} more</span>
         )}
       </div>
+
+      {showFieldStrip && (
+        <div className="df2-structure-field-strip" aria-label="Detected fields">
+          {columns.slice(0, maxCols).map((col) => (
+            <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}>
+              <strong>{col}</strong>
+              <small className="df2-type-badge">{schema[col] || "string"}</small>
+            </span>
+          ))}
+          {columns.length > maxCols && (
+            <span className="df2-structure-field-chip muted">+{columns.length - maxCols} more</span>
+          )}
+        </div>
+      )}
 
       {previewRows.length > 0 ? (
         <div className="df2-structure-table-wrap">

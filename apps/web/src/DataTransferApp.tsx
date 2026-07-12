@@ -441,10 +441,10 @@ function AppShell({
                   <TransferPage
                     connectors={connectors}
                     onOpenSchedules={() => setScreen("schedules")}
+                    onOpenJobs={() => setScreen("jobs")}
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
-                      setScreen("jobs");
                       toast({ title: "Transfer complete", message: "View progress in Job Theater.", tone: "success" });
                     }}
                   />

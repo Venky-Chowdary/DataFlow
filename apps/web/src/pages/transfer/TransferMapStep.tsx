@@ -24,6 +24,7 @@ interface TransferMapStepProps {
   mappingReviewCount: number;
   confidenceThreshold: number;
   rowCount?: number;
+  sampleRows?: Record<string, unknown>[];
   sourceColumnCount?: number;
   llmUsed?: boolean;
   onChangeMappings: (mappings: EditableMapping[]) => void;
@@ -52,6 +53,7 @@ export function TransferMapStep({
   mappingReviewCount,
   confidenceThreshold,
   rowCount,
+  sampleRows,
   llmUsed,
   onChangeMappings,
   onBack,
@@ -140,6 +142,7 @@ export function TransferMapStep({
               <ColumnReviewPanel
                 mappings={columnMappings}
                 rowCount={rowCount}
+                sampleRows={sampleRows}
                 confidenceThreshold={confidenceThreshold}
                 onChange={onChangeMappings}
                 destinationFields={destColumns}

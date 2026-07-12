@@ -1,5 +1,6 @@
 import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
+import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAPPING_TRANSFORMS,
@@ -22,6 +23,7 @@ import {
 interface ColumnReviewPanelProps {
   mappings: EditableMapping[];
   rowCount?: number;
+  sampleRows?: Record<string, unknown>[];
   onChange: (mappings: EditableMapping[]) => void;
   confidenceThreshold?: number;
   compact?: boolean;
@@ -57,6 +59,7 @@ const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
 export function ColumnReviewPanel({
   mappings,
   rowCount,
+  sampleRows,
   onChange,
   confidenceThreshold = 0.85,
   compact = false,
@@ -201,6 +204,23 @@ export function ColumnReviewPanel({
               <DtIcon name="check" size={14} /> Approve all {needsReview.length} flagged
             </button>
           )}
+        </div>
+      )}
+
+      {sampleRows && sampleRows.length > 0 && (
+        <div className="df2-column-review-data-preview">
+          <StructurePreview
+            columns={mappings.map((m) => m.source)}
+            schema={Object.fromEntries(mappings.map((m) => [m.source, m.inferredType || "string"]))}
+            rows={sampleRows}
+            rowCount={rowCount}
+            title="Source data preview"
+            subtitle={`First ${Math.min(sampleRows.length, 10).toLocaleString()} rows`}
+            showFieldStrip={false}
+            showBadge={false}
+            maxRows={10}
+            maxCols={10}
+          />
         </div>
       )}
 
