@@ -259,6 +259,10 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         database = cfg.get("database") or ""
         return f"sqlite:///{database or ':memory:'}"
 
+    if drivername == "duckdb":
+        database = cfg.get("database") or ""
+        return f"duckdb:////{database}" if database.startswith("/") else f"duckdb:///{database or ':memory:'}"
+
     port = int(cfg.get("port") or 0)
     if not port:
         port = _default_port(db_type)
