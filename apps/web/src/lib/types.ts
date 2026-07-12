@@ -97,7 +97,7 @@ export interface EnhancedAnalysis {
 
 export interface PreflightGate {
   id: string;
-  status: "pass" | "block" | "skip";
+  status: "pass" | "block" | "skip" | "running";
   message: string;
   duration_ms: number;
   details?: Record<string, unknown>;

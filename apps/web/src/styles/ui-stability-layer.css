@@ -452,6 +452,8 @@
 
 .df2-page-pipelines .df2-pipeline-card {
   min-height: 250px;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .df2-page-pipelines .df2-pipeline-card-head {
@@ -491,8 +493,13 @@
 
 .df2-page-pipelines .df2-pipeline-card-actions {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.df2-page-pipelines .df2-pipeline-card-actions button {
+  width: 100%;
+  justify-content: center;
 }
 
 .df2-page-settings .df2-settings-layout,

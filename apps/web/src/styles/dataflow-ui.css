@@ -22,6 +22,17 @@ body {
   letter-spacing: 0;
 }
 
+/* Base icon wrapper for DtIcon — ensures icons align with text in buttons and headings */
+.dt-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+}
+
 .dt-spinner {
   display: inline-block;
   width: 18px;
@@ -3738,6 +3749,11 @@ body {
   align-items: center;
 }
 
+.df2-preflight-head > div:last-child {
+  flex: 1;
+  min-width: 0;
+}
+
 .df2-preflight-score {
   position: relative;
   width: 80px;
@@ -3808,8 +3824,18 @@ body {
 .df2-preflight-step.pass .df2-preflight-marker { background: #ecfdf5; color: #059669; }
 .df2-preflight-step.block .df2-preflight-marker { background: #fef2f2; color: #dc2626; }
 
-.df2-preflight-step-title { font-size: 14px; font-weight: 600; color: #0f172a; }
+.df2-preflight-step-title { font-size: 14px; font-weight: 600; color: #0f172a; overflow-wrap: anywhere; }
 .df2-preflight-step-msg { font-size: 13px; color: #64748b; margin-top: 2px; overflow-wrap: anywhere; }
+
+.df2-preflight-step.running {
+  background: #f0f9ff;
+  border-left-color: #0ea5e9;
+}
+
+.df2-preflight-step.running .df2-preflight-marker {
+  background: #e0f2fe;
+  color: #0ea5e9;
+}
 
 @keyframes df2-fade-in {
   from { opacity: 0; transform: translateY(4px); }

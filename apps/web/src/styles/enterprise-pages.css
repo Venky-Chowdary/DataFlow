@@ -440,6 +440,8 @@
   padding: 16px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
   animation: df-fade-up 0.5s var(--df-ease-out) both;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 .df2-docs-orbit-head {

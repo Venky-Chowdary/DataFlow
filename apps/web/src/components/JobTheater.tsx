@@ -39,6 +39,14 @@ function formatDuration(ms: number): string {
   return `${m}m ${s % 60}s`;
 }
 
+function formatCompact(n: number): string {
+  try {
+    return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  } catch {
+    return n.toLocaleString();
+  }
+}
+
 export function JobTheater({
   jobId,
   sourceLabel,
@@ -65,7 +73,9 @@ export function JobTheater({
       (update) => {
         setJob((prev) => {
           if (update.message && update.message !== prev?.message) {
-            setLog((l) => [...l.slice(-40), `${new Date().toLocaleTimeString()} — ${update.message}`]);
+            setLog((l) => [...l.slice(-100), `${new Date().toLocaleTimeString()} — ${update.message}`]);
+          } else if (update.phase && update.phase !== prev?.phase && (!update.message || update.message === prev?.message)) {
+            setLog((l) => [...l.slice(-100), `${new Date().toLocaleTimeString()} — Phase ${update.phase}`]);
           }
           return update;
         });
@@ -162,17 +172,20 @@ export function JobTheater({
               <strong>{progress}%</strong>
               {total > 0 ? (
                 <>
-                  <small>{processed.toLocaleString()}</small>
-                  <small>{total.toLocaleString()}</small>
+                  <small>{formatCompact(processed)}</small>
+                  <small>{formatCompact(total)}</small>
                 </>
               ) : (
-                <small>{processed.toLocaleString()}</small>
+                <small>{formatCompact(processed)}</small>
               )}
             </div>
           </div>
           <div className="df2-theater-v3-progress-copy">
             <h3>{isComplete ? "Transfer complete" : isFailed ? "Transfer failed" : job.phase || "Running"}</h3>
             <p>{job.message || (isRunning ? "Streaming rows to destination…" : "Job finished")}</p>
+            <span className="df2-theater-v3-count">
+              {processed.toLocaleString()}{total > 0 ? ` / ${total.toLocaleString()} rows` : " rows processed"}
+            </span>
             {job.chunk_current != null && job.chunk_total != null && job.chunk_total > 0 && (
               <span className="df2-theater-v3-chunk">
                 Batch {job.chunk_current} of {job.chunk_total}

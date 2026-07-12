@@ -130,7 +130,7 @@ export function TransferResultDashboard({
         ) : null}
       </div>
 
-      {result.reconciliation && (result.reconciliation.message || result.reconciliation.source_checksum || result.reconciliation.target_checksum) && (
+      {result.reconciliation && (result.reconciliation.message || result.reconciliation.source_checksum || result.reconciliation.target_checksum || result.reconciliation.source_rows != null || result.reconciliation.target_rows != null) && (
         <div className="df2-result-section">
           <h4><DtIcon name="shield" size={14} /> Reconciliation</h4>
           {result.reconciliation.message && <p>{result.reconciliation.message}</p>}
@@ -142,6 +142,21 @@ export function TransferResultDashboard({
               <span>Target rows: {result.reconciliation.target_rows.toLocaleString()}</span>
             )}
           </div>
+          {(result.reconciliation.source_checksum || result.reconciliation.target_checksum) && (
+            <div className="df2-result-row">
+              {result.reconciliation.source_checksum && (
+                <span title={result.reconciliation.source_checksum}>Source checksum: {result.reconciliation.source_checksum.slice(0, 16)}…</span>
+              )}
+              {result.reconciliation.target_checksum && (
+                <span title={result.reconciliation.target_checksum}>Target checksum: {result.reconciliation.target_checksum.slice(0, 16)}…</span>
+              )}
+              {result.reconciliation.source_checksum && result.reconciliation.target_checksum && (
+                <span className={result.reconciliation.source_checksum === result.reconciliation.target_checksum ? "ok" : "warn"}>
+                  {result.reconciliation.source_checksum === result.reconciliation.target_checksum ? "Checksums match" : "Checksums differ"}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

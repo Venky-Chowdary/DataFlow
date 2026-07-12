@@ -399,6 +399,7 @@
 .df2-result-dashboard {
   width: 100%;
   max-width: 100%;
+  max-height: 100%;
   margin: 0;
   padding: 24px;
   display: flex;
@@ -406,6 +407,8 @@
   align-items: stretch;
   gap: 20px;
   text-align: left;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .df2-result-hero {
@@ -430,10 +433,9 @@
 }
 
 .df2-result-route-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
   gap: 20px;
   padding: 18px 22px;
   border-radius: 14px;
@@ -448,7 +450,11 @@
   gap: 12px;
   min-width: 0;
   text-align: left;
-  flex: 1;
+}
+
+.df2-result-endpoint:last-child {
+  justify-content: flex-end;
+  text-align: right;
 }
 
 .df2-result-endpoint > div {
@@ -563,6 +569,9 @@
   color: #64748b;
   margin-top: 8px;
 }
+
+.df2-result-row .ok { color: #059669; font-weight: 600; }
+.df2-result-row .warn { color: #d97706; font-weight: 600; }
 
 .df2-result-warnings,
 .df2-result-ddl {

@@ -43,10 +43,10 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
             {running ? (
               <>
                 <Spinner size="sm" label="" />
-                Running validation…
+                <span>Running validation…</span>
               </>
             ) : (
-              "Route intelligence and trust posture"
+              <span>Route intelligence and trust posture</span>
             )}
           </h3>
         </div>

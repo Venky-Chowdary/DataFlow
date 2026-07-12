@@ -48,11 +48,11 @@ function confidenceClass(c: number, threshold: number, approved: boolean): strin
 
 const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "review", label: "Needs review" },
+  { id: "review", label: "Review" },
   { id: "block", label: "Critical" },
-  { id: "warn", label: "Low confidence" },
+  { id: "warn", label: "Low" },
   { id: "pii", label: "PII" },
-  { id: "new", label: "New fields" },
+  { id: "new", label: "New" },
   { id: "ready", label: "Ready" },
 ];
 
@@ -224,6 +224,7 @@ export function ColumnReviewPanel({
         </div>
       )}
 
+      <div className="df2-column-review-editor">
       <div className="df2-column-review-chrome">
         {!compact && (
           <div className="df2-column-workbench-stats" role="status" aria-label="Mapping summary">
@@ -267,7 +268,7 @@ export function ColumnReviewPanel({
             <input
               type="search"
               className="df2-input df2-column-workbench-search"
-              placeholder="Search source or destination column…"
+              placeholder="Search columns…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search columns"
@@ -478,6 +479,7 @@ export function ColumnReviewPanel({
           </button>
         </div>
       )}
+      </div>
     </div>
   );
 }

@@ -48,7 +48,7 @@ export function PreflightTimeline({
     : running
       ? [{
           id: "preflight_running",
-          status: "skip" as const,
+          status: "running" as const,
           message: "Running validation…",
           duration_ms: 0,
         }]
@@ -241,6 +241,7 @@ export function PreflightTimeline({
             <div className="df2-preflight-marker">
               {gate.status === "pass" && <DtIcon name="check" size={14} />}
               {gate.status === "block" && <DtIcon name="x" size={14} />}
+              {gate.status === "running" && <Spinner size="sm" label="" />}
               {gate.status === "skip" && <span>—</span>}
             </div>
             <div>

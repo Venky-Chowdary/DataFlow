@@ -239,6 +239,17 @@
   transition: width 260ms ease;
 }
 
+.df2-mapping-progress-fill.is-finishing {
+  background: linear-gradient(90deg, #0f766e 0%, #14b8a6 50%, #0f766e 100%);
+  background-size: 200% 100%;
+  animation: df2-mapping-shimmer 1.2s linear infinite;
+}
+
+@keyframes df2-mapping-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* Validate split */
 .df2-validate-split {
   display: flex;
@@ -309,6 +320,12 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.df2-proof-dashboard-title > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .df2-proof-dashboard-trust {
@@ -449,6 +466,12 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.df2-preflight-title > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .df2-preflight-compact-head .df2-preflight-title {

@@ -1581,10 +1581,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
     setMappingProgress(10);
     setMappingPhase(phaseForProgress(10));
 
-    const timer = window.setInterval(() => {
+    let timer = window.setInterval(() => {
       setMappingProgress((prev) => {
-        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 8)), 96);
+        const step = prev >= 95 ? Math.max(1, Math.round(Math.random() * 2)) : Math.max(2, Math.round(Math.random() * 8));
+        const next = Math.min(prev + step, 99);
         setMappingPhase(phaseForProgress(next));
+        if (next >= 99) {
+          window.clearInterval(timer);
+        }
         return next;
       });
     }, 260);
@@ -1688,7 +1692,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 <span>{mappingPhase}</span>
               </div>
               <div className="df2-mapping-progress-track">
-                <span className="df2-mapping-progress-fill" style={{ width: `${mappingProgress}%` }} />
+                <span className={`df2-mapping-progress-fill ${mappingProgress >= 95 ? "is-finishing" : ""}`} style={{ width: `${mappingProgress}%` }} />
               </div>
             </div>
           </div>

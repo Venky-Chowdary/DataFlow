@@ -94,7 +94,8 @@ export function PipelineCard({
             </>
           )}
         </button>
-        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-btn-danger" onClick={onDelete}>
+        <button type="button" className="df2-btn df2-btn-sm df2-btn-danger" onClick={onDelete}>
+          <DtIcon name="trash" size={14} />
           Delete
         </button>
       </div>
