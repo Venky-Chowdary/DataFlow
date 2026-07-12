@@ -89,11 +89,27 @@ def remove_saved_connector(connector_id: str):
     return {"ok": True}
 
 
+def _sentinel_secret(value: str) -> bool:
+    """Return True if the secret could not be decrypted."""
+    return "[encrypted-secret-unavailable]" in value or "[decryption-failed]" in value
+
+
 @router.post("/{connector_id}/test")
 def test_saved_connector(connector_id: str):
     conn = get_connector(connector_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Connector not found")
+
+    if _sentinel_secret(conn.password or "") or _sentinel_secret(conn.connection_string or ""):
+        mark_tested(connector_id, False)
+        return {
+            "success": False,
+            "message": (
+                "Saved credentials cannot be decrypted. Install `cryptography` "
+                "(`pip install cryptography`) and ensure the same DATAFLOW_SECRETS_KEY "
+                "is set, then re-enter the password or connection string."
+            ),
+        }
 
     db_type = (conn.type or "").lower()
     ok, message = False, "Unsupported type"

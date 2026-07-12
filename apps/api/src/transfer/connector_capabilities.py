@@ -233,7 +233,7 @@ def resolve_driver_type(catalog_id: str) -> str:
 def _sqlalchemy_available() -> bool:
     try:
         return importlib.util.find_spec("sqlalchemy") is not None
-    except (ModuleNotFoundError, ValueError, ImportError):
+    except Exception:
         return False
 
 
@@ -304,9 +304,10 @@ def _module_is_installed(name: str | None) -> bool:
         return False
     try:
         return importlib.util.find_spec(name) is not None
-    except (ModuleNotFoundError, ValueError, ImportError):
-        # find_spec can raise for namespace packages, missing __init__, or
-        # invalid module paths. Treat all as "not installed" rather than crash.
+    except Exception:
+        # find_spec can raise for namespace packages, missing __init__,
+        # invalid module paths, or broken parent packages. Treat all as
+        # "not installed" rather than crash the catalog.
         return False
 
 
@@ -359,17 +360,21 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
 
 
 def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
-    if driver_type == "generic_sql":
-        base = {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
-        if not catalog_id:
-            return base if driver_available("generic_sql") else {k: False for k in base}
-        return base if driver_available("generic_sql", catalog_id) else {k: False for k in base}
-    if driver_type in _DRIVER_CAPS:
-        caps = dict(_DRIVER_CAPS[driver_type])
-        return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
-    if driver_type in _FILE_CAPS:
-        caps = dict(_FILE_CAPS[driver_type])
-        return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
+    try:
+        if driver_type == "generic_sql":
+            base = {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+            if not catalog_id:
+                return base if driver_available("generic_sql") else {k: False for k in base}
+            return base if driver_available("generic_sql", catalog_id) else {k: False for k in base}
+        if driver_type in _DRIVER_CAPS:
+            caps = dict(_DRIVER_CAPS[driver_type])
+            return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
+        if driver_type in _FILE_CAPS:
+            caps = dict(_FILE_CAPS[driver_type])
+            return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
+    except Exception:
+        # Capability discovery should never crash the catalog; degrade gracefully.
+        pass
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 

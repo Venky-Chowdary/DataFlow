@@ -32,8 +32,24 @@ def load_catalog() -> dict:
 def _enriched_connectors() -> list[dict]:
     enriched = []
     for c in load_catalog().get("connectors", []):
-        row = enrich_catalog_entry(c)
-        row["status"] = row.get("effective_status", row.get("status"))
+        try:
+            row = enrich_catalog_entry(c)
+            row["status"] = row.get("effective_status", row.get("status"))
+        except Exception:
+            # If a single connector entry fails capability discovery, keep the
+            # original catalog row and mark it as planned so the catalog still
+            # loads and the rest of the connectors are usable.
+            row = dict(c)
+            row["status"] = row.get("status", "planned")
+            row["effective_status"] = "planned"
+            row["driver_type"] = "unknown"
+            row["capabilities"] = {
+                "test": False, "read": False, "write": False,
+                "introspect": False, "preflight": False,
+            }
+            row["transfer_ready"] = False
+            row["connect_only"] = False
+            row["capability_label"] = "Roadmap"
         enriched.append(row)
     return enriched
 

@@ -60,6 +60,14 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     dest_by_name = {c.name.lower(): c for c in ctx.plan.destination.target_columns}
     issues: list[str] = []
 
+    # Schemaless document stores (MongoDB, DynamoDB, Redis) do not enforce a
+    # column-level type contract; every field can hold any BSON/DynamoDB type.
+    # Skip lossy-coercion checks for these destinations.
+    dest_kind = (ctx.plan.destination.db_type or "").lower()
+    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    if schemaless:
+        return _pass(GateId.G3_SCHEMA_CONTRACT, "Schemaless destination — no DDL type contract to validate", start)
+
     try:
         from services.type_system import is_lossy_coercion
     except ImportError:

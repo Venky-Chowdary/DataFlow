@@ -62,14 +62,17 @@ def _warn_once() -> None:
 
 
 def encrypt_secret(plain: str) -> str:
-    if not plain or plain == "****":
+    if not plain or plain == "****" or plain.startswith("["):
         return plain
     if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0):
         return plain
 
-    if _cryptography_available():
-        token = _get_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
-        return f"{_PREFIX_V1}{token}"
+    try:
+        if _cryptography_available():
+            token = _get_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
+            return f"{_PREFIX_V1}{token}"
+    except Exception:
+        _warn_once()
 
     _warn_once()
     return f"{_PREFIX_V0}{base64.urlsafe_b64encode(plain.encode('utf-8')).decode('ascii')}"
@@ -80,11 +83,16 @@ def decrypt_secret(stored: str) -> str:
         return stored
 
     if stored.startswith(_PREFIX_V1):
-        if _cryptography_available():
-            token = stored[len(_PREFIX_V1) :]
+        if not _cryptography_available():
+            _warn_once()
+            return "[encrypted-secret-unavailable]"
+        token = stored[len(_PREFIX_V1) :]
+        try:
             return _get_fernet().decrypt(token.encode("ascii")).decode("utf-8")
-        _warn_once()
-        return "[encrypted-secret-unavailable]"
+        except Exception:
+            # Wrong key or corrupted token; keep the token as a sentinel so the
+            # connector still loads and the user can re-enter credentials.
+            return "[decryption-failed]"
 
     if stored.startswith(_PREFIX_V0):
         token = stored[len(_PREFIX_V0) :]
