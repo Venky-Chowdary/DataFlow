@@ -40,7 +40,9 @@ def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_nam
     if dt in ("s3", "gcs"):
         return destination.table or destination.collection or destination.schema or f"exports/dt_{base}.json"
     if dt == "elasticsearch":
-        return destination.database or destination.table or destination.collection or f"dt_{base}"
+        # Elasticsearch uses an index name; prefer the table name (UI's destination name)
+        # and fall back to the database field when it is intentionally supplied.
+        return destination.table or destination.collection or destination.database or f"dt_{base}"
     return destination.table or destination.collection or f"dt_{base}"
 
 
