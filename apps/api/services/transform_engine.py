@@ -207,24 +207,29 @@ def _normalize_locale_separators(text: str) -> str | None:
         last_comma = text.rfind(",")
         if last_dot > last_comma:
             return text.replace(",", "")
+        # Comma is the decimal separator; thousand dots are removed.
         text = text.replace(".", "")
+        last_comma = text.rfind(",")
         return text[:last_comma] + "." + text[last_comma + 1:]
     if "," in text:
         parts = text.split(",")
+        # US-style thousands: 1,234 or 1,234,567 (all groups after first are 3 digits).
         if parts[0] and not parts[0].startswith("0") and all(
             part.isdigit() and len(part) == 3 for part in parts[1:]
         ):
             return text.replace(",", "")
-        # Comma is used as decimal separator.
+        # European decimal: 1,234 or 1,23
         if len(parts) == 2:
             return parts[0] + "." + parts[1]
         return None
     if "." in text:
         parts = text.split(".")
+        # US-style thousands with multiple groups: 1.234.567
         if len(parts) > 2 and parts[0] and not parts[0].startswith("0") and all(
             part.isdigit() and len(part) == 3 for part in parts[1:]
         ):
             return text.replace(".", "")
+        # Single dot is a decimal point (e.g. 1.234), not a thousands separator.
         return text
     return text
 

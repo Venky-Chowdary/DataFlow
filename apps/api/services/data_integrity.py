@@ -155,7 +155,11 @@ def _check_financial_precision(
                 issues.append(f"{src}: unparseable financial value {raw!r}")
                 continue
             try:
-                original = Decimal(raw.replace(",", "").replace("$", "").replace("€", "").strip())
+                original_parsed, original_err = apply_transform(raw, "decimal")
+                if original_parsed is None or original_err:
+                    issues.append(f"{src}: unparseable financial value {raw!r}")
+                    continue
+                original = Decimal(str(original_parsed))
                 result = Decimal(str(converted))
                 if original != 0 and result != 0:
                     ratio = abs(result / original)
