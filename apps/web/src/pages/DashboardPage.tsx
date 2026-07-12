@@ -29,7 +29,7 @@ interface DashboardPageProps {
   onOpenJobs?: () => void;
 }
 
-const JOB_LIMIT = 6;
+const JOB_LIMIT = 12;
 
 export function DashboardPage({
   connectors,
@@ -290,7 +290,7 @@ export function DashboardPage({
                   />
                 ) : (
                   <ul className="df2-overview-conn-list">
-                    {connectors.slice(0, 6).map((c) => (
+                    {connectors.slice(0, 8).map((c) => (
                       <li key={c.id}>
                         <span className={`df2-health-dot ${c.status === "error" || c.last_test_ok === false ? "err" : "ok"}`} />
                         <ConnectorIcon id={c.type} size={18} />
@@ -311,7 +311,7 @@ export function DashboardPage({
                   <EmptyState compact icon="activity" title="No pipelines" description="Schedule recurring syncs from Pipelines." />
                 ) : (
                   <ul className="df2-overview-pipeline-list">
-                    {schedules.slice(0, 5).map((s) => (
+                    {schedules.slice(0, 7).map((s) => (
                       <li key={s.id}>
                         <strong title={s.name}>{s.name}</strong>
                         <span className="df2-cell-meta">
