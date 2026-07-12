@@ -92,7 +92,11 @@ def write_mapped_rows(
                     target_cols[i]: _to_es_value(value, source_types[i])
                     for i, value in enumerate(row)
                 }
-                yield {"_index": index, "_source": source}
+                doc_id = source.pop("_id", None)
+                action: dict[str, Any] = {"_index": index, "_source": source}
+                if doc_id is not None:
+                    action["_id"] = str(doc_id)
+                yield action
 
         written, bulk_errors = bulk(client, gen_actions(), raise_on_error=False)
         if on_checkpoint:

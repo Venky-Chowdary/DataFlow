@@ -5,11 +5,20 @@ from __future__ import annotations
 import csv
 import io
 import json
+import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, Callable
 
 from connectors.gcs_common import gcs_client
 from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string, json_default
 
 
 @dataclass
@@ -91,7 +100,7 @@ def write_mapped_rows(
             # Structural types are parsed as JSON objects/arrays.
             if ctype in {"json", "array", "object", "struct"}:
                 try:
-                    return json.loads(text)
+                    return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
                 except json.JSONDecodeError:
                     return value
             # Text, dates, UUID, binary and other non-numeric types must stay as strings.
@@ -99,7 +108,7 @@ def write_mapped_rows(
                 return value
             # Numeric / boolean types: allow JSON scalar parsing where valid.
             try:
-                return json.loads(text)
+                return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
             except json.JSONDecodeError:
                 return value
         return value
@@ -108,11 +117,7 @@ def write_mapped_rows(
 
     if key.endswith(".csv"):
         def _csv_cell(value: Any) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, (dict, list)):
-                return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            return str(value)
+            return cell_to_string(value)
 
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=target_cols, extrasaction="ignore")
@@ -122,10 +127,10 @@ def write_mapped_rows(
         body = buf.getvalue().encode("utf-8")
         content_type = "text/csv"
     elif key.endswith(".jsonl"):
-        body = "\n".join(json.dumps(r, default=str, ensure_ascii=False) for r in records).encode("utf-8")
+        body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")
         content_type = "application/x-ndjson"
     else:
-        body = json.dumps(records, indent=2, default=str, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
         content_type = "application/json"
 
     try:

@@ -22,6 +22,7 @@ if str(_api_root) not in sys.path:
 
 from services.csv_profiler import detect_delimiter
 from services.schema_inference import infer_type
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -370,21 +371,7 @@ class FileParser:
     @staticmethod
     def _value_to_string(value: Any) -> str:
         """Convert a typed Python value into a string for statistical inference."""
-        if value is None:
-            return ""
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, (bytes, bytearray)):
-            return base64.b64encode(bytes(value)).decode("ascii")
-        if isinstance(value, (dict, list, tuple, set, frozenset)):
-            return json.dumps(value, default=str)
-        if isinstance(value, datetime):
-            return value.isoformat()
-        if isinstance(value, date):
-            return value.isoformat()
-        if isinstance(value, time):
-            return value.isoformat()
-        return str(value)
+        return cell_to_string(value)
 
     @staticmethod
     def infer_schema(records: list[dict]) -> dict[str, str]:

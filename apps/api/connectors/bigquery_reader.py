@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -50,7 +58,7 @@ def read_table_batch(
         job = client.query(query)
         rows_iter = job.result()
         headers = [field.name for field in job.schema]
-        rows = [["" if v is None else str(v) for v in row.values()] for row in rows_iter]
+        rows = [[cell_to_string(v) for v in row.values()] for row in rows_iter]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     except Exception as exc:
         raise RuntimeError(f"BigQuery read failed for {table_ref}: {exc}") from exc

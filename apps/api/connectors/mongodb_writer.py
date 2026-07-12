@@ -196,7 +196,7 @@ def write_mapped_rows(
                     return value
                 if isinstance(value, str):
                     try:
-                        return json.loads(value)
+                        return json.loads(value, parse_constant=lambda v: None)
                     except Exception:
                         return value
                 return value

@@ -17,6 +17,8 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from services.value_serializer import cell_to_string
+
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect, text
@@ -662,28 +664,7 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
 
 def _cell_to_string(value: Any) -> str:
     """Render a SQLAlchemy result cell value to the string matrix used by DataFlow."""
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    if isinstance(value, memoryview):
-        return base64.b64encode(value.tobytes()).decode("ascii")
-    if isinstance(value, bytearray):
-        return base64.b64encode(value).decode("ascii")
-    if isinstance(value, bytes):
-        return base64.b64encode(value).decode("ascii")
-    if isinstance(value, Decimal):
-        # Normalize trailing fractional zeros so MySQL DECIMAL(38,15) padding
-        # does not propagate as a data change to other targets.
-        try:
-            return format(value.normalize(), "f")
-        except Exception:
-            return str(value)
-    if isinstance(value, datetime) and value.tzinfo is None and value.time() == time():
-        return value.date().isoformat()
-    return str(value)
+    return cell_to_string(value)
 
 
 def _cfg_from_params(

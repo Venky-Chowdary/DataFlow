@@ -41,7 +41,7 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
             return value
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                return json.loads(value, parse_float=Decimal, parse_constant=lambda v: None)
             except json.JSONDecodeError:
                 return value
         return value

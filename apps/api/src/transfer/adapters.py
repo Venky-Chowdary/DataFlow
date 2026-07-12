@@ -6,6 +6,7 @@ import io
 import json
 import re
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +24,12 @@ try:
     from services.mongodb_service import get_mongodb_service
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
+
+try:
+    from services.value_serializer import cell_to_string, json_default
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services.value_serializer import cell_to_string, json_default
+
 from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
 
@@ -94,11 +101,7 @@ def parse_file_route_sample(
 
 
 def _matrix_cell(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str)
-    return str(value)
+    return cell_to_string(value)
 
 
 def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str], list[list[str]]]:
@@ -760,7 +763,7 @@ def write_destination_file(
 
     if mappings:
         headers = columns
-        data_rows = [[str(rec.get(col, "")) for col in headers] for rec in records]
+        data_rows = [[cell_to_string(rec.get(col, "")) for col in headers] for rec in records]
         target_cols, _ = resolve_target_columns(mappings, types)
         mapped_rows, transform_errors = build_mapped_rows(
             headers=headers,
@@ -775,7 +778,7 @@ def write_destination_file(
             for row in mapped_rows
         ]
 
-    grid = [[str(rec.get(col, "")) for col in export_columns] for rec in export_records]
+    grid = [[cell_to_string(rec.get(col, "")) for col in export_columns] for rec in export_records]
 
     if can_convert(src_fmt, fmt) and grid:
         content, mime = convert_rows(export_columns, grid, source_format=src_fmt, target_format=fmt)
@@ -797,15 +800,23 @@ def write_destination_file(
             "mapped": bool(mappings),
         }
 
-    def _to_json_value(value: Any) -> Any:
+    def _to_json_value(value: Any, col: str) -> Any:
         if value is None:
             return None
         if isinstance(value, str):
             text = value.strip()
             if not text:
                 return value
+            ctype = normalize_inferred(types.get(col, "string")).lower()
+            if ctype in {"json", "array", "object", "struct"}:
+                try:
+                    return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+                except json.JSONDecodeError:
+                    return value
+            if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
+                return value
             try:
-                return json.loads(text)
+                return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
             except json.JSONDecodeError:
                 return value
         return value
@@ -814,19 +825,19 @@ def write_destination_file(
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(export_records)
+        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in export_records])
         content = buf.getvalue().encode("utf-8")
         filename = "export.csv"
     elif fmt == "tsv":
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(export_records)
+        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in export_records])
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
     elif fmt == "jsonl":
-        records = [{c: _to_json_value(v) for c, v in r.items()} for r in export_records]
-        lines = [json.dumps(r, default=str, ensure_ascii=False) for r in records]
+        records = [{c: _to_json_value(v, c) for c, v in r.items()} for r in export_records]
+        lines = [json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
     elif fmt == "excel":
@@ -836,8 +847,8 @@ def write_destination_file(
         content, _ = convert_rows(export_columns, grid, source_format="csv", target_format=fmt)
         filename = "export.parquet"
     else:
-        records = [{c: _to_json_value(v) for c, v in r.items()} for r in export_records]
-        content = json.dumps(records, indent=2, default=str, ensure_ascii=False).encode("utf-8")
+        records = [{c: _to_json_value(v, c) for c, v in r.items()} for r in export_records]
+        content = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
         filename = "export.json"
     return content, filename, {
         "format": fmt,

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from connectors.gcs_common import gcs_client
 from connectors.object_read_cache import get_or_parse
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -57,11 +64,7 @@ def read_object(
     slice_rows = records[offset : offset + limit]
 
     def cell(v: Any) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, (dict, list)):
-            return json.dumps(v, default=str)
-        return str(v)
+        return cell_to_string(v)
 
     rows = [[cell(r.get(c)) for c in columns] for r in slice_rows]
     return ReadBatch(headers=columns, rows=rows, offset=offset, total_rows=total)

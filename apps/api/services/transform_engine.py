@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.value_serializer import json_default
+
 DATE_PATTERNS = (
     "%Y-%m-%d",
     "%m/%d/%Y",
@@ -287,10 +289,10 @@ def _parse_boolean(value: str) -> bool | None:
 
 def _parse_json(value: str) -> str | None:
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(value, parse_constant=lambda v: None)
     except json.JSONDecodeError:
         return None
-    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default, allow_nan=False)
 
 
 def _parse_uuid(value: str) -> str | None:

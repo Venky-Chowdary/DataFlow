@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
-from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
 from connectors.driver_guard import require_driver
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 def _ensure_psycopg2() -> None:
@@ -18,22 +25,7 @@ def _ensure_psycopg2() -> None:
 
 
 def _cell(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (dict, list)):
-        import json
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    if isinstance(value, (bytes, memoryview)):
-        import base64
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, Decimal):
-        try:
-            return format(value.normalize(), "f")
-        except Exception:
-            return str(value)
-    return str(value)
+    return cell_to_string(value)
 
 
 @dataclass

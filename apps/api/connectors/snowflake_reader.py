@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from connectors.snowflake_conn import get_connection, normalize_account
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -93,7 +101,7 @@ def read_table_batch(
                 f'SELECT {col_sql} FROM "{sch}"."{table}" LIMIT {int(limit)} OFFSET {int(offset)}'
             )
             headers = [desc[0] for desc in cur.description]
-            rows = [[str(v) if v is not None else "" for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -146,7 +154,7 @@ def read_table_cursor_batch(
                     (limit,),
                 )
             headers = [desc[0] for desc in cur.description]
-            rows = [[str(v) if v is not None else "" for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
     finally:
         conn.close()
