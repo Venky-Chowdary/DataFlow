@@ -1173,7 +1173,7 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
-    target_cols, _ = resolve_target_columns(mappings, column_types)
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
     target_column_types = {target_cols[i]: column_types.get(mappings[i]["source"], "string") for i in range(len(target_cols))}
 
     policy = transform_error_policy(error_policy)
@@ -1185,6 +1185,7 @@ def write_mapped_rows(
         column_types=column_types,
         error_policy=policy,
         dest_types=target_column_types,
+        preserve_case=True,
     )
 
     if transform_errors and policy == "fail":

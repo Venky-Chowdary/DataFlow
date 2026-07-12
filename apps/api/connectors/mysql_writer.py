@@ -113,14 +113,14 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=database,
             checksum="", chunks_completed=0, error="No column mappings",
         )
 
-    table_name = sanitize_identifier(table_name)
+    table_name = sanitize_identifier(table_name, preserve_case=True)
     target_types = [mysql_type(t) for t in source_types]
     policy = transform_error_policy(error_policy)
 
@@ -144,6 +144,7 @@ def write_mapped_rows(
                 target_cols=target_cols,
                 column_types=column_types,
                 error_policy=policy,
+                preserve_case=True,
             )
             rejected_rows = len(data_rows) - len(mapped_rows)
             if transform_errors and policy == "fail":

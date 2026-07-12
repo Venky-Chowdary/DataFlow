@@ -116,7 +116,7 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -129,7 +129,7 @@ def write_mapped_rows(
         )
 
     schema = schema or "public"
-    table_name = sanitize_identifier(table_name)
+    table_name = sanitize_identifier(table_name, preserve_case=True)
     target_types = [pg_type(t) for t in source_types]
     policy = transform_error_policy(error_policy)
 
@@ -168,6 +168,7 @@ def write_mapped_rows(
                 target_cols=target_cols,
                 column_types=column_types,
                 error_policy=policy,
+                preserve_case=True,
             )
 
             # Convert base64-encoded strings to raw bytes for BYTEA columns

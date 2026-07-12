@@ -92,13 +92,14 @@ def write_mapped_rows(
         "password": password,
         "connection_string": connection_string,
     }
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        preserve_case=True,
     )
 
     client = boto3_client("dynamodb", cfg)

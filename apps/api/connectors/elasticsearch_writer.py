@@ -69,13 +69,14 @@ def write_mapped_rows(
         "host": host, "port": port, "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl,
     }
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        preserve_case=True,
     )
 
     client = _client(cfg)

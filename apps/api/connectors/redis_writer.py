@@ -50,13 +50,14 @@ def write_mapped_rows(
         "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl,
     }
-    target_cols, _ = resolve_target_columns(mappings, column_types)
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        preserve_case=True,
     )
 
     client = _redis_client(cfg)
@@ -66,7 +67,7 @@ def write_mapped_rows(
         for i, row in enumerate(mapped_rows):
             doc = dict(zip(target_cols, row))
             key_id = doc.get(id_col) or str(i)
-            key = f"{prefix}:{sanitize_identifier(str(key_id))}"
+            key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
             client.set(key, json.dumps(doc, default=str))
             written += 1
         if on_checkpoint:

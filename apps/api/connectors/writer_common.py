@@ -16,8 +16,9 @@ TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantin
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 
-def sanitize_identifier(name: str) -> str:
-    s = re.sub(r"[^a-zA-Z0-9_]", "_", name.strip().lower())
+def sanitize_identifier(name: str, preserve_case: bool = False) -> str:
+    cleaned = name.strip() if preserve_case else name.strip().lower()
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", cleaned)
     s = re.sub(r"_+", "_", s).rstrip("_")
     if not s or s[0].isdigit():
         s = f"col_{s or 'field'}"
@@ -60,19 +61,20 @@ def build_mapped_rows(
     column_types: dict[str, str] | None = None,
     error_policy: str | None = None,
     dest_types: dict[str, str] | None = None,
+    preserve_case: bool = False,
 ) -> tuple[list[tuple], list[str]]:
     """Returns mapped rows and any transform errors (first 10)."""
     column_types = column_types or {}
     policy = transform_error_policy(error_policy)
     source_indices = {h: i for i, h in enumerate(headers)}
-    sanitized_target_cols = [sanitize_identifier(c) for c in target_cols]
+    sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
 
     mapping_infos = []
     for m in mappings:
         src = m["source"]
-        tgt = sanitize_identifier(m["target"])
+        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         transform = resolve_transform(
             m,
             column_types=column_types,
@@ -110,11 +112,15 @@ def build_mapped_rows(
     return mapped, errors
 
 
-def resolve_target_columns(mappings: list[dict], column_types: dict[str, str]) -> tuple[list[str], list[str]]:
+def resolve_target_columns(
+    mappings: list[dict],
+    column_types: dict[str, str],
+    preserve_case: bool = False,
+) -> tuple[list[str], list[str]]:
     target_cols: list[str] = []
     source_types: list[str] = []
     for m in mappings:
-        tgt = sanitize_identifier(m["target"])
+        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
             source_types.append(column_types.get(m["source"], "VARCHAR"))

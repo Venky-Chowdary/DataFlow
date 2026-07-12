@@ -1,6 +1,7 @@
 """Universal transfer orchestrator — routes any source to any destination."""
 
 from __future__ import annotations
+import logging
 import os
 from typing import Optional
 
@@ -47,6 +48,8 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 from services.batch_progress import ThrottledCheckpoint  # noqa: E402
+
+logger = logging.getLogger("dataflow.transfer")
 
 
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
@@ -104,6 +107,72 @@ def _enrich_mappings_with_types(mappings: list[dict], dest_types: dict[str, str]
             enriched["target_type"] = dest_types[tgt]
         out.append(enriched)
     return out
+
+
+def _auto_map(
+    request: TransferRequest,
+    columns: list[str],
+    schema: dict[str, str],
+    sample_rows: list[dict] | None = None,
+) -> list[dict]:
+    """Generate destination-aware mappings when no mapping contract was supplied.
+
+    For append/upsert/merge into an existing target, the destination schema is
+    introspected and the semantic mapper aligns source columns to target columns.
+    For full-refresh/overwrites into a new target, identity mappings are used so
+    the destination can be created from the source shape.
+    """
+    if request.mappings:
+        return request.mappings
+    if request.destination.kind != "database":
+        return default_mappings(columns)
+
+    sync_mode = (request.sync_mode or "full_refresh_overwrite").lower()
+    if sync_mode in {"full_refresh_overwrite", "overwrite"}:
+        return default_mappings(columns)
+
+    target_schema = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+    if not target_schema:
+        return default_mappings(columns)
+
+    try:
+        from services.mapping_pipeline import run_mapping_pipeline
+
+        source_schemas = [
+            {
+                "name": c,
+                "inferred_type": schema.get(c, "string"),
+                "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
+            }
+            for c in columns
+        ]
+        target_columns = list(target_schema.keys())
+        target_schemas = [
+            {"name": c, "inferred_type": target_schema.get(c, "string"), "samples": []}
+            for c in target_columns
+        ]
+        source_samples = {
+            c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
+            for c in columns
+        }
+        result = run_mapping_pipeline(
+            source_columns=columns,
+            target_columns=target_columns,
+            source_schemas=source_schemas,
+            target_schemas=target_schemas,
+            file_format=request.source.format,
+            confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+            source_samples=source_samples,
+            validation_mode=request.validation_mode,
+            use_llm=False,
+        )
+        mappings = result.get("mappings")
+        if mappings and isinstance(mappings, list) and any(m.get("source") for m in mappings):
+            return mappings
+    except Exception as exc:
+        logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
+
+    return default_mappings(columns)
 
 
 class UniversalTransferEngine:
@@ -164,9 +233,10 @@ class UniversalTransferEngine:
             total_rows = len(records)
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
 
+            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                request.mappings or default_mappings(columns),
-                _destination_schema_types(request.destination, sync_mode=request.sync_mode),
+                _auto_map(request, columns, schema, sample_rows=records[:100]),
+                dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -186,7 +256,9 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-                    destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
+                    destination_column_types=dest_schema_types,
+                    destination_table_exists=bool(dest_schema_types),
+                    destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                 )
                 pf = apply_policy_gates(
@@ -414,9 +486,10 @@ class UniversalTransferEngine:
                 )
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                request.mappings or default_mappings(columns),
-                _destination_schema_types(request.destination, sync_mode=request.sync_mode),
+                _auto_map(request, columns, schema, sample_rows=sample_rows),
+                dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -436,7 +509,9 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-                    destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
+                    destination_column_types=dest_schema_types,
+                    destination_table_exists=bool(dest_schema_types),
+                    destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                 )
                 pf = apply_policy_gates(
@@ -635,9 +710,10 @@ class UniversalTransferEngine:
                 )
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
+            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                request.mappings or default_mappings(columns),
-                _destination_schema_types(request.destination, sync_mode=request.sync_mode),
+                _auto_map(request, columns, schema, sample_rows=sample_rows),
+                dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -657,7 +733,9 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-                    destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
+                    destination_column_types=dest_schema_types,
+                    destination_table_exists=bool(dest_schema_types),
+                    destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                 )
                 pf = apply_policy_gates(

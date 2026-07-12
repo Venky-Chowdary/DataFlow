@@ -107,14 +107,14 @@ def write_mapped_rows(
             checksum="", chunks_completed=0, error="SQLite path is required (database or connection_string).",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",
             checksum="", chunks_completed=0, error="No column mappings",
         )
 
-    table_name = sanitize_identifier(table_name)
+    table_name = sanitize_identifier(table_name, preserve_case=True)
     target_types = [sqlite_type(t) for t in source_types]
     policy = transform_error_policy(error_policy)
 
@@ -133,6 +133,7 @@ def write_mapped_rows(
                 target_cols=target_cols,
                 column_types=column_types,
                 error_policy=policy,
+                preserve_case=True,
             )
 
             converted_rows = [

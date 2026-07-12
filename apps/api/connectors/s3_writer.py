@@ -70,13 +70,14 @@ def write_mapped_rows(
         "ssl": ssl,
         "database": database,
     }
-    target_cols, _ = resolve_target_columns(mappings, column_types)
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        preserve_case=True,
     )
 
     def _to_json_value(value: Any, col: str) -> Any:
