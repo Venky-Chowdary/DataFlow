@@ -31,6 +31,7 @@ const SchedulesPage = lazy(() => import("./pages/SchedulesPage").then((m) => ({ 
 const JobsPage = lazy(() => import("./pages/JobsPage").then((m) => ({ default: m.JobsPage })));
 const McpPage = lazy(() => import("./pages/McpPage").then((m) => ({ default: m.McpPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const DocsPage = lazy(() => import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })));
 const AICopilot = lazy(() => import("./components/AICopilot").then((m) => ({ default: m.AICopilot })));
 const ConnectorModal = lazy(() => import("./components/ConnectorModal").then((m) => ({ default: m.ConnectorModal })));
 
@@ -42,6 +43,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
   { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs" },
   { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress" },
   { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code" },
+  { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security & team" },
 ];
 
@@ -492,6 +494,11 @@ function AppShell({
               {screen === "mcp" && (
                 <PageErrorBoundary label="MCP Server">
                   <McpPage />
+                </PageErrorBoundary>
+              )}
+              {screen === "docs" && (
+                <PageErrorBoundary label="Docs">
+                  <DocsPage />
                 </PageErrorBoundary>
               )}
               {screen === "settings" && (
