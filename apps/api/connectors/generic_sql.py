@@ -23,8 +23,26 @@ try:
     from sqlalchemy.dialects import postgresql
 
     SQLALCHEMY_AVAILABLE = True
+
+    try:
+        from clickhouse_sqlalchemy import engines as ch_engines
+        from clickhouse_sqlalchemy.types import DateTime64 as ChDateTime64
+        from clickhouse_sqlalchemy.types import Nullable as ChNullable
+    except Exception:  # pragma: no cover
+        ch_engines = None
+        ChDateTime64 = None
+        ChNullable = None
+
+    try:
+        from trino.sqlalchemy.datatype import TIMESTAMP as TrinoTimestamp
+    except Exception:  # pragma: no cover
+        TrinoTimestamp = None
 except Exception:  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
+    ch_engines = None
+    ChDateTime64 = None
+    ChNullable = None
+    TrinoTimestamp = None
 
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -400,33 +418,56 @@ def _sa_type_for_logical(logical: str, dialect_name: str) -> Any:
     """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine."""
     t = (logical or "string").lower().strip()
 
+    def _maybe_nullable(sa_type: Any) -> Any:
+        if dialect_name == "clickhouse" and ChNullable is not None:
+            return ChNullable(sa_type)
+        return sa_type
+
     if t == "integer":
-        return sa.BigInteger()
+        return _maybe_nullable(sa.BigInteger())
     if t == "decimal":
-        return sa.Numeric(38, 10)
+        return _maybe_nullable(sa.Numeric(38, 10))
     if t == "boolean":
-        return sa.Boolean()
+        return _maybe_nullable(sa.Boolean())
     if t == "date":
-        return sa.Date()
+        return _maybe_nullable(sa.Date())
     if t == "datetime":
         # Preserve timezone metadata when the target dialect supports it.
+        if dialect_name == "clickhouse":
+            return _maybe_nullable(ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime())
+        if dialect_name == "trino" and TrinoTimestamp is not None:
+            return TrinoTimestamp(precision=3, timezone=True)
         return sa.DateTime(timezone=True)
     if t == "time":
-        return sa.Time()
+        return _maybe_nullable(sa.Time())
     if t == "uuid":
-        return sa.String(36)
+        return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
-        if dialect_name == "oracle":
-            return sa.Text()
+        if dialect_name in ("oracle", "clickhouse", "trino"):
+            return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
         return sa.JSON()
     if t == "binary":
+        if dialect_name in ("clickhouse", "trino"):
+            return _maybe_nullable(sa.Text())
         return sa.LargeBinary()
-    return sa.Text()
+    return _maybe_nullable(sa.Text())
 
 
-def _to_sa_value(value: Any, logical: str) -> Any:
+def _is_string_type(sa_type: Any) -> bool:
+    if sa_type is None:
+        return False
+    if isinstance(sa_type, (sa.String, sa.Text, sa.CHAR)):
+        return True
+    # Handle ClickHouse Nullable(String) / Nullable(TEXT)
+    nested = getattr(sa_type, "nested_type", None)
+    if nested is not None and isinstance(nested, (sa.String, sa.Text, sa.CHAR)):
+        return True
+    return False
+
+
+def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: str = "") -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
     if value is None:
         return None
@@ -434,19 +475,33 @@ def _to_sa_value(value: Any, logical: str) -> Any:
     t = (logical or "string").lower().strip()
 
     if t in ("json", "array"):
-        if isinstance(value, (dict, list)):
-            return value
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except Exception:
-                return value
+                parsed = value
+        else:
+            parsed = value
+
+        if isinstance(parsed, (dict, list)):
+            if _is_string_type(sa_type):
+                return json.dumps(parsed, ensure_ascii=False, default=str)
+            return parsed
+        if isinstance(value, str):
+            return value
         return value
 
     if t == "binary":
         if isinstance(value, bytes):
+            if _is_string_type(sa_type):
+                try:
+                    return base64.b64encode(value).decode("ascii")
+                except Exception:
+                    return value.decode("utf-8", errors="replace")
             return value
         if isinstance(value, str):
+            if _is_string_type(sa_type):
+                return value
             try:
                 return base64.b64decode(value, validate=True)
             except Exception:
@@ -493,6 +548,27 @@ def _to_sa_value(value: Any, logical: str) -> Any:
         if isinstance(value, str):
             try:
                 return time.fromisoformat(value)
+            except Exception:
+                return value
+        return value
+
+    if t == "decimal":
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, (int, float)):
+            return Decimal(value)
+        if isinstance(value, str):
+            return Decimal(value)
+        return value
+
+    if t == "integer":
+        if isinstance(value, int):
+            return value
+        if isinstance(value, (float, Decimal)):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value)
             except Exception:
                 return value
         return value
@@ -612,14 +688,49 @@ def _build_table_for_write(
                 quote=True,
             )
         )
+    if dialect_name == "clickhouse" and ch_engines is not None:
+        return sa.Table(
+            table_name,
+            metadata,
+            *cols,
+            ch_engines.MergeTree(order_by=sa.text("tuple()")),
+            schema=schema,
+            quote=True,
+            quote_schema=True,
+        )
+
     return sa.Table(
         table_name,
         metadata,
+        *cols,
         schema=schema,
         quote=True,
         quote_schema=True,
-        *cols,
     )
+
+
+def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
+    """Use DataFlow value inference to narrow generic SQL String columns."""
+    try:
+        from services.schema_inference import infer_type
+
+        mapped = {
+            "JSON": "json",
+            "BINARY": "binary",
+            "UUID": "uuid",
+            "DATE": "date",
+            "TIMESTAMP": "datetime",
+            "TIME": "time",
+            "INTEGER": "integer",
+            "DECIMAL": "decimal",
+            "BOOLEAN": "boolean",
+            "VARCHAR": "string",
+            "TEXT": "string",
+        }
+        samples = [str(v) if v is not None else "" for v in values]
+        return mapped.get(infer_type(samples, field_name=field_name))
+    except Exception:
+        return None
 
 
 def introspect_table_schema(
@@ -643,6 +754,27 @@ def introspect_table_schema(
                     "nullable": col.get("nullable", True),
                 }
             )
+
+        # Sample the table to narrow generic String columns to JSON, UUID, BINARY, etc.
+        try:
+            dialect_name = engine.dialect.name if engine.dialect else ""
+            with engine.connect() as conn:
+                if dialect_name == "clickhouse":
+                    sample_sql = f"SELECT * FROM {table} LIMIT 200"
+                else:
+                    sample_sql = f"SELECT * FROM {table} LIMIT 200"
+                sample_rows = conn.execute(sa.text(sample_sql)).fetchall()
+                if sample_rows:
+                    col_names = [c["name"] for c in columns]
+                    for idx, col in enumerate(result):
+                        if col["inferred_type"] == "string":
+                            values = [row[idx] for row in sample_rows if idx < len(row)]
+                            inferred = _infer_logical_from_samples(values, field_name=col["name"])
+                            if inferred and inferred != "string":
+                                col["inferred_type"] = inferred
+        except Exception:
+            pass
+
         return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -853,10 +985,13 @@ def write_mapped_rows(
 
     table_obj = _build_table_for_write(engine, table_name, schema_name, target_cols, target_column_types)
 
+    dialect_name = engine.dialect.name if engine.dialect else ""
+    sa_col_types = {col: _sa_type_for_logical(target_column_types.get(col, "string"), dialect_name) for col in target_cols}
+
     converted_rows: list[dict] = []
     for row in mapped_rows:
         converted_rows.append(
-            {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string")) for i in range(len(target_cols))}
+            {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string"), sa_col_types.get(target_cols[i]), dialect_name) for i in range(len(target_cols))}
         )
 
     try:

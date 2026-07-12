@@ -409,7 +409,7 @@ async def run_universal_transfer(
     dest_kind: str = Form("database"),
     dest_format: str = Form("mongodb"),
     dest_database: str = Form("test_db"),
-    dest_schema: str = Form("public"),
+    dest_schema: str = Form(""),
     dest_table: str = Form(""),
     dest_collection: str = Form(""),
     dest_connector_id: Optional[str] = Form(None),

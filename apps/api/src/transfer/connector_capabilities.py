@@ -337,7 +337,12 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
             return True
         drivername = _generic_sql_drivername_map().get(catalog_id, catalog_id)
         module = _generic_sql_dbapi_module(drivername)
-        return module is not None and _module_is_installed(module)
+        if module is None or not _module_is_installed(module):
+            return False
+        # ClickHouse needs the separate SQLAlchemy dialect package too.
+        if "clickhouse" in drivername:
+            return _module_is_installed("clickhouse_sqlalchemy")
+        return True
 
     module = _DRIVER_MODULE.get(driver_type)
     return _module_is_installed(module)

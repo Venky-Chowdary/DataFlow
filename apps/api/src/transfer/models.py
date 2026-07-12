@@ -34,7 +34,7 @@ class EndpointConfig:
             host=d.get("host", "localhost"),
             port=int(d.get("port", 0) or 0),
             database=d.get("database", ""),
-            schema=d.get("schema", "public"),
+            schema=d.get("schema", ""),
             table=d.get("table", d.get("table_name", "")),
             collection=d.get("collection", d.get("collection_name", "")),
             username=d.get("username", ""),
