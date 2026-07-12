@@ -257,6 +257,20 @@ def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]
     if proof_blocks:
         has_blocks = True
 
+    if has_blocks and proof_bundle:
+        proof_bundle = {**proof_bundle}
+        gate_blocker_messages = [b["message"] for b in blockers]
+        decision_blockers = list(proof_bundle.get("transfer_decision", {}).get("blockers") or [])
+        for msg in gate_blocker_messages:
+            if msg not in decision_blockers:
+                decision_blockers.append(msg)
+        proof_bundle["passed"] = False
+        proof_bundle["transfer_decision"] = {
+            "decision": "block",
+            "blockers": decision_blockers,
+            "reason": "; ".join(decision_blockers) if decision_blockers else "Preflight gates blocked the transfer",
+        }
+
     return {
         **result,
         "passed": not has_blocks,
@@ -265,6 +279,7 @@ def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
         "gates": gates,
         "blockers": blockers,
+        "proof_bundle": proof_bundle,
     }
 
 
