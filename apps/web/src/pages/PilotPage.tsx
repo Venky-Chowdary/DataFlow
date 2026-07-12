@@ -69,7 +69,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const [loading, setLoading] = useState(false);
   const [pilotOnline, setPilotOnline] = useState<boolean | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
-  const [trainingInfo, setTrainingInfo] = useState<{ docs: number; ready: boolean } | null>(null);
+  const [trainingInfo, setTrainingInfo] = useState<{ docs: number; ready: boolean }>({ docs: 0, ready: false });
   const [toolRegistry, setToolRegistry] = useState<PilotToolRegistry | null>(null);
   const [toolsLoading, setToolsLoading] = useState(true);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -109,13 +109,14 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       const agent = s.training_agent as {
         last_run?: { metrics?: { copilot_evaluation?: { ready?: boolean } } };
       } | undefined;
+      // Only fill metadata from /copilot/status if the dedicated endpoints
+      // have not already returned. Use updater functions so the latest state
+      // is checked, avoiding a stale-closure override when /copilot/status
+      // arrives after tools/models.
       const registry = s.tool_registry as PilotToolRegistry | undefined;
       const models = s.model_capabilities as ModelCapabilities | undefined;
-      if (registry?.tool_count) setToolRegistry(registry);
-      if (models?.active_provider) {
-        setModelCapabilities(models);
-        setModelsLoading(false);
-      }
+      if (registry?.tool_count) setToolRegistry((current) => current ?? registry);
+      if (models?.active_provider) setModelCapabilities((current) => current ?? models);
       setTrainingInfo({
         docs: rag?.document_count ?? 0,
         ready: agent?.last_run?.metrics?.copilot_evaluation?.ready ?? false,
@@ -233,15 +234,18 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           </div>
           <div className="df2-pilot-status-metrics">
             {!metaReady ? (
-              <span className="df2-pilot-metrics-skeleton">Loading agent status…</span>
+              <>
+                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>model</span>
+                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>tools</span>
+                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>actions</span>
+                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>docs</span>
+              </>
             ) : (
               <>
                 <span><strong>{modelCapabilities?.active_provider ?? "local"}</strong> model</span>
                 <span><strong>{displayRegistry.tool_count}</strong> tools</span>
                 <span><strong>{displayRegistry.total_routable_actions.toLocaleString()}</strong> actions</span>
-                {trainingInfo && (
-                  <span><strong>{trainingInfo.docs.toLocaleString()}</strong> docs</span>
-                )}
+                <span><strong>{trainingInfo.docs.toLocaleString()}</strong> docs</span>
               </>
             )}
           </div>
@@ -381,7 +385,15 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
             <div className="df2-pilot-capability-grid">
               {!metaReady ? (
-                <p className="df2-cell-meta" aria-live="polite">Loading capabilities…</p>
+                <>
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="df2-pilot-capability-skeleton" aria-hidden>
+                      <span className="df2-pilot-skeleton df2-pilot-skeleton--wide" />
+                      <span className="df2-pilot-skeleton df2-pilot-skeleton--medium" />
+                      <span className="df2-pilot-skeleton df2-pilot-skeleton--wide" />
+                    </div>
+                  ))}
+                </>
               ) : displayRegistry.families.length === 0 ? (
                 <EmptyState compact icon="zap" title="No tool families" description="Tool families appear when the API is online." />
               ) : (

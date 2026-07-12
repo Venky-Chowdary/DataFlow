@@ -231,7 +231,10 @@ def resolve_driver_type(catalog_id: str) -> str:
 
 
 def _sqlalchemy_available() -> bool:
-    return importlib.util.find_spec("sqlalchemy") is not None
+    try:
+        return importlib.util.find_spec("sqlalchemy") is not None
+    except (ModuleNotFoundError, ValueError, ImportError):
+        return False
 
 
 # First-class / file drivers and the DBAPI / library modules they need
@@ -297,7 +300,14 @@ _GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
 def _module_is_installed(name: str | None) -> bool:
     if name is None:
         return True
-    return importlib.util.find_spec(name) is not None
+    if not name or not isinstance(name, str):
+        return False
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ModuleNotFoundError, ValueError, ImportError):
+        # find_spec can raise for namespace packages, missing __init__, or
+        # invalid module paths. Treat all as "not installed" rather than crash.
+        return False
 
 
 @lru_cache(maxsize=1)

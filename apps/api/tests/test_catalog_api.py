@@ -57,3 +57,17 @@ def test_catalog_training_docs_do_not_overclaim_planned_connectors():
     planned = next(d for d in docs if d["metadata"].get("status") == "planned")
     assert "catalog discovery" in planned["text"]
     assert "route live transfers only when" in planned["text"]
+
+
+def test_catalog_summary_survives_broken_module_spec(monkeypatch):
+    """A broken/missing DBAPI package must not crash the catalog endpoint."""
+    original = importlib.util.find_spec
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name and "snowflake" in name:
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    data = _catalog.catalog_summary()
+    assert data["total"] >= 600
