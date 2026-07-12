@@ -67,7 +67,7 @@ def _is_base64(value: str) -> bool:
 
 
 _BINARY_FIELD_RE = re.compile(
-    r"(?:^|_)(?:payload|binary|blob|bytes|b64|base64|data|file|doc|content|image|audio|video|pdf|signature|hash|checksum|key|secret|token|cipher|iv|salt|nonce|encoded|raw|dump|attachment)(?:_?\d*)?(?:$|_)",
+    r"(?:^|_)(?:payload|binary|blob|bytea|bytes|b64|base64|data|file|doc|content|image|audio|video|pdf|signature|hash|checksum|key|secret|token|cipher|iv|salt|nonce|encoded|raw|dump|attachment)(?:_?\d*)?(?:$|_)",
     re.I,
 )
 

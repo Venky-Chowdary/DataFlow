@@ -30,8 +30,6 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
             "DATE": "DATE",
             "TIMESTAMP": "DATETIME",
             "TIME": "TIME",
-            "INTEGER": "INTEGER",
-            "DECIMAL": "DECIMAL",
             "BOOLEAN": "BOOLEAN",
             "VARCHAR": "TEXT",
             "TEXT": "TEXT",

@@ -476,12 +476,19 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return sa.TIMESTAMP()
         return sa.DateTime(timezone=True)
     if t == "time":
+        # ClickHouse and QuestDB do not have a native TIME column; store as string.
+        if dialect_name == "clickhouse" or db_type in ("clickhouse", "questdb"):
+            return _maybe_nullable(sa.String())
         return _maybe_nullable(sa.Time())
     if t == "uuid":
         if db_type == "questdb":
             return sa.Text()
         if db_type == "risingwave":
             return sa.String()
+        # ClickHouse stores UUIDs as variable-length String to avoid
+        # FixedString(36) padding/failure for non-canonical UUIDs.
+        if dialect_name == "clickhouse":
+            return _maybe_nullable(sa.String())
         return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
@@ -593,6 +600,14 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
         return value
 
     if t == "time":
+        if _is_string_type(sa_type):
+            if isinstance(value, time):
+                return value.isoformat()
+            if isinstance(value, datetime):
+                return value.time().isoformat()
+            if isinstance(value, str):
+                return value
+            return str(value)
         if isinstance(value, time):
             return value
         if isinstance(value, datetime):
@@ -769,7 +784,14 @@ def _build_table_for_write(
 
 
 def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str | None:
-    """Use DataFlow value inference to narrow generic SQL String columns."""
+    """Use DataFlow value inference to narrow generic SQL String columns.
+
+    We intentionally do NOT narrow string columns to INTEGER or DECIMAL: a
+    string column may contain codes, identifiers, bit strings, or formatted
+    values (e.g. $1,000.00, 1010) that would be corrupted by numeric coercion.
+    Structural/representational types (JSON, UUID, BINARY, DATE, TIME, etc.)
+    are still recovered safely.
+    """
     try:
         from services.schema_inference import infer_type
 
@@ -780,8 +802,6 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
             "DATE": "date",
             "TIMESTAMP": "datetime",
             "TIME": "time",
-            "INTEGER": "integer",
-            "DECIMAL": "decimal",
             "BOOLEAN": "boolean",
             "VARCHAR": "string",
             "TEXT": "string",
