@@ -176,15 +176,15 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
             <dl className="lp-stats">
               <div>
                 <dt>Catalog</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.total} suffix="+" /> : "673+"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.total} suffix="+" /> : "733+"}</dd>
               </div>
               <div>
                 <dt>Transfer ready</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.transfer_live} /> : "120+"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.transfer_live} /> : "121"}</dd>
               </div>
               <div>
                 <dt>Categories</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.categories} /> : "6"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.categories} /> : "12"}</dd>
               </div>
               <div>
                 <dt>Preflight gates</dt>
