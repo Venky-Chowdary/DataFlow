@@ -140,13 +140,19 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         9200 if fmt == "elasticsearch" else
         5439 if fmt == "redshift" else
         0 if fmt == "sqlite" else
+        0 if fmt == "generic_sql" else
         443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs") else 5432
+    )
+    default_schema = (
+        "PUBLIC" if fmt == "snowflake" else
+        None if fmt == "generic_sql" else
+        "public"
     )
     cfg = {
         "host": endpoint.host or "localhost",
         "port": endpoint.port or default_port,
-        "database": endpoint.database or endpoint.host or "",
-        "schema": endpoint.schema or ("PUBLIC" if fmt == "snowflake" else "public"),
+        "database": endpoint.database if fmt == "generic_sql" else (endpoint.database or endpoint.host or ""),
+        "schema": endpoint.schema or default_schema,
         "username": endpoint.username,
         "password": endpoint.password,
         "connection_string": endpoint.connection_string,
@@ -217,6 +223,7 @@ def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, head
         ssl=cfg.get("ssl", False),
         warehouse=cfg.get("warehouse", ""),
         table=table,
+        catalog_type=cfg.get("type", ""),
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
@@ -453,6 +460,31 @@ def read_source_database(
         schema = {c: "TEXT" for c in batch.headers}
         return records, batch.headers, schema
 
+    if db_type == "generic_sql":
+        from connectors.generic_sql import read_table_batch
+
+        table = endpoint.table
+        if not table:
+            raise ValueError("Source table name required")
+        batch = read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema") or "",
+            connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            type=cfg.get("type", ""),
+            table=table,
+            limit=limit,
+        )
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        return records, batch.headers, schema
+
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
@@ -485,7 +517,8 @@ def write_destination_database(
         "port": cfg["port"] or (
             5439 if db_type == "redshift" else
             5432 if db_type == "postgresql" else
-            3306 if db_type == "mysql" else 443
+            3306 if db_type == "mysql" else
+            0 if db_type == "generic_sql" else 443
         ),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
@@ -661,6 +694,21 @@ def write_destination_database(
             "type": "sqlite", "database": cfg["database"], "table": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
             **_writer_diagnostics(result),
+        }
+
+    if db_type == "generic_sql":
+        from connectors.generic_sql import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"GENERIC_SQL COLUMN {col} {ddl_type('generic_sql', schema.get(col, 'string'))}")
+        common["type"] = cfg.get("type", "")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Generic SQL write failed")
+        ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "generic_sql", "driver": result.driver,
+            "schema": result.target_schema, "table": result.table_name,
+            "checksum": result.checksum, **_writer_diagnostics(result),
         }
 
     raise ValueError(f"Database destination '{db_type}' write not implemented")

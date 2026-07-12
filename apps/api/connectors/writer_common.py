@@ -59,6 +59,7 @@ def build_mapped_rows(
     target_cols: list[str],
     column_types: dict[str, str] | None = None,
     error_policy: str | None = None,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[list[tuple], list[str]]:
     """Returns mapped rows and any transform errors (first 10)."""
     column_types = column_types or {}
@@ -75,7 +76,7 @@ def build_mapped_rows(
         transform = resolve_transform(
             m,
             column_types=column_types,
-            dest_types=column_types,
+            dest_types=dest_types or column_types,
         )
         mapping_infos.append((
             source_indices.get(src),

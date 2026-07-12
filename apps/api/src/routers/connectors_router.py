@@ -118,6 +118,22 @@ async def test_connection(request: TestConnectionRequest):
             ok, msg = run_probe(driver, cfg)
             return {"success": ok, "message": msg, "driver": driver}
 
+        if driver == "generic_sql":
+            cfg = {
+                "host": request.host or "",
+                "port": request.port or 0,
+                "database": request.database or "",
+                "username": request.username or "",
+                "password": request.password or "",
+                "schema": request.schema or "",
+                "connection_string": request.connection_string or "",
+                "ssl": False,
+                "warehouse": "",
+                "type": request.type,
+            }
+            ok, msg = run_probe(driver, cfg)
+            return {"success": ok, "message": msg, "driver": driver}
+
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             return {
                 "success": True,

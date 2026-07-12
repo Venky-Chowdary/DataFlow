@@ -18,7 +18,23 @@ def introspect_schema(
     ssl: bool = True,
     warehouse: str = "",
     table: str | None = None,
+    catalog_type: str = "",
 ) -> dict[str, Any]:
+    if db_type == "generic_sql":
+        from connectors.generic_sql import introspect_table_schema
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "database": database,
+            "username": username,
+            "password": password,
+            "schema": schema,
+            "connection_string": connection_string,
+            "ssl": ssl,
+            "type": catalog_type,
+        }
+        return introspect_table_schema(cfg, table or "")
     if db_type == "postgresql" or db_type == "redshift":
         return _introspect_postgresql(
             host=host,

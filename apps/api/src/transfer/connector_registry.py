@@ -119,7 +119,16 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     """Execute connectivity probe for a driver using resolved config."""
     import importlib
 
+    from .connector_capabilities import resolve_driver_type
+
     db_type = (db_type or "").lower()
+    resolved = resolve_driver_type(db_type)
+
+    if resolved == "generic_sql":
+        from connectors.generic_sql import test_generic_sql
+
+        return test_generic_sql(**cfg)
+
     spec = CONNECTOR_MODULES.get(db_type)
     if not spec:
         return False, f"No connectivity probe for {db_type}"

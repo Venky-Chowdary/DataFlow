@@ -32,7 +32,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "s3", "gcs", "dynamodb", "elasticsearch", "redis", "sqlite",
+    "s3", "gcs", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
 })
 
 
@@ -265,6 +265,42 @@ def _read_batch(
             table=table,
             limit=limit,
             offset=offset,
+        )
+    if src_type == "generic_sql":
+        from connectors.generic_sql import read_table_batch, read_table_cursor_batch
+
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=cfg["port"],
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                type=cfg.get("type", ""),
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                columns=columns,
+                limit=limit,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            type=cfg.get("type", ""),
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
         )
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
@@ -514,6 +550,35 @@ def _write_batch(
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
         summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        return result.rows_written, result.checksum, summary
+
+    if dest_type == "generic_sql":
+        from connectors.generic_sql import write_mapped_rows
+
+        result = write_mapped_rows(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            type=cfg.get("type", ""),
+            table_name=table_name,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            create_table=create_table,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns,
+            on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+        summary = {"type": "generic_sql", "schema": result.target_schema, "table": result.table_name,
+                   "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
@@ -855,7 +920,8 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
+    from .connector_capabilities import resolve_driver_type
     return (
-        source.format.lower() in _STREAMING_TYPES
-        and destination.format.lower() in _STREAMING_TYPES
+        resolve_driver_type(source.format) in _STREAMING_TYPES
+        and resolve_driver_type(destination.format) in _STREAMING_TYPES
     )

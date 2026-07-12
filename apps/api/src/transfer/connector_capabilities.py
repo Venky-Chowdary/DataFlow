@@ -79,7 +79,7 @@ SUGGESTED_SOURCES = [
 TRANSFER_READY_CATALOG_IDS = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
-    "sqlite",
+    "sqlite", "generic_sql",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
 })
 
@@ -103,6 +103,7 @@ def default_port(driver_type: str) -> int:
         "gcs": 443,
         "redshift": 5439,
         "sqlite": 0,
+        "generic_sql": 0,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -111,6 +112,8 @@ def resolve_driver_type(catalog_id: str) -> str:
     cid = (catalog_id or "").lower().strip()
     if not cid:
         return "unknown"
+    if cid == "generic_sql":
+        return "generic_sql"
     if cid in CATALOG_ID_ALIASES:
         return CATALOG_ID_ALIASES[cid]
     if cid in _DRIVER_CAPS:
@@ -118,8 +121,12 @@ def resolve_driver_type(catalog_id: str) -> str:
     if cid in _FILE_CAPS:
         return cid
 
-    # Strict substring match — only if target is a known implemented type
+    # Generic SQL fallback handles any SQL engine with a SQLAlchemy dialect.
+    def _valid(driver: str) -> bool:
+        return driver in _DRIVER_CAPS or driver in _FILE_CAPS or driver == "generic_sql"
+
     for needle, driver in [
+        # Existing first-class drivers
         ("postgres", "postgresql"),
         ("mongo", "mongodb"),
         ("documentdb", "mongodb"),
@@ -153,8 +160,54 @@ def resolve_driver_type(catalog_id: str) -> str:
         ("backblaze", "s3"),
         ("spaces", "s3"),
         ("object_storage", "s3"),
+        # Generic SQL engines
+        ("mssql", "generic_sql"),
+        ("sql_server", "generic_sql"),
+        ("microsoft_sql", "generic_sql"),
+        ("azure_sql", "generic_sql"),
+        ("oracle", "generic_sql"),
+        ("db2", "generic_sql"),
+        ("ibm_db2", "generic_sql"),
+        ("teradata", "generic_sql"),
+        ("netezza", "generic_sql"),
+        ("vertica", "generic_sql"),
+        ("exasol", "generic_sql"),
+        ("sybase", "generic_sql"),
+        ("sap_ase", "generic_sql"),
+        ("sap_iq", "generic_sql"),
+        ("sap_hana", "generic_sql"),
+        ("hana", "generic_sql"),
+        ("firebird", "generic_sql"),
+        ("h2", "generic_sql"),
+        ("clickhouse", "generic_sql"),
+        ("druid", "generic_sql"),
+        ("pinot", "generic_sql"),
+        ("presto", "generic_sql"),
+        ("trino", "generic_sql"),
+        ("hive", "generic_sql"),
+        ("spark", "generic_sql"),
+        ("impala", "generic_sql"),
+        ("phoenix", "generic_sql"),
+        ("duckdb", "generic_sql"),
+        ("databricks", "generic_sql"),
+        ("greenplum", "generic_sql"),
+        ("cratedb", "generic_sql"),
+        ("questdb", "generic_sql"),
+        ("doris", "generic_sql"),
+        ("starrocks", "generic_sql"),
+        ("citus", "generic_sql"),
+        ("dremio", "generic_sql"),
+        ("firebolt", "generic_sql"),
+        ("risingwave", "generic_sql"),
+        ("materialize", "generic_sql"),
+        ("yellowbrick", "generic_sql"),
+        ("actian", "generic_sql"),
+        ("informix", "generic_sql"),
+        ("athena", "generic_sql"),
+        ("synapse", "generic_sql"),
+        ("azure_synapse", "generic_sql"),
     ]:
-        if needle in cid and driver in _DRIVER_CAPS:
+        if needle in cid and _valid(driver):
             return driver
     if "gcs" in cid or "google_cloud_storage" in cid or ("cloud_storage" in cid and "google" in cid):
         return "gcs"
@@ -170,12 +223,14 @@ def resolve_driver_type(catalog_id: str) -> str:
         return "csv"
 
     base = cid.replace("___", "_").split("_")[0]
-    if base in _DRIVER_CAPS or base in _FILE_CAPS:
+    if base in _DRIVER_CAPS or base in _FILE_CAPS or base == "generic_sql":
         return base
     return base
 
 
 def get_capabilities(driver_type: str) -> dict[str, bool]:
+    if driver_type == "generic_sql":
+        return {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
     if driver_type in _DRIVER_CAPS:
         return dict(_DRIVER_CAPS[driver_type])
     if driver_type in _FILE_CAPS:
@@ -222,6 +277,8 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
         return True
     if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
         return True
+    if driver == "generic_sql":
+        return True
     return False
 
 
@@ -247,7 +304,7 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def transfer_live_driver_types() -> list[str]:
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS}.items():
+    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
         if transfer_ready(caps):
             live.append(k)
     return sorted(set(live))

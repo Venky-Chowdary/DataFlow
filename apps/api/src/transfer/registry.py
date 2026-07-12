@@ -5,11 +5,11 @@ from __future__ import annotations
 LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"]
 LIVE_DEST_DATABASES = [
     "mongodb", "postgresql", "snowflake", "mysql", "bigquery", "redshift",
-    "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite",
+    "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite", "generic_sql",
 ]
 LIVE_SOURCE_DATABASES = [
     "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
-    "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite",
+    "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite", "generic_sql",
 ]
 LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson"]
 
