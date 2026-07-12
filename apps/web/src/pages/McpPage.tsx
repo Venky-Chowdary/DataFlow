@@ -126,11 +126,11 @@ export function McpPage() {
       description="Connect Cursor, Claude, VS Code, and custom GPTs — same tools as Data Pilot."
     >
       {loading ? (
-        <PageFrame className="df2-mcp-workspace" showHonesty>
+        <PageFrame className="df2-mcp-workspace" showHonesty={false}>
           <SectionLoader title="Loading MCP server" hint="Fetching manifest and status…" />
         </PageFrame>
       ) : (
-        <PageFrame className="df2-mcp-workspace df2-stack" showHonesty>
+        <PageFrame className="df2-mcp-workspace df2-stack" showHonesty={false}>
           <PageInsightStrip
             tone={online ? "live" : "warn"}
             pill={online ? "Server healthy" : "Unreachable"}

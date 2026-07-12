@@ -94,7 +94,7 @@ export function DashboardPage({
         </div>
       }
     >
-      <PageFrame className="df2-overview-page df2-overview-enterprise" showHonesty>
+      <PageFrame className="df2-overview-page df2-overview-enterprise" showHonesty={false}>
         <PageInsightStrip
           tone={healthTone}
           pill={

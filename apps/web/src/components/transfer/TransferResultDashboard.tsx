@@ -77,8 +77,8 @@ export function TransferResultDashboard({
           </div>
         </div>
         <div className="df2-result-arrow" aria-hidden>
-          <DtIcon name="transfer" size={20} />
-          <small>{result.operation || "transfer"}</small>
+          <DtIcon name="arrow-right" size={20} />
+          <small>to</small>
         </div>
         <div className="df2-result-endpoint">
           <ConnectorIcon id={destType} size={24} />
@@ -122,7 +122,7 @@ export function TransferResultDashboard({
           </div>
         )}
         {fmt(ds?.checksum) || fmt(result.reconciliation?.target_checksum) ? (
-          <div className="df2-result-stat-card">
+          <div className="df2-result-stat-card" title="Checksum is computed over the source rows and destination rows and compared to verify that the transfer is complete and unchanged.">
             <DtIcon name="lock" size={18} />
             <strong>{(ds?.checksum || result.reconciliation?.target_checksum || "").slice(0, 16)}</strong>
             <span>Checksum</span>

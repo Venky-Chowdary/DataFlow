@@ -279,7 +279,7 @@ export function SettingsPage() {
       title="Settings"
       description="Organization profile, security, SSO, team access, API keys, and audit logs."
     >
-      <PageFrame className="df2-settings-workspace" showHonesty>
+      <PageFrame className="df2-settings-workspace" showHonesty={false}>
         <PageInsightStrip
           tone={tab === "logs" && auditEvents.some((e) => e.level === "error") ? "warn" : "info"}
           pill={activeTab.label}

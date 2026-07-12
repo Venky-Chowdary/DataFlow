@@ -391,9 +391,12 @@
 .df2-run-step.df2-result-banner {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   justify-content: flex-start;
-  text-align: center;
+  text-align: left;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .df2-result-dashboard {
@@ -401,7 +404,7 @@
   max-width: 100%;
   max-height: 100%;
   margin: 0;
-  padding: 24px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -414,9 +417,9 @@
 .df2-result-hero {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  text-align: center;
+  text-align: left;
 }
 
 .df2-result-title {
@@ -598,7 +601,7 @@
 .df2-result-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 10px;
   width: 100%;
   margin-top: 8px;
