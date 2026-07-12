@@ -212,11 +212,26 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     # contract on `_id`; other `*_id` fields are foreign keys and may repeat.
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    source_cols = [c.name for c in ctx.plan.source.columns]
+    pk = None
     if schemaless:
-        pk_candidates = [m.target for m in ctx.plan.mappings if m.target == "_id"]
+        pk = next((c for c in source_cols if c.lower() == "_id"), None)
     else:
-        pk_candidates = [m.target for m in ctx.plan.mappings if m.target.lower().endswith("_id")]
-    for col_group in [pk_candidates] if pk_candidates else []:
+        for c in source_cols:
+            if c.lower() in {"id", "_id"}:
+                pk = c
+                break
+        if not pk:
+            pk = next((c for c in source_cols if c.lower().endswith("_id")), None)
+
+    pk_targets: list[str] = []
+    if pk:
+        for m in ctx.plan.mappings:
+            if m.source == pk:
+                pk_targets.append(m.target)
+        if not pk_targets:
+            pk_targets.append(pk)
+    for col_group in [pk_targets] if pk_targets else []:
         dupes = ctx.probe_unique_constraint(col_group)
         if dupes:
             return _block(
