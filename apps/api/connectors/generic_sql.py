@@ -1,0 +1,845 @@
+"""Universal SQLAlchemy connector for any SQL database with a Python DBAPI.
+
+This connector lets DataFlow treat SQLAlchemy-supported engines as first-class
+sources and destinations. The user provides the catalog type (e.g. mssql,
+oracle, db2, trino, h2) or a full connection_string; we build the SQLAlchemy
+URL and driver name from the catalog. This is the fastest path to 100+
+real, working catalog IDs without needing a dedicated connector for every
+engine.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
+from typing import Any, Callable
+
+try:
+    import sqlalchemy as sa
+    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy.dialects import postgresql
+
+    SQLALCHEMY_AVAILABLE = True
+except Exception:  # pragma: no cover
+    SQLALCHEMY_AVAILABLE = False
+
+from connectors.writer_common import (
+    CHUNK_SIZE,
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    sanitize_identifier,
+    transform_error_policy,
+)
+
+
+@dataclass
+class ReadBatch:
+    headers: list[str]
+    rows: list[list[str]]
+    offset: int = 0
+    total_rows: int | None = None
+
+
+@dataclass
+class WriteResult:
+    ok: bool
+    rows_written: int
+    table_name: str
+    target_schema: str
+    checksum: str
+    chunks_completed: int
+    error: str | None = None
+    driver: str = "sqlalchemy"
+    rejected_rows: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+# Catalog type -> SQLAlchemy drivername.  If a type is missing we attempt to
+# use the catalog type as the drivername, which works for engines where the
+# DBAPI/dialect package already installed a SQLAlchemy dialect.
+_DRIVERNAME_MAP: dict[str, str] = {
+    "mssql": "mssql+pyodbc",
+    "sql_server": "mssql+pyodbc",
+    "sqlserver": "mssql+pyodbc",
+    "microsoft_sql_server": "mssql+pyodbc",
+    "azure_sql_database": "mssql+pyodbc",
+    "google_cloud_sql_sql_server": "mssql+pyodbc",
+    "amazon_rds_sql_server": "mssql+pyodbc",
+    "synapse_analytics": "mssql+pyodbc",
+    "azure_synapse_dedicated": "mssql+pyodbc",
+    "azure_synapse_serverless": "mssql+pyodbc",
+    "oracle": "oracle+oracledb",
+    "oracle_db": "oracle+oracledb",
+    "oracle_autonomous_warehouse": "oracle+oracledb",
+    "amazon_rds_oracle": "oracle+oracledb",
+    "db2": "ibm_db_sa",
+    "ibm_db2": "ibm_db_sa",
+    "ibm_db2_warehouse": "ibm_db_sa",
+    "sybase_ase": "sybase+pyodbc",
+    "sap_ase": "sybase+pyodbc",
+    "sap_iq": "sybase+pyodbc",
+    "teradata": "teradatasql",
+    "teradata_vantage": "teradatasql",
+    "netezza": "nzpsql",
+    "vertica": "vertica+vertica_python",
+    "exasol": "exasol+pyodbc",
+    "firebird": "firebird+fdb",
+    "h2": "h2",
+    "clickhouse": "clickhouse+native",
+    "druid": "druid",
+    "pinot": "pinot",
+    "presto": "presto",
+    "trino": "trino",
+    "apache_hive": "hive",
+    "apache_impala": "impala",
+    "sparksql": "spark",
+    "phoenix": "phoenix",
+    "sap_hana": "hana",
+    "hana": "hana",
+    "duckdb": "duckdb",
+    "databricks": "databricks+connector",
+    "sqlite": "sqlite",
+    # PostgreSQL-wire compatible engines
+    "greenplum": "postgresql+psycopg2",
+    "cratedb": "postgresql+psycopg2",
+    "yugabytedb": "postgresql+psycopg2",
+    "cockroachdb": "postgresql+psycopg2",
+    "timescaledb": "postgresql+psycopg2",
+    "alloydb": "postgresql+psycopg2",
+    "supabase": "postgresql+psycopg2",
+    "neon": "postgresql+psycopg2",
+    "citus": "postgresql+psycopg2",
+    "amazon_rds_postgresql": "postgresql+psycopg2",
+    "google_cloud_sql_postgresql": "postgresql+psycopg2",
+    "azure_database_for_postgresql": "postgresql+psycopg2",
+    "questdb": "postgresql+psycopg2",
+    # MySQL-wire compatible engines handled by generic SQL too if not routed to mysql
+    "singlestore": "mysql+pymysql",
+    "doris": "mysql+pymysql",
+    "starrocks": "mysql+pymysql",
+    "oceanbase": "mysql+pymysql",
+    "tidb": "mysql+pymysql",
+    "polardb": "mysql+pymysql",
+    "gaussdb": "mysql+pymysql",
+    "goldendb": "mysql+pymysql",
+    "vitess": "mysql+pymysql",
+    "planetscale": "mysql+pymysql",
+    "amazon_rds_mysql": "mysql+pymysql",
+    "google_cloud_sql_mysql": "mysql+pymysql",
+    "azure_database_for_mysql": "mysql+pymysql",
+    "amazon_aurora": "mysql+pymysql",
+    "mariadb": "mysql+pymysql",
+    # Additional SQL engines reached via generic SQL driver
+    "dremio": "dremio+flight",
+    "dremio_flight": "dremio+flight",
+    "firebolt": "firebolt",
+    "risingwave": "postgresql+psycopg2",
+    "materialize": "postgresql+psycopg2",
+    "yellowbrick": "postgresql+psycopg2",
+    "actian_avalanche": "postgresql+psycopg2",
+    "actian": "postgresql+psycopg2",
+    "informix": "informix+pyodbc",
+    "athena": "awsathena+rest",
+    "amazon_athena": "awsathena+rest",
+    "synapse": "mssql+pyodbc",
+    "azure_synapse": "mssql+pyodbc",
+}
+
+_DEFAULT_PORT_MAP: dict[str, int] = {
+    "mssql": 1433,
+    "sql_server": 1433,
+    "sqlserver": 1433,
+    "microsoft_sql_server": 1433,
+    "azure_sql_database": 1433,
+    "google_cloud_sql_sql_server": 1433,
+    "amazon_rds_sql_server": 1433,
+    "synapse_analytics": 1433,
+    "azure_synapse_dedicated": 1433,
+    "azure_synapse_serverless": 1433,
+    "oracle": 1521,
+    "oracle_db": 1521,
+    "oracle_autonomous_warehouse": 1521,
+    "amazon_rds_oracle": 1521,
+    "db2": 50000,
+    "ibm_db2": 50000,
+    "ibm_db2_warehouse": 50000,
+    "sybase_ase": 5000,
+    "sap_ase": 5000,
+    "sap_iq": 2638,
+    "teradata": 1025,
+    "teradata_vantage": 1025,
+    "netezza": 5480,
+    "vertica": 5433,
+    "exasol": 8563,
+    "firebird": 3050,
+    "h2": 9092,
+    "clickhouse": 8123,
+    "druid": 8082,
+    "pinot": 8099,
+    "presto": 8080,
+    "trino": 8080,
+    "apache_hive": 10000,
+    "apache_impala": 21000,
+    "sparksql": 10000,
+    "phoenix": 8765,
+    "sap_hana": 30015,
+    "hana": 30015,
+    "duckdb": 0,
+    "databricks": 443,
+    "sqlite": 0,
+    "greenplum": 5432,
+    "cratedb": 5432,
+    "yugabytedb": 5433,
+    "cockroachdb": 26257,
+    "timescaledb": 5432,
+    "alloydb": 5432,
+    "supabase": 5432,
+    "neon": 5432,
+    "citus": 5432,
+    "amazon_rds_postgresql": 5432,
+    "google_cloud_sql_postgresql": 5432,
+    "azure_database_for_postgresql": 5432,
+    "questdb": 8812,
+    "singlestore": 3306,
+    "doris": 9030,
+    "starrocks": 9030,
+    "oceanbase": 2881,
+    "tidb": 4000,
+    "polardb": 3306,
+    "gaussdb": 3306,
+    "goldendb": 3306,
+    "vitess": 3306,
+    "planetscale": 3306,
+    "amazon_rds_mysql": 3306,
+    "google_cloud_sql_mysql": 3306,
+    "azure_database_for_mysql": 3306,
+    "amazon_aurora": 3306,
+    "mariadb": 3306,
+    "dremio": 32010,
+    "dremio_flight": 32010,
+    "firebolt": 443,
+    "risingwave": 4566,
+    "materialize": 6875,
+    "yellowbrick": 5432,
+    "actian_avalanche": 5432,
+    "actian": 5432,
+    "informix": 9088,
+    "athena": 443,
+    "amazon_athena": 443,
+    "synapse": 1433,
+    "azure_synapse": 1433,
+}
+
+
+def _drivername(db_type: str) -> str:
+    return _DRIVERNAME_MAP.get(db_type, db_type)
+
+
+def _default_port(db_type: str) -> int:
+    return _DEFAULT_PORT_MAP.get(db_type, 0)
+
+
+def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
+    """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
+    connection_string = cfg.get("connection_string") or ""
+    if connection_string:
+        return connection_string
+
+    db_type = (cfg.get("type") or "").lower().strip()
+    if not db_type:
+        raise ValueError("A database type or connection_string is required")
+
+    drivername = _drivername(db_type)
+
+    if drivername == "sqlite":
+        database = cfg.get("database") or ""
+        return f"sqlite:///{database or ':memory:'}"
+
+    port = int(cfg.get("port") or 0)
+    if not port:
+        port = _default_port(db_type)
+
+    return sa.URL.create(
+        drivername,
+        username=cfg.get("username") or None,
+        password=cfg.get("password") or None,
+        host=cfg.get("host") or "localhost",
+        port=port if port else None,
+        database=cfg.get("database") or None,
+    )
+
+
+def _engine(cfg: dict[str, Any]) -> Any:
+    url = _build_url(cfg)
+    # Fast, safe defaults for local and network databases.
+    return create_engine(url, pool_pre_ping=True, pool_recycle=600)
+
+
+def _schema_name(cfg: dict[str, Any]) -> str | None:
+    return cfg.get("schema") or None
+
+
+def _type_repr(type_obj: Any) -> str:
+    try:
+        return str(type_obj).lower()
+    except Exception:
+        return ""
+
+
+def _logical_type_from_sa(col_type: Any) -> str:
+    """Map a SQLAlchemy type instance to a DataFlow logical type."""
+    from services.type_system import normalize_logical_type
+
+    if col_type is None:
+        return "string"
+
+    repr_ = _type_repr(col_type)
+
+    # Direct dialect UUID types
+    if "uuid" in repr_:
+        return "uuid"
+    if isinstance(col_type, (sa.UUID,)):
+        return "uuid"
+    if isinstance(col_type, postgresql.UUID):
+        return "uuid"
+
+    if isinstance(col_type, (sa.ARRAY,)):
+        return "array"
+
+    if isinstance(col_type, (sa.JSON,)):
+        return "json"
+
+    if isinstance(col_type, (sa.LargeBinary, sa.BINARY)):
+        return "binary"
+
+    if isinstance(col_type, (sa.Boolean,)):
+        return "boolean"
+
+    if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
+        return "integer"
+
+    if isinstance(col_type, (sa.Numeric, sa.Float, sa.Double, sa.REAL)):
+        return "decimal"
+
+    if isinstance(col_type, (sa.DateTime,)):
+        return "datetime"
+
+    if isinstance(col_type, (sa.Date,)):
+        return "date"
+
+    if isinstance(col_type, (sa.Time,)):
+        return "time"
+
+    if isinstance(col_type, (sa.String, sa.Text, sa.CHAR)):
+        return "string"
+
+    # Fallback text matching for dialect-specific types not captured above
+    if "json" in repr_ or "variant" in repr_ or "super" in repr_:
+        return "json"
+    if "array" in repr_:
+        return "array"
+    if "uuid" in repr_ or "guid" in repr_ or "uniqueidentifier" in repr_:
+        return "uuid"
+    if any(x in repr_ for x in ("binary", "blob", "bytea", "varbinary", "image", "raw")):
+        return "binary"
+    if any(x in repr_ for x in ("numeric", "decimal", "number", "double", "float", "real", "money", "smallmoney")):
+        return "decimal"
+    if any(x in repr_ for x in ("int", "serial", "smallint", "tinyint", "bigint")):
+        return "integer"
+    if "bool" in repr_ or "bit" in repr_:
+        return "boolean"
+    if "datetime" in repr_ or "timestamp" in repr_:
+        return "datetime"
+    if "date" in repr_:
+        return "date"
+    if "time" in repr_:
+        return "time"
+    if any(x in repr_ for x in ("char", "varchar", "text", "clob", "string")):
+        return "string"
+
+    return normalize_logical_type(repr_)
+
+
+def _sa_type_for_logical(logical: str, dialect_name: str) -> Any:
+    """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine."""
+    t = (logical or "string").lower().strip()
+
+    if t == "integer":
+        return sa.BigInteger()
+    if t == "decimal":
+        return sa.Numeric(38, 10)
+    if t == "boolean":
+        return sa.Boolean()
+    if t == "date":
+        return sa.Date()
+    if t == "datetime":
+        return sa.DateTime()
+    if t == "time":
+        return sa.Time()
+    if t == "uuid":
+        return sa.String(36)
+    if t in ("json", "array"):
+        # Oracle's SQLAlchemy dialect cannot render a native JSON type.
+        return sa.Text() if dialect_name == "oracle" else sa.JSON()
+    if t == "binary":
+        return sa.LargeBinary()
+    return sa.Text()
+
+
+def _to_sa_value(value: Any, logical: str) -> Any:
+    """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
+    if value is None:
+        return None
+
+    t = (logical or "string").lower().strip()
+
+    if t in ("json", "array"):
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+        return value
+
+    if t == "binary":
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            try:
+                return base64.b64decode(value, validate=True)
+            except Exception:
+                return value.encode("utf-8")
+        return value
+
+    if t == "date":
+        if isinstance(value, date):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except Exception:
+                return value
+        return value
+
+    if t == "datetime":
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time())
+        if isinstance(value, str):
+            text = value.strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(text)
+            except Exception:
+                return value
+        return value
+
+    if t == "time":
+        if isinstance(value, time):
+            return value
+        if isinstance(value, datetime):
+            return value.time()
+        if isinstance(value, str):
+            try:
+                return time.fromisoformat(value)
+            except Exception:
+                return value
+        return value
+
+    # integer, decimal, boolean, uuid, string/text are already bound-friendly
+    return value
+
+
+def _cell_to_string(value: Any) -> str:
+    """Render a SQLAlchemy result cell value to the string matrix used by DataFlow."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)
+
+
+def _cfg_from_params(
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    type: str = "",
+    **_: Any,
+) -> dict[str, Any]:
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password": password,
+        "schema": schema,
+        "connection_string": connection_string,
+        "ssl": ssl,
+        "type": type,
+    }
+    return cfg
+
+
+def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
+    """Probe connectivity using a lightweight SELECT 1 equivalent."""
+    if not SQLALCHEMY_AVAILABLE:
+        return False, "SQLAlchemy is not installed"
+    cfg = _cfg_from_params(**kwargs)
+    try:
+        engine = _engine(cfg)
+        with engine.connect() as conn:
+            conn.execute(sa.select(sa.literal(1)))
+        return True, "SQLAlchemy connection successful"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _reflect_table(
+    engine: Any,
+    table: str,
+    schema: str | None,
+    columns: list[str] | None = None,
+    include_pk: bool = False,
+) -> sa.Table:
+    """Reflect or build a Table object for reading/writing."""
+    metadata = sa.MetaData()
+    # Quote identifiers for safety with reserved words and case-sensitive engines.
+    table_obj = sa.Table(
+        table,
+        metadata,
+        schema=schema,
+        quote=True,
+        quote_schema=True,
+        autoload_with=engine,
+    )
+    if columns is None:
+        return table_obj
+
+    # Restrict to requested columns but keep the full table for ordering/cursor.
+    selected = []
+    for c in columns:
+        if c in table_obj.c:
+            selected.append(table_obj.c[c])
+        else:
+            raise ValueError(f"Column '{c}' not found in table {table}")
+    # Return a subselect proxy with those columns only so we can still use .c.
+    new_meta = sa.MetaData()
+    new_table = sa.Table(table, new_meta, schema=schema, quote=True, quote_schema=True)
+    for col in selected:
+        new_table.append_column(sa.Column(col.name, col.type, quote=True))
+    return new_table
+
+
+def _build_table_for_write(
+    engine: Any,
+    table_name: str,
+    schema: str | None,
+    columns: list[str],
+    column_types: dict[str, str],
+) -> sa.Table:
+    """Build an explicit Table definition for CREATE/INSERT using the target schema."""
+    metadata = sa.MetaData()
+    dialect_name = engine.dialect.name if engine.dialect else ""
+    cols = []
+    for col in columns:
+        logical = column_types.get(col, "string")
+        cols.append(
+            sa.Column(
+                col,
+                _sa_type_for_logical(logical, dialect_name),
+                quote=True,
+            )
+        )
+    return sa.Table(
+        table_name,
+        metadata,
+        schema=schema,
+        quote=True,
+        quote_schema=True,
+        *cols,
+    )
+
+
+def introspect_table_schema(
+    cfg: dict[str, Any],
+    table: str,
+) -> dict[str, Any]:
+    """Return schema metadata for the table using SQLAlchemy reflection."""
+    if not SQLALCHEMY_AVAILABLE:
+        return {"ok": False, "error": "SQLAlchemy is not installed", "columns": [], "tables": []}
+    try:
+        engine = _engine(cfg)
+        schema = _schema_name(cfg)
+        inspector = inspect(engine)
+        columns = inspector.get_columns(table, schema=schema)
+        result = []
+        for col in columns:
+            result.append(
+                {
+                    "name": col["name"],
+                    "inferred_type": _logical_type_from_sa(col.get("type")),
+                    "nullable": col.get("nullable", True),
+                }
+            )
+        return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+
+def read_table_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    type: str = "",
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 100_000,
+    known_total_rows: int | None = None,
+) -> ReadBatch:
+    """Read a batch of rows from any SQLAlchemy-supported database."""
+    if not SQLALCHEMY_AVAILABLE:
+        raise RuntimeError("SQLAlchemy is not installed")
+
+    cfg = _cfg_from_params(
+        host, port, database, username, password, schema, connection_string, ssl, type=type
+    )
+    engine = _engine(cfg)
+    schema_name = _schema_name(cfg)
+
+    with engine.connect() as conn:
+        table_obj = _reflect_table(engine, table, schema_name, columns)
+        selected_cols = list(table_obj.c)
+        if columns:
+            selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+        else:
+            columns = selected_cols = list(table_obj.c)
+
+        stmt = sa.select(*selected_cols)
+        if offset > 0:
+            order_col = selected_cols[0]
+            stmt = stmt.order_by(order_col).offset(offset).limit(limit)
+        else:
+            stmt = stmt.limit(limit)
+
+        fetched = conn.execute(stmt).fetchall()
+        headers = [c.name for c in selected_cols]
+        rows = [[_cell_to_string(value) for value in row] for row in fetched]
+
+        if known_total_rows is not None:
+            total = known_total_rows
+        else:
+            try:
+                total = conn.execute(
+                    sa.select(sa.func.count()).select_from(table_obj)
+                ).scalar()
+            except Exception:
+                total = len(rows)
+
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
+
+def read_table_cursor_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    cursor_column: str,
+    cursor_after: str | None,
+    type: str = "",
+    columns: list[str] | None = None,
+    limit: int = 20_000,
+) -> ReadBatch:
+    """Cursor/keyset pagination for incremental and streaming transfers."""
+    if not SQLALCHEMY_AVAILABLE:
+        raise RuntimeError("SQLAlchemy is not installed")
+
+    cfg = _cfg_from_params(
+        host, port, database, username, password, schema, connection_string, ssl, type=type
+    )
+    engine = _engine(cfg)
+    schema_name = _schema_name(cfg)
+
+    with engine.connect() as conn:
+        table_obj = _reflect_table(engine, table, schema_name, columns)
+        if cursor_column not in table_obj.c:
+            raise ValueError(f"Cursor column '{cursor_column}' not found in table {table}")
+        cursor_col = table_obj.c[cursor_column]
+        selected_cols = list(table_obj.c)
+        if columns:
+            selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+        else:
+            columns = selected_cols = list(table_obj.c)
+
+        stmt = sa.select(*selected_cols)
+        if cursor_after:
+            # Cast the cursor string to the reflected column type so numeric and
+            # date/timestamp cursors compare correctly.
+            marker = sa.cast(sa.literal(cursor_after), cursor_col.type)
+            stmt = stmt.where(cursor_col > marker)
+        stmt = stmt.order_by(cursor_col).limit(limit)
+
+        fetched = conn.execute(stmt).fetchall()
+        headers = [c.name for c in selected_cols]
+        rows = [[_cell_to_string(value) for value in row] for row in fetched]
+
+    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
+
+
+def write_mapped_rows(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table_name: str,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    on_checkpoint: Callable[[int, int, int], None] | None = None,
+    create_table: bool = True,
+    error_policy: str | None = None,
+    write_mode: str = "insert",
+    conflict_columns: list[str] | None = None,
+    type: str = "",
+) -> WriteResult:
+    """Write mapped rows to any SQLAlchemy-supported destination."""
+    if not SQLALCHEMY_AVAILABLE:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or database,
+            checksum="",
+            chunks_completed=0,
+            error="SQLAlchemy is not installed",
+        )
+
+    cfg = _cfg_from_params(
+        host, port, database, username, password, schema, connection_string, ssl, type=type
+    )
+    engine = _engine(cfg)
+    schema_name = _schema_name(cfg)
+
+    target_cols, _ = resolve_target_columns(mappings, column_types)
+    target_column_types = {target_cols[i]: column_types.get(mappings[i]["source"], "string") for i in range(len(target_cols))}
+
+    policy = transform_error_policy(error_policy)
+    mapped_rows, transform_errors = build_mapped_rows(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=target_column_types,
+    )
+
+    if transform_errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or database,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_rows=len(data_rows) - len(mapped_rows),
+            warnings=transform_errors,
+        )
+
+    table_obj = _build_table_for_write(engine, table_name, schema_name, target_cols, target_column_types)
+
+    converted_rows: list[dict] = []
+    for row in mapped_rows:
+        converted_rows.append(
+            {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string")) for i in range(len(target_cols))}
+        )
+
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            table_exists = inspector.has_table(table_name, schema=schema_name)
+
+            if write_mode == "replace" and table_exists:
+                conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
+                conn.commit()
+                table_exists = False
+
+            if create_table and not table_exists:
+                conn.execute(sa.schema.CreateTable(table_obj))
+                conn.commit()
+
+            total = len(converted_rows)
+            chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
+            written = 0
+            for chunk_idx in range(chunks):
+                batch = converted_rows[chunk_idx * CHUNK_SIZE : (chunk_idx + 1) * CHUNK_SIZE]
+                if not batch:
+                    break
+                conn.execute(table_obj.insert(), batch)
+                conn.commit()
+                written += len(batch)
+                if on_checkpoint:
+                    on_checkpoint(chunk_idx + 1, chunks, written)
+
+        return WriteResult(
+            ok=True,
+            rows_written=written,
+            table_name=table_name,
+            target_schema=schema or database,
+            checksum=row_checksum(mapped_rows),
+            chunks_completed=chunks,
+            rejected_rows=len(data_rows) - len(mapped_rows),
+            warnings=transform_errors,
+        )
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or database,
+            checksum="",
+            chunks_completed=0,
+            error=str(exc),
+            rejected_rows=len(data_rows) - len(mapped_rows),
+            warnings=transform_errors,
+        )
