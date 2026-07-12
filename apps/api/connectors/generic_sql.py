@@ -648,6 +648,22 @@ def introspect_table_schema(
         engine.dispose()
 
 
+def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bool:
+    """Drop a table using SQLAlchemy dialect-aware DDL."""
+    if not SQLALCHEMY_AVAILABLE:
+        return False
+    engine = _engine(cfg)
+    try:
+        schema = schema or _schema_name(cfg)
+        table_obj = sa.Table(table, sa.MetaData(), schema=schema)
+        table_obj.drop(engine, checkfirst=True)
+        return True
+    except Exception:
+        return False
+    finally:
+        engine.dispose()
+
+
 def read_table_batch(
     *,
     host: str,

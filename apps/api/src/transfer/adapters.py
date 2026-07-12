@@ -209,6 +209,16 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
 
 def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, headers: list[str]) -> dict[str, str]:
     """Load column types from INFORMATION_SCHEMA when the driver is available."""
+    if db_type == "generic_sql":
+        try:
+            from connectors.generic_sql import introspect_table_schema
+
+            info = introspect_table_schema(cfg, table)
+            if info.get("ok") and info.get("columns"):
+                return {c["name"]: c["inferred_type"] for c in info["columns"]}
+        except Exception:
+            pass
+
     from services.schema_introspect import introspect_schema
 
     info = introspect_schema(

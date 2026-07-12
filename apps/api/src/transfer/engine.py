@@ -49,9 +49,16 @@ from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 from services.batch_progress import ThrottledCheckpoint  # noqa: E402
 
 
-def _destination_schema_types(destination: EndpointConfig) -> dict[str, str]:
-    """Introspect destination column types for schema-aware preflight and transforms."""
+def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
+    """Introspect destination column types for schema-aware preflight and transforms.
+
+    For full-refresh overwrite sync modes the destination table will be dropped
+    and recreated, so any existing schema is irrelevant and should not influence
+    mapping or preflight decisions.
+    """
     if destination.kind != "database":
+        return {}
+    if (sync_mode or "full_refresh_overwrite").lower() in {"full_refresh_overwrite", "overwrite"}:
         return {}
     try:
         from .endpoint_intelligence import introspect_endpoint
@@ -60,6 +67,24 @@ def _destination_schema_types(destination: EndpointConfig) -> dict[str, str]:
         return dict(info.get("schema") or {})
     except Exception:
         return {}
+
+
+def _drop_destination_table(destination: EndpointConfig) -> bool:
+    """Drop the destination object for full-refresh overwrite sync modes."""
+    if destination.kind != "database":
+        return False
+    try:
+        from .connector_capabilities import resolve_driver_type
+        from .adapters import resolve_connector_config, resolve_dest_table
+        from connectors.table_manager import drop_table
+
+        db_type = resolve_driver_type(destination.format)
+        cfg = resolve_connector_config(destination)
+        table_name = resolve_dest_table(db_type, destination)
+        schema = cfg.get("schema")
+        return drop_table(db_type, cfg, table_name, schema)
+    except Exception:
+        return False
 
 
 def _enrich_mappings_with_types(mappings: list[dict], dest_types: dict[str, str]) -> list[dict]:
@@ -141,7 +166,7 @@ class UniversalTransferEngine:
 
             mappings = _enrich_mappings_with_types(
                 request.mappings or default_mappings(columns),
-                _destination_schema_types(request.destination),
+                _destination_schema_types(request.destination, sync_mode=request.sync_mode),
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -161,7 +186,7 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-                    destination_column_types=_destination_schema_types(request.destination),
+                    destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
                     destination_db_type=(request.destination.format or "postgresql").lower(),
                 )
                 pf = apply_policy_gates(
@@ -222,6 +247,8 @@ class UniversalTransferEngine:
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
             if request.destination.kind == "database":
+                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                    _drop_destination_table(request.destination)
                 rows_written, ddl_log, dest_summary = write_destination_database(
                     request.destination, records, columns, schema, mappings,
                     on_checkpoint=throttled_checkpoint,
@@ -358,7 +385,7 @@ class UniversalTransferEngine:
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             mappings = _enrich_mappings_with_types(
                 request.mappings or default_mappings(columns),
-                _destination_schema_types(request.destination),
+                _destination_schema_types(request.destination, sync_mode=request.sync_mode),
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -378,7 +405,7 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-                    destination_column_types=_destination_schema_types(request.destination),
+                    destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
                     destination_db_type=(request.destination.format or "postgresql").lower(),
                 )
                 pf = apply_policy_gates(
@@ -433,6 +460,9 @@ class UniversalTransferEngine:
                 job_id, "running", phase="writing", progress_pct=25,
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
+
+            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
                 request.source,
@@ -545,7 +575,7 @@ class UniversalTransferEngine:
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             mappings = _enrich_mappings_with_types(
                 request.mappings or default_mappings(columns),
-                _destination_schema_types(request.destination),
+                _destination_schema_types(request.destination, sync_mode=request.sync_mode),
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -565,7 +595,7 @@ class UniversalTransferEngine:
                     source_kind=request.source.kind,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-                    destination_column_types=_destination_schema_types(request.destination),
+                    destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
                     destination_db_type=(request.destination.format or "postgresql").lower(),
                 )
                 pf = apply_policy_gates(
@@ -620,6 +650,9 @@ class UniversalTransferEngine:
                 job_id, "running", phase="writing", progress_pct=25,
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
+
+            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_file_to_database(
                 content,
