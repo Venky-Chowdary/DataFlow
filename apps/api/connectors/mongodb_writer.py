@@ -222,6 +222,18 @@ def write_mapped_rows(
             # Convert row tuples to documents
             docs = [dict(zip(target_cols, row)) for row in batch]
 
+            # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
+            from bson.objectid import ObjectId
+
+            for doc in docs:
+                if "_id" in doc and isinstance(doc["_id"], str):
+                    v = doc["_id"]
+                    if len(v) == 24 and ObjectId.is_valid(v):
+                        try:
+                            doc["_id"] = ObjectId(v)
+                        except Exception:
+                            pass
+
             if write_mode == "upsert" and conflict_columns:
                 from pymongo import ReplaceOne
 
