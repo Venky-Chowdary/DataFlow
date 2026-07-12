@@ -376,10 +376,12 @@ function AppShell({
                 <span className="df2-topbar-btn-text">Pilot</span>
               </button>
             )}
-            <button type="button" className="df2-btn df2-btn-primary" onClick={() => setScreen("transfer")}>
-              <DtIcon name="plus" size={16} />
-              <span className="df2-topbar-btn-text">Transfer</span>
-            </button>
+            {screen !== "transfer" && (
+              <button type="button" className="df2-btn df2-btn-primary" onClick={() => setScreen("transfer")}>
+                <DtIcon name="plus" size={16} />
+                <span className="df2-topbar-btn-text">New transfer</span>
+              </button>
+            )}
           </div>
         </header>
 

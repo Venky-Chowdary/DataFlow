@@ -167,11 +167,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
               <DtIcon name="activity" size={16} /> Refresh
             </button>
           )}
-          {onStartTransfer && (
-            <button type="button" className="df2-btn df2-btn-primary" onClick={onStartTransfer}>
-              <DtIcon name="plus" size={16} /> New transfer
-            </button>
-          )}
         </>
       }
     >

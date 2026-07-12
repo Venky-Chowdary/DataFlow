@@ -231,7 +231,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
         metrics={[
           { label: "Transfer ready", value: stats?.transfer_live ?? stats?.live ?? "—", tone: "green", icon: "check" },
           { label: "Test only", value: stats?.connect_only ?? 0, icon: "connectors" },
-          { label: "Roadmap", value: stats?.roadmap ?? stats?.planned ?? "—" },
+          { label: "Roadmap", value: stats?.roadmap ?? stats?.planned ?? "—", icon: "activity" },
           { label: "Saved", value: connectors.length, icon: "database" },
         ]}
       />
