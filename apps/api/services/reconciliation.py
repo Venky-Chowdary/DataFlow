@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
@@ -333,8 +334,30 @@ def normalize_cell(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
-        return f"{value:.10g}"
-    return str(value).strip()
+        return _canonicalize_number(str(value))
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        return _canonicalize_number(value)
+    text = str(value).strip()
+    canonical = _canonicalize_number(text)
+    if canonical is not None:
+        return canonical
+    return text
+
+
+def _canonicalize_number(value: Any) -> str | None:
+    """Return a canonical string for numeric values so 9.5 == 9.5000000000."""
+    try:
+        d = Decimal(value) if not isinstance(value, Decimal) else value
+        if d.is_nan():
+            return None
+        s = format(d.normalize(), "f")
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def build_reconciliation_proof(

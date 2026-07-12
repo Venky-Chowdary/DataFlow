@@ -105,6 +105,8 @@ def write_mapped_rows(
     if create_table:
         _ensure_table(client, table, target_cols, mappings)
 
+    key_types = _table_key_types(client, table)
+
     written = 0
     batch_size = 25
     chunks = max(1, (len(mapped_rows) + batch_size - 1) // batch_size)
@@ -114,7 +116,21 @@ def write_mapped_rows(
             slice_rows = mapped_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
             for row in slice_rows:
-                item = {target_cols[i]: _to_attr(row[i], source_types[i]) for i in range(len(target_cols))}
+                item = {}
+                for i, col in enumerate(target_cols):
+                    value = row[i]
+                    attr_type = key_types.get(col)
+                    if attr_type == "S":
+                        value = str(value) if value is not None else ""
+                    elif attr_type == "N":
+                        try:
+                            value = Decimal(value) if value is not None else None
+                        except Exception:
+                            value = value
+                    elif attr_type == "B":
+                        if isinstance(value, str):
+                            value = value.encode("utf-8")
+                    item[col] = _to_attr(value, source_types[i])
                 request_items.append({"PutRequest": {"Item": item}})
             _batch_write_with_retry(client, table, request_items)
             written += len(slice_rows)
@@ -140,6 +156,22 @@ def write_mapped_rows(
             ok=False, rows_written=written, table_name=table, target_schema=host or "",
             checksum="", chunks_completed=0, error=str(exc),
         )
+
+
+def _table_key_types(client, table: str) -> dict[str, str]:
+    """Return key attribute names -> DynamoDB type ('S', 'N', 'B') for an existing table."""
+    from botocore.exceptions import ClientError
+    try:
+        info = client.describe_table(TableName=table)["Table"]
+        attrs = {a["AttributeName"]: a["AttributeType"] for a in info.get("AttributeDefinitions", [])}
+        keys = {}
+        for ks in info.get("KeySchema", []):
+            name = ks["AttributeName"]
+            if name in attrs:
+                keys[name] = attrs[name]
+        return keys
+    except ClientError:
+        return {}
 
 
 def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
