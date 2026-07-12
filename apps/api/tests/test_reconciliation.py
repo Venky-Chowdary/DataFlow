@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from services.reconciliation import reconcile
 
 
@@ -123,3 +125,21 @@ def test_build_reconciliation_proof_detects_missing_keys():
     )
     assert proof["passed"] is False
     assert proof["missing_key_count"] == 1
+
+
+def test_normalize_cell_equates_decimal_representations():
+    from services.reconciliation import normalize_cell
+
+    assert normalize_cell("9.5") == normalize_cell("9.5000000000")
+    assert normalize_cell(Decimal("9.5")) == normalize_cell("9.5000000000")
+    assert normalize_cell("1000") == normalize_cell("1E+3")
+    assert normalize_cell("0.000") == "0"
+
+
+def test_normalize_cell_preserves_booleans_and_text():
+    from services.reconciliation import normalize_cell
+
+    assert normalize_cell(True) == "true"
+    assert normalize_cell(False) == "false"
+    assert normalize_cell("hello") == "hello"
+    assert normalize_cell(None) == ""
