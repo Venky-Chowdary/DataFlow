@@ -175,7 +175,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
     >
       <PageFrame className="df2-pipeline-page" showHonesty={false}>
       {schedules.length > 0 && !loading && (
-        <div className="df2-jobs-v3-toolbar">
+        <div className="df2-page-controls">
           <FilterTabs
             ariaLabel="Filter pipelines"
             value={filter}

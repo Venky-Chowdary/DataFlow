@@ -1,4 +1,5 @@
 import { DtIcon } from "./DtIcon";
+import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
 
 const GATE_LABELS: Record<string, string> = {
@@ -189,7 +190,12 @@ export function PreflightTimeline({
         <div className="df2-preflight-compact-head">
           <div>
             <h3 className="df2-preflight-title">
-              {running ? "Running checks…" : result.passed ? "All checks passed" : "Checks need attention"}
+              {running ? (
+                <>
+                  <Spinner size="sm" label="" />
+                  Running checks…
+                </>
+              ) : result.passed ? "All checks passed" : "Checks need attention"}
             </h3>
             <div className="df2-preflight-compact-summary">
               <span className="ok">{passCount} passed</span>

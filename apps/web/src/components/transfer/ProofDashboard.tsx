@@ -1,3 +1,4 @@
+import { Spinner } from "../LoadingState";
 import type { PreflightResult } from "../../lib/types";
 
 interface ProofDashboardProps {
@@ -38,7 +39,16 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
       <div className="df2-proof-dashboard-head">
         <div>
           <p className="df2-proof-dashboard-kicker">Enterprise proof command center</p>
-          <h3 className="df2-proof-dashboard-title">Route intelligence and trust posture</h3>
+          <h3 className="df2-proof-dashboard-title">
+            {running ? (
+              <>
+                <Spinner size="sm" label="" />
+                Running validation…
+              </>
+            ) : (
+              "Route intelligence and trust posture"
+            )}
+          </h3>
         </div>
         <div className="df2-proof-dashboard-trust">
           <span className="df2-status-chip">Deterministic safety gates</span>
@@ -49,15 +59,15 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
       <div className="df2-proof-dashboard-grid">
         <div className="df2-proof-dashboard-stat">
           <span>Readiness</span>
-          <strong>{readiness.toFixed(0)}%</strong>
+          <strong>{running ? "—" : `${readiness.toFixed(0)}%`}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
           <span>Semantic confidence</span>
-          <strong>{semanticScore.toFixed(2)}</strong>
+          <strong>{running ? "—" : semanticScore.toFixed(2)}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
           <span>Sample quality</span>
-          <strong>{qualityScore.toFixed(2)}</strong>
+          <strong>{running ? "—" : qualityScore.toFixed(2)}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
           <span>Gate score</span>
@@ -69,13 +79,15 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
         {chips.map((chip) => (
           <span key={chip.label} className="df2-proof-chip">
             <small>{chip.label}</small>
-            <strong>{chip.value}</strong>
+            <strong>{running ? "—" : chip.value}</strong>
           </span>
         ))}
       </div>
 
       <p className="df2-proof-dashboard-summary">
-        {proof?.evidence_summary ?? "No proof bundle available yet — run preflight to surface deterministic transfer evidence."}
+        {running
+          ? "Executing schema, mapping, transform, and data-integrity gates against the source and destination."
+          : (proof?.evidence_summary ?? "No proof bundle available yet — run preflight to surface deterministic transfer evidence.")}
       </p>
     </section>
   );

@@ -368,25 +368,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               </p>
             </div>
 
-            <div className="df2-pilot-composer-bar">
-              <textarea
-                rows={3}
-                placeholder="Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-              />
-              <button
-                type="button"
-                className="df2-pilot-send"
-                onClick={() => send()}
-                disabled={!input.trim()}
-                aria-label="Send"
-              >
-                <DtIcon name="send" size={18} />
-              </button>
-            </div>
-
             {prompts.length > 0 && (
               <>
                 <p className="df2-section-label">Suggested prompts</p>
@@ -436,6 +417,25 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   <span className="df2-pilot-idea-desc">{idea.description}</span>
                 </button>
               ))}
+            </div>
+
+            <div className="df2-pilot-composer-bar">
+              <textarea
+                rows={3}
+                placeholder="Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              />
+              <button
+                type="button"
+                className="df2-pilot-send"
+                onClick={() => send()}
+                disabled={!input.trim()}
+                aria-label="Send"
+              >
+                <DtIcon name="send" size={18} />
+              </button>
             </div>
           </div>
         ) : (

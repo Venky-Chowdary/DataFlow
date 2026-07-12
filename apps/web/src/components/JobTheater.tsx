@@ -50,7 +50,7 @@ export function JobTheater({
 }: JobTheaterProps) {
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
-  const [logOpen, setLogOpen] = useState(true);
+
   const [log, setLog] = useState<string[]>([]);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
@@ -89,8 +89,8 @@ export function JobTheater({
   }, [jobId, onComplete, onFailed]);
 
   useEffect(() => {
-    if (logOpen) logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [log, logOpen]);
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
+  }, [log]);
 
   const progress = job?.progress_pct ?? 5;
   const total = job?.total_rows ?? 0;
@@ -160,7 +160,14 @@ export function JobTheater({
             </svg>
             <div className="df2-theater-v3-ring-label">
               <strong>{progress}%</strong>
-              <small>{total > 0 ? `${processed.toLocaleString()}/${total.toLocaleString()}` : processed.toLocaleString()}</small>
+              {total > 0 ? (
+                <>
+                  <small>{processed.toLocaleString()}</small>
+                  <small>{total.toLocaleString()}</small>
+                </>
+              ) : (
+                <small>{processed.toLocaleString()}</small>
+              )}
             </div>
           </div>
           <div className="df2-theater-v3-progress-copy">
@@ -272,17 +279,15 @@ export function JobTheater({
 
       {log.length > 0 && (
         <div className="df2-theater-v3-log-section">
-          <button type="button" className="df2-theater-v3-log-toggle" onClick={() => setLogOpen((o) => !o)}>
+          <div className="df2-theater-v3-log-toggle">
             <DtIcon name="activity" size={14} />
-            {logOpen ? "Hide event log" : `Show event log (${log.length})`}
-          </button>
-          {logOpen && (
-            <div className="df2-theater-v3-log" ref={logRef}>
-              {log.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
-            </div>
-          )}
+            Event log ({log.length})
+          </div>
+          <div className="df2-theater-v3-log" ref={logRef}>
+            {log.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -40,7 +40,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   const [role, setRole] = useState<"all" | "source" | "destination">("all");
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
-
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
@@ -196,7 +195,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
       <div className="df2-connectors-workspace">
       <div className="df2-connectors-pane">
       {tab === "connections" ? (
-        <div className="df2-connectors-layout"><div className="df2-connectors-detail">
+        <div className="df2-stack">
           <div className="df2-card df2-card-elevated df2-topology-card">
             <div className="df2-card-head">
               <div>
@@ -389,9 +388,9 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 )
               )}
             </div>
-          </section></div>
+          </section>
 
-          <div className="df2-connectors-list">{connectors.length === 0 ? (
+          {connectors.length === 0 ? (
             <EmptyState
               icon="connectors"
               title="No connections yet"
@@ -404,21 +403,23 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
             />
           ) : (
             <>
-            <div className="df2-connectors-list-controls"><FilterTabs
-              ariaLabel="Filter connection status"
-              value={statusFilter}
-              onChange={setStatusFilter}
-              items={[
-                { id: "all", label: "All", count: connectors.length },
-                { id: "ready", label: "Healthy", count: healthyCount },
-                { id: "error", label: "Errors", count: errorCount },
-              ]}
-            />
-            <PageToolbar
-              searchValue={query}
-              onSearchChange={setQuery}
-              searchPlaceholder="Search saved connections…"
-            /></div>
+            <div className="df2-page-controls">
+              <FilterTabs
+                ariaLabel="Filter connection status"
+                value={statusFilter}
+                onChange={setStatusFilter}
+                items={[
+                  { id: "all", label: "All", count: connectors.length },
+                  { id: "ready", label: "Healthy", count: healthyCount },
+                  { id: "error", label: "Errors", count: errorCount },
+                ]}
+              />
+              <PageToolbar
+                searchValue={query}
+                onSearchChange={setQuery}
+                searchPlaceholder="Search saved connections…"
+              />
+            </div>
             <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
               {filteredConnectors.map((c) => (
                 <ConnectorCard
@@ -444,7 +445,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
               />
             )}
             </>
-          )}</div>
+          )}
         </div>
       ) : (
         <div className="df2-stack">

@@ -245,9 +245,9 @@
 }
 
 .df2-column-review-data-preview {
-  flex: 0 0 45%;
-  min-height: 240px;
-  max-height: 58%;
+  flex: 0 0 55%;
+  min-height: 360px;
+  max-height: 75%;
   overflow: hidden;
   margin-bottom: 8px;
 }
@@ -713,19 +713,42 @@
 
 .df2-column-workbench-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  min-width: 0;
+}
+
+.df2-column-workbench-toolbar .df2-column-workbench-filters {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.df2-column-workbench-toolbar .df2-column-workbench-filters.df2-tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.df2-column-workbench-toolbar .df2-column-workbench-filters.df2-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.df2-column-workbench-toolbar .df2-column-workbench-filters .df2-tab {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .df2-column-workbench-search-wrap {
   position: relative;
-  flex: 1 1 240px;
+  flex: 0 1 260px;
+  min-width: 180px;
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
 }
 
 .df2-column-workbench-search-wrap > svg:first-child {
@@ -764,13 +787,18 @@
 
 .df2-column-workbench-actions {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .df2-column-workbench-filters {
-  margin-bottom: 10px;
+  margin-bottom: 0;
+}
+
+.df2-column-workbench-filters .df2-tabs {
+  flex-wrap: nowrap;
 }
 
 .df2-column-workbench-filters .df2-tab {

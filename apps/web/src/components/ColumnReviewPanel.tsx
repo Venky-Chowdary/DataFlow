@@ -215,11 +215,11 @@ export function ColumnReviewPanel({
             rows={sampleRows}
             rowCount={rowCount}
             title="Source data preview"
-            subtitle={`First ${Math.min(sampleRows.length, 10).toLocaleString()} rows`}
+            subtitle={`First ${Math.min(sampleRows.length, 12).toLocaleString()} rows`}
             showFieldStrip={false}
             showBadge={false}
-            maxRows={10}
-            maxCols={10}
+            maxRows={12}
+            maxCols={12}
           />
         </div>
       )}
@@ -255,6 +255,13 @@ export function ColumnReviewPanel({
         )}
 
         <div className="df2-column-workbench-toolbar">
+          <FilterTabs
+            items={filterTabItems}
+            value={filter}
+            onChange={setFilter}
+            className="df2-column-workbench-filters"
+            ariaLabel="Filter columns"
+          />
           <div className="df2-column-workbench-search-wrap">
             <DtIcon name="search" size={16} />
             <input
@@ -292,14 +299,6 @@ export function ColumnReviewPanel({
             )}
           </div>
         </div>
-
-        <FilterTabs
-          items={filterTabItems}
-          value={filter}
-          onChange={setFilter}
-          className="df2-column-workbench-filters"
-          ariaLabel="Filter columns"
-        />
 
         {needsReview.length > 0 && filter === "review" && !compact && (
           <div className="df2-column-review-alert" role="status">

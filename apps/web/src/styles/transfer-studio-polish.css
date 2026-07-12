@@ -305,6 +305,10 @@
   color: #0f172a;
   line-height: 1.25;
   overflow-wrap: anywhere;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .df2-proof-dashboard-trust {
@@ -330,6 +334,10 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #0f766e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .df2-proof-dashboard-grid {
@@ -427,11 +435,26 @@
   gap: 12px;
   margin-bottom: 10px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.df2-preflight-compact-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-preflight-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .df2-preflight-compact-head .df2-preflight-title {
   margin: 0;
   font-size: 15px;
+  overflow-wrap: anywhere;
 }
 
 .df2-preflight-compact-summary {

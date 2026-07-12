@@ -77,6 +77,28 @@ def test_integrity_passes_clean_financial_data():
     assert financial["passed"] is True
 
 
+def test_integrity_passes_locale_currency_formats():
+    rows = [
+        {"amount": "€1.000.000,89"},
+        {"amount": "1 000 000.89"},
+        {"amount": "(1,234.56)"},
+        {"amount": "USD 1 000,00"},
+    ]
+    mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
+    report = run_integrity_audit(
+        source_columns=["amount"],
+        mappings=mappings,
+        source_schemas=[{"name": "amount", "inferred_type": "DECIMAL"}],
+        sample_rows=rows,
+        validation_mode="strict",
+    )
+    financial = next((c for c in report["checks"] if c["check"] == "financial_precision"), None)
+    assert financial is not None
+    assert financial["passed"] is True
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is None or transform["passed"] is True
+
+
 # ── Required field null checks ─────────────────────────────────────────────
 
 def test_integrity_blocks_nulls_on_required_id():

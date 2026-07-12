@@ -64,7 +64,7 @@
 
 .df2-pilot-v2 .df2-pilot-hero {
   text-align: center;
-  margin: auto 0 24px;
+  margin: 0 0 24px;
 }
 
 .df2-pilot-v2 .df2-pilot-title {
@@ -80,7 +80,7 @@
 
 .df2-pilot-v2 .df2-filter-tabs--center {
   margin-bottom: 20px;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .df2-pilot-v2 .df2-pilot-composer-bar {

@@ -362,8 +362,8 @@
 
 .df2-theater-v3-ring {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 72px;
+  height: 72px;
   flex-shrink: 0;
 }
 
@@ -396,18 +396,25 @@
   gap: 1px;
   font-size: 12px;
   color: #0f172a;
+  padding: 0 4px;
+  text-align: center;
 }
 
 .df2-theater-v3-ring-label strong {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
 }
 
 .df2-theater-v3-ring-label small {
-  font-size: 8px;
+  display: block;
+  font-size: 9px;
   font-weight: 600;
   color: #64748b;
-  line-height: 1;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .df2-theater-v3-progress-copy h3 {
@@ -585,9 +592,9 @@
 
 .df2-theater-v3-log {
   margin-top: 8px;
-  max-height: min(260px, 30vh);
+  max-height: min(420px, 42vh);
   overflow-y: auto;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: 8px;
   background: #0f172a;
   color: #94a3b8;
