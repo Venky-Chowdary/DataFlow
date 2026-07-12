@@ -1,0 +1,217 @@
+/* ═══════════════════════════════════════════════════════════
+   UI density layer — final override pass
+   Enterprise data product: compact cards, tighter spacing, and
+   more rows/fields visible per screen without losing hierarchy.
+   Imported last so it wins the cascade over prior polish layers.
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* Global rhythm — tighter section/grid gaps and card padding */
+  --df-tile-min-h: 60px;
+  --df-card-pad: 12px 14px;
+  --df-card-head-pad: 9px 14px;
+  --df-page-section-gap: 12px;
+  --df-grid-gap: 12px;
+  --df-workspace-gap: 12px;
+
+  /* enterprise-final tokens (last-imported layer drives most cards) */
+  --ef-section-gap: 12px;
+  --ef-card-pad: 12px 14px;
+  --ef-card-head-pad: 9px 14px;
+  --ef-card-foot-pad: 9px 14px;
+}
+
+/* ── Page workspace: tighter vertical rhythm ── */
+.df2-app .df2-page-workspace {
+  gap: 12px;
+  padding: 12px 16px 24px;
+}
+
+.df2-app .df2-page-workspace.df2-overview-page,
+.df2-app .df2-page-workspace.df2-connectors-page,
+.df2-app .df2-page-workspace.df2-pipeline-page,
+.df2-app .df2-page-workspace.df2-settings-workspace,
+.df2-app .df2-page-workspace.df2-jobs-workspace,
+.df2-app .df2-page-workspace.df2-jobs-workspace-v3 {
+  gap: 12px;
+}
+
+/* ── Honesty + insight strips: single-line, low-profile ── */
+.df2-app .df2-honesty-banner {
+  padding: 7px 12px;
+}
+
+.df2-app .df2-honesty-banner.is-compact {
+  padding: 6px 12px;
+}
+
+.df2-app .df2-page-insight {
+  padding: 8px 14px;
+}
+
+/* ── Card chrome: shorter heads/bodies ── */
+.df2-app .df2-card-head,
+.df2-app .df2-glass-panel-head {
+  min-height: 42px;
+}
+
+.df2-app .df2-card-sub,
+.df2-app .df2-glass-sub {
+  margin-top: 2px;
+}
+
+/* ═══ Metric tiles — the biggest wasted space offenders ═══
+   Compact layout: icon floated top-right, tight label/value stack. */
+.df2-app .df2-stat,
+.df2-app .df2-stats .df2-stat,
+.df2-app .df2-overview-kpis .df2-stat {
+  position: relative;
+  min-height: var(--df-tile-min-h);
+  padding: 10px 13px;
+  justify-content: center;
+}
+
+.df2-app .df2-stats--compact .df2-stat {
+  min-height: 54px;
+  padding: 8px 12px;
+}
+
+.df2-app .df2-stat-icon {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  margin-bottom: 0;
+  border-radius: 7px;
+}
+
+.df2-app .df2-stat-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.df2-app .df2-stat-label {
+  margin-bottom: 1px;
+  font-size: 10px;
+  padding-right: 26px;
+}
+
+.df2-app .df2-stat-value {
+  font-size: 1.15rem;
+  line-height: 1.15;
+}
+
+.df2-app .df2-stats--compact .df2-stat-value {
+  font-size: 1.05rem;
+}
+
+.df2-app .df2-stat-sub {
+  margin-top: 1px;
+  font-size: 11px;
+}
+
+/* Control-plane metrics share the same compaction */
+.df2-app .df2-control-metric {
+  min-height: var(--df-tile-min-h);
+  padding: 10px 13px !important;
+}
+
+/* ═══ Column mapping workbench — fit 10+ rows in the viewport ═══ */
+.df2-app .df2-column-review-table th {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.df2-app .df2-column-review-table td {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.df2-app .df2-column-reason {
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow: hidden;
+}
+
+.df2-app .df2-column-sample {
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-app .df2-column-target-input {
+  min-height: 28px !important;
+  padding: 3px 8px !important;
+}
+
+.df2-app .df2-column-transform {
+  min-height: 28px !important;
+  padding: 2px 6px !important;
+}
+
+.df2-app .df2-column-review-table .df2-btn-sm {
+  height: 26px;
+  padding: 0 10px;
+}
+
+.df2-app .df2-column-review-table .df2-badge-xs {
+  margin-left: 4px;
+}
+
+/* Compact the workbench toolbar/search/filter chrome */
+.df2-app .df2-column-workbench-search {
+  min-height: 34px;
+}
+
+.df2-app .df2-column-workbench-toolbar {
+  margin-bottom: 6px;
+}
+
+.df2-app .df2-column-workbench-filters .df2-tab {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+/* ═══ Overview: denser tables + lists (show more activity) ═══ */
+.df2-app .df2-overview-table th {
+  padding: 6px 12px;
+  font-size: 11px;
+}
+
+.df2-app .df2-overview-table td {
+  padding: 4px 12px;
+}
+
+.df2-app .df2-overview-table .df2-cell-title {
+  line-height: 1.25;
+}
+
+.df2-app .df2-overview-table .df2-cell-meta {
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.df2-app .df2-overview-conn-list > li,
+.df2-app .df2-overview-pipeline-list > li {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+/* ═══ Generic data tables across pages ═══ */
+.df2-app .df2-table th {
+  padding: 7px 12px;
+}
+
+.df2-app .df2-table td {
+  padding: 6px 12px;
+}
+
+/* Jobs list rows tighter so the queue shows more at once */
+.df2-app .df2-jobs-v3-item {
+  padding: 10px 12px;
+}
