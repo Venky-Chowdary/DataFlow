@@ -103,7 +103,7 @@ def write_mapped_rows(
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
-        _ensure_table(client, table, target_cols, mappings)
+        _ensure_table(client, table, target_cols, mappings, source_types)
 
     key_types = _table_key_types(client, table)
 
@@ -191,7 +191,7 @@ def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
     return target_cols[0] if target_cols else "id"
 
 
-def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dict]) -> None:
+def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dict], source_types: list[str] | None = None) -> None:
     from botocore.exceptions import ClientError
 
     try:
@@ -203,7 +203,13 @@ def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dic
     if not target_cols:
         raise ValueError(f"DynamoDB table `{table}` does not exist and no columns were provided to create it.")
     hash_key = _pick_hash_key(target_cols, mappings)
-    attr_type = "N" if hash_key.lower().endswith("_id") and hash_key.lower() != "uuid" else "S"
+    attr_type = "S"
+    if source_types and hash_key in target_cols:
+        logical = (source_types[target_cols.index(hash_key)] or "").upper()
+        if logical in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT"}:
+            attr_type = "N"
+        elif logical in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+            attr_type = "B"
     client.create_table(
         TableName=table,
         AttributeDefinitions=[{"AttributeName": hash_key, "AttributeType": attr_type}],
