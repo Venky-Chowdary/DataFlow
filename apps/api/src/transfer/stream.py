@@ -913,7 +913,7 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
     elif src_type == "redis":
         schema = {c: "string" for c in columns}
     else:
-        schema = _introspect_table_schema(src_type, src_cfg, table, columns)
+        schema = _introspect_table_schema(resolve_driver_type(src_type), src_cfg, table, columns)
         if not schema:
             schema = {c: "string" for c in columns}
     sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
