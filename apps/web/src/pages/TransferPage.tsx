@@ -84,12 +84,12 @@ const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_
 
 const FALLBACK_DEST_TYPES = [
   "mongodb", "postgresql", "mysql", "snowflake", "bigquery", "redshift",
-  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite",
+  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite", "generic_sql",
 ] as const;
 const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl", "tsv", "parquet", "excel", "ndjson"] as const;
 const FALLBACK_SOURCE_DBS = [
   "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
-  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite",
+  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite", "generic_sql",
 ] as const;
 
 const ACCEPTED_UPLOAD_EXTENSIONS = new Set(["csv", "json", "jsonl", "tsv", "parquet"]);
@@ -2120,14 +2120,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
-              {destType === "mongodb" ? (
+              {destType === "mongodb" || destType === "generic_sql" ? (
                 <div className="df2-field df2-field-flex">
-                  <label className="df2-label">Connection String (optional)</label>
+                  <label className="df2-label">{destType === "generic_sql" ? "SQLAlchemy Connection String" : "Connection String (optional)"}</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
                     onChange={(e) => setDestConnectionString(e.target.value)}
-                    placeholder="mongodb://localhost:27017/"
+                    placeholder={destType === "generic_sql" ? "mssql+pyodbc://user:pass@host:1433/db" : "mongodb://localhost:27017/"}
                   />
                 </div>
               ) : null}

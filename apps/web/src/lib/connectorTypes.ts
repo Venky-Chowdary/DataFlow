@@ -5,7 +5,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
-  "sqlite",
+  "sqlite", "generic_sql",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -86,6 +86,23 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("csv") || id.includes("tsv")) return "csv";
   if (id.includes("sqlite")) return "sqlite";
 
+  // Generic SQL fallback — any SQL engine with a SQLAlchemy dialect is routed through generic_sql.
+  if (
+    id.includes("mssql") || id.includes("sql_server") || id.includes("microsoft_sql") || id.includes("azure_sql") ||
+    id.includes("oracle") || id.includes("db2") || id.includes("teradata") || id.includes("netezza") ||
+    id.includes("vertica") || id.includes("exasol") || id.includes("sybase") || id.includes("sap_ase") ||
+    id.includes("sap_iq") || id.includes("sap_hana") || id.includes("hana") || id.includes("firebird") ||
+    id.includes("h2") || id.includes("clickhouse") || id.includes("druid") || id.includes("pinot") ||
+    id.includes("presto") || id.includes("trino") || id.includes("hive") || id.includes("spark") ||
+    id.includes("impala") || id.includes("phoenix") || id.includes("duckdb") || id.includes("databricks") ||
+    id.includes("greenplum") || id.includes("cratedb") || id.includes("questdb") || id.includes("doris") ||
+    id.includes("starrocks") || id.includes("yellowbrick") || id.includes("actian") || id.includes("informix") ||
+    id.includes("athena") || id.includes("synapse") || id.includes("dremio") || id.includes("firebolt") ||
+    id.includes("risingwave") || id.includes("materialize") || id.includes("citus")
+  ) {
+    return "generic_sql";
+  }
+
   return id.split("_")[0] || id;
 }
 
@@ -110,6 +127,7 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   if (type === "redis") return { host: "localhost", port: 6379, label: "Redis" };
   if (type === "elasticsearch") return { host: "localhost", port: 9200, label: "Elasticsearch" };
   if (type === "sqlite") return { host: "", port: 0, label: "SQLite" };
+  if (type === "generic_sql") return { host: "", port: 0, label: "Generic SQL (SQLAlchemy)" };
   return {
     host: "localhost",
     port: item?.port ?? 5432,
