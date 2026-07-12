@@ -24,14 +24,14 @@ const OPTIONS: {
   {
     id: "database",
     label: "Database",
-    desc: "PostgreSQL, MySQL, MongoDB, Snowflake…",
+    desc: "PostgreSQL, MySQL, MongoDB, SQLite, DuckDB, Snowflake…",
     icon: "database",
     mindset: "Pick a saved connector, then choose a table or collection.",
   },
   {
     id: "cloud",
     label: "Cloud storage",
-    desc: "Amazon S3, GCS, Azure Blob",
+    desc: "S3, GCS, MinIO, R2, Wasabi, Backblaze",
     icon: "connectors",
     mindset: "Connect object storage and select a path or prefix.",
   },

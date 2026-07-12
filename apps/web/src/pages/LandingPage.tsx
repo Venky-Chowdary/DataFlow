@@ -188,7 +188,7 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
               </div>
               <div>
                 <dt>Preflight gates</dt>
-                <dd><AnimatedCounter value={8} /></dd>
+                <dd>8</dd>
               </div>
             </dl>
           </div>
