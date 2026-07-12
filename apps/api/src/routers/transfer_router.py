@@ -570,6 +570,8 @@ async def run_universal_transfer(
         "destination": result.destination_summary,
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
+        "validation_plan": result.validation_plan,
+        "payload_shape": result.payload_shape,
     }
 
 
