@@ -145,6 +145,7 @@ class TransferResult:
     destination_summary: dict = field(default_factory=dict)
     ddl_executed: list[str] = field(default_factory=list)
     error: str = ""
+    error_details: dict = field(default_factory=dict)
     columns: list[str] = field(default_factory=list)
     reconciliation: dict = field(default_factory=dict)
 

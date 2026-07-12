@@ -246,6 +246,7 @@ def apply_policy_gates(
     result: dict[str, Any],
     policy_gates: list[dict[str, Any]],
     validation_mode: str = "strict",
+    destination_db_type: str = "postgresql",
 ) -> dict[str, Any]:
     proof_bundle = result.get("proof_bundle") or {}
     transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
@@ -331,6 +332,16 @@ def apply_policy_gates(
                 "warnings": warnings,
             }
 
+    from services.ddl_compatibility import _normalize_dest_kind
+    from services.preflight_rules import enrich_blockers
+
+    dest_kind = _normalize_dest_kind(destination_db_type)
+    enriched_blockers = enrich_blockers(
+        blockers,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
+
     return {
         **result,
         "passed": not has_blocks,
@@ -338,7 +349,7 @@ def apply_policy_gates(
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
         "gates": gates,
-        "blockers": blockers,
+        "blockers": enriched_blockers,
         "proof_bundle": proof_bundle,
     }
 
@@ -505,6 +516,20 @@ def run_file_preflight(
         ],
         source_records=sample_rows or [],
         target_records=[],
+        validation_mode=validation_mode,
+        confidence_threshold=confidence_threshold,
+    )
+
+    from services.preflight_rules import enrich_blockers
+
+    blockers = [
+        {"id": b.gate_id.value, "message": b.message, "details": b.details}
+        for b in result.blockers
+    ]
+    enriched_blockers = enrich_blockers(
+        blockers,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
     )
 
     out = {
@@ -522,10 +547,7 @@ def run_file_preflight(
             }
             for g in result.gates
         ],
-        "blockers": [
-            {"id": b.gate_id.value, "message": b.message, "details": b.details}
-            for b in result.blockers
-        ],
+        "blockers": enriched_blockers,
         "schema_drift": drift,
         "ddl_issues": ddl_issues,
         "sample_quality": sample_quality,

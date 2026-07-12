@@ -558,6 +558,7 @@ async def run_universal_transfer(
             "error": result.error,
             "operation": result.operation,
             "job_id": result.job_id,
+            "error_details": result.error_details,
         })
     return {
         "success": True,

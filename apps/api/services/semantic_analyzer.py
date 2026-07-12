@@ -27,6 +27,8 @@ SEMANTIC_ROLES: dict[str, list[str]] = {
     "transaction_id": ["transaction_id", "txn_id", "trans_id", "txn_no", "transaction_no"],
     "customer_id": [
         "customer_id", "cust_id", "customerid", "buyer_id", "client_id", "cust_no",
+        "user_id", "userid", "user", "account_id", "accountid", "account_no",
+        "member_id", "memberid", "subscriber_id", "subscriberid", "clientid",
     ],
     "first_name": ["first_name", "firstname", "fname", "given_name", "forename"],
     "last_name": ["last_name", "lastname", "lname", "surname", "family_name"],

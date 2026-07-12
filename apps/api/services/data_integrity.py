@@ -298,20 +298,29 @@ def _check_mapping_confidence(
     mode = (validation_mode or "strict").strip().lower()
     floor = confidence_min if mode in {"strict", "maximum"} else max(0.55, confidence_min - 0.3)
     issues: list[str] = []
+    warnings: list[str] = []
     for m in mappings:
         conf = float(m.get("confidence", 0))
         if conf < floor:
             issues.append(
                 f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"
             )
-        if m.get("requires_review"):
-            issues.append(f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review")
+        elif m.get("requires_review"):
+            # In balanced mode a near-threshold mapping with a small gap is a
+            # warning, not a hard blocker, so the user can review without being
+            # stopped entirely. In strict/maximum it stays a blocker.
+            msg = f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review"
+            if mode in {"strict", "maximum"}:
+                issues.append(msg)
+            else:
+                warnings.append(msg)
     blocks = len(issues) > 0
     return {
         "check": "mapping_confidence",
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issues[:20],
+        "warnings": warnings[:10],
     }
 
 

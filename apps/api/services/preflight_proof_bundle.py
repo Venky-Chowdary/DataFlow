@@ -94,6 +94,8 @@ def build_preflight_proof_bundle(
     source_records: list[dict[str, Any]] | None = None,
     target_records: list[dict[str, Any]] | None = None,
     primary_key: str | None = None,
+    validation_mode: str = "strict",
+    confidence_threshold: float = 0.85,
 ) -> dict[str, Any]:
     """Assemble the unified proof bundle for a transfer preflight decision."""
     mappings = mappings or []
@@ -123,17 +125,26 @@ def build_preflight_proof_bundle(
         blockers.append("PII/compliance review required")
     if not reconciliation.get("passed"):
         blockers.append("Row-level reconciliation proof failed")
-    if semantic_score < 0.75:
+
+    # Use the validation-mode aware confidence floor rather than a hard 0.75.
+    # The proof bundle should stop a transfer only when the weakest mapping is
+    # below the threshold (or the configured floor for balanced mode). The
+    # average semantic score is reported for UX, not as a hard gate on its own.
+    mode = (validation_mode or "strict").strip().lower()
+    effective_threshold = confidence_threshold if mode in {"strict", "maximum"} else max(0.55, confidence_threshold - 0.3)
+    confidences = [float(m.get("confidence", 0)) for m in mappings if m.get("confidence") is not None]
+    min_confidence = round(min(confidences) if confidences else 0.0, 3)
+    if min_confidence < effective_threshold:
         blockers.append("Semantic mapping confidence too low")
 
     decision = "approve"
     if blockers:
         decision = "block" if compliance.get("requires_review") or not reconciliation.get("passed") else "review"
 
-    confidence_band = "high" if semantic_score >= 0.9 else "medium" if semantic_score >= 0.75 else "low"
+    confidence_band = "high" if min_confidence >= 0.9 else "medium" if min_confidence >= 0.75 else "low"
     quality_grade = "excellent" if quality_score >= 0.9 else "good" if quality_score >= 0.7 else "review"
     evidence_summary = (
-        f"Semantic mapping confidence {semantic_score:.2f}; sample quality {quality_score:.2f}; "
+        f"Semantic mapping confidence {semantic_score:.2f} (min {min_confidence:.2f}); sample quality {quality_score:.2f}; "
         f"compliance risk {compliance.get('risk_score', 0.0):.2f}; reconciliation {'passed' if reconciliation.get('passed') else 'needs review'}"
     )
 
@@ -142,6 +153,8 @@ def build_preflight_proof_bundle(
     return {
         "passed": passed,
         "semantic_mapping_score": semantic_score,
+        "min_confidence": min_confidence,
+        "confidence_threshold": effective_threshold,
         "semantic_notes": semantic_notes,
         "quality_score": quality_score,
         "confidence_band": confidence_band,

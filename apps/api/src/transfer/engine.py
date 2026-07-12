@@ -199,6 +199,7 @@ class UniversalTransferEngine:
                         backfill_new_fields=request.backfill_new_fields,
                     ),
                     validation_mode=request.validation_mode,
+                    destination_db_type=dst_fmt.lower(),
                 )
                 if not dest_ok:
                     mongo.update_job_status(
@@ -213,13 +214,42 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
+                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
+                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
+                    error_details = {
+                        "reason": "Preflight blocked transfer",
+                        "blockers": blocker_reasons,
+                        "guidance": [
+                            {
+                                "gate": b.get("id"),
+                                "message": b.get("message"),
+                                "why": (b.get("guidance") or {}).get("why", ""),
+                                "fix": (b.get("guidance") or {}).get("fix", ""),
+                            }
+                            for b in pf.get("blockers", [])
+                            if b.get("guidance")
+                        ],
+                        "proof_bundle": {
+                            "decision": decision.get("decision"),
+                            "reason": decision.get("reason"),
+                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
+                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
+                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
+                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
+                        },
+                        "readiness_score": pf.get("readiness_score"),
+                    }
+                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
                     mongo.update_job_status(
-                        job_id, "failed", error="Preflight blocked transfer",
+                        job_id, "failed", error=error_message,
                         phase="failed", progress_pct=0,
+                        error_details=error_details,
+                        preflight=pf,
                     )
                     return TransferResult(
                         success=False,
-                        error="Preflight blocked transfer",
+                        error=error_message,
+                        error_details=error_details,
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -419,6 +449,7 @@ class UniversalTransferEngine:
                         backfill_new_fields=request.backfill_new_fields,
                     ),
                     validation_mode=request.validation_mode,
+                    destination_db_type=dst_fmt.lower(),
                 )
                 if not dest_ok:
                     mongo.update_job_status(
@@ -433,13 +464,42 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
+                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
+                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
+                    error_details = {
+                        "reason": "Preflight blocked transfer",
+                        "blockers": blocker_reasons,
+                        "guidance": [
+                            {
+                                "gate": b.get("id"),
+                                "message": b.get("message"),
+                                "why": (b.get("guidance") or {}).get("why", ""),
+                                "fix": (b.get("guidance") or {}).get("fix", ""),
+                            }
+                            for b in pf.get("blockers", [])
+                            if b.get("guidance")
+                        ],
+                        "proof_bundle": {
+                            "decision": decision.get("decision"),
+                            "reason": decision.get("reason"),
+                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
+                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
+                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
+                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
+                        },
+                        "readiness_score": pf.get("readiness_score"),
+                    }
+                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
                     mongo.update_job_status(
-                        job_id, "failed", error="Preflight blocked transfer",
+                        job_id, "failed", error=error_message,
                         phase="failed", progress_pct=0,
+                        error_details=error_details,
+                        preflight=pf,
                     )
                     return TransferResult(
                         success=False,
-                        error="Preflight blocked transfer",
+                        error=error_message,
+                        error_details=error_details,
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -610,6 +670,7 @@ class UniversalTransferEngine:
                         backfill_new_fields=request.backfill_new_fields,
                     ),
                     validation_mode=request.validation_mode,
+                    destination_db_type=dst_fmt.lower(),
                 )
                 if not dest_ok:
                     mongo.update_job_status(
@@ -624,13 +685,42 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
+                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
+                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
+                    error_details = {
+                        "reason": "Preflight blocked transfer",
+                        "blockers": blocker_reasons,
+                        "guidance": [
+                            {
+                                "gate": b.get("id"),
+                                "message": b.get("message"),
+                                "why": (b.get("guidance") or {}).get("why", ""),
+                                "fix": (b.get("guidance") or {}).get("fix", ""),
+                            }
+                            for b in pf.get("blockers", [])
+                            if b.get("guidance")
+                        ],
+                        "proof_bundle": {
+                            "decision": decision.get("decision"),
+                            "reason": decision.get("reason"),
+                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
+                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
+                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
+                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
+                        },
+                        "readiness_score": pf.get("readiness_score"),
+                    }
+                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
                     mongo.update_job_status(
-                        job_id, "failed", error="Preflight blocked transfer",
+                        job_id, "failed", error=error_message,
                         phase="failed", progress_pct=0,
+                        error_details=error_details,
+                        preflight=pf,
                     )
                     return TransferResult(
                         success=False,
-                        error="Preflight blocked transfer",
+                        error=error_message,
+                        error_details=error_details,
                         operation=request.operation,
                         job_id=job_id,
                     )

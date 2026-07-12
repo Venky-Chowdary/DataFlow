@@ -216,6 +216,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
         ),
         validation_mode=validation_mode,
+        destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
     )
 
     if drift.get("drift_detected"):
