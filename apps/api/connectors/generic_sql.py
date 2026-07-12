@@ -97,6 +97,8 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "apache_hive": "hive",
     "apache_impala": "impala",
     "sparksql": "spark",
+    "spark": "spark",
+    "apache_spark": "spark",
     "phoenix": "phoenix",
     "sap_hana": "hana",
     "hana": "hana",
