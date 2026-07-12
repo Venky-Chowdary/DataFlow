@@ -21,6 +21,9 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+from src.transfer.adapters import read_source_database
+from src.transfer.models import EndpointConfig
+
 
 def _preflight():
     from src.services.preflight_service import (
@@ -174,6 +177,17 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     validation_mode = policies.get("validation_mode", "strict")
     threshold = confidence_threshold_for_mode(validation_mode)
 
+    sample_rows = plan.sample_rows or None
+    if not sample_rows and plan.source.get("kind") == "database" and plan.source_columns:
+        try:
+            source_endpoint = EndpointConfig.from_dict(plan.source.get("kind", "database"), plan.source)
+            records, _headers, _schema = read_source_database(
+                source_endpoint, limit=100, raise_on_truncate=False
+            )
+            sample_rows = records[:100] if records else None
+        except Exception:
+            sample_rows = None
+
     pf = run_file_preflight(
         columns=plan.source_columns,
         column_types=plan.source_schema,
@@ -183,7 +197,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
         source_kind=plan.source.get("kind", "file"),
-        sample_rows=plan.sample_rows or None,
+        sample_rows=sample_rows,
         confidence_threshold=threshold,
         destination_column_types=live_target_schema,
         destination_table_exists=dest_meta.get("table_exists"),

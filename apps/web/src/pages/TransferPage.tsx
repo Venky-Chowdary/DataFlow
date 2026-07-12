@@ -898,7 +898,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       setStep(STEP_SOURCE);
       return true;
     }
-    if (isConnectorSource && !sourceConnectorId) {
+    if (isConnectorSource && !sourceConnectorId && !sourceManualEnabled) {
       toast({
         title: "Source connector required",
         message: sourceKind === "cloud"
@@ -1325,7 +1325,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         file: sourceKind === "file" ? file ?? undefined : undefined,
         sourceKind: sourceKind === "cloud" ? "database" : sourceKind,
         sourceFormat: isManualSource ? sourceManualType : sourceConnector?.type,
-        sourceConnectorId: isConnectorSource ? sourceConnectorId || undefined : undefined,
+        sourceConnectorId: isConnectorSource && !isManualSource ? sourceConnectorId || undefined : undefined,
         sourceHost: isManualSource ? sourceManualHost : undefined,
         sourcePort: isManualSource ? sourceManualPort : undefined,
         sourceUsername: isManualSource ? sourceManualUsername : undefined,

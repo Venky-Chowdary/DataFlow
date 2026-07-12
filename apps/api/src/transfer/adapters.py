@@ -236,7 +236,12 @@ def _guard_truncated_read(batch, db_type: str, name: str) -> None:
         )
 
 
-def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str], dict[str, str]]:
+def read_source_database(
+    endpoint: EndpointConfig,
+    *,
+    limit: int = _NON_STREAMING_ROW_LIMIT,
+    raise_on_truncate: bool = True,
+) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
     cfg = resolve_connector_config(endpoint)
     db_type = resolve_driver_type(endpoint.format)
@@ -258,9 +263,10 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             table=table,
-            limit=_NON_STREAMING_ROW_LIMIT,
+            limit=limit,
         )
-        _guard_truncated_read(batch, db_type, table)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema("postgresql", cfg, table, batch.headers)
         return records, batch.headers, schema
@@ -277,9 +283,10 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             database=db_name,
             collection=coll_name,
             offset=0,
-            limit=_NON_STREAMING_ROW_LIMIT,
+            limit=limit,
         )
-        _guard_truncated_read(batch, "mongodb", coll_name)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, "mongodb", coll_name)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
@@ -300,9 +307,10 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             table=table,
-            limit=_NON_STREAMING_ROW_LIMIT,
+            limit=limit,
         )
-        _guard_truncated_read(batch, db_type, table)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
@@ -324,9 +332,10 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
             table=table,
-            limit=_NON_STREAMING_ROW_LIMIT,
+            limit=limit,
         )
-        _guard_truncated_read(batch, db_type, table)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
@@ -347,9 +356,10 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             warehouse=cfg.get("warehouse", ""),
             table=table,
-            limit=_NON_STREAMING_ROW_LIMIT,
+            limit=limit,
         )
-        _guard_truncated_read(batch, db_type, table)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
@@ -361,8 +371,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
         key = endpoint.table or endpoint.collection or endpoint.schema or ""
         if not bucket or not key:
             raise ValueError("GCS source requires bucket (database) and object key (table/collection)")
-        batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=_NON_STREAMING_ROW_LIMIT)
-        _guard_truncated_read(batch, db_type, key)
+        batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
@@ -374,8 +385,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
         key = endpoint.table or endpoint.collection or endpoint.schema or ""
         if not bucket or not key:
             raise ValueError("S3 source requires bucket (database) and object key (table/collection)")
-        batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=_NON_STREAMING_ROW_LIMIT)
-        _guard_truncated_read(batch, db_type, key)
+        batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
@@ -386,8 +398,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
         table = endpoint.database or endpoint.table
         if not table:
             raise ValueError("DynamoDB table name required (database field)")
-        batch = read_all_paginated(cfg, table, limit=_NON_STREAMING_ROW_LIMIT)
-        _guard_truncated_read(batch, db_type, table)
+        batch = read_all_paginated(cfg, table, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
@@ -398,8 +411,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
         index = endpoint.database or endpoint.table or endpoint.collection
         if not index:
             raise ValueError("Elasticsearch index name required (database field)")
-        batch, _ = read_index_batch(cfg=cfg, index=index, limit=_NON_STREAMING_ROW_LIMIT)
-        _guard_truncated_read(batch, db_type, index)
+        batch, _ = read_index_batch(cfg=cfg, index=index, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, index)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
@@ -408,8 +422,9 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
         from connectors.redis_reader import read_keys_batch
 
         pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
-        batch, _ = read_keys_batch(cfg=cfg, pattern=pattern, limit=_NON_STREAMING_ROW_LIMIT)
-        _guard_truncated_read(batch, db_type, pattern)
+        batch, _ = read_keys_batch(cfg=cfg, pattern=pattern, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, pattern)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "string" for c in batch.headers}
         return records, batch.headers, schema
@@ -430,9 +445,10 @@ def read_source_database(endpoint: EndpointConfig) -> tuple[list[dict], list[str
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             table=table,
-            limit=_NON_STREAMING_ROW_LIMIT,
+            limit=limit,
         )
-        _guard_truncated_read(batch, db_type, table)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = {c: "TEXT" for c in batch.headers}
         return records, batch.headers, schema
