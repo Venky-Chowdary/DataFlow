@@ -47,15 +47,16 @@ def _refine_columns_by_samples(
     table: str,
     schema: str,
     sample_limit: int = 200,
+    quote_char: str = '"',
 ) -> list[dict]:
     """Sample string columns and use heuristics to recover UUID/JSON/BINARY/etc."""
     candidates = [c for c in columns if c["inferred_type"] in ("TEXT", "VARCHAR", "CHAR", "CHARACTER VARYING")]
     if not candidates:
         return columns
 
-    name_to_idx = {c["name"]: i for i, c in enumerate(candidates)}
-    cols_sql = ", ".join(f'"{c["name"]}"' for c in candidates)
-    qualified = f'"{schema}"."{table}"' if schema else f'"{table}"'
+    q = quote_char
+    cols_sql = ", ".join(f"{q}{c['name']}{q}" for c in candidates)
+    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))
@@ -458,7 +459,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         "nullable": nullable == "YES",
                     })
                 if target:
-                    columns = _refine_columns_by_samples(conn, columns, target, kwargs.get("database", ""))
+                    columns = _refine_columns_by_samples(conn, columns, target, kwargs.get("database", ""), quote_char="`")
         conn.close()
         return {"ok": True, "tables": tables, "columns": columns, "schema": kwargs.get("database", "")}
     except ImportError:

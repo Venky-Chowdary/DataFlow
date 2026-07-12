@@ -266,10 +266,17 @@ def _default_port(db_type: str) -> int:
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
+    db_type = (cfg.get("type") or "").lower().strip()
+
     if connection_string:
+        if connection_string.startswith("duckdb:") or connection_string.startswith("sqlite:"):
+            return connection_string
+        if db_type == "duckdb":
+            return f"duckdb:////{connection_string}" if connection_string.startswith("/") else f"duckdb:///{connection_string}"
+        if db_type == "sqlite":
+            return f"sqlite:///{connection_string}"
         return connection_string
 
-    db_type = (cfg.get("type") or "").lower().strip()
     if not db_type:
         raise ValueError("A database type or connection_string is required")
 
@@ -282,6 +289,17 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     if drivername == "duckdb":
         database = cfg.get("database") or ""
         return f"duckdb:////{database}" if database.startswith("/") else f"duckdb:///{database or ':memory:'}"
+
+    if drivername in ("presto", "trino"):
+        # Trino/Presto URLs require catalog/schema in the path.
+        schema = _schema_name(cfg) or ""
+        database = cfg.get("database") or "default"
+        host = cfg.get("host") or "localhost"
+        port = int(cfg.get("port") or 0) or _default_port(db_type)
+        user = cfg.get("username") or ""
+        auth = f"{user}@" if user else ""
+        path = f"/{database}/{schema}" if schema else f"/{database}"
+        return f"{drivername}://{auth}{host}:{port}{path}"
 
     port = int(cfg.get("port") or 0)
     if not port:
@@ -326,6 +344,11 @@ def _schema_name(cfg: dict[str, Any]) -> str | None:
         or connection_string.startswith("duckdb:")
     ):
         return None
+    if not schema:
+        if db_type == "presto":
+            return "public"
+        if db_type == "trino":
+            return "default"
     return schema or None
 
 
@@ -430,6 +453,8 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return sa.Numeric()
         if db_type == "questdb":
             return sa.Float()
+        if db_type == "presto":
+            return sa.DECIMAL(38, 10)
         return _maybe_nullable(sa.Numeric(38, 10))
     if t == "boolean":
         return _maybe_nullable(sa.Boolean())
@@ -443,21 +468,25 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return _maybe_nullable(ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime())
         if db_type == "trino" and TrinoTimestamp is not None:
             return TrinoTimestamp(precision=3, timezone=True)
+        if db_type == "presto":
+            return sa.TIMESTAMP()
         return sa.DateTime(timezone=True)
     if t == "time":
         return _maybe_nullable(sa.Time())
     if t == "uuid":
         if db_type == "questdb":
             return sa.Text()
+        if db_type == "risingwave":
+            return sa.String()
         return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
-        if db_type in ("oracle", "clickhouse", "trino", "questdb"):
+        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
         return sa.JSON()
     if t == "binary":
-        if db_type in ("clickhouse", "trino", "questdb"):
+        if db_type in ("clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         return sa.LargeBinary()
     return _maybe_nullable(sa.Text())
