@@ -873,6 +873,9 @@ def stream_database_transfer(
         return 0, ddl_log, dest_summary, columns
 
     if written == 0:
+        details = "; ".join(filter(None, warning_samples[:10]))
+        if details:
+            raise ValueError(f"No rows were written to the destination: {details}")
         raise ValueError("Source table is empty")
 
     if incremental and running_cursor and cursor_key and running_cursor != watermark:

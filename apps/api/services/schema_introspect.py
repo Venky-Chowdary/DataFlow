@@ -432,19 +432,39 @@ def _bq_to_logical(dtype: str) -> str:
 
 
 def _pg_to_logical(dtype: str) -> str:
-    d = dtype.lower()
-    if "int" in d:
+    """Map PostgreSQL information_schema.data_type values to DataFlow logical types.
+
+    Uses a precise lookup table so that `interval`, `point`, `geometry`, etc.
+    are not incorrectly matched as integers by substring search.
+    """
+    d = dtype.lower().strip()
+    if d in ("integer", "smallint", "bigint", "serial", "bigserial",
+             "smallserial", "oid", "xid", "cid", "tid"):
         return "INTEGER"
-    if "numeric" in d or "decimal" in d or "double" in d or "real" in d:
+    if d in ("numeric", "decimal", "real", "double precision", "double",
+             "float", "float4", "float8"):
         return "DECIMAL"
-    if "bool" in d:
+    if d == "boolean":
         return "BOOLEAN"
     if d == "date":
         return "DATE"
     if "timestamp" in d:
         return "TIMESTAMP"
-    if "json" in d:
+    if d == "time" or "time with" in d or "time without" in d:
+        return "TIME"
+    if d == "uuid":
+        return "UUID"
+    if d == "bytea":
+        return "BINARY"
+    if d == "json" or d == "jsonb" or "array" in d:
         return "JSON"
+    if d in ("xml", "tsvector", "tsquery", "text", "character varying",
+             "varchar", "character", "char", "name", "interval", "point",
+             "line", "lseg", "box", "path", "polygon", "circle", "geometry",
+             "geography", "inet", "cidr", "macaddr", "macaddr8", "money",
+             "bit", "bit varying", "varbit", "hstore", "uuid", "pg_lsn",
+             "txid_snapshot", "pg_snapshot", "user-defined"):
+        return "TEXT"
     return "TEXT"
 
 

@@ -24,6 +24,9 @@ def _cell(value: Any) -> str:
     if isinstance(value, (dict, list)):
         import json
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, (bytes, memoryview)):
+        import base64
+        return base64.b64encode(bytes(value)).decode("ascii")
     return str(value)
 
 
