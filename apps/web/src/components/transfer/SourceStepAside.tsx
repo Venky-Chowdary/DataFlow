@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { StructurePreview } from "../ui/StructurePreview";
@@ -105,7 +106,11 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           <div className="df2-source-aside-format-chips">
             {FILE_FORMATS.map((fmt) => (
               <span key={fmt} className="df2-source-aside-format-chip">{fmt}</span>
-            ))}
+            )).reduce((acc: React.ReactNode[], chip, i) => {
+              acc.push(chip);
+              if (i < FILE_FORMATS.length - 1) acc.push(" ");
+              return acc;
+            }, [])}
           </div>
         </div>
       )}

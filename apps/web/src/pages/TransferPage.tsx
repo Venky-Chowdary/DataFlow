@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/EmptyState";
@@ -1770,7 +1770,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 <div className="df2-upload-formats">
                   {UPLOAD_FORMATS.map((fmt) => (
                     <span key={fmt} className="df2-upload-format-chip">{fmt}</span>
-                  ))}
+                  )).reduce((acc: ReactNode[], chip, i) => {
+                    acc.push(chip);
+                    if (i < UPLOAD_FORMATS.length - 1) acc.push(" ");
+                    return acc;
+                  }, [])}
                 </div>
               </div>
               {file && parsed && (
