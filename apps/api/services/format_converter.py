@@ -20,6 +20,11 @@ SUPPORTED_CONVERSIONS: dict[str, set[str]] = {
 def can_convert(source_format: str, target_format: str) -> bool:
     src = (source_format or "").lower()
     tgt = (target_format or "").lower()
+    # NDJSON is JSON Lines in every conversion path
+    if src == "ndjson":
+        src = "jsonl"
+    if tgt == "ndjson":
+        tgt = "jsonl"
     if src == tgt:
         return True
     return tgt in SUPPORTED_CONVERSIONS.get(src, set())
@@ -73,6 +78,11 @@ def convert_rows(
     """Convert tabular data between supported file formats."""
     src = (source_format or "csv").lower()
     tgt = (target_format or "csv").lower()
+    # NDJSON is JSON Lines in every conversion path
+    if src == "ndjson":
+        src = "jsonl"
+    if tgt == "ndjson":
+        tgt = "jsonl"
     if not can_convert(src, tgt):
         raise ValueError(f"Conversion {src} → {tgt} not supported")
 

@@ -746,7 +746,12 @@ def write_destination_file(
     from services.format_converter import can_convert, convert_rows
 
     fmt = (endpoint.format or "json").lower()
+    # ndjson is a JSON Lines alias for the conversion engine
+    if fmt == "ndjson":
+        fmt = "jsonl"
     src_fmt = (source_format or fmt).lower()
+    if src_fmt == "ndjson":
+        src_fmt = "jsonl"
     types = column_types or {}
 
     export_columns = columns
