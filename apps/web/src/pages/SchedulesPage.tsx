@@ -209,24 +209,23 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
       />
 
       {schedules.length > 0 && !loading && (
-        <FilterTabs
-          ariaLabel="Filter pipelines"
-          value={filter}
-          onChange={setFilter}
-          items={[
-            { id: "all", label: "All", count: schedules.length },
-            { id: "active", label: "Active", count: enabledCount },
-            { id: "paused", label: "Paused", count: pausedCount },
-          ]}
-        />
-      )}
-
-      {schedules.length > 0 && !loading && (
-        <PageToolbar
-          searchValue={pipelineSearch}
-          onSearchChange={setPipelineSearch}
-          searchPlaceholder="Search pipelines by name, table, or cadence…"
-        />
+        <div className="df2-jobs-v3-toolbar">
+          <FilterTabs
+            ariaLabel="Filter pipelines"
+            value={filter}
+            onChange={setFilter}
+            items={[
+              { id: "all", label: "All", count: schedules.length },
+              { id: "active", label: "Active", count: enabledCount },
+              { id: "paused", label: "Paused", count: pausedCount },
+            ]}
+          />
+          <PageToolbar
+            searchValue={pipelineSearch}
+            onSearchChange={setPipelineSearch}
+            searchPlaceholder="Search pipelines by name, table, or cadence…"
+          />
+        </div>
       )}
 
       {showForm && (
