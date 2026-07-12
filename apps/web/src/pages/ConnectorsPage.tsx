@@ -205,7 +205,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
       title="Connectors"
       description="Manage saved connections and browse the connector catalog."
       actions={
-        <div className="df2-page-actions-group">
+        <>
           {connectors.length > 0 && (
             <button
               type="button"
@@ -220,7 +220,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
           <button type="button" className="df2-btn df2-btn-primary" onClick={() => onAdd()}>
             <DtIcon name="plus" size={16} /> New connection
           </button>
-        </div>
+        </>
       }
     >
       <PageFrame className="df2-connectors-page" showHonesty>

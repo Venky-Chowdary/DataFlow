@@ -1592,7 +1592,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   return (
     <PageShell
       wide
-      showHeader={false}
       className="df2-page-transfer-studio"
       title="Transfer Studio"
       description="Source → Destination → Map → Validate → Run"
