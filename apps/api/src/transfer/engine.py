@@ -3,7 +3,16 @@
 from __future__ import annotations
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any, Optional
+
+# Ensure the API root (parent of the `src` package) is first on sys.path so the
+# `services` intelligence package resolves to `apps/api/services`, not an
+# accidentally-shadowing `apps/api/src/services` that may be on PYTHONPATH.
+_api_root = Path(__file__).resolve().parents[2]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
 
 try:
     from services.mongodb_service import get_mongodb_service
@@ -45,13 +54,8 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.ai.training.training_scheduler import schedule_training_on_transfer
 
-import sys
-from pathlib import Path
-_api_root = Path(__file__).resolve().parents[2]
-if str(_api_root) not in sys.path:
-    sys.path.insert(0, str(_api_root))
-from connectors.writer_common import CHUNK_SIZE  # noqa: E402
-from services.batch_progress import ThrottledCheckpoint  # noqa: E402
+from connectors.writer_common import CHUNK_SIZE
+from services.batch_progress import ThrottledCheckpoint
 
 logger = logging.getLogger("dataflow.transfer")
 
