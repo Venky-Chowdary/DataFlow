@@ -39,7 +39,7 @@ export function PageShell({
         .join(" ")}
     >
       {showHeader && (
-        <header className="df2-page-head df2-page-head-enterprise">
+        <header className="df2-page-head df2-page-head-enterprise" aria-label={title ? `${title} page header` : "Page header"}>
           <div className="df2-page-copy">
             {kicker && (
               <span className="df2-page-kicker">
@@ -47,7 +47,7 @@ export function PageShell({
                 {kicker}
               </span>
             )}
-            <h1 className="df2-page-title">{title}</h1>
+            <h1 className="df2-page-title" id="df2-page-title">{title}</h1>
             {description && <p className="df2-page-desc">{description}</p>}
           </div>
           {actions && <div className="df2-page-actions">{actions}</div>}

@@ -276,6 +276,14 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 def _engine(cfg: dict[str, Any]) -> Any:
     url = _build_url(cfg)
     # Fast, safe defaults for local and network databases.
+    db_type = (cfg.get("type") or "").lower()
+    connection_string = (cfg.get("connection_string") or "").lower()
+    # DuckDB and SQLite are file-based; use NullPool so the file lock is released
+    # after each operation and external readers can open the database.
+    if db_type in ("duckdb", "sqlite") or "duckdb" in connection_string or "sqlite://" in connection_string:
+        from sqlalchemy.pool import NullPool
+
+        return create_engine(url, poolclass=NullPool)
     return create_engine(url, pool_pre_ping=True, pool_recycle=600)
 
 
@@ -606,8 +614,8 @@ def introspect_table_schema(
     """Return schema metadata for the table using SQLAlchemy reflection."""
     if not SQLALCHEMY_AVAILABLE:
         return {"ok": False, "error": "SQLAlchemy is not installed", "columns": [], "tables": []}
+    engine = _engine(cfg)
     try:
-        engine = _engine(cfg)
         schema = _schema_name(cfg)
         inspector = inspect(engine)
         columns = inspector.get_columns(table, schema=schema)
@@ -623,6 +631,8 @@ def introspect_table_schema(
         return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+    finally:
+        engine.dispose()
 
 
 def read_table_batch(
@@ -652,36 +662,39 @@ def read_table_batch(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
-    with engine.connect() as conn:
-        table_obj = _reflect_table(engine, table, schema_name, columns)
-        selected_cols = list(table_obj.c)
-        if columns:
-            selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
-        else:
-            columns = selected_cols = list(table_obj.c)
+    try:
+        with engine.connect() as conn:
+            table_obj = _reflect_table(engine, table, schema_name, columns)
+            selected_cols = list(table_obj.c)
+            if columns:
+                selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+            else:
+                columns = selected_cols = list(table_obj.c)
 
-        stmt = sa.select(*selected_cols)
-        if offset > 0:
-            order_col = selected_cols[0]
-            stmt = stmt.order_by(order_col).offset(offset).limit(limit)
-        else:
-            stmt = stmt.limit(limit)
+            stmt = sa.select(*selected_cols)
+            if offset > 0:
+                order_col = selected_cols[0]
+                stmt = stmt.order_by(order_col).offset(offset).limit(limit)
+            else:
+                stmt = stmt.limit(limit)
 
-        fetched = conn.execute(stmt).fetchall()
-        headers = [c.name for c in selected_cols]
-        rows = [[_cell_to_string(value) for value in row] for row in fetched]
+            fetched = conn.execute(stmt).fetchall()
+            headers = [c.name for c in selected_cols]
+            rows = [[_cell_to_string(value) for value in row] for row in fetched]
 
-        if known_total_rows is not None:
-            total = known_total_rows
-        else:
-            try:
-                total = conn.execute(
-                    sa.select(sa.func.count()).select_from(table_obj)
-                ).scalar()
-            except Exception:
-                total = len(rows)
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                try:
+                    total = conn.execute(
+                        sa.select(sa.func.count()).select_from(table_obj)
+                    ).scalar()
+                except Exception:
+                    total = len(rows)
 
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+        return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    finally:
+        engine.dispose()
 
 
 def read_table_cursor_batch(
@@ -711,30 +724,33 @@ def read_table_cursor_batch(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
-    with engine.connect() as conn:
-        table_obj = _reflect_table(engine, table, schema_name, columns)
-        if cursor_column not in table_obj.c:
-            raise ValueError(f"Cursor column '{cursor_column}' not found in table {table}")
-        cursor_col = table_obj.c[cursor_column]
-        selected_cols = list(table_obj.c)
-        if columns:
-            selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
-        else:
-            columns = selected_cols = list(table_obj.c)
+    try:
+        with engine.connect() as conn:
+            table_obj = _reflect_table(engine, table, schema_name, columns)
+            if cursor_column not in table_obj.c:
+                raise ValueError(f"Cursor column '{cursor_column}' not found in table {table}")
+            cursor_col = table_obj.c[cursor_column]
+            selected_cols = list(table_obj.c)
+            if columns:
+                selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+            else:
+                columns = selected_cols = list(table_obj.c)
 
-        stmt = sa.select(*selected_cols)
-        if cursor_after:
-            # Cast the cursor string to the reflected column type so numeric and
-            # date/timestamp cursors compare correctly.
-            marker = sa.cast(sa.literal(cursor_after), cursor_col.type)
-            stmt = stmt.where(cursor_col > marker)
-        stmt = stmt.order_by(cursor_col).limit(limit)
+            stmt = sa.select(*selected_cols)
+            if cursor_after:
+                # Cast the cursor string to the reflected column type so numeric and
+                # date/timestamp cursors compare correctly.
+                marker = sa.cast(sa.literal(cursor_after), cursor_col.type)
+                stmt = stmt.where(cursor_col > marker)
+            stmt = stmt.order_by(cursor_col).limit(limit)
 
-        fetched = conn.execute(stmt).fetchall()
-        headers = [c.name for c in selected_cols]
-        rows = [[_cell_to_string(value) for value in row] for row in fetched]
+            fetched = conn.execute(stmt).fetchall()
+            headers = [c.name for c in selected_cols]
+            rows = [[_cell_to_string(value) for value in row] for row in fetched]
 
-    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
+        return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
+    finally:
+        engine.dispose()
 
 
 def write_mapped_rows(
@@ -861,3 +877,5 @@ def write_mapped_rows(
             rejected_rows=len(data_rows) - len(mapped_rows),
             warnings=transform_errors,
         )
+    finally:
+        engine.dispose()
