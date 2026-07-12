@@ -116,24 +116,24 @@ export function ValidateActionsRail({
       )}
 
       <div className="df2-validate-rail-actions">
-        <button type="button" className="df2-btn" onClick={onBack}>
+        <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
           <DtIcon name="chevron-left" size={16} /> Back to mapping
         </button>
 
         {!preflight && !preflighting && (
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onRunPreflight}>
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={onRunPreflight}>
             <DtIcon name="gate" size={16} /> Run preflight
           </button>
         )}
 
         {blocked && (
-          <button type="button" className="df2-btn" onClick={onRunPreflight} disabled={preflighting}>
+          <button type="button" className="df2-btn df2-btn-lg" onClick={onRunPreflight} disabled={preflighting}>
             <DtIcon name="gate" size={16} /> Re-run
           </button>
         )}
 
         {blocked && mappingBlocked && mappingReviewCount > 0 && (
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onApproveMappings}>
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={onApproveMappings}>
             <DtIcon name="check" size={16} /> Approve all mappings
           </button>
         )}
