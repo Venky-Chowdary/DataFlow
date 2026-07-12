@@ -6,9 +6,7 @@ import { CadenceTiles } from "../components/ui/CadenceTiles";
 import { EmptyState } from "../components/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
 import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -175,39 +173,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
         </button>
       }
     >
-      <PageFrame className="df2-pipeline-page" showHonesty>
-      <PageInsightStrip
-        tone={connectors.length < 2 ? "warn" : enabledCount > 0 ? "live" : schedules.length ? "info" : "ok"}
-        pill={
-          connectors.length < 2
-            ? "Setup needed"
-            : enabledCount > 0
-              ? `${enabledCount} active`
-              : schedules.length
-                ? "All paused"
-                : "No pipelines"
-        }
-        message={
-          connectors.length < 2
-            ? "Add at least two saved connectors before creating a recurring sync."
-            : enabledCount
-              ? `${enabledCount} pipeline${enabledCount > 1 ? "s" : ""} running on schedule — track runs in Job Theater.`
-              : schedules.length
-                ? "Pipelines exist but none are enabled — toggle a card to resume syncs."
-                : "Create hourly, daily, or weekly syncs between saved connectors."
-        }
-      />
-      <PageMetricsRow
-        compact
-        columns={4}
-        metrics={[
-          { label: "Total pipelines", value: schedules.length, icon: "activity" },
-          { label: "Active", value: enabledCount, tone: "green", icon: "check" },
-          { label: "Paused", value: pausedCount, icon: "activity" },
-          { label: "Connectors", value: connectors.length, icon: "connectors" },
-        ]}
-      />
-
+      <PageFrame className="df2-pipeline-page" showHonesty={false}>
       {schedules.length > 0 && !loading && (
         <div className="df2-jobs-v3-toolbar">
           <FilterTabs

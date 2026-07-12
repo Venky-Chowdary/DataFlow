@@ -1,0 +1,168 @@
+/* Connectors page — list + detail split layout with compact cards */
+
+.df2-connectors-workspace,
+.df2-connectors-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-connectors-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-connectors-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-right: 1px solid #e2e8f0;
+  background: #fff;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-connectors-list-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.df2-connectors-list-controls .df2-filter-tabs {
+  flex-wrap: wrap;
+}
+
+.df2-connectors-list .df2-connector-card-grid {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  align-content: start;
+}
+
+.df2-connectors-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.df2-connectors-detail .df2-topology-card {
+  flex-shrink: 0;
+}
+
+.df2-connectors-detail .df2-connection-workbench {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Compact connection cards */
+.df2-connectors-list .df2-connector-card {
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  transition: box-shadow 0.12s, border-color 0.12s;
+  cursor: pointer;
+}
+
+.df2-connectors-list .df2-connector-card:hover {
+  border-color: #0f766e;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.08);
+}
+
+.df2-connectors-list .df2-connector-card.selected {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.df2-connectors-list .df2-connector-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.df2-connectors-list .df2-connector-card-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.df2-connectors-list .df2-connector-card-badges {
+  display: flex;
+  gap: 6px;
+}
+
+.df2-connectors-list .df2-connector-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-connectors-list .df2-connector-card-meta,
+.df2-connectors-list .df2-connector-card-endpoint,
+.df2-connectors-list .df2-connector-card-created {
+  font-size: 11px;
+  color: #64748b;
+  margin: 0 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-connectors-list .df2-connector-card-created {
+  margin-bottom: 8px;
+}
+
+.df2-connectors-list .df2-connector-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.df2-connectors-list .df2-connector-card-actions .df2-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+@media (max-width: 1024px) {
+  .df2-connectors-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .df2-connectors-list {
+    border-right: none;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  .df2-connectors-list .df2-connector-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+
+  .df2-connectors-detail {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 600px) {
+  .df2-connectors-list .df2-connector-card-grid {
+    grid-template-columns: 1fr;
+  }
+}

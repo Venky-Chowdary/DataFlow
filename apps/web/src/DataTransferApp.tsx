@@ -7,7 +7,7 @@ import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { SectionLoader } from "./components/LoadingState";
-import { ToastProvider, useToast } from "./components/Toast";
+import { useToast } from "./components/Toast";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
@@ -625,7 +625,7 @@ export function DataTransferApp() {
   }, [stage, entryScreen]);
 
   return (
-    <ToastProvider>
+    <>
       {stage === "landing" && (
       <LandingPage
           onEnterApp={() => requestApp("dashboard")}
@@ -648,6 +648,6 @@ export function DataTransferApp() {
           <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
         </DataProvider>
       )}
-    </ToastProvider>
+    </>
   );
 }

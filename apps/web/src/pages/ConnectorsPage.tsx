@@ -6,12 +6,10 @@ import { DtIcon } from "../components/DtIcon";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
-import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
-import { fetchCatalogStats, testSavedConnector, type CatalogConnector } from "../lib/api";
+import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { buildConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
@@ -42,7 +40,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   const [role, setRole] = useState<"all" | "source" | "destination">("all");
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
-  const [stats, setStats] = useState<{ total: number; live: number; beta: number; transfer_live?: number; connect_only?: number; roadmap?: number; planned?: number } | null>(null);
+
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
@@ -66,20 +64,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
       setTab("connections");
     }
   }, [showConnectionsTab]);
-
-  useEffect(() => {
-    fetchCatalogStats()
-      .then((s) => setStats({
-        total: s.total,
-        live: s.live,
-        beta: s.beta,
-        transfer_live: s.transfer_live,
-        connect_only: s.connect_only,
-        roadmap: s.roadmap,
-        planned: s.planned,
-      }))
-      .catch(() => setStats(null));
-  }, []);
 
   useEffect(() => {
     if (!selectedConnectionId && connectors.length > 0) {
@@ -172,31 +156,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
     onAdd(catalogType(item.id));
   };
 
-  const pageInsight = useMemo(() => {
-    if (tab === "catalog") {
-      return {
-        tone: "info" as const,
-        pill: "Catalog",
-        message: `${stats?.transfer_live ?? stats?.live ?? "—"} connectors support full transfer today. Browse ${stats?.total ?? "—"} integrations — transfer-ready, test-only, and roadmap tiers are labeled in the grid.`,
-      };
-    }
-    return {
-      tone: (errorCount > 0 ? "warn" : connectors.length ? "live" : "info") as "info" | "live" | "warn",
-      pill:
-        connectors.length === 0
-          ? "No connections"
-          : errorCount > 0
-            ? `${errorCount} need attention`
-            : `${healthyCount} healthy`,
-      message:
-        connectors.length === 0
-          ? "Browse the catalog to add your first source or destination — credentials are saved once and reused."
-          : errorCount
-            ? "Re-test failing connections or update credentials before running transfers."
-            : `${topology.edges.length} route${topology.edges.length === 1 ? "" : "s"} on the data plane — topology updates as jobs complete.`,
-    };
-  }, [tab, stats, errorCount, connectors.length, healthyCount, topology.edges.length]);
-
   return (
     <PageShell
       wide
@@ -223,19 +182,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
         </>
       }
     >
-      <PageFrame className="df2-connectors-page" showHonesty>
-      <PageInsightStrip tone={pageInsight.tone} pill={pageInsight.pill} message={pageInsight.message} />
-      <PageMetricsRow
-        compact
-        columns={4}
-        metrics={[
-          { label: "Transfer ready", value: stats?.transfer_live ?? stats?.live ?? "—", tone: "green", icon: "check" },
-          { label: "Test only", value: stats?.connect_only ?? 0, icon: "connectors" },
-          { label: "Roadmap", value: stats?.roadmap ?? stats?.planned ?? "—", icon: "activity" },
-          { label: "Saved", value: connectors.length, icon: "database" },
-        ]}
-      />
-
+      <PageFrame className="df2-connectors-page" showHonesty={false}>
       <FilterTabs
         ariaLabel="Connector views"
         value={tab}
@@ -249,7 +196,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
       <div className="df2-connectors-workspace">
       <div className="df2-connectors-pane">
       {tab === "connections" ? (
-        <div className="df2-stack">
+        <div className="df2-connectors-layout"><div className="df2-connectors-detail">
           <div className="df2-card df2-card-elevated df2-topology-card">
             <div className="df2-card-head">
               <div>
@@ -442,9 +389,9 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 )
               )}
             </div>
-          </section>
+          </section></div>
 
-          {connectors.length === 0 ? (
+          <div className="df2-connectors-list">{connectors.length === 0 ? (
             <EmptyState
               icon="connectors"
               title="No connections yet"
@@ -457,7 +404,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
             />
           ) : (
             <>
-            <FilterTabs
+            <div className="df2-connectors-list-controls"><FilterTabs
               ariaLabel="Filter connection status"
               value={statusFilter}
               onChange={setStatusFilter}
@@ -471,7 +418,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
               searchValue={query}
               onSearchChange={setQuery}
               searchPlaceholder="Search saved connections…"
-            />
+            /></div>
             <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
               {filteredConnectors.map((c) => (
                 <ConnectorCard
@@ -497,7 +444,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
               />
             )}
             </>
-          )}
+          )}</div>
         </div>
       ) : (
         <div className="df2-stack">

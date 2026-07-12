@@ -69,7 +69,7 @@ function ArchitectureDiagram() {
             />
             <text
               x={n.x + n.w / 2}
-              y={y - 14}
+              y={y - 24}
               className="df2-docs-arch-title"
               textAnchor="middle"
               dominantBaseline="middle"
@@ -78,12 +78,16 @@ function ArchitectureDiagram() {
             </text>
             <text
               x={n.x + n.w / 2}
-              y={y + 14}
+              y={y - 4}
               className="df2-docs-arch-sub"
               textAnchor="middle"
               dominantBaseline="middle"
             >
-              {n.sub}
+              {n.sub.split(" · ").map((line, idx) => (
+                <tspan key={line} x={n.x + n.w / 2} dy={idx === 0 ? 0 : "1.2em"}>
+                  {line}
+                </tspan>
+              ))}
             </text>
             {n.label === "Preflight" && (
               <circle
@@ -129,12 +133,12 @@ function ArchitectureDiagram() {
 
 function ConnectorOrbit() {
   const categories = [
-    { label: "Relational", examples: "PostgreSQL · MySQL · SQL Server · Oracle · SQLite" },
-    { label: "Document / NoSQL", examples: "MongoDB · DynamoDB · Cassandra · Redis · Elasticsearch" },
-    { label: "Cloud Warehouses", examples: "Snowflake · BigQuery · Redshift · Databricks · ClickHouse" },
-    { label: "Object Storage", examples: "Amazon S3 · GCS · Azure Blob / ADLS · MinIO · R2" },
-    { label: "Files & Streams", examples: "CSV · JSON · Parquet · Excel · Kafka · Kinesis" },
-    { label: "SaaS & APIs", examples: "Salesforce · HubSpot · Stripe · REST · GraphQL · gRPC" },
+    { label: "Relational", icon: "database", examples: "PostgreSQL · MySQL · SQL Server · Oracle · SQLite" },
+    { label: "Document / NoSQL", icon: "layers", examples: "MongoDB · DynamoDB · Cassandra · Redis · Elasticsearch" },
+    { label: "Cloud Warehouses", icon: "cloud", examples: "Snowflake · BigQuery · Redshift · Databricks · ClickHouse" },
+    { label: "Object Storage", icon: "server", examples: "Amazon S3 · GCS · Azure Blob / ADLS · MinIO · R2" },
+    { label: "Files & Streams", icon: "file", examples: "CSV · JSON · Parquet · Excel · Kafka · Kinesis" },
+    { label: "SaaS & APIs", icon: "globe", examples: "Salesforce · HubSpot · Stripe · REST · GraphQL · gRPC" },
   ];
 
   return (
@@ -146,7 +150,7 @@ function ConnectorOrbit() {
           style={{ animationDelay: `${i * 80}ms` }}
         >
           <div className="df2-docs-orbit-head">
-            <DtIcon name="database" size={18} />
+            <DtIcon name={c.icon} size={18} />
             <strong>{c.label}</strong>
           </div>
           <p>{c.examples}</p>
@@ -298,6 +302,17 @@ export function DocsPage() {
             <StatCard label="Preflight gates" value="6" sub="Hard and soft validation gates" icon="shield" tone="green" />
             <StatCard label="Test coverage" value="753" sub="API tests + preflight suite" icon="check" tone="default" />
           </div>
+        </RevealSection>
+
+        <RevealSection>
+          <PageSection title="Data flow" subtitle="From any source to any verified target">
+            <img
+              src="/docs/pipeline.png"
+              alt="DataFlow pipeline illustration"
+              className="df2-docs-illustration"
+              loading="lazy"
+            />
+          </PageSection>
         </RevealSection>
 
         <RevealSection>

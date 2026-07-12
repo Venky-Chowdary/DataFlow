@@ -225,7 +225,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       showHeader={false}
       className="df2-page-pilot"
     >
-      <PageFrame className="df2-pilot-workspace">
+      <PageFrame className="df2-pilot-workspace df2-pilot-v2">
         <div className="df2-pilot-status-bar" role="status">
           <div>
             <strong>Data Pilot</strong>
@@ -349,6 +349,17 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               )}
             </div>
 
+            <FilterTabs
+              ariaLabel="Automation ideas by category"
+              className="df2-filter-tabs--center"
+              value={category}
+              onChange={setCategory}
+              items={[
+                { id: "all", label: "All" },
+                ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
+              ]}
+            />
+
             <div className="df2-pilot-hero">
               <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
               <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, govern, or repair data.</h1>
@@ -357,7 +368,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               </p>
             </div>
 
-            <div className="df2-pilot-composer">
+            <div className="df2-pilot-composer-bar">
               <textarea
                 rows={3}
                 placeholder="Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"
@@ -365,11 +376,15 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               />
-              <div className="df2-pilot-composer-foot">
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => send()} disabled={!input.trim()}>
-                  Let's go →
-                </button>
-              </div>
+              <button
+                type="button"
+                className="df2-pilot-send"
+                onClick={() => send()}
+                disabled={!input.trim()}
+                aria-label="Send"
+              >
+                <DtIcon name="send" size={18} />
+              </button>
             </div>
 
             {prompts.length > 0 && (
@@ -413,18 +428,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               )}
             </div>
 
-            <FilterTabs
-              ariaLabel="Automation ideas by category"
-              className="df2-filter-tabs--center"
-              value={category}
-              onChange={setCategory}
-              items={[
-                { id: "all", label: "All" },
-                ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
-              ]}
-            />
-
-            <p className="df2-section-label">Or start from an idea</p>
             <div className="df2-pilot-ideas">
               {ideas.slice(0, 6).map((idea) => (
                 <button key={idea.id} type="button" className="df2-pilot-idea" onClick={() => send(idea.prompt)}>
@@ -470,16 +473,24 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             </div>
 
             <div className="df2-pilot-composer-sticky">
-              <textarea
-                rows={2}
-                placeholder="Follow up…"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-              />
-              <button type="button" className="df2-btn df2-btn-primary" onClick={() => send()} disabled={loading || !input.trim()}>
-                Send
-              </button>
+              <div className="df2-pilot-composer-bar">
+                <textarea
+                  rows={2}
+                  placeholder="Follow up…"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                />
+                <button
+                  type="button"
+                  className="df2-pilot-send"
+                  onClick={() => send()}
+                  disabled={loading || !input.trim()}
+                  aria-label="Send"
+                >
+                  <DtIcon name="send" size={18} />
+                </button>
+              </div>
             </div>
           </>
         )}

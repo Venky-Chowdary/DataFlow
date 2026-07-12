@@ -29,6 +29,10 @@
 @import "./ui-stability-layer.css";
 @import "./enterprise-final.css";
 @import "./ui-density.css";
+@import "./pilot-chat.css";
+@import "./connectors-page.css";
+@import "./jobs-page-redesign.css";
+@import "./docs-page.css";
 
 .df2-honesty-banner {
   display: flex;

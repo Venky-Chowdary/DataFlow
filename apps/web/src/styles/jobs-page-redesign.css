@@ -1,0 +1,369 @@
+/* Jobs page — list + detail cards with independent scroll and compact stats */
+
+.df2-jobs-workspace.df2-jobs-workspace-v3 {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.df2-jobs-workspace-v3 > .df2-empty {
+  flex: 1;
+}
+
+.df2-jobs-v3-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 0 16px;
+  flex-shrink: 0;
+}
+
+.df2-jobs-v3-toolbar .df2-filter-tabs {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-jobs-v3-toolbar .df2-toolbar {
+  flex: 0 0 auto;
+}
+
+.df2-jobs-v3-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-jobs-v3-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 12px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.df2-jobs-v3-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  text-align: left;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  transition: box-shadow 0.12s, border-color 0.12s;
+}
+
+.df2-jobs-v3-item:hover,
+.df2-jobs-v3-item.active {
+  border-color: #0f766e;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.08);
+}
+
+.df2-jobs-v3-item.active {
+  background: #f0fdfa;
+}
+
+.df2-jobs-v3-item.failed {
+  border-left: 3px solid #ef4444;
+}
+
+.df2-jobs-v3-item.live {
+  border-left: 3px solid #22c55e;
+}
+
+.df2-jobs-v3-item-status {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.df2-jobs-v3-item-status--completed { background: #dcfce7; color: #16a34a; }
+.df2-jobs-v3-item-status--failed { background: #fee2e2; color: #dc2626; }
+.df2-jobs-v3-item-status--running { background: #d1fae5; color: #059669; }
+.df2-jobs-v3-item-status--pending { background: #fef9c3; color: #ca8a04; }
+
+.df2-jobs-v3-item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-jobs-v3-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.df2-jobs-v3-item-route {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.df2-jobs-v3-item-route svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.df2-jobs-v3-item-source,
+.df2-jobs-v3-item-dest {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-jobs-v3-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.df2-jobs-v3-item-id {
+  font-family: var(--df-font-mono);
+  color: #94a3b8;
+}
+
+.df2-jobs-v3-item-bar {
+  height: 4px;
+  background: #e2e8f0;
+  border-radius: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.df2-jobs-v3-item-bar-fill {
+  height: 100%;
+  background: #0f766e;
+  transition: width 0.3s;
+}
+
+.df2-jobs-v3-item-error {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: #dc2626;
+  background: #fef2f2;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.df2-jobs-v3-detail {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.df2-jobs-v3-detail .df2-empty {
+  min-height: 200px;
+}
+
+.df2-jobs-v3-detail .df2-theater-v3 {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+.df2-jobs-v3-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.df2-jobs-v3-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.df2-jobs-v3-summary-route {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.df2-jobs-v3-summary-route > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-jobs-v3-summary-route span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.df2-jobs-v3-summary-route strong {
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.df2-jobs-v3-summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.df2-jobs-v3-summary-metrics article {
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.df2-jobs-v3-summary-metrics strong {
+  display: block;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.df2-jobs-v3-summary-metrics span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.df2-jobs-v3-summary-phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-jobs-v3-phase-pill {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.df2-jobs-v3-phase-pill.done { background: #dcfce7; color: #16a34a; }
+.df2-jobs-v3-phase-pill.failed { background: #fee2e2; color: #dc2626; }
+.df2-jobs-v3-phase-pill.active { background: #ccfbf1; color: #0f766e; }
+
+.df2-jobs-v3-summary-dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.df2-jobs-v3-summary-dl > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.df2-jobs-v3-summary-dl dt {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.df2-jobs-v3-summary-dl dd {
+  margin: 0;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.df2-jobs-v3-mappings,
+.df2-jobs-v3-log {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.df2-jobs-v3-mappings h3,
+.df2-jobs-v3-log h3 {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.df2-jobs-v3-mappings-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.df2-jobs-v3-mappings table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.df2-jobs-v3-mappings th,
+.df2-jobs-v3-mappings td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.df2-jobs-v3-mappings th {
+  color: #64748b;
+  font-size: 11px;
+  background: #f8fafc;
+}
+
+.df2-jobs-v3-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.df2-jobs-v3-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.df2-jobs-v3-alert.error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.df2-jobs-v3-alert.error p {
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .df2-jobs-v3-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+    overflow: visible;
+  }
+
+  .df2-jobs-v3-list {
+    max-height: 320px;
+  }
+
+  .df2-jobs-v3-summary-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

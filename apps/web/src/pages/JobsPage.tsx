@@ -142,8 +142,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
 
-  const totalRows = jobs.reduce((s, j) => s + (j.records_processed || 0), 0);
-  const latestFailed = jobs.find((j) => j.status === "failed");
+
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const jobPhases = liveJob?.phases?.length
@@ -170,41 +169,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
         </>
       }
     >
-      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3" showHonesty>
-        <header className="df2-jobs-v3-header">
-          <div className="df2-jobs-v3-stats">
-            <div className="df2-jobs-v3-stat">
-              <span>Total</span>
-              <strong>{counts.all}</strong>
-            </div>
-            <div className={`df2-jobs-v3-stat ${counts.running ? "live" : ""}`}>
-              <span>Running</span>
-              <strong>{counts.running}</strong>
-            </div>
-            <div className="df2-jobs-v3-stat ok">
-              <span>Completed</span>
-              <strong>{counts.completed}</strong>
-            </div>
-            <div className={`df2-jobs-v3-stat ${counts.failed ? "warn" : ""}`}>
-              <span>Failed</span>
-              <strong>{counts.failed}</strong>
-            </div>
-            <div className="df2-jobs-v3-stat">
-              <span>Rows moved</span>
-              <strong>{totalRows.toLocaleString()}</strong>
-            </div>
-          </div>
-          {latestFailed && (
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm"
-              onClick={() => { setFilter("failed"); setSelectedId(latestFailed._id); }}
-            >
-              <DtIcon name="alert" size={14} /> Triage failed
-            </button>
-          )}
-        </header>
-
+      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3" showHonesty={false}>
         {jobs.length === 0 ? (
           <EmptyState
             icon="jobs"
