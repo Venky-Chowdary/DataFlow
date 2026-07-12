@@ -141,7 +141,7 @@ const paths: Record<string, React.ReactNode> = {
 export function DtIcon({ name, size = 20 }: { name: string; size?: number }) {
   const stroke = name === "plus" || name === "check" || name === "x" ? 2 : 1.5;
   return (
-    <span className="dt-nav-icon">
+    <span className="dt-nav-icon" aria-hidden="true">
       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
         {paths[name] || paths.database}
       </svg>

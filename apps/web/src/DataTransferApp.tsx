@@ -449,7 +449,7 @@ function AppShell({
           <div className={`df2-system-visibility-banner ${systemTone}`} role="status" aria-live="polite">
             <div className="df2-system-visibility-copy">
               <strong>System visibility</strong>
-              <p>{systemMessage}</p>
+              <p> {systemMessage}</p>
             </div>
             <div className="df2-system-visibility-meta">
               <button
