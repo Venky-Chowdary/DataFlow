@@ -347,21 +347,28 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     tgt = normalize_logical_type(target_type)
     if src == tgt:
         return False
-    if tgt in LOSSLESS_TEXT_TYPES or tgt == LOGICAL_JSON:
-        return False
-    if src in {LOGICAL_JSON, LOGICAL_ARRAY} and tgt in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN}:
-        return True
     if src == LOGICAL_BINARY and tgt != LOGICAL_BINARY:
         return True
-    if src in {LOGICAL_DATETIME, LOGICAL_DATE} and tgt == LOGICAL_DATE and src == LOGICAL_DATETIME:
+    if tgt in LOSSLESS_TEXT_TYPES or tgt == LOGICAL_JSON:
+        return False
+    if src in {LOGICAL_JSON, LOGICAL_ARRAY} and tgt in {
+        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_BINARY, LOGICAL_UUID,
+    }:
+        return True
+    if src in {LOGICAL_INTEGER, LOGICAL_DECIMAL} and tgt == LOGICAL_BOOLEAN:
+        return True
+    if src == LOGICAL_BOOLEAN and tgt in {LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_UUID, LOGICAL_BINARY}:
         return True
     if src == LOGICAL_DECIMAL and tgt == LOGICAL_INTEGER:
         return True
     if src in LOSSLESS_TEXT_TYPES and tgt in {
-        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_BINARY,
+        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_BINARY,
     }:
         return True
-    if src == LOGICAL_DATETIME and tgt == LOGICAL_DATE:
+    if src in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME} and tgt in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME}:
+        # Only date -> datetime is a safe widening; all other date/time/timezone trims lose information.
+        if src == LOGICAL_DATE and tgt == LOGICAL_DATETIME:
+            return False
         return True
     return False
 

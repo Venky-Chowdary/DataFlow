@@ -310,38 +310,45 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
-    """Reduce score for incompatible type pairs."""
-    s, t = src_type.upper(), tgt_type.upper()
-    text_types = {"TEXT", "CLOB", "LONGTEXT", "BLOB", "BYTEA", "BINARY", "VARCHAR", "STRING"}
-    numeric_types = {"INTEGER", "DECIMAL", "FLOAT", "NUMBER", "NUMERIC"}
-    date_types = {"DATE", "TIMESTAMP"}
-    
-    if s in text_types and t in date_types:
-        return 0.35
-    if s in {"BINARY", "BLOB", "BYTEA"} and t not in text_types | {"BINARY", "BLOB", "BYTEA"}:
-        return 0.4
-    if s in text_types and t in numeric_types:
-        return 0.25  # text to numeric needs parsing, slightly less ideal
-        
+    """Reduce score for incompatible type pairs using the canonical type-system rules."""
+    from services.type_system import is_lossy_coercion, normalize_logical_type
+
+    if not src_type or not tgt_type:
+        return 0.0
+    if is_lossy_coercion(src_type, tgt_type):
+        src = normalize_logical_type(src_type)
+        tgt = normalize_logical_type(tgt_type)
+        if src == "binary" and tgt != "binary":
+            return 0.4
+        if src in ("json", "array") and tgt in ("integer", "decimal", "boolean", "date", "datetime", "time", "binary", "uuid"):
+            return 0.35
+        if src in ("decimal",) and tgt == "integer":
+            return 0.15
+        return 0.25
     return 0.0
 
 def _type_aware_boost(src_type: str, tgt_type: str) -> float:
     """Boost score for exact or highly compatible type matches."""
-    s, t = src_type.upper(), tgt_type.upper()
-    if s == t:
+    from services.type_system import is_lossy_coercion, normalize_logical_type
+
+    if not src_type or not tgt_type:
+        return 0.0
+    src = normalize_logical_type(src_type)
+    tgt = normalize_logical_type(tgt_type)
+    if src == tgt:
         return 0.05
-    
-    numeric_types = {"INTEGER", "DECIMAL", "FLOAT", "NUMBER", "NUMERIC"}
-    date_types = {"DATE", "TIMESTAMP"}
-    text_types = {"VARCHAR", "STRING", "TEXT"}
-    
-    if s in numeric_types and t in numeric_types:
+    if is_lossy_coercion(src_type, tgt_type):
+        return 0.0
+    # Safe widening / cross-cast pairs that are not lossy.
+    safe_pairs: set[tuple[str, str]] = {
+        ("integer", "decimal"), ("boolean", "integer"), ("boolean", "decimal"),
+        ("date", "datetime"), ("string", "text"), ("uuid", "string"), ("uuid", "text"),
+        ("json", "text"), ("array", "text"), ("json", "string"), ("array", "string"),
+    }
+    if (src, tgt) in safe_pairs:
         return 0.03
-    if s in date_types and t in date_types:
-        return 0.03
-    if s in text_types and t in text_types:
+    if src in ("string", "text", "uuid") and tgt in ("string", "text", "uuid"):
         return 0.02
-        
     return 0.0
 
 
