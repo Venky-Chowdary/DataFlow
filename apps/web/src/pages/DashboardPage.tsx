@@ -87,13 +87,10 @@ export function DashboardPage({
       actions={
         <div className="df2-overview-toolbar-actions">
           {onOpenPilot && (
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-icon" onClick={onOpenPilot} title="Data Pilot">
-              <DtIcon name="sparkle" size={18} />
+            <button type="button" className="df2-btn df2-btn-ghost" onClick={onOpenPilot} title="Open Data Pilot">
+              <DtIcon name="sparkle" size={16} /> Data Pilot
             </button>
           )}
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
-            <DtIcon name="plus" size={16} /> New transfer
-          </button>
         </div>
       }
     >
