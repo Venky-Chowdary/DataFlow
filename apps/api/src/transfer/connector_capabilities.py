@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+from functools import lru_cache
 from typing import Any
 
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
@@ -228,13 +230,131 @@ def resolve_driver_type(catalog_id: str) -> str:
     return base
 
 
-def get_capabilities(driver_type: str) -> dict[str, bool]:
+def _sqlalchemy_available() -> bool:
+    return importlib.util.find_spec("sqlalchemy") is not None
+
+
+# First-class / file drivers and the DBAPI / library modules they need
+_DRIVER_MODULE: dict[str, str | None] = {
+    "postgresql": "psycopg2",
+    "mysql": "pymysql",
+    "redshift": "psycopg2",
+    "mongodb": "pymongo",
+    "redis": "redis",
+    "elasticsearch": "elasticsearch",
+    "dynamodb": "boto3",
+    "s3": "boto3",
+    "gcs": "google.cloud.storage",
+    "snowflake": "snowflake.connector",
+    "bigquery": "google.cloud.bigquery",
+    "sqlite": "sqlite3",
+    "csv": None,
+    "tsv": None,
+    "json": None,
+    "jsonl": None,
+    "ndjson": None,
+    "excel": "openpyxl",
+    "parquet": "pyarrow",
+}
+
+
+# Map a generic SQL engine drivername to the DBAPI module it requires
+_GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
+    "postgresql+psycopg2": "psycopg2",
+    "mysql+pymysql": "pymysql",
+    "duckdb": "duckdb",
+    "sqlite": "sqlite3",
+    "mssql+pyodbc": "pyodbc",
+    "oracle+oracledb": "oracledb",
+    "ibm_db_sa": "ibm_db",
+    "teradatasql": "teradatasql",
+    "nzpsql": "nzpsql",
+    "vertica+vertica_python": "vertica_python",
+    "exasol+pyodbc": "pyodbc",
+    "sybase+pyodbc": "pyodbc",
+    "sap_hana": "hdbcli",
+    "hana": "hdbcli",
+    "firebird+fdb": "fdb",
+    "h2": "h2",
+    "clickhouse+native": "clickhouse_driver",
+    "druid": "pydruid",
+    "pinot": "pinotdb",
+    "presto": "pyhive",
+    "trino": "trino",
+    "hive": "pyhive",
+    "impala": "impyla",
+    "spark": "pyhive",
+    "phoenix": "phoenixdb",
+    "databricks+connector": "databricks",
+    "dremio+flight": "dremio_sqlalchemy",
+    "firebolt": "firebolt",
+    "informix+pyodbc": "pyodbc",
+    "awsathena+rest": "pyathena",
+    "db2": "ibm_db",
+}
+
+
+def _module_is_installed(name: str | None) -> bool:
+    if name is None:
+        return True
+    return importlib.util.find_spec(name) is not None
+
+
+@lru_cache(maxsize=1)
+def _generic_sql_drivername_map() -> dict[str, str]:
+    """Lazy import of generic_sql drivername map to avoid heavy startup import."""
+    try:
+        from connectors.generic_sql import _DRIVERNAME_MAP
+
+        return _DRIVERNAME_MAP
+    except Exception:
+        return {}
+
+
+def _generic_sql_dbapi_module(drivername: str) -> str | None:
+    if not drivername:
+        return None
+    if drivername in _GENERIC_DRIVERNAME_TO_MODULE:
+        return _GENERIC_DRIVERNAME_TO_MODULE[drivername]
+    # Try to derive from the DBAPI suffix after the "+" separator
+    if "+" in drivername:
+        return drivername.split("+", 1)[1]
+    return None
+
+
+def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
+    """Check whether the runtime dependencies for a driver are installed.
+
+    For generic SQL this is catalog-id aware: a PostgreSQL-wire alias is only
+    ready when psycopg2 is installed, a MySQL-wire alias when pymysql is
+    installed, etc. This keeps the catalog honest and avoids claiming "Full
+    transfer" for engines whose DBAPI drivers are not present.
+    """
     if driver_type == "generic_sql":
-        return {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+        if not _sqlalchemy_available():
+            return False
+        if not catalog_id:
+            return True
+        drivername = _generic_sql_drivername_map().get(catalog_id, catalog_id)
+        module = _generic_sql_dbapi_module(drivername)
+        return module is not None and _module_is_installed(module)
+
+    module = _DRIVER_MODULE.get(driver_type)
+    return _module_is_installed(module)
+
+
+def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
+    if driver_type == "generic_sql":
+        base = {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+        if not catalog_id:
+            return base if driver_available("generic_sql") else {k: False for k in base}
+        return base if driver_available("generic_sql", catalog_id) else {k: False for k in base}
     if driver_type in _DRIVER_CAPS:
-        return dict(_DRIVER_CAPS[driver_type])
+        caps = dict(_DRIVER_CAPS[driver_type])
+        return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
     if driver_type in _FILE_CAPS:
-        return dict(_FILE_CAPS[driver_type])
+        caps = dict(_FILE_CAPS[driver_type])
+        return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 
@@ -285,7 +405,7 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
 def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     catalog_id = (entry.get("id") or "").lower().strip()
     driver = resolve_driver_type(catalog_id)
-    caps = get_capabilities(driver)
+    caps = get_capabilities(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
     eff = "live" if ready else (
         "connect_only" if connect_only(caps) else effective_status(caps, entry.get("status", "planned"))
