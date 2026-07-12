@@ -231,6 +231,16 @@ def run_transfer_policy_gates(
     return gates
 
 
+def is_compliance_only_block(proof_blockers: list[str]) -> bool:
+    """Return True when every proof blocker is purely a PII/compliance review."""
+    if not proof_blockers:
+        return False
+    return all(
+        "PII/compliance" in b or "compliance review" in b.lower()
+        for b in proof_blockers
+    )
+
+
 def apply_policy_gates(
     result: dict[str, Any],
     policy_gates: list[dict[str, Any]],
@@ -240,13 +250,28 @@ def apply_policy_gates(
     transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
     proof_blockers = (proof_bundle.get("transfer_decision") or {}).get("blockers") or []
 
+    is_strict = (validation_mode or "strict").lower() in {"strict", "maximum"}
+    compliance_only = is_compliance_only_block(proof_blockers)
+
+    # In non-strict modes, PII/compliance review is a warning, not a hard blocker.
+    # Real transfers with email/name fields should be able to proceed after the user
+    # sees the compliance risk. Reconciliation failures and semantic confidence issues
+    # still stop the transfer.
+    if is_strict:
+        active_proof_blockers = list(proof_blockers)
+    else:
+        active_proof_blockers = [
+            b for b in proof_blockers
+            if "PII/compliance" not in b and "compliance review" not in b.lower()
+        ]
+
     blockers = [
         {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
         for b in result.get("blockers", [])
     ]
     blockers.extend(
         {"id": f"proof_{idx}", "message": str(message), "details": {}}
-        for idx, message in enumerate(proof_blockers)
+        for idx, message in enumerate(active_proof_blockers)
     )
 
     if policy_gates:
@@ -263,17 +288,9 @@ def apply_policy_gates(
     total_gates = len(gates)
     has_blocks = any(g.get("status") == GateStatus.BLOCK.value for g in gates)
 
-    # Strict/Maximum validation blocks on proof-bundle "block" and any failed proof.
-    # Balanced/Minimum only blocks proof-bundle blocks when the reason is not purely
-    # a PII/compliance review (so real transfers with email fields can proceed with
-    # a warning while reconciliation failures still stop the transfer).
-    is_strict = validation_mode.lower() in {"strict", "maximum"}
-    non_compliance_blockers = [b for b in proof_blockers if "PII/compliance" not in b and "compliance review" not in b.lower()]
-    proof_blocks = transfer_decision == "block" or proof_bundle.get("passed") is False
+    proof_blocks = transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
     if proof_blocks and not is_strict:
-        if transfer_decision == "review":
-            proof_blocks = False
-        elif transfer_decision == "block" and non_compliance_blockers:
+        if active_proof_blockers:
             proof_blocks = True
         else:
             proof_blocks = False
@@ -281,19 +298,37 @@ def apply_policy_gates(
     if proof_blocks:
         has_blocks = True
 
-    if has_blocks and proof_bundle:
+    if proof_bundle:
         proof_bundle = {**proof_bundle}
-        gate_blocker_messages = [b["message"] for b in blockers]
-        decision_blockers = list(proof_bundle.get("transfer_decision", {}).get("blockers") or [])
-        for msg in gate_blocker_messages:
-            if msg not in decision_blockers:
-                decision_blockers.append(msg)
-        proof_bundle["passed"] = False
-        proof_bundle["transfer_decision"] = {
-            "decision": "block",
-            "blockers": decision_blockers,
-            "reason": "; ".join(decision_blockers) if decision_blockers else "Preflight gates blocked the transfer",
-        }
+        base_decision = proof_bundle.get("transfer_decision") or {}
+        if has_blocks:
+            gate_blocker_messages = [b["message"] for b in blockers]
+            decision_blockers = list(base_decision.get("blockers") or [])
+            for msg in gate_blocker_messages:
+                if msg not in decision_blockers:
+                    decision_blockers.append(msg)
+            proof_bundle["passed"] = False
+            proof_bundle["transfer_decision"] = {
+                "decision": "block",
+                "blockers": decision_blockers,
+                "reason": "; ".join(decision_blockers) if decision_blockers else "Preflight gates blocked the transfer",
+                "warnings": [],
+            }
+        else:
+            # No hard gate blocks; downgrade proof decision to review/approve and surface
+            # compliance warnings so the UI shows the risk without disabling the transfer.
+            warnings = [b for b in proof_blockers if b not in active_proof_blockers]
+            decision = "review" if (transfer_decision in {"block", "review"} or compliance_only) else "approve"
+            proof_bundle["passed"] = True
+            proof_bundle["transfer_decision"] = {
+                "decision": decision,
+                "blockers": [],
+                "reason": (
+                    "No blocking issues detected" if not warnings
+                    else "; ".join(warnings)
+                ),
+                "warnings": warnings,
+            }
 
     return {
         **result,

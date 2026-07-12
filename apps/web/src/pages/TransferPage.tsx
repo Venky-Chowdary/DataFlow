@@ -1218,6 +1218,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       if (planId) {
         await syncTransferPlanMappings(planId, mappings);
         const pf = await preflightTransferPlan(planId);
+        const proofDecision = pf.proof_bundle?.transfer_decision?.decision;
         if (pf.passed) {
           await approveTransferPlan(planId);
         }
@@ -1227,6 +1228,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             title: "Validation incomplete",
             message: pf.blockers?.[0]?.message ?? `${pf.blockers?.length ?? 0} check(s) failed — use the fix actions below.`,
             tone: "warning",
+          });
+        } else if (proofDecision === "review") {
+          toast({
+            title: "Validation passed with review items",
+            message: "You can execute the transfer; review the warnings in the proof panel first.",
+            tone: "info",
           });
         } else {
           setStep(STEP_RUN);
@@ -1266,11 +1273,18 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         stream_contracts: streamContracts,
       });
       setPreflight(pf);
+      const proofDecision = pf.proof_bundle?.transfer_decision?.decision;
       if (!pf.passed) {
         toast({
           title: "Validation incomplete",
           message: pf.blockers[0]?.message ?? `${pf.blockers.length} check(s) failed — use the fix actions below.`,
           tone: "warning",
+        });
+      } else if (proofDecision === "review") {
+        toast({
+          title: "Validation passed with review items",
+          message: "You can execute the transfer; review the warnings in the proof panel first.",
+          tone: "info",
         });
       } else {
         setStep(STEP_RUN);

@@ -14,7 +14,17 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
   const semanticScore = proof?.semantic_mapping_score ?? 0;
   const qualityScore = proof?.quality_score ?? 0;
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
-  const statusTone = running ? "live" : preflight?.passed ? "ok" : preflight ? "warn" : "info";
+  const statusTone = running
+    ? "live"
+    : decision === "block"
+      ? "warn"
+      : decision === "review"
+        ? "warn"
+        : preflight?.passed
+          ? "ok"
+          : preflight
+            ? "warn"
+            : "info";
 
   const chips = [
     { label: "Proof decision", value: decision.toUpperCase() },

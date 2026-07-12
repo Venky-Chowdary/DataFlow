@@ -9,6 +9,7 @@ import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { SectionLoader } from "./components/LoadingState";
 import { ToastProvider, useToast } from "./components/Toast";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
+import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
@@ -21,7 +22,6 @@ import { usePageMeta } from "./lib/usePageMeta";
 import { readAppHash, writeAppHash } from "./lib/appNavigation";
 import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
 
-const SYSTEM_BANNER_PREF_KEY = "df2.systemVisibilityBanner.hidden";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const PilotPage = lazy(() => import("./pages/PilotPage").then((m) => ({ default: m.PilotPage })));
@@ -93,13 +93,6 @@ function AppShell({
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
-  const [showSystemBanner, setShowSystemBanner] = useState(() => {
-    try {
-      return localStorage.getItem(SYSTEM_BANNER_PREF_KEY) !== "1";
-    } catch {
-      return true;
-    }
-  });
   const searchRef = useRef<HTMLInputElement>(null);
 
   usePageMeta(metaForScreen(screen));
@@ -233,46 +226,6 @@ function AppShell({
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
   const unhealthyConnectorsCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
-  const hasAttentionItems = !apiOnline || failedJobsCount > 0 || unhealthyConnectorsCount > 0;
-  const systemTone: "ok" | "live" | "warn" = hasAttentionItems ? "warn" : runningJobsCount > 0 ? "live" : "ok";
-  const shouldRenderSystemBanner = showSystemBanner && (hasAttentionItems || runningJobsCount > 0);
-  const parts: string[] = [];
-  if (!apiOnline) {
-    parts.push("Control plane API is offline. Transfers and validation checks can fail until connectivity recovers.");
-  } else {
-    if (failedJobsCount > 0) {
-      parts.push(`${failedJobsCount} failed job${failedJobsCount > 1 ? "s" : ""} need triage in Job Theater.`);
-    }
-    if (unhealthyConnectorsCount > 0) {
-      parts.push(`${unhealthyConnectorsCount} connector${unhealthyConnectorsCount > 1 ? "s" : ""} need health checks before production transfers.`);
-    }
-    if (runningJobsCount > 0 && parts.length === 0) {
-      parts.push(`${runningJobsCount} active transfer${runningJobsCount > 1 ? "s" : ""} streaming now.`);
-    }
-    if (parts.length === 0) {
-      parts.push("All systems healthy. Preflight, routing, and transfer services are operational.");
-    }
-  }
-  const systemMessage = parts.join(" ");
-
-  const closeSystemBanner = () => {
-    setShowSystemBanner(false);
-    try {
-      localStorage.setItem(SYSTEM_BANNER_PREF_KEY, "1");
-    } catch {
-      // Ignore localStorage failures (private mode / policy).
-    }
-  };
-
-  const openSystemBanner = () => {
-    setShowSystemBanner(true);
-    try {
-      localStorage.removeItem(SYSTEM_BANNER_PREF_KEY);
-    } catch {
-      // Ignore localStorage failures (private mode / policy).
-    }
-  };
-
   return (
     <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
       {mobileNavOpen && (
@@ -405,18 +358,13 @@ function AppShell({
               <span className="df2-system-dot" />
               <span className="df2-topbar-pill-text">{apiOnline ? "Online" : "Offline"}</span>
             </div>
-            {!shouldRenderSystemBanner && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-ghost"
-                onClick={openSystemBanner}
-                aria-label="Show system visibility"
-                title="Show system visibility"
-              >
-                <DtIcon name="activity" size={16} />
-                <span className="df2-topbar-btn-text">Status</span>
-              </button>
-            )}
+            <StatusPopover
+              apiOnline={apiOnline}
+              failedJobsCount={failedJobsCount}
+              runningJobsCount={runningJobsCount}
+              unhealthyConnectorsCount={unhealthyConnectorsCount}
+              onNavigate={setScreen}
+            />
             {screen !== "pilot" && (
               <button
                 type="button"
@@ -442,64 +390,6 @@ function AppShell({
               <strong>{offlineCopy.title}</strong>
               <p>{offlineCopy.body}</p>
             </div>
-          </div>
-        )}
-
-        {shouldRenderSystemBanner && (
-          <div className={`df2-system-visibility-banner ${systemTone}`} role="status" aria-live="polite">
-            <div className="df2-system-visibility-leading">
-              <span className={`df2-system-visibility-icon ${systemTone}`} aria-hidden>
-                <DtIcon
-                  name={systemTone === "ok" ? "check" : systemTone === "warn" ? "alert" : "activity"}
-                  size={18}
-                />
-              </span>
-              <div className="df2-system-visibility-copy">
-                <strong>System status</strong>
-                <p>{systemMessage}</p>
-              </div>
-            </div>
-
-            <div className="df2-system-visibility-body">
-              <div className="df2-system-visibility-metrics" aria-label="System status summary">
-                <span className={`df2-system-metric-pill ${!apiOnline ? "warn" : "ok"}`}>
-                  API {apiOnline ? "online" : "offline"}
-                </span>
-                <span className={`df2-system-metric-pill ${failedJobsCount > 0 ? "warn" : "ok"}`}>
-                  Failed {failedJobsCount}
-                </span>
-                <span className={`df2-system-metric-pill ${runningJobsCount > 0 ? "live" : "ok"}`}>
-                  Running {runningJobsCount}
-                </span>
-                <span className={`df2-system-metric-pill ${unhealthyConnectorsCount > 0 ? "warn" : "ok"}`}>
-                  Connector alerts {unhealthyConnectorsCount}
-                </span>
-              </div>
-              {(failedJobsCount > 0 || unhealthyConnectorsCount > 0) && (
-                <div className="df2-system-visibility-actions">
-                  {failedJobsCount > 0 && (
-                    <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("jobs")}>
-                      Open Job Theater
-                    </button>
-                  )}
-                  {unhealthyConnectorsCount > 0 && (
-                    <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("connectors")}>
-                      Review connectors
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <button
-              type="button"
-              className="df2-system-visibility-close"
-              onClick={closeSystemBanner}
-              aria-label="Dismiss system status"
-              title="Dismiss"
-            >
-              <DtIcon name="x" size={14} />
-            </button>
           </div>
         )}
 

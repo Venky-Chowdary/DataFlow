@@ -37,6 +37,7 @@ export function ValidateActionsRail({
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
   const evidenceSummary = preflight?.proof_bundle?.evidence_summary || "Deterministic proof signals ready for operator review.";
+  const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
   const firstBlocker = preflight?.blockers?.[0]?.message;
 
   return (
@@ -74,19 +75,19 @@ export function ValidateActionsRail({
                 <strong>{confidenceBand}</strong>
               </span>
               <span className="df2-validate-rail-metric">
-                <small>Quality</small>
+                <small>Quality grade</small>
                 <strong>{qualityGrade}</strong>
               </span>
               <span className="df2-validate-rail-metric">
-                <small>Semantic</small>
+                <small>Semantic confidence</small>
                 <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
               </span>
               <span className="df2-validate-rail-metric">
-                <small>Quality</small>
+                <small>Sample quality</small>
                 <strong>{preflight.proof_bundle.quality_score.toFixed(2)}</strong>
               </span>
               <span className="df2-validate-rail-metric">
-                <small>Compliance</small>
+                <small>Compliance risk</small>
                 <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
               </span>
             </div>
@@ -98,12 +99,25 @@ export function ValidateActionsRail({
               ))}
             </ul>
           )}
+          {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
+            <div className="df2-validate-rail-review">
+              <strong><DtIcon name="shield" size={14} /> Review required</strong>
+              <p>{proofReason}</p>
+              {proofWarnings.length > 0 && (
+                <ul>
+                  {proofWarnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       <div className="df2-validate-rail-actions">
         <button type="button" className="df2-btn" onClick={onBack}>
-          ← Back to mapping
+          <DtIcon name="chevron-left" size={16} /> Back to mapping
         </button>
 
         {!preflight && !preflighting && (

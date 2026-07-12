@@ -131,6 +131,7 @@ export interface PreflightProofBundle {
     decision: "approve" | "review" | "block";
     blockers: string[];
     reason: string;
+    warnings?: string[];
   };
 }
 

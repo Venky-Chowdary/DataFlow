@@ -122,41 +122,142 @@
   background: #f9fbfd;
 }
 
-.df2-system-visibility-banner {
-  display: flex;
+/* Status popover — anchored to the topbar Status button */
+.df2-status-popover-anchor {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+}
+
+.df2-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.df2-status-trigger:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.df2-status-trigger.ok:hover {
+  border-color: #6ee7b7;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.df2-status-trigger.warn:hover {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.df2-status-trigger.live:hover {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.df2-status-trigger.ok {
+  color: #0f766e;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.df2-status-trigger.warn {
+  color: #92400e;
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.df2-status-trigger.live {
+  color: #0369a1;
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+
+.df2-status-trigger.attention {
+  animation: df2-pulse-attention 2s infinite;
+}
+
+@keyframes df2-pulse-attention {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.3); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.0); }
+}
+
+.df2-status-trigger-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.df2-status-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(340px, 90vw);
   border: 1px solid #e2e8f0;
   border-radius: 14px;
-  background: #ffffff;
-  padding: 12px 14px;
-  margin: 12px 16px 0;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
-  border-left: 4px solid #cbd5e1;
+  background: #fff;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.12);
+  z-index: 50;
+  padding: 14px;
+  overflow: hidden;
 }
 
-.df2-system-visibility-banner.ok {
-  border-left-color: #10b981;
+.df2-status-popover::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: #cbd5e1;
 }
 
-.df2-system-visibility-banner.live {
-  border-left-color: #0ea5e9;
+.df2-status-popover.ok::before { background: #10b981; }
+.df2-status-popover.warn::before { background: #f59e0b; }
+.df2-status-popover.live::before { background: #0ea5e9; }
+
+.df2-status-popover-arrow {
+  position: absolute;
+  top: -6px;
+  right: 18px;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-bottom: none;
+  border-right: none;
+  transform: rotate(45deg);
 }
 
-.df2-system-visibility-banner.warn {
-  border-left-color: #f59e0b;
-  background: linear-gradient(180deg, #fffbf7 0%, #ffffff 100%);
-}
-
-.df2-system-visibility-leading {
+.df2-status-popover-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   min-width: 0;
 }
 
-.df2-system-visibility-icon {
+.df2-status-popover-icon {
   flex-shrink: 0;
   width: 34px;
   height: 34px;
@@ -167,26 +268,22 @@
   color: #64748b;
 }
 
-.df2-system-visibility-icon.ok {
+.df2-status-popover-icon.ok {
   background: #ecfdf5;
   color: #10b981;
 }
 
-.df2-system-visibility-icon.live {
+.df2-status-popover-icon.live {
   background: #eff6ff;
   color: #0ea5e9;
 }
 
-.df2-system-visibility-icon.warn {
+.df2-status-popover-icon.warn {
   background: #fffbeb;
   color: #f59e0b;
 }
 
-.df2-system-visibility-copy {
-  min-width: 0;
-}
-
-.df2-system-visibility-copy strong {
+.df2-status-popover-head strong {
   display: block;
   font-size: 12px;
   font-weight: 700;
@@ -195,29 +292,21 @@
   color: #0f172a;
 }
 
-.df2-system-visibility-copy p {
+.df2-status-popover-head p {
   margin: 2px 0 0;
   font-size: 13px;
   color: #475569;
   line-height: 1.4;
 }
 
-.df2-system-visibility-body {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  min-width: 0;
-}
-
-.df2-system-visibility-metrics {
+.df2-status-popover-metrics {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-top: 12px;
 }
 
-.df2-system-metric-pill {
+.df2-status-metric-pill {
   padding: 5px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 999px;
@@ -227,66 +316,39 @@
   color: #334155;
 }
 
-.df2-system-metric-pill.ok {
+.df2-status-metric-pill.ok {
   color: #0f766e;
   border-color: #99f6e4;
   background: #f0fdfa;
 }
 
-.df2-system-metric-pill.live {
+.df2-status-metric-pill.live {
   color: #0369a1;
   border-color: #bae6fd;
   background: #f0f9ff;
 }
 
-.df2-system-metric-pill.warn {
+.df2-status-metric-pill.warn {
   color: #b45309;
   border-color: #fdba74;
   background: #fffbeb;
 }
 
-.df2-system-visibility-actions {
+.df2-status-popover-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.df2-system-visibility-close {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #64748b;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  transition: border-color 0.12s, color 0.12s, background 0.12s;
-}
-
-.df2-system-visibility-close:hover {
-  color: #0f172a;
-  border-color: #cbd5e1;
-  background: #f8fafc;
+  margin-top: 12px;
 }
 
 @media (max-width: 768px) {
-  .df2-system-visibility-banner {
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    margin: 8px 10px 0;
+  .df2-status-popover {
+    right: -10px;
+    width: min(300px, calc(100vw - 20px));
   }
 
-  .df2-system-visibility-body {
-    justify-content: flex-start;
-    width: 100%;
-  }
-
-  .df2-system-visibility-metrics {
-    justify-content: flex-start;
+  .df2-status-popover-arrow {
+    right: 28px;
   }
 }
 
