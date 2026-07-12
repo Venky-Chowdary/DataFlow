@@ -63,6 +63,16 @@ def _is_base64(value: str) -> bool:
     return True
 
 
+_BINARY_FIELD_RE = re.compile(
+    r"(?:^|_)(?:payload|binary|blob|bytes|b64|base64|data|file|doc|content|image|audio|video|pdf|signature|hash|checksum|key|secret|token|cipher|iv|salt|nonce|encoded|raw|dump|attachment)(?:_?\d*)?(?:$|_)",
+    re.I,
+)
+
+
+def _is_binary_field_name(name: str) -> bool:
+    return bool(_BINARY_FIELD_RE.search(name or ""))
+
+
 def _classify_value(value: str) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -152,6 +162,22 @@ def infer_type(
         and all(v.lower() in _BOOLEAN_STRINGS for v in non_empty)
     ):
         return "BOOLEAN"
+
+    # Short base64 payloads in fields like payload, binary, b64, blob, etc.
+    if field_name and _is_binary_field_name(field_name):
+        valid = 0
+        for v in non_empty:
+            s = v.strip()
+            if len(s) >= 4 and len(s) % 4 == 0 and _BASE64_RE.match(s):
+                try:
+                    import base64
+
+                    base64.b64decode(s, validate=True)
+                    valid += 1
+                except Exception:
+                    pass
+        if valid == len(non_empty):
+            return "BINARY"
 
     return inferred
 

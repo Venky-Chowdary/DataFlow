@@ -23,7 +23,12 @@ def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
         return host.rstrip("/")
     if host.endswith(".amazonaws.com"):
         return f"https://{host}"
-    port = cfg.get("port")
+    # If host already includes a port, extract it so we don't duplicate the port param.
+    if ":" in host:
+        host, _, port_from_host = host.rpartition(":")
+        port = int(port_from_host) if port_from_host.isdigit() else cfg.get("port")
+    else:
+        port = cfg.get("port")
     if host and port:
         ssl = cfg.get("ssl", False)
         scheme = "https" if ssl else "http"
@@ -43,7 +48,7 @@ def is_local_endpoint(cfg: dict[str, Any]) -> bool:
 
 
 def resolve_region(cfg: dict[str, Any]) -> str:
-    host = (cfg.get("host") or "").strip()
+    host = (cfg.get("host") or "").strip().split(":")[0]
     if host.startswith("http://") or host.startswith("https://") or host.endswith(".amazonaws.com"):
         if host == "s3.amazonaws.com":
             return "us-east-1"
