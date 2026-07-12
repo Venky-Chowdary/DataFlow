@@ -18,3 +18,8 @@ packages/ml/data/
 
 apps/api/data/vector_store/
 apps/api/data/training/
+apps/api/data/upload_registry.json
+apps/api/data/audit_events.jsonl
+apps/api/exports/
+apps/api/test
+apps/web/tsconfig.tsbuildinfo
