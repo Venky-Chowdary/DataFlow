@@ -182,6 +182,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [sourceManualDatabase, setSourceManualDatabase] = useState("");
   const [sourceManualSchema, setSourceManualSchema] = useState("public");
   const [sourceManualConnectionString, setSourceManualConnectionString] = useState("");
+  const [sourceGenericSqlDriver, setSourceGenericSqlDriver] = useState("postgresql");
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1874,26 +1875,55 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                         ))}
                       </select>
                     </div>
-                    <div className="df2-field df2-field-flex">
-                      <label className="df2-label">Host / endpoint</label>
-                      <input
-                        className="df2-input"
-                        value={sourceManualHost}
-                        onChange={(e) => setSourceManualHost(e.target.value)}
-                        placeholder={sourceManualType === "dynamodb" ? "us-east-1" : "localhost"}
-                      />
-                    </div>
-                    <div className="df2-field df2-field-xs">
-                      <label className="df2-label">Port</label>
-                      <input
-                        className="df2-input"
-                        type="number"
-                        value={sourceManualPort}
-                        onChange={(e) => setSourceManualPort(parseInt(e.target.value || "0", 10))}
-                        placeholder={String(getConnectorDefaults(sourceManualType).port)}
-                      />
-                    </div>
+                    {sourceManualType === "generic_sql" ? (
+                      <>
+                        <div className="df2-field df2-field-sm">
+                          <label className="df2-label">SQL engine</label>
+                          <select
+                            className="df2-select"
+                            value={sourceGenericSqlDriver}
+                            onChange={(e) => setSourceGenericSqlDriver(e.target.value)}
+                          >
+                            {GENERIC_SQL_DRIVERS.map((d) => (
+                              <option key={d.id} value={d.id}>{d.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="df2-field df2-field-flex">
+                          <label className="df2-label">SQLAlchemy Connection String</label>
+                          <input
+                            className="df2-input"
+                            value={sourceManualConnectionString}
+                            onChange={(e) => setSourceManualConnectionString(e.target.value)}
+                            placeholder={getGenericSqlPlaceholder(sourceGenericSqlDriver)}
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="df2-field df2-field-flex">
+                          <label className="df2-label">Host / endpoint</label>
+                          <input
+                            className="df2-input"
+                            value={sourceManualHost}
+                            onChange={(e) => setSourceManualHost(e.target.value)}
+                            placeholder={sourceManualType === "dynamodb" ? "us-east-1" : "localhost"}
+                          />
+                        </div>
+                        <div className="df2-field df2-field-xs">
+                          <label className="df2-label">Port</label>
+                          <input
+                            className="df2-input"
+                            type="number"
+                            value={sourceManualPort}
+                            onChange={(e) => setSourceManualPort(parseInt(e.target.value || "0", 10))}
+                            placeholder={String(getConnectorDefaults(sourceManualType).port)}
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
+                  {sourceManualType !== "generic_sql" && (
                   <div className="df2-form-row">
                     <div className="df2-field df2-field-md">
                       <label className="df2-label">Database</label>
@@ -1935,6 +1965,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                       />
                     </div>
                   </div>
+                  )}
+                  {sourceManualType !== "generic_sql" && (
                   <div className="df2-form-row">
                     <div className="df2-field df2-field-flex">
                       <label className="df2-label">Connection string (optional — overrides host fields)</label>
@@ -1946,6 +1978,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                       />
                     </div>
                   </div>
+                  )}
                   <div className="df2-form-row">
                     <div className="df2-field df2-field-md">
                       <label className="df2-label">
