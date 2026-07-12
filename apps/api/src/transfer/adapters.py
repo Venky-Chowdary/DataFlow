@@ -307,7 +307,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, "mongodb", coll_name)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "string" for c in batch.headers}
+        schema = _introspect_table_schema("mongodb", cfg, coll_name, batch.headers)
         return records, batch.headers, schema
 
     if db_type == "mysql":
@@ -394,7 +394,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "string" for c in batch.headers}
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
     if db_type == "s3":
@@ -408,7 +408,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, key)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "string" for c in batch.headers}
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
     if db_type == "dynamodb":
@@ -421,7 +421,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "string" for c in batch.headers}
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
     if db_type == "elasticsearch":
@@ -434,7 +434,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, index)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "string" for c in batch.headers}
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
     if db_type == "redis":
@@ -445,7 +445,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, pattern)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "string" for c in batch.headers}
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
     if db_type == "sqlite":
