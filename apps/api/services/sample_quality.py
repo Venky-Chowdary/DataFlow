@@ -55,8 +55,10 @@ def analyze_column_quality(
     values: list[str],
     *,
     inferred_type: str = "VARCHAR",
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     """Profile one column for anomalies affecting transfer quality."""
+    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
     non_empty = [v for v in values if v]
     null_rate = 1.0 - (len(non_empty) / max(len(values), 1))
     issues: list[str] = []
@@ -99,7 +101,7 @@ def analyze_column_quality(
             issues.append(f"{invalid} invalid email format(s)")
             severity = "warning"
 
-    if null_rate > 0.5 and not re.search(r"optional|note|comment|description", column, re.I):
+    if not schemaless and null_rate > 0.5 and not re.search(r"optional|note|comment|description", column, re.I):
         issues.append(f"High null rate ({null_rate:.0%})")
         if null_rate > 0.9:
             severity = "block"
@@ -128,6 +130,7 @@ def analyze_dataset_quality(
     *,
     schema: dict[str, str] | None = None,
     sample_limit: int = 500,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     """Analyze all columns; return issues suitable for mapping/preflight gates."""
     schema = schema or {}
@@ -155,7 +158,7 @@ def analyze_dataset_quality(
 
     for col in columns:
         values = _column_values(sample, col)
-        report = analyze_column_quality(col, values, inferred_type=schema.get(col, "VARCHAR"))
+        report = analyze_column_quality(col, values, inferred_type=schema.get(col, "VARCHAR"), dest_kind=dest_kind)
         column_reports.append(report)
         for issue in report.get("issues", []):
             msg = f"{col}: {issue}"

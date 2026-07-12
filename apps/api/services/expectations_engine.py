@@ -387,12 +387,20 @@ def infer_expectations_for_schema(
     schema: dict[str, str],
     *,
     primary_key: str | None = None,
+    dest_kind: str = "",
 ) -> list[dict[str, Any]]:
     """Auto-generate standard expectations from schema metadata (dbt-style)."""
     specs: list[dict[str, Any]] = []
+    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
     for col in columns:
         t = (schema.get(col) or "VARCHAR").upper()
-        if col == primary_key or col.lower().endswith("_id") or col.lower() == "id":
+        is_id = col.lower().endswith("_id") or col.lower() == "id"
+        is_primary = col == primary_key
+        if is_primary or is_id:
+            # Schemaless destinations only enforce uniqueness/nullability on the
+            # primary `_id`; other `*_id` fields are normal FKs and may repeat.
+            if schemaless and not is_primary and col.lower() != "_id":
+                continue
             specs.append({"fn": "expect_column_unique", "column": col, "severity": "block"})
             specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.0})
         if t in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "NUMBER"}:
@@ -413,7 +421,10 @@ def infer_expectations_for_schema(
                 "severity": "warn",
             })
         if re.search(r"status|state|type|category", col, re.I):
-            specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.05})
+            # Categorical columns in schemaless documents are often sparse; do not
+            # treat a 5% null rate as a transfer blocker.
+            if not schemaless:
+                specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.05})
     return specs
 
 
@@ -475,9 +486,10 @@ def run_auto_expectations(
     *,
     primary_key: str | None = None,
     baseline_rows: list[dict[str, Any]] | None = None,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     """Infer + run standard expectations for a dataset."""
-    specs = infer_expectations_for_schema(columns, schema, primary_key=primary_key)
+    specs = infer_expectations_for_schema(columns, schema, primary_key=primary_key, dest_kind=dest_kind)
     if baseline_rows:
         for col in columns:
             if (schema.get(col) or "").upper() in {"DECIMAL", "INTEGER", "VARCHAR"}:

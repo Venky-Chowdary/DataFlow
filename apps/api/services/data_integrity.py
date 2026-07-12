@@ -54,6 +54,8 @@ def _check_coercion_safety(
     mappings: list[dict],
     source_types: dict[str, str],
     target_types: dict[str, str],
+    *,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     from services.type_coercion_validator import coerce_blocks_transfer, validate_mapping_coercions
 
@@ -62,6 +64,18 @@ def _check_coercion_safety(
         source_types=source_types,
         target_types=target_types,
     )
+    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    if schemaless:
+        # Schemaless destinations store values as-is; strict type coercion checks
+        # are not transfer blockers.
+        return {
+            "check": "coercion_safety",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [i["message"] for i in issues if i.get("severity") in {"warn", "block"}][:10],
+        }
+
     blocks = [i for i in issues if i.get("severity") == "block"]
     return {
         "check": "coercion_safety",
@@ -77,6 +91,8 @@ def _check_transform_dry_run(
     source_columns: list[str],
     source_types: dict[str, str],
     rows: list[dict[str, Any]],
+    *,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -91,6 +107,17 @@ def _check_transform_dry_run(
         mappings=mappings,
         column_types=source_types,
     )
+    missing_col_errors = [e for e in errors if "Source column missing" in e]
+    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    if schemaless and not missing_col_errors:
+        # Schemaless stores values as-is; transform failures (e.g. typed casts
+        # inferred from an unknown target schema) should not block preflight.
+        return {
+            "check": "transform_dry_run",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": errors[:20],
+        }
     return {
         "check": "transform_dry_run",
         "passed": ok,
@@ -152,11 +179,16 @@ def _check_required_nulls(
     rows: list[dict[str, Any]],
     *,
     null_rate_max: float,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     issues: list[str] = []
+    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
     for m in mappings:
         src = m.get("source", "")
         tgt = m.get("target", "")
+        if schemaless and tgt.lower() != "_id" and src.lower() != "_id":
+            # Schemaless documents generate `_id` and do not require every FK.
+            continue
         if not (_REQUIRED_NAME_PATTERNS.search(src) or _REQUIRED_NAME_PATTERNS.search(tgt)):
             continue
         values = [row.get(src) for row in rows]
@@ -179,12 +211,19 @@ def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
     validation_mode: str = "strict",
+    *,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     issues: list[str] = []
+    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
     for m in mappings:
         tgt = m.get("target", "").lower()
         src = m.get("source", "")
         if not (tgt.endswith("_id") or tgt == "id" or tgt.endswith("id")):
+            continue
+        # For schemaless destinations, only the primary `_id` field is a real
+        # uniqueness contract; other `*_id` columns (e.g. user_id) are normal FKs.
+        if schemaless and tgt != "_id":
             continue
         seen: dict[str, int] = {}
         for row in rows:
@@ -213,6 +252,8 @@ def _check_sample_quality(
     rows: list[dict[str, Any]],
     source_types: dict[str, str],
     validation_mode: str,
+    *,
+    dest_kind: str = "",
 ) -> dict[str, Any]:
     if not rows:
         return {"check": "sample_quality", "passed": True, "blocks_transfer": False, "issues": []}
@@ -223,6 +264,7 @@ def _check_sample_quality(
         source_columns,
         rows,
         schema=source_types,
+        dest_kind=dest_kind,
     )
     return {
         "check": "sample_quality",
@@ -297,6 +339,7 @@ def run_integrity_audit(
     source_schemas: list[dict] | None = None,
     target_schemas: list[dict] | None = None,
     source_samples: dict[str, list[str]] | None = None,
+    destination_db_type: str = "",
     sample_rows: list[dict] | None = None,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
@@ -305,6 +348,10 @@ def run_integrity_audit(
     Returns a structured report used by mapping pipeline and preflight G9.
     """
     cfg = _mode_config(validation_mode)
+    from services.schema_drift import _normalize_dest_kind
+
+    dest_kind = _normalize_dest_kind(destination_db_type)
+
     mappings = mappings or []
     source_schemas = source_schemas or []
     target_schemas = target_schemas or []
@@ -321,17 +368,17 @@ def run_integrity_audit(
     checks: list[dict[str, Any]] = []
 
     if mappings:
-        checks.append(_check_coercion_safety(mappings, source_types, target_types))
-        checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows))
+        checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind))
+        checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
         checks.append(_check_financial_precision(mappings, source_types, rows))
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"]))
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode))
+        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind))
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
 
     if rows and source_columns:
-        checks.append(_check_sample_quality(source_columns, rows, source_types, validation_mode))
+        checks.append(_check_sample_quality(source_columns, rows, source_types, validation_mode, dest_kind=dest_kind))
 
     if rows:
         checks.append(_check_encoding_anomalies(rows))
@@ -350,6 +397,7 @@ def run_integrity_audit(
             source_columns,
             source_types,
             primary_key=pk,
+            dest_kind=dest_kind,
         )
         checks.append({
             "check": "expectations_suite",

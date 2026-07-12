@@ -208,7 +208,14 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             {"issues": ctx.plan.ddl_issues},
         )
 
-    pk_candidates = [m.target for m in ctx.plan.mappings if m.target.lower().endswith("_id")]
+    # Schemaless destinations (MongoDB/DynamoDB/Redis) only have a hard uniqueness
+    # contract on `_id`; other `*_id` fields are foreign keys and may repeat.
+    dest_kind = (ctx.plan.destination.db_type or "").lower()
+    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    if schemaless:
+        pk_candidates = [m.target for m in ctx.plan.mappings if m.target == "_id"]
+    else:
+        pk_candidates = [m.target for m in ctx.plan.mappings if m.target.lower().endswith("_id")]
     for col_group in [pk_candidates] if pk_candidates else []:
         dupes = ctx.probe_unique_constraint(col_group)
         if dupes:

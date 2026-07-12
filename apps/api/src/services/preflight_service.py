@@ -120,6 +120,7 @@ class FilePreflightContext(PreflightContext):
             target_schemas=target_schemas,
             sample_rows=self.sample_rows,
             validation_mode=mode,
+            destination_db_type=self.plan.destination.db_type,
         )
 
 
@@ -406,8 +407,11 @@ def run_file_preflight(
     dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
     dest_table_exists = destination_table_exists if destination_table_exists is not None else False
 
-    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.ddl_compatibility import _normalize_dest_kind, evaluate_ddl_compatibility
     from services.schema_drift import detect_schema_drift
+
+    dest_kind = _normalize_dest_kind(destination_db_type)
+    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
 
     target_cols = list((destination_column_types or {}).keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
@@ -440,12 +444,16 @@ def run_file_preflight(
     if sample_rows and columns:
         from services.sample_quality import analyze_dataset_quality
 
-        sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types)
-        if sample_quality.get("blocks_transfer"):
+        sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types, dest_kind=dest_kind)
+        # For schemaless destinations (MongoDB, DynamoDB, Redis) missing/optional fields
+        # are normal; high null rates should not be treated as DDL blockers.
+        if sample_quality.get("blocks_transfer") and not schemaless:
             ddl_compatible = False
             for issue in sample_quality.get("issues", [])[:10]:
                 if issue not in ddl_issues:
                     ddl_issues.append(issue)
+        if schemaless:
+            sample_quality["blocks_transfer"] = False
 
     plan = TransferPlan(
         source=SourceConfig(
@@ -459,6 +467,7 @@ def run_file_preflight(
         ),
         destination=DestinationConfig(
             kind="database",
+            db_type=dest_kind,
             connected=destination_connected,
             can_create_table=dest_can_create,
             can_write=destination_connected,
