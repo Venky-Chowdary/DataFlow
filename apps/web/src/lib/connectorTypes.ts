@@ -14,6 +14,36 @@ const CATALOG_ALIASES: Record<string, string> = {
   csv___tsv: "csv",
   amazon_s3: "s3",
   aws_s3: "s3",
+  google_cloud_storage: "gcs",
+  gcs: "gcs",
+  minio: "s3",
+  wasabi: "s3",
+  backblaze_b2: "s3",
+  digitalocean_spaces: "s3",
+  cloudflare_r2: "s3",
+  amazon_redshift: "redshift",
+  google_bigquery: "bigquery",
+  opensearch: "elasticsearch",
+  amazon_elasticsearch: "elasticsearch",
+  elastic_cloud: "elasticsearch",
+  amazon_dynamodb: "dynamodb",
+  planetscale: "mysql",
+  mariadb: "mysql",
+  percona_mysql: "mysql",
+  amazon_aurora_mysql: "mysql",
+  amazon_aurora_postgresql: "postgresql",
+  amazon_rds_postgresql: "postgresql",
+  amazon_rds_mysql: "mysql",
+  google_cloud_sql_postgresql: "postgresql",
+  google_cloud_sql_mysql: "mysql",
+  azure_database_postgresql: "postgresql",
+  azure_database_mysql: "mysql",
+  supabase: "postgresql",
+  neon: "postgresql",
+  timescaledb: "postgresql",
+  cockroachdb: "postgresql",
+  jsonl: "jsonl",
+  ndjson: "ndjson",
 };
 
 /** Map marketplace catalog id → connectable type used by API/forms (strict) */
@@ -29,22 +59,32 @@ export function resolveCatalogIdToType(catalogId: string): string {
     return direct.id;
   }
 
-  // Substring match only for known implemented drivers
+  // Substring match for wire-compatible databases / object stores / warehouses.
   if (id.includes("postgres")) return "postgresql";
-  if (id.includes("mongo")) return "mongodb";
-  if (id.includes("mysql") || id.includes("mariadb")) return "mysql";
+  if (id.includes("mongo") || id.includes("documentdb")) return "mongodb";
+  if (id.includes("mysql") || id.includes("mariadb") || id.includes("percona") || id.includes("planetscale") || id.includes("vitess") || id.includes("tidb") || id.includes("oceanbase") || id.includes("polardb") || id.includes("singlestore") || id.includes("gaussdb") || id.includes("goldendb")) return "mysql";
+  if (id.includes("aurora")) return "mysql";
   if (id.includes("snowflake")) return "snowflake";
   if (id.includes("bigquery")) return "bigquery";
   if (id.includes("dynamodb")) return "dynamodb";
-  if (id.includes("redis")) return "redis";
-  if (id.includes("elastic")) return "elasticsearch";
+  if (id.includes("redis") || id.includes("valkey") || id.includes("keydb") || id.includes("dragonfly")) return "redis";
+  if (id.includes("elastic") || id.includes("opensearch")) return "elasticsearch";
   if (id.includes("redshift")) return "redshift";
-  if (id.includes("gcs") || id.includes("google_cloud")) return "gcs";
+  if (id.includes("cockroach")) return "postgresql";
+  if (id.includes("yugabyte")) return "postgresql";
+  if (id.includes("timescale")) return "postgresql";
+  if (id.includes("alloydb")) return "postgresql";
+  if (id.includes("supabase")) return "postgresql";
+  if (id.includes("neon")) return "postgresql";
+  if (id.includes("gcs") || id.includes("google_cloud_storage") || id.includes("google_cloud_sql")) return "gcs";
+  if (id.includes("minio") || id.includes("wasabi") || id.includes("backblaze") || id.includes("spaces") || id.includes("object_storage") || id.includes("r2") || id.includes("s3_compatible") || id.includes("s3_compatible_storage")) return "s3";
+  if (id.includes("s3") || id.includes("aws_s3")) return "s3";
   if (id.includes("parquet")) return "parquet";
   if (id.includes("jsonl") || id.includes("ndjson")) return "jsonl";
   if (id.includes("excel") || id.endsWith(".xlsx")) return "excel";
   if (id.includes("json")) return "json";
   if (id.includes("csv") || id.includes("tsv")) return "csv";
+  if (id.includes("sqlite")) return "sqlite";
 
   return id.split("_")[0] || id;
 }
