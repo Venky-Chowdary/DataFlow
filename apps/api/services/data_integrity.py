@@ -213,17 +213,29 @@ def _check_duplicate_keys(
     validation_mode: str = "strict",
     *,
     dest_kind: str = "",
+    primary_key: str | None = None,
 ) -> dict[str, Any]:
     issues: list[str] = []
     schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    if not primary_key:
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+        }
+    pk_targets = set()
+    for m in mappings:
+        if m.get("source", "") == primary_key:
+            pk_targets.add(m.get("target", "").lower())
+    if not pk_targets:
+        pk_targets = {primary_key.lower()}
     for m in mappings:
         tgt = m.get("target", "").lower()
         src = m.get("source", "")
-        if not (tgt.endswith("_id") or tgt == "id" or tgt.endswith("id")):
-            continue
-        # For schemaless destinations, only the primary `_id` field is a real
-        # uniqueness contract; other `*_id` columns (e.g. user_id) are normal FKs.
         if schemaless and tgt != "_id":
+            continue
+        if not schemaless and tgt not in pk_targets:
             continue
         seen: dict[str, int] = {}
         for row in rows:
@@ -235,8 +247,7 @@ def _check_duplicate_keys(
         if dupes:
             sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
             issues.append(f"{src}: duplicate key values ({sample})")
-    # Duplicate *_id values are common in child/transaction tables; only block
-    # in strict/maximum modes where uniqueness is treated as a hard requirement.
+    # Duplicate primary key values are only a hard blocker in strict/maximum modes.
     mode = (validation_mode or "strict").strip().lower()
     blocks = len(issues) > 0 and mode in {"strict", "maximum"}
     return {
@@ -365,6 +376,22 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
+    # Primary-key heuristic: prefer exact id/_id; for SQL fall back to the first
+    # *_id column if no exact id/_id is present. Schemaless stores only enforce _id.
+    pk = None
+    if dest_kind in {"mongodb", "dynamodb", "redis"}:
+        pk = next((c for c in source_columns if c.lower() == "_id"), None)
+    else:
+        for col in source_columns:
+            if col.lower() in {"id", "_id"}:
+                pk = col
+                break
+        if not pk:
+            for col in source_columns:
+                if col.lower().endswith("_id"):
+                    pk = col
+                    break
+
     checks: list[dict[str, Any]] = []
 
     if mappings:
@@ -372,7 +399,7 @@ def run_integrity_audit(
         checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind))
-        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind))
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
@@ -387,19 +414,6 @@ def run_integrity_audit(
     if rows and source_columns:
         from services.expectations_engine import run_auto_expectations
 
-        pk = None
-        if dest_kind in {"mongodb", "dynamodb", "redis"}:
-            pk = next((c for c in source_columns if c.lower() == "_id"), None)
-        if not pk:
-            for col in source_columns:
-                if col.lower() == "id" or col.lower() == "_id":
-                    pk = col
-                    break
-            if not pk:
-                for col in source_columns:
-                    if col.lower().endswith("_id"):
-                        pk = col
-                        break
         exp = run_auto_expectations(
             rows,
             source_columns,
