@@ -187,7 +187,7 @@ class UniversalTransferEngine:
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
-                    destination_db_type=(request.destination.format or "postgresql").lower(),
+                    destination_db_type=dst_fmt.lower(),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -369,6 +369,7 @@ class UniversalTransferEngine:
         src_fmt: str,
     ) -> TransferResult:
         """Batched DB→DB path — never loads full table into memory."""
+        dst_fmt = request.destination.format or "mongodb"
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -406,7 +407,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
-                    destination_db_type=(request.destination.format or "postgresql").lower(),
+                    destination_db_type=dst_fmt.lower(),
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -556,6 +557,7 @@ class UniversalTransferEngine:
         src_fmt: str,
     ) -> TransferResult:
         """Batched file → database path for large CSV/TSV/JSONL uploads."""
+        dst_fmt = request.destination.format or "mongodb"
         try:
             content = request.source_content or b""
             filename = request.source_filename or "upload.csv"
@@ -596,7 +598,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=_destination_schema_types(request.destination, sync_mode=request.sync_mode),
-                    destination_db_type=(request.destination.format or "postgresql").lower(),
+                    destination_db_type=dst_fmt.lower(),
                 )
                 pf = apply_policy_gates(
                     pf,

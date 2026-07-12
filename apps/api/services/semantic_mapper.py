@@ -229,7 +229,7 @@ def _normalize(name: str) -> str:
     s = re.sub(r"([a-z])([A-Z])", r"\1_\2", s)
     s = s.lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
-    return re.sub(r"_+", "_", s).strip("_")
+    return re.sub(r"_+", "_", s).rstrip("_")
 
 
 def _expand_abbrev(token: str) -> str:

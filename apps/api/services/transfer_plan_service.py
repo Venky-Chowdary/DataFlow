@@ -81,6 +81,7 @@ def run_plan_mapping(
         use_llm=use_llm,
         source_samples=source_samples,
         validation_mode=validation_mode,
+        destination_db_type=(plan.destination.get("format") or plan.destination.get("type") or "").lower(),
     )
 
     updated = add_mapping_revision(plan_id, result)

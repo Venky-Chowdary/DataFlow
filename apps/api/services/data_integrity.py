@@ -388,10 +388,18 @@ def run_integrity_audit(
         from services.expectations_engine import run_auto_expectations
 
         pk = None
-        for col in source_columns:
-            if col.lower().endswith("_id") or col.lower() == "id":
-                pk = col
-                break
+        if dest_kind in {"mongodb", "dynamodb", "redis"}:
+            pk = next((c for c in source_columns if c.lower() == "_id"), None)
+        if not pk:
+            for col in source_columns:
+                if col.lower() == "id" or col.lower() == "_id":
+                    pk = col
+                    break
+            if not pk:
+                for col in source_columns:
+                    if col.lower().endswith("_id"):
+                        pk = col
+                        break
         exp = run_auto_expectations(
             rows,
             source_columns,
