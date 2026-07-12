@@ -403,14 +403,18 @@ def _sa_type_for_logical(logical: str, dialect_name: str) -> Any:
     if t == "date":
         return sa.Date()
     if t == "datetime":
-        return sa.DateTime()
+        # Preserve timezone metadata when the target dialect supports it.
+        return sa.DateTime(timezone=True)
     if t == "time":
         return sa.Time()
     if t == "uuid":
         return sa.String(36)
     if t in ("json", "array"):
-        # Oracle's SQLAlchemy dialect cannot render a native JSON type.
-        return sa.Text() if dialect_name == "oracle" else sa.JSON()
+        if dialect_name == "oracle":
+            return sa.Text()
+        if dialect_name == "postgresql":
+            return postgresql.JSONB()
+        return sa.JSON()
     if t == "binary":
         return sa.LargeBinary()
     return sa.Text()
@@ -456,16 +460,21 @@ def _to_sa_value(value: Any, logical: str) -> Any:
         return value
 
     if t == "datetime":
+        def _ensure_utc(dt: datetime) -> datetime:
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
         if isinstance(value, datetime):
-            return value
+            return _ensure_utc(value)
         if isinstance(value, date):
-            return datetime.combine(value, time())
+            return _ensure_utc(datetime.combine(value, time()))
         if isinstance(value, str):
             text = value.strip()
             if text.endswith("Z"):
                 text = text[:-1] + "+00:00"
             try:
-                return datetime.fromisoformat(text)
+                return _ensure_utc(datetime.fromisoformat(text))
             except Exception:
                 return value
         return value
