@@ -876,6 +876,15 @@ def recommended_batch_size(key: str) -> int:
     return int(get_connector_capability(key).get("recommended_batch_size", 1000))
 
 
+STRUCTURED_FILE_FORMATS: set[str] = {
+    "csv", "tsv", "parquet", "avro", "excel", "xlsx", "xls", "ods", "feather", "arrow", "ipc", "orc"
+}
+
+SEMI_STRUCTURED_FILE_FORMATS: set[str] = {
+    "json", "jsonl", "ndjson", "xml", "yaml", "yml", "toml", "bson", "msgpack", "protobuf"
+}
+
+
 def classify_payload(
     *,
     source_format: str = "",
@@ -889,10 +898,26 @@ def classify_payload(
     tgt = get_connector_capability(target_format)
     if is_streaming or src.get("pattern") == "streaming" or tgt.get("pattern") == "streaming":
         return {"shape": "streaming", "note": "Streaming/messaging payload"}
-    if has_binary or src.get("supports_binary") or tgt.get("supports_binary"):
-        if has_unstructured or src.get("supports_unstructured") or tgt.get("supports_unstructured"):
-            return {"shape": "mixed", "note": "Binary/unstructured payload with structured metadata"}
+
+    if has_binary and has_unstructured:
+        return {"shape": "mixed", "note": "Binary/unstructured payload with structured metadata"}
+    if has_binary:
         return {"shape": "binary", "note": "Binary payload"}
-    if src.get("requires_schema") is False or tgt.get("requires_schema") is False:
-        return {"shape": "semi_structured", "note": "Document or object payload without strict schema"}
+    if has_unstructured:
+        return {"shape": "unstructured", "note": "Unstructured text or media payload"}
+
+    src_key = _normalize_connector_id(source_format)
+    tgt_key = _normalize_connector_id(target_format)
+    if src_key in STRUCTURED_FILE_FORMATS or tgt_key in STRUCTURED_FILE_FORMATS:
+        return {"shape": "structured", "note": "Tabular file payload with rows and columns"}
+    if src_key in SEMI_STRUCTURED_FILE_FORMATS or tgt_key in SEMI_STRUCTURED_FILE_FORMATS:
+        return {"shape": "semi_structured", "note": "Hierarchical document payload without strict schema"}
+
+    src_schemaless = src.get("requires_schema") is False
+    tgt_schemaless = tgt.get("requires_schema") is False
+    if src_schemaless or tgt_schemaless:
+        if src.get("supports_unstructured") or tgt.get("supports_unstructured"):
+            return {"shape": "semi_structured", "note": "Document or object payload without strict schema"}
+        return {"shape": "structured", "note": "Tabular payload with inferred schema"}
+
     return {"shape": "structured", "note": "Structured tabular payload"}

@@ -146,6 +146,46 @@ def emit_lineage(
     )
 
 
+def emit_run_completed(
+    *,
+    run_id: str,
+    job_id: str,
+    records_transferred: int = 0,
+    source_summary: dict[str, Any] | None = None,
+    destination_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _emit(
+        "run_completed",
+        {
+            "run_id": run_id,
+            "job_id": job_id,
+            "records_transferred": records_transferred,
+            "source_summary": source_summary or {},
+            "destination_summary": destination_summary or {},
+        },
+    )
+
+
+def emit_run_failed(
+    *,
+    run_id: str,
+    job_id: str,
+    error: str = "",
+    error_details: dict[str, Any] | None = None,
+    retriable: bool = False,
+) -> dict[str, Any]:
+    return _emit(
+        "run_failed",
+        {
+            "run_id": run_id,
+            "job_id": job_id,
+            "error": error,
+            "error_details": error_details or {},
+            "retriable": retriable,
+        },
+    )
+
+
 def get_events(run_id: str | None = None) -> list[dict[str, Any]]:
     if run_id is None:
         return list(LINEAGE_EVENTS)

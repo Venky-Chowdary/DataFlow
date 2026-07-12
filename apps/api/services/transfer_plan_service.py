@@ -199,6 +199,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
         source_kind=plan.source.get("kind", "file"),
+        source_format=plan.source.get("format") or plan.source.get("kind", "file"),
+        sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
         sample_rows=sample_rows,
         confidence_threshold=threshold,
         destination_column_types=live_target_schema,

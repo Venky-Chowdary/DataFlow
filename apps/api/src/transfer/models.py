@@ -148,6 +148,8 @@ class TransferResult:
     error_details: dict = field(default_factory=dict)
     columns: list[str] = field(default_factory=list)
     reconciliation: dict = field(default_factory=dict)
+    validation_plan: dict = field(default_factory=dict)
+    payload_shape: dict = field(default_factory=dict)
 
 
 @dataclass

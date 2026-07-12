@@ -21,6 +21,8 @@ from preflight.models import (
     SourceConfig,
     TransferPlan,
 )
+from services.connector_capability_registry import classify_payload, recommended_batch_size
+from services.validation_plan import build_validation_plan
 
 
 class FilePreflightContext(PreflightContext):
@@ -365,6 +367,8 @@ def run_file_preflight(
     source_connected: bool = True,
     source_error: str | None = None,
     source_kind: str = "file",
+    source_format: str = "",
+    sync_mode: str = "append",
     sample_rows: list[dict] | None = None,
     estimated_bytes: int = 0,
     confidence_threshold: float = 0.85,
@@ -532,6 +536,26 @@ def run_file_preflight(
         validation_mode=validation_mode,
     )
 
+    from services.type_system import is_binary_type, is_structural_type
+
+    has_binary = any(is_binary_type(t) for t in column_types.values())
+    has_unstructured = any(is_structural_type(t) for t in column_types.values())
+    _src_fmt = (source_format or source_kind).lower()
+    _tgt_fmt = (destination_db_type or "").lower()
+    payload_shape = classify_payload(
+        source_format=_src_fmt,
+        target_format=_tgt_fmt,
+        has_binary=has_binary,
+        has_unstructured=has_unstructured,
+    )
+    validation_plan = build_validation_plan(
+        source_format=_src_fmt,
+        target_format=_tgt_fmt,
+        validation_mode=validation_mode,
+        write_semantics=sync_mode,
+        confidence_threshold=confidence_threshold,
+    )
+
     out = {
         "passed": result.passed,
         "passed_count": result.passed_count,
@@ -552,6 +576,12 @@ def run_file_preflight(
         "ddl_issues": ddl_issues,
         "sample_quality": sample_quality,
         "proof_bundle": proof_bundle,
+        "payload_shape": payload_shape,
+        "validation_plan": validation_plan.to_dict(),
+        "recommended_batch_size": min(
+            recommended_batch_size(_src_fmt),
+            recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
+        ),
     }
     return out
 

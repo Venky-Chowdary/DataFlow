@@ -3,7 +3,7 @@
 from __future__ import annotations
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from services.mongodb_service import get_mongodb_service
@@ -14,6 +14,8 @@ try:
         run_file_preflight,
         run_transfer_policy_gates,
     )
+    from services import lineage_telemetry as lineage
+    from services.error_handling import classify_error
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -23,6 +25,8 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
         run_file_preflight,
         run_transfer_policy_gates,
     )
+    from src.services import lineage_telemetry as lineage
+    from src.services.error_handling import classify_error
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -50,6 +54,23 @@ from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 from services.batch_progress import ThrottledCheckpoint  # noqa: E402
 
 logger = logging.getLogger("dataflow.transfer")
+
+
+def _redacted_endpoint(ep: EndpointConfig) -> dict[str, Any]:
+    """Return endpoint metadata without credentials for lineage and logging."""
+    d = {
+        "kind": ep.kind,
+        "format": ep.format,
+        "connector_id": ep.connector_id,
+        "host": ep.host,
+        "port": ep.port,
+        "database": ep.database,
+        "schema": ep.schema,
+        "table": ep.table,
+        "collection": ep.collection,
+        "warehouse": ep.warehouse,
+    }
+    return {k: v for k, v in d.items() if v}
 
 
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
@@ -192,6 +213,14 @@ class UniversalTransferEngine:
 
     def execute_tracked(self, request: TransferRequest, job_id: str) -> TransferResult:
         mongo = get_mongodb_service()
+        lineage.emit_run_started(
+            run_id=job_id,
+            job_id=job_id,
+            source=_redacted_endpoint(request.source),
+            destination=_redacted_endpoint(request.destination),
+            validation_mode=request.validation_mode,
+            write_semantics=request.sync_mode,
+        )
         src_fmt = request.source.format or "csv"
         dst_fmt = request.destination.format or "mongodb"
         ok, msg = validate_transfer(
@@ -203,6 +232,10 @@ class UniversalTransferEngine:
             live = ", ".join(transfer_live_driver_types())
             msg = f"{msg}. Transfer-live drivers: {live}."
             mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+            lineage.emit_run_failed(
+                run_id=job_id, job_id=job_id, error=msg,
+                error_details={"reason": "Unsupported route", "supported": live},
+            )
             return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
 
         if supports_streaming(request.source, request.destination):
@@ -220,6 +253,7 @@ class UniversalTransferEngine:
         ):
             return self._execute_file_streaming(request, job_id, mongo, src_fmt)
 
+        pf = None
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -254,6 +288,8 @@ class UniversalTransferEngine:
                     destination_connected=dest_ok,
                     destination_error=None if dest_ok else dest_msg,
                     source_kind=request.source.kind,
+                    source_format=request.source.format,
+                    sync_mode=request.sync_mode,
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
@@ -279,9 +315,14 @@ class UniversalTransferEngine:
                         error=f"Destination unreachable: {dest_msg}",
                         phase="failed", progress_pct=0,
                     )
+                    line_msg = f"Destination unreachable: {dest_msg}"
+                    lineage.emit_run_failed(
+                        run_id=job_id, job_id=job_id, error=line_msg,
+                        error_details={"reason": "Destination unreachable"},
+                    )
                     return TransferResult(
                         success=False,
-                        error=f"Destination unreachable: {dest_msg}",
+                        error=line_msg,
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -310,8 +351,20 @@ class UniversalTransferEngine:
                             "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
                         },
                         "readiness_score": pf.get("readiness_score"),
+                        "validation_plan": pf.get("validation_plan"),
+                        "payload_shape": pf.get("payload_shape"),
                     }
                     error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
+                    lineage.emit_preflight_completed(
+                        run_id=job_id, passed=False,
+                        readiness_score=pf.get("readiness_score", 0),
+                        blockers=pf.get("blockers", []),
+                        validation_plan=pf.get("validation_plan"),
+                    )
+                    lineage.emit_run_failed(
+                        run_id=job_id, job_id=job_id, error=error_message,
+                        error_details=error_details,
+                    )
                     mongo.update_job_status(
                         job_id, "failed", error=error_message,
                         phase="failed", progress_pct=0,
@@ -322,6 +375,8 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
+                        validation_plan=pf.get("validation_plan") or {},
+                        payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -435,6 +490,23 @@ class UniversalTransferEngine:
             except Exception:
                 pass
 
+            lineage.emit_preflight_completed(
+                run_id=job_id, passed=True,
+                readiness_score=pf.get("readiness_score", 100) if pf else 100,
+                validation_plan=pf.get("validation_plan") if pf else {},
+            )
+            lineage.emit_lineage(
+                run_id=job_id,
+                source_dataset=f"{request.source.kind}/{src_fmt}/{request.source.table or request.source.collection}",
+                target_dataset=f"{request.destination.kind}/{dst_fmt}/{request.destination.table or request.destination.collection}",
+                mappings=[{"source": m.get("source"), "target": m.get("target"), "confidence": m.get("confidence")} for m in mappings],
+            )
+            lineage.emit_run_completed(
+                run_id=job_id, job_id=job_id,
+                records_transferred=rows_written,
+                source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
+                destination_summary=dest_summary,
+            )
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -450,16 +522,26 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
+                validation_plan=pf.get("validation_plan") if pf else {},
+                payload_shape=pf.get("payload_shape") if pf else {},
             )
         except Exception as e:
+            error_classification = classify_error(e)
             mongo.update_job_status(
                 job_id, "failed",
                 error=str(e), phase="failed", progress_pct=0, message=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+            )
+            lineage.emit_run_failed(
+                run_id=job_id, job_id=job_id, error=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                retriable=error_classification.get("retriable", False),
             )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
             )
 
@@ -507,6 +589,8 @@ class UniversalTransferEngine:
                     destination_connected=dest_ok,
                     destination_error=None if dest_ok else dest_msg,
                     source_kind=request.source.kind,
+                    source_format=request.source.format,
+                    sync_mode=request.sync_mode,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
@@ -532,9 +616,14 @@ class UniversalTransferEngine:
                         error=f"Destination unreachable: {dest_msg}",
                         phase="failed", progress_pct=0,
                     )
+                    line_msg = f"Destination unreachable: {dest_msg}"
+                    lineage.emit_run_failed(
+                        run_id=job_id, job_id=job_id, error=line_msg,
+                        error_details={"reason": "Destination unreachable"},
+                    )
                     return TransferResult(
                         success=False,
-                        error=f"Destination unreachable: {dest_msg}",
+                        error=line_msg,
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -563,8 +652,20 @@ class UniversalTransferEngine:
                             "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
                         },
                         "readiness_score": pf.get("readiness_score"),
+                        "validation_plan": pf.get("validation_plan"),
+                        "payload_shape": pf.get("payload_shape"),
                     }
                     error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
+                    lineage.emit_preflight_completed(
+                        run_id=job_id, passed=False,
+                        readiness_score=pf.get("readiness_score", 0),
+                        blockers=pf.get("blockers", []),
+                        validation_plan=pf.get("validation_plan"),
+                    )
+                    lineage.emit_run_failed(
+                        run_id=job_id, job_id=job_id, error=error_message,
+                        error_details=error_details,
+                    )
                     mongo.update_job_status(
                         job_id, "failed", error=error_message,
                         phase="failed", progress_pct=0,
@@ -575,6 +676,8 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
+                        validation_plan=pf.get("validation_plan") or {},
+                        payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -655,6 +758,23 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
             )
 
+            lineage.emit_preflight_completed(
+                run_id=job_id, passed=True,
+                readiness_score=pf.get("readiness_score", 100) if pf else 100,
+                validation_plan=pf.get("validation_plan") if pf else {},
+            )
+            lineage.emit_lineage(
+                run_id=job_id,
+                source_dataset=f"{request.source.kind}/{src_fmt}/{request.source.table or request.source.collection}",
+                target_dataset=f"{request.destination.kind}/{dst_fmt}/{request.destination.table or request.destination.collection}",
+                mappings=[{"source": m.get("source"), "target": m.get("target"), "confidence": m.get("confidence")} for m in mappings],
+            )
+            lineage.emit_run_completed(
+                run_id=job_id, job_id=job_id,
+                records_transferred=rows_written,
+                source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
+                destination_summary=dest_summary,
+            )
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -671,16 +791,26 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
+                validation_plan=pf.get("validation_plan") if pf else {},
+                payload_shape=pf.get("payload_shape") if pf else {},
             )
         except Exception as e:
+            error_classification = classify_error(e)
             mongo.update_job_status(
                 job_id, "failed",
                 error=str(e), phase="failed", progress_pct=0, message=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+            )
+            lineage.emit_run_failed(
+                run_id=job_id, job_id=job_id, error=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                retriable=error_classification.get("retriable", False),
             )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
             )
 
@@ -731,6 +861,8 @@ class UniversalTransferEngine:
                     destination_connected=dest_ok,
                     destination_error=None if dest_ok else dest_msg,
                     source_kind=request.source.kind,
+                    source_format=request.source.format,
+                    sync_mode=request.sync_mode,
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
@@ -756,9 +888,14 @@ class UniversalTransferEngine:
                         error=f"Destination unreachable: {dest_msg}",
                         phase="failed", progress_pct=0,
                     )
+                    line_msg = f"Destination unreachable: {dest_msg}"
+                    lineage.emit_run_failed(
+                        run_id=job_id, job_id=job_id, error=line_msg,
+                        error_details={"reason": "Destination unreachable"},
+                    )
                     return TransferResult(
                         success=False,
-                        error=f"Destination unreachable: {dest_msg}",
+                        error=line_msg,
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -787,8 +924,20 @@ class UniversalTransferEngine:
                             "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
                         },
                         "readiness_score": pf.get("readiness_score"),
+                        "validation_plan": pf.get("validation_plan"),
+                        "payload_shape": pf.get("payload_shape"),
                     }
                     error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
+                    lineage.emit_preflight_completed(
+                        run_id=job_id, passed=False,
+                        readiness_score=pf.get("readiness_score", 0),
+                        blockers=pf.get("blockers", []),
+                        validation_plan=pf.get("validation_plan"),
+                    )
+                    lineage.emit_run_failed(
+                        run_id=job_id, job_id=job_id, error=error_message,
+                        error_details=error_details,
+                    )
                     mongo.update_job_status(
                         job_id, "failed", error=error_message,
                         phase="failed", progress_pct=0,
@@ -799,6 +948,8 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
+                        validation_plan=pf.get("validation_plan") or {},
+                        payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
                     )
@@ -877,6 +1028,23 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
             )
 
+            lineage.emit_preflight_completed(
+                run_id=job_id, passed=True,
+                readiness_score=pf.get("readiness_score", 100) if pf else 100,
+                validation_plan=pf.get("validation_plan") if pf else {},
+            )
+            lineage.emit_lineage(
+                run_id=job_id,
+                source_dataset=f"{request.source.kind}/{src_fmt}/{request.source_filename}",
+                target_dataset=f"{request.destination.kind}/{dst_fmt}/{request.destination.table or request.destination.collection}",
+                mappings=[{"source": m.get("source"), "target": m.get("target"), "confidence": m.get("confidence")} for m in mappings],
+            )
+            lineage.emit_run_completed(
+                run_id=job_id, job_id=job_id,
+                records_transferred=rows_written,
+                source_summary={"kind": "file", "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
+                destination_summary=dest_summary,
+            )
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -893,16 +1061,26 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
+                validation_plan=pf.get("validation_plan") if pf else {},
+                payload_shape=pf.get("payload_shape") if pf else {},
             )
         except Exception as e:
+            error_classification = classify_error(e)
             mongo.update_job_status(
                 job_id, "failed",
                 error=str(e), phase="failed", progress_pct=0, message=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+            )
+            lineage.emit_run_failed(
+                run_id=job_id, job_id=job_id, error=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                retriable=error_classification.get("retriable", False),
             )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
+                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
             )
 
