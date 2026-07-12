@@ -7,11 +7,11 @@ import os
 import re
 from typing import Any, Callable
 
-from services.transform_engine import apply_transform, infer_transform, infer_transform_for_mapping
+from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 
-# Configurable batch size — default 5 000 rows per commit (enterprise scale)
-CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "5000"))
+# Configurable batch size — default 20 000 rows per commit (enterprise scale)
+CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "20000"))
 TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantine").lower()
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
@@ -64,34 +64,47 @@ def build_mapped_rows(
     column_types = column_types or {}
     policy = transform_error_policy(error_policy)
     source_indices = {h: i for i, h in enumerate(headers)}
-    mapped: list[tuple] = []
+    sanitized_target_cols = [sanitize_identifier(c) for c in target_cols]
+    target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
 
+    mapping_infos = []
+    for m in mappings:
+        src = m["source"]
+        tgt = sanitize_identifier(m["target"])
+        transform = resolve_transform(
+            m,
+            column_types=column_types,
+            dest_types=column_types,
+        )
+        mapping_infos.append((
+            source_indices.get(src),
+            target_index.get(tgt, -1),
+            transform,
+            src,
+            tgt,
+        ))
+
+    mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
-        row_map: dict[str, Any] = {}
+        out = [None] * len(sanitized_target_cols)
         row_has_error = False
-        for m in mappings:
-            idx = source_indices.get(m["source"])
-            val = raw[idx] if idx is not None and idx < len(raw) else None
-            tgt = sanitize_identifier(m["target"])
-            src_type = column_types.get(m["source"], "VARCHAR")
-            tgt_type = m.get("target_type") or column_types.get(m["target"])
-            transform = resolve_transform(
-                m,
-                column_types=column_types,
-                dest_types=column_types,
-            )
+        for source_idx, target_idx, transform, src_name, tgt_name in mapping_infos:
+            val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
             converted, err = apply_transform(val, transform)
-            if err and len(errors) < 10:
-                errors.append(f"row {row_number} {m['source']}→{m['target']}: {err}")
             if err:
                 row_has_error = True
+                if len(errors) < 10:
+                    errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
                 if policy == "coerce_null":
                     converted = None
-            row_map[tgt] = converted
+                else:
+                    continue
+            if target_idx >= 0:
+                out[target_idx] = converted
         if row_has_error and policy in {"fail", "quarantine"}:
             continue
-        mapped.append(tuple(row_map.get(sanitize_identifier(c)) for c in target_cols))
+        mapped.append(tuple(out))
 
     return mapped, errors
 
