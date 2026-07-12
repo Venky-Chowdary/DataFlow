@@ -38,7 +38,9 @@ export function ValidateActionsRail({
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
   const evidenceSummary = preflight?.proof_bundle?.evidence_summary || "Deterministic proof signals ready for operator review.";
   const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
-  const firstBlocker = preflight?.blockers?.[0]?.message;
+  const firstBlocker = preflight?.blockers?.[0];
+  const firstBlockerMessage = firstBlocker?.message;
+  const firstBlockerFix = firstBlocker?.guidance?.fix;
 
   return (
     <aside className="df2-validate-rail" aria-label="Validation actions">
@@ -95,7 +97,10 @@ export function ValidateActionsRail({
           {preflight.blockers.length > 0 && (
             <ul className="df2-validate-rail-blockers">
               {preflight.blockers.slice(0, 4).map((b) => (
-                <li key={b.id}>{b.message}</li>
+                <li key={b.id}>
+                  {b.message}
+                  {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
+                </li>
               ))}
             </ul>
           )}
@@ -144,7 +149,7 @@ export function ValidateActionsRail({
             className="df2-btn df2-btn-primary df2-btn-lg"
             onClick={onExecute}
             disabled={transferring || !passed}
-            title={!passed ? `Blocked: ${firstBlocker || "Resolve failed checks and re-run preflight"}` : undefined}
+            title={!passed ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}` : undefined}
           >
             {transferring ? (
               <ButtonLoader label="Starting…" />
@@ -159,9 +164,10 @@ export function ValidateActionsRail({
           </button>
         )}
 
-        {blocked && firstBlocker && (
+        {blocked && firstBlockerMessage && (
           <p className="df2-validate-rail-explain">
-            Run is blocked: {firstBlocker}
+            Run is blocked: {firstBlockerMessage}
+            {firstBlockerFix && <span className="df2-validate-rail-fix"> Fix: {firstBlockerFix}</span>}
           </p>
         )}
       </div>

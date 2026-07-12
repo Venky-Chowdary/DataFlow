@@ -141,7 +141,7 @@ export interface PreflightResult {
   total_gates: number;
   readiness_score: number;
   gates: PreflightGate[];
-  blockers: { id: string; message: string; details?: Record<string, unknown> }[];
+  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
   proof_bundle?: PreflightProofBundle;
 }
 

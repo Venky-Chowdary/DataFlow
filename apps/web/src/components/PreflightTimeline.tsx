@@ -256,11 +256,22 @@ export function PreflightTimeline({
             {result.blockers.map((b) => (
               <li key={b.id}>
                 <strong>{gateLabel(b.id)}:</strong> {b.message}
+                {b.guidance && (
+                  <div className="df2-preflight-diagnostics-guidance">
+                    {b.guidance.why && <p><strong>Why:</strong> {b.guidance.why}</p>}
+                    {b.guidance.fix && <p><strong>Fix:</strong> {b.guidance.fix}</p>}
+                    {b.guidance.examples && b.guidance.examples.length > 0 && (
+                      <ul>
+                        {b.guidance.examples.map((ex, i) => <li key={i}>{ex}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
                 {b.details && typeof b.details === "object" && (
                   <ul className="df2-preflight-diagnostics-sub">
                     {Object.entries(b.details).map(([k, v]) => {
                       const value = Array.isArray(v) ? v.slice(0, 3).join(", ") : String(v);
-                      if (!value || value === "[object Object]") return null;
+                      if (!value || value === "[object Object]" || k === "guidance") return null;
                       return (
                         <li key={k}>
                           <span>{k}:</span> {value}
