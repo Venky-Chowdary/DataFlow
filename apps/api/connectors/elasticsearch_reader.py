@@ -34,6 +34,10 @@ def _cell(value: Any) -> str:
         return ""
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
+    if isinstance(value, (bytes, bytearray)):
+        import base64
+
+        return base64.b64encode(value).decode("ascii")
     return str(value)
 
 
@@ -57,9 +61,9 @@ def read_index_batch(
             total = int(count_resp.get("count", 0))
 
         body: dict[str, Any] = {
-            "size": limit,
+            "size": min(limit, 10000),
             "query": {"match_all": {}},
-            "sort": [{"_shard_doc": "asc"}],
+            "sort": ["_doc"],
         }
         if search_after:
             body["search_after"] = search_after

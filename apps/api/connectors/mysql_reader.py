@@ -16,6 +16,10 @@ def _cell(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, (bytes, bytearray)):
+        import base64
+
+        return base64.b64encode(value).decode("ascii")
     return str(value)
 
 

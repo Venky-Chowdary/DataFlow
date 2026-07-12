@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 from typing import Any
 
 
@@ -497,8 +498,14 @@ def _mysql_to_logical(dtype: str) -> str:
         return "DATE"
     if "timestamp" in d or "datetime" in d:
         return "TIMESTAMP"
+    if "time" in d:
+        return "TIME"
     if "json" in d:
         return "JSON"
+    if "binary" in d or "blob" in d or "varbinary" in d:
+        return "BINARY"
+    if "uuid" in d:
+        return "UUID"
     return "TEXT"
 
 
@@ -658,6 +665,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
     try:
         from connectors.elasticsearch_reader import _client
+        from services.schema_inference import infer_type
 
         cfg = {
             "host": kwargs.get("host") or "localhost",
@@ -677,14 +685,48 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 .get("mappings", {})
                 .get("properties", {})
             )
-            columns = [
-                {
+
+            # Sample real docs so date fields become TIMESTAMP when they carry time
+            # and so text/binary/object fields are classified by value, not just mapping.
+            samples_by_name: dict[str, list[str]] = {name: [] for name in props}
+            try:
+                resp = client.search(index=index, body={"size": 50, "query": {"match_all": {}}, "sort": ["_doc"]})
+                for hit in resp.get("hits", {}).get("hits") or []:
+                    src = hit.get("_source") or {}
+                    for name in props:
+                        value = src.get(name)
+                        if value is None:
+                            continue
+                        if isinstance(value, (dict, list)):
+                            samples_by_name[name].append(json.dumps(value, default=str))
+                        elif isinstance(value, (bytes, bytearray)):
+                            import base64
+
+                            samples_by_name[name].append(base64.b64encode(value).decode("ascii"))
+                        else:
+                            samples_by_name[name].append(str(value))
+            except Exception:
+                pass
+
+            columns = []
+            for name, info in props.items():
+                es_type = info.get("type", "text")
+                mapped = _es_mapping_type(es_type)
+                samples = samples_by_name.get(name, [])
+                if es_type == "date" or (es_type in ("text", "keyword") and samples):
+                    inferred = infer_type(samples, field_name=name)
+                    if inferred in ("VARCHAR", "TEXT"):
+                        inferred = mapped if mapped != "VARCHAR" else inferred
+                    mapped = inferred
+                elif es_type == "binary":
+                    mapped = "BINARY"
+                elif es_type == "object":
+                    mapped = "JSON"
+                columns.append({
                     "name": name,
-                    "inferred_type": _es_mapping_type(info.get("type", "text")),
+                    "inferred_type": mapped,
                     "nullable": True,
-                }
-                for name, info in props.items()
-            ]
+                })
             return {"ok": True, "tables": [index], "columns": columns, "schema": index}
         finally:
             client.close()
