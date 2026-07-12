@@ -280,7 +280,18 @@ def _engine(cfg: dict[str, Any]) -> Any:
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:
-    return cfg.get("schema") or None
+    schema = cfg.get("schema") or ""
+    db_type = (cfg.get("type") or "").lower()
+    connection_string = (cfg.get("connection_string") or "").lower()
+    # SQLite and DuckDB do not support a 'public' schema; use the default schema.
+    if (
+        db_type == "sqlite"
+        or connection_string.startswith("sqlite://")
+        or db_type == "duckdb"
+        or connection_string.startswith("duckdb:")
+    ):
+        return None
+    return schema or None
 
 
 def _type_repr(type_obj: Any) -> str:
