@@ -353,7 +353,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             if target:
                 cur.execute(
                     """
-                    SELECT column_name, data_type, is_nullable
+                    SELECT column_name, column_type, is_nullable
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position
@@ -363,7 +363,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 for name, dtype, nullable in cur.fetchall():
                     columns.append({
                         "name": name,
-                        "inferred_type": _pg_to_logical(dtype),
+                        "inferred_type": _mysql_to_logical(dtype),
                         "nullable": nullable == "YES",
                     })
         conn.close()
@@ -426,6 +426,25 @@ def _pg_to_logical(dtype: str) -> str:
     if d == "date":
         return "DATE"
     if "timestamp" in d:
+        return "TIMESTAMP"
+    if "json" in d:
+        return "JSON"
+    return "TEXT"
+
+
+def _mysql_to_logical(dtype: str) -> str:
+    d = (dtype or "").lower()
+    if "tinyint(1)" in d:
+        return "BOOLEAN"
+    if "int" in d:
+        return "INTEGER"
+    if "numeric" in d or "decimal" in d or "double" in d or "float" in d or "real" in d:
+        return "DECIMAL"
+    if "bool" in d:
+        return "BOOLEAN"
+    if d == "date":
+        return "DATE"
+    if "timestamp" in d or "datetime" in d:
         return "TIMESTAMP"
     if "json" in d:
         return "JSON"
