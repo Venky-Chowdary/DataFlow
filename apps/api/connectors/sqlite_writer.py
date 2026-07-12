@@ -100,7 +100,7 @@ def write_mapped_rows(
 ) -> WriteResult:
     """Write records to a SQLite database file."""
     del port, username, password, ssl, write_mode, conflict_columns
-    path = connection_string or host or database
+    path = connection_string or database or host
     if not path:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",

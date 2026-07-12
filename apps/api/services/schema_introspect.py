@@ -115,6 +115,8 @@ def introspect_schema(
         })
     if db_type == "redis":
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
+    if db_type == "sqlite":
+        return _introspect_sqlite(database=database, connection_string=connection_string, host=host, table=table)
     return {"ok": False, "error": f"Schema introspection not implemented for {db_type}", "columns": [], "tables": []}
 
 
@@ -642,3 +644,87 @@ def _es_mapping_type(es_type: str) -> str:
     if t == "date":
         return "DATE"
     return "TEXT"
+
+
+def _introspect_sqlite(
+    *,
+    database: str = "",
+    connection_string: str = "",
+    host: str = "",
+    table: str | None = None,
+) -> dict[str, Any]:
+    """Introspect a SQLite table using PRAGMA table_info plus sample-value inference.
+
+    SQLite is dynamically typed, so we read the declared affinity and then sample
+    rows to recover logical types (BOOLEAN, DATE, JSON, UUID, etc.) that cannot be
+    determined from affinity alone.
+    """
+    import sqlite3
+
+    from services.schema_inference import infer_type
+
+    path = connection_string or database or host
+    if not path:
+        return {"ok": False, "error": "SQLite path is required", "columns": [], "tables": []}
+    if not table:
+        return {"ok": False, "error": "SQLite table name is required", "columns": [], "tables": []}
+
+    try:
+        conn = sqlite3.connect(path, timeout=8)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+            if not cur.fetchone():
+                return {"ok": False, "error": f"Table `{table}` not found", "columns": [], "tables": []}
+
+            cur.execute(f'PRAGMA table_info("{table}")')
+            info_rows = cur.fetchall()
+            if not info_rows:
+                return {"ok": False, "error": f"No columns for table `{table}`", "columns": [], "tables": []}
+
+            col_names: list[str] = [row[1] for row in info_rows]
+            declared_types: dict[str, str] = {row[1]: (row[2] or "").upper() for row in info_rows}
+
+            # Sample up to 100 rows for value-based inference
+            samples: dict[str, list[str]] = {name: [] for name in col_names}
+            try:
+                cur.execute(f'SELECT * FROM "{table}" LIMIT 100')
+                for row in cur.fetchall():
+                    for i, name in enumerate(col_names):
+                        value = row[i]
+                        if isinstance(value, bytes):
+                            # keep BLOB as-is for BINARY classification
+                            samples[name].append(value)
+                        else:
+                            samples[name].append(str(value) if value is not None else "")
+            except Exception:
+                pass
+
+            columns: list[dict[str, Any]] = []
+            for name in col_names:
+                declared = declared_types.get(name, "")
+                values = samples.get(name, [])
+                if declared == "BLOB" or any(isinstance(v, bytes) for v in values):
+                    inferred = "BINARY"
+                else:
+                    str_values = [v for v in values if not isinstance(v, bytes)]
+                    inferred = infer_type(str_values, field_name=name)
+                    if inferred in ("VARCHAR", "TEXT") and declared in ("INTEGER", "INT"):
+                        inferred = "INTEGER"
+                    elif inferred in ("VARCHAR", "TEXT") and declared in ("REAL", "FLOAT", "NUMERIC", "DOUBLE"):
+                        inferred = "DECIMAL"
+
+                columns.append(
+                    {
+                        "name": name,
+                        "inferred_type": inferred,
+                        "nullable": True,
+                    }
+                )
+
+            return {"ok": True, "tables": [table], "columns": columns, "schema": ""}
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}

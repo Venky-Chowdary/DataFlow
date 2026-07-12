@@ -457,7 +457,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = {c: "TEXT" for c in batch.headers}
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
 
     if db_type == "generic_sql":
