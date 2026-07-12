@@ -17,6 +17,7 @@ if str(_api_root) not in sys.path:
 from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 
 from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
+from .connector_capabilities import resolve_driver_type
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -266,9 +267,10 @@ def _read_batch(
             limit=limit,
             offset=offset,
         )
-    if src_type == "generic_sql":
+    if resolve_driver_type(src_type) == "generic_sql":
         from connectors.generic_sql import read_table_batch, read_table_cursor_batch
 
+        type_name = cfg.get("type", "") or src_type
         if cursor_column:
             return read_table_cursor_batch(
                 host=cfg["host"],
@@ -279,7 +281,7 @@ def _read_batch(
                 schema=cfg.get("schema", ""),
                 connection_string=cfg.get("connection_string", ""),
                 ssl=False,
-                type=cfg.get("type", ""),
+                type=type_name,
                 table=table,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
@@ -295,7 +297,7 @@ def _read_batch(
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=False,
-            type=cfg.get("type", ""),
+            type=type_name,
             table=table,
             columns=columns,
             offset=offset,
@@ -552,9 +554,10 @@ def _write_batch(
         summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    if dest_type == "generic_sql":
+    if resolve_driver_type(dest_type) == "generic_sql":
         from connectors.generic_sql import write_mapped_rows
 
+        type_name = cfg.get("type", "") or dest_type
         result = write_mapped_rows(
             host=cfg["host"],
             port=cfg["port"],
@@ -564,7 +567,7 @@ def _write_batch(
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=False,
-            type=cfg.get("type", ""),
+            type=type_name,
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
@@ -577,7 +580,7 @@ def _write_batch(
         )
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
-        summary = {"type": "generic_sql", "schema": result.target_schema, "table": result.table_name,
+        summary = {"type": type_name, "schema": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 

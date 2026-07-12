@@ -35,12 +35,24 @@ for _src in LIVE_SOURCE_DATABASES:
 
 
 def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest_format: str) -> tuple[bool, str]:
-    key = (source_kind, source_format.lower(), dest_kind, dest_format.lower())
+    def _resolve(fmt: str) -> str:
+        try:
+            from .connector_capabilities import resolve_driver_type
+            return resolve_driver_type(fmt)
+        except Exception:
+            try:
+                from transfer.connector_capabilities import resolve_driver_type
+                return resolve_driver_type(fmt)
+            except Exception:
+                return fmt
+    src_fmt = _resolve(source_format)
+    dst_fmt = _resolve(dest_format)
+    key = (source_kind, src_fmt.lower(), dest_kind, dst_fmt.lower())
     if key in LIVE_MATRIX:
         return True, "supported"
     for sk, sf, dk, df in LIVE_MATRIX:
-        if sk == source_kind and dk == dest_kind and df == dest_format.lower():
-            if source_kind == "file" and source_format.lower() in LIVE_SOURCE_FORMATS:
+        if sk == source_kind and dk == dest_kind and df == dst_fmt.lower():
+            if source_kind == "file" and src_fmt.lower() in LIVE_SOURCE_FORMATS:
                 return True, "supported"
     return False, f"Combination {source_kind}/{source_format} → {dest_kind}/{dest_format} not yet live"
 
