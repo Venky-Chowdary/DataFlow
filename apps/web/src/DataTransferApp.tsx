@@ -447,20 +447,20 @@ function AppShell({
 
         {shouldRenderSystemBanner && (
           <div className={`df2-system-visibility-banner ${systemTone}`} role="status" aria-live="polite">
-            <div className="df2-system-visibility-copy">
-              <strong>System visibility</strong>
-              <p> {systemMessage}</p>
+            <div className="df2-system-visibility-leading">
+              <span className={`df2-system-visibility-icon ${systemTone}`} aria-hidden>
+                <DtIcon
+                  name={systemTone === "ok" ? "check" : systemTone === "warn" ? "alert" : "activity"}
+                  size={18}
+                />
+              </span>
+              <div className="df2-system-visibility-copy">
+                <strong>System status</strong>
+                <p>{systemMessage}</p>
+              </div>
             </div>
-            <div className="df2-system-visibility-meta">
-              <button
-                type="button"
-                className="df2-system-visibility-close"
-                onClick={closeSystemBanner}
-                aria-label="Dismiss system visibility"
-                title="Dismiss"
-              >
-                <DtIcon name="x" size={14} />
-              </button>
+
+            <div className="df2-system-visibility-body">
               <div className="df2-system-visibility-metrics" aria-label="System status summary">
                 <span className={`df2-system-metric-pill ${!apiOnline ? "warn" : "ok"}`}>
                   API {apiOnline ? "online" : "offline"}
@@ -475,21 +475,31 @@ function AppShell({
                   Connector alerts {unhealthyConnectorsCount}
                 </span>
               </div>
+              {(failedJobsCount > 0 || unhealthyConnectorsCount > 0) && (
+                <div className="df2-system-visibility-actions">
+                  {failedJobsCount > 0 && (
+                    <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("jobs")}>
+                      Open Job Theater
+                    </button>
+                  )}
+                  {unhealthyConnectorsCount > 0 && (
+                    <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("connectors")}>
+                      Review connectors
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
-            {(failedJobsCount > 0 || unhealthyConnectorsCount > 0) && (
-              <div className="df2-system-visibility-actions">
-                {failedJobsCount > 0 && (
-                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("jobs")}>
-                    Open Job Theater
-                  </button>
-                )}
-                {unhealthyConnectorsCount > 0 && (
-                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("connectors")}>
-                    Review connectors
-                  </button>
-                )}
-              </div>
-            )}
+
+            <button
+              type="button"
+              className="df2-system-visibility-close"
+              onClick={closeSystemBanner}
+              aria-label="Dismiss system status"
+              title="Dismiss"
+            >
+              <DtIcon name="x" size={14} />
+            </button>
           </div>
         )}
 

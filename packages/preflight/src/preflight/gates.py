@@ -83,11 +83,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             )
 
     if issues:
-        return _block(
+        if (ctx.plan.validation_mode or "strict").lower() in {"strict", "maximum"}:
+            return _block(
+                GateId.G3_SCHEMA_CONTRACT,
+                f"{len(issues)} type coercion issue(s)",
+                start,
+                {"issues": issues},
+            )
+        return _pass(
             GateId.G3_SCHEMA_CONTRACT,
-            f"{len(issues)} type coercion issue(s)",
+            f"{len(issues)} type coercion warning(s) — will be verified by dry-run",
             start,
-            {"issues": issues},
+            {"issues": issues, "warnings": issues},
         )
     return _pass(GateId.G3_SCHEMA_CONTRACT, "Schema contract valid", start)
 

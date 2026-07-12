@@ -80,6 +80,7 @@ def run_plan_mapping(
         confidence_threshold=threshold,
         use_llm=use_llm,
         source_samples=source_samples,
+        validation_mode=validation_mode,
     )
 
     updated = add_mapping_revision(plan_id, result)
@@ -213,6 +214,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             stream_contracts=policies.get("stream_contracts"),
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
         ),
+        validation_mode=validation_mode,
     )
 
     if drift.get("drift_detected"):

@@ -37,8 +37,14 @@ class FilePreflightContext(PreflightContext):
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
         rows = [[str(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
+        dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
         mapping_dicts = [
-            {"source": m.source, "target": m.target, "transform": getattr(m, "transform", "")}
+            {
+                "source": m.source,
+                "target": m.target,
+                "transform": getattr(m, "transform", ""),
+                "target_type": dest_types_by_name.get(m.target),
+            }
             for m in self.plan.mappings
         ]
 
@@ -334,7 +340,10 @@ def run_file_preflight(
     dest_cols = [
         ColumnSchema(
             name=m["target"],
-            inferred_type=dest_types.get(m["target"], column_types.get(m["source"], "VARCHAR")).upper(),
+            inferred_type=dest_types.get(
+                m["target"],
+                m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
+            ).upper(),
         )
         for m in mappings
     ]

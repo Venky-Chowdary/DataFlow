@@ -1425,7 +1425,9 @@ select.df2-select:focus {
 /* ─── 21. Transfer Studio ─── */
 
 .df2-transfer-studio-body.is-validate-step {
-  grid-template-columns: 1fr !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) clamp(280px, 26vw, 340px) !important;
+  overflow: hidden;
 }
 
 @media (max-width: 1280px) {

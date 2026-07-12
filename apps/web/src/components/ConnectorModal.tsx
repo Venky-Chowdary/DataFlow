@@ -202,7 +202,7 @@ export function ConnectorModal({
 
         <div className="dt-modal-body">
           {step === "pick" ? (
-            <ConnectorCatalogPanel role="all" onSelect={handleCatalogPick} limit={120} compact requireAvailable initialStatus="live" />
+            <ConnectorCatalogPanel role="all" onSelect={handleCatalogPick} limit={120} compact requireAvailable={false} initialStatus="" />
           ) : (
             <>
               {!editing && (

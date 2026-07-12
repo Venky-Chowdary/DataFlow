@@ -64,24 +64,30 @@ export function ValidateActionsRail({
             <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks passed
           </p>
           {preflight.proof_bundle && (
-            <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: "#0f172a" }}>
-                Proof decision: {proofDecision.toUpperCase()}
+            <div className="df2-validate-rail-metrics">
+              <span className="df2-validate-rail-metric">
+                <small>Proof decision</small>
+                <strong>{proofDecision.toUpperCase()}</strong>
               </span>
-              <span style={{ fontSize: 12, color: "#475569" }}>
-                {proofReason}
+              <span className="df2-validate-rail-metric">
+                <small>Confidence</small>
+                <strong>{confidenceBand}</strong>
               </span>
-              <span style={{ fontSize: 12, color: "#475569" }}>
-                Confidence {confidenceBand} · Quality grade {qualityGrade}
+              <span className="df2-validate-rail-metric">
+                <small>Quality</small>
+                <strong>{qualityGrade}</strong>
               </span>
-              <span style={{ fontSize: 12, color: "#475569" }}>
-                {evidenceSummary}
+              <span className="df2-validate-rail-metric">
+                <small>Semantic</small>
+                <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
               </span>
-              <span style={{ fontSize: 12, color: "#475569" }}>
-                Semantic {preflight.proof_bundle.semantic_mapping_score.toFixed(2)} · Quality {preflight.proof_bundle.quality_score.toFixed(2)}
+              <span className="df2-validate-rail-metric">
+                <small>Quality</small>
+                <strong>{preflight.proof_bundle.quality_score.toFixed(2)}</strong>
               </span>
-              <span style={{ fontSize: 12, color: "#475569" }}>
-                Compliance risk {preflight.proof_bundle.compliance.risk_score.toFixed(2)}
+              <span className="df2-validate-rail-metric">
+                <small>Compliance</small>
+                <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
               </span>
             </div>
           )}
@@ -95,14 +101,8 @@ export function ValidateActionsRail({
         </div>
       )}
 
-      {blocked && mappingBlocked && mappingReviewCount > 0 && (
-        <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={onApproveMappings}>
-          <DtIcon name="check" size={14} /> Approve all mappings
-        </button>
-      )}
-
       <div className="df2-validate-rail-actions">
-        <button type="button" className="df2-btn df2-btn-sm" onClick={onBack}>
+        <button type="button" className="df2-btn" onClick={onBack}>
           ← Back to mapping
         </button>
 
@@ -113,8 +113,14 @@ export function ValidateActionsRail({
         )}
 
         {blocked && (
-          <button type="button" className="df2-btn df2-btn-sm" onClick={onRunPreflight} disabled={preflighting}>
-            <DtIcon name="gate" size={14} /> Re-run
+          <button type="button" className="df2-btn" onClick={onRunPreflight} disabled={preflighting}>
+            <DtIcon name="gate" size={16} /> Re-run
+          </button>
+        )}
+
+        {blocked && mappingBlocked && mappingReviewCount > 0 && (
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onApproveMappings}>
+            <DtIcon name="check" size={16} /> Approve all mappings
           </button>
         )}
 

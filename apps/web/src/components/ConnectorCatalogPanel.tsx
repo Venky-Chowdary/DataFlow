@@ -67,8 +67,8 @@ export function ConnectorCatalogPanel({
   limit = 96,
   compact = false,
   transferOnly = false,
-  requireAvailable = true,
-  initialStatus = "live",
+  requireAvailable = false,
+  initialStatus = "",
 }: ConnectorCatalogPanelProps) {
   const [query, setQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");

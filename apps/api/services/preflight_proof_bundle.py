@@ -19,17 +19,16 @@ def _semantic_mapping_score(
     source_schemas: list[dict[str, Any]] | None = None,
 ) -> tuple[float, list[str]]:
     """Compute a bounded semantic mapping score from confidence and role heuristics."""
-    from services.mapping_quality import analyze_column_profile, score_mapping_pair, refine_mappings_with_quality
+    from services.mapping_quality import analyze_column_profile, score_mapping_pair
 
     source_schemas = source_schemas or []
     src_by_name = {s["name"]: s for s in source_schemas}
-    refined = refine_mappings_with_quality(mappings, source_schemas=source_schemas)
 
-    scores = [float(m.get("confidence", 0.0)) for m in refined]
+    scores = [float(m.get("confidence", 0.0)) for m in mappings]
     avg_conf = sum(scores) / len(scores) if scores else 0.0
 
     profile_notes: list[str] = []
-    for m in refined:
+    for m in mappings:
         src = src_by_name.get(m["source"], {})
         samples = [str(x) for x in (src.get("samples") or [])]
         profile = analyze_column_profile(m["source"], samples)

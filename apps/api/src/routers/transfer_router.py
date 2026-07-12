@@ -184,6 +184,7 @@ async def map_columns_route(body: MapColumnsRequest):
         confidence_threshold=threshold,
         use_llm=body.use_llm,
         source_samples=body.source_samples or None,
+        validation_mode=body.validation_mode,
     )
     nested_fields: list[dict[str, str]] = []
     try:

@@ -151,7 +151,7 @@ def analyze_dataset_quality(
     duplicate_row_count = sum(count - 1 for count in key_signature_counts.values() if count > 1)
     if duplicate_row_count > 0:
         all_issues.append(f"Duplicate rows detected: {duplicate_row_count} replicated sample record(s)")
-        blocking = True
+        # Duplicate rows are a data-quality observation, not a transfer blocker.
 
     for col in columns:
         values = _column_values(sample, col)

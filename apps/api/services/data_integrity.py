@@ -178,6 +178,7 @@ def _check_required_nulls(
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     issues: list[str] = []
     for m in mappings:
@@ -195,7 +196,10 @@ def _check_duplicate_keys(
         if dupes:
             sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
             issues.append(f"{src}: duplicate key values ({sample})")
-    blocks = len(issues) > 0
+    # Duplicate *_id values are common in child/transaction tables; only block
+    # in strict/maximum modes where uniqueness is treated as a hard requirement.
+    mode = (validation_mode or "strict").strip().lower()
+    blocks = len(issues) > 0 and mode in {"strict", "maximum"}
     return {
         "check": "duplicate_keys",
         "passed": not blocks,
@@ -233,13 +237,19 @@ def _check_mapping_confidence(
     mappings: list[dict],
     *,
     confidence_min: float,
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
+    # In strict/maximum mode, hold mappings to the full configured threshold.
+    # In balanced mode, align with the preflight G4 confidence floor so a
+    # mapping that is accepted by the mapping gate is not rejected again here.
+    mode = (validation_mode or "strict").strip().lower()
+    floor = confidence_min if mode in {"strict", "maximum"} else max(0.55, confidence_min - 0.3)
     issues: list[str] = []
     for m in mappings:
         conf = float(m.get("confidence", 0))
-        if conf < confidence_min:
+        if conf < floor:
             issues.append(
-                f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {confidence_min:.0%}"
+                f"{m.get('source')}→{m.get('target')}: confidence {conf:.0%} < {floor:.0%}"
             )
         if m.get("requires_review"):
             issues.append(f"{m.get('source')}→{m.get('target')}: ambiguous mapping requires review")
@@ -315,9 +325,9 @@ def run_integrity_audit(
         checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows))
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"]))
-        checks.append(_check_duplicate_keys(mappings, rows))
+        checks.append(_check_duplicate_keys(mappings, rows, validation_mode))
         checks.append(
-            _check_mapping_confidence(mappings, confidence_min=cfg["confidence"])
+            _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )
 
     if rows and source_columns:

@@ -120,7 +120,7 @@ def evaluate_ddl_compatibility(
     table_exists: bool = False,
     dest_connected: bool = False,
     dest_db_type: str = "postgresql",
-    allow_create: bool = True,
+    allow_create: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -151,8 +151,12 @@ def evaluate_ddl_compatibility(
         tgt_type = _ci_get(target_schema, tgt)
 
         if not schemaless and table_exists and target_schema and tgt_type is None:
-            issues.append(f"Target column '{tgt}' does not exist in destination table")
-            continue
+            # If the destination connector supports creating tables, we can evolve
+            # the target schema (e.g. CREATE TABLE or ALTER TABLE ADD COLUMN) so
+            # missing columns do not block the transfer.
+            if not allow_create:
+                issues.append(f"Target column '{tgt}' does not exist in destination table")
+                continue
 
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             issues.append(

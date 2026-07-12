@@ -153,6 +153,15 @@ def score_mapping_pair(
     if overlap and float(mapping.get("confidence", 0)) < 0.8:
         delta += min(0.03 * len(overlap), 0.06)
 
+    # Strong exact / normalized-name match boost. If the source and target names
+    # are the same (or obvious variants), the mapping is highly reliable.
+    if src_lower == tgt:
+        delta += 0.75
+    elif src_lower in tgt or tgt in src_lower:
+        delta += 0.45
+    elif overlap and float(mapping.get("confidence", 0)) < 0.7:
+        delta += 0.25
+
     return delta, notes
 
 

@@ -170,6 +170,7 @@ def run_mapping_pipeline(
     confidence_threshold: float = 0.85,
     use_llm: bool = True,
     source_samples: dict[str, list[str]] | None = None,
+    validation_mode: str = "strict",
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -369,7 +370,7 @@ def run_mapping_pipeline(
         source_schemas=source_schemas,
         target_schemas=target_schemas,
         source_samples=source_samples,
-        validation_mode="strict",
+        validation_mode=validation_mode,
     )
     if integrity.get("blocks_transfer"):
         validation = {

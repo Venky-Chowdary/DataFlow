@@ -470,9 +470,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     targetCollection,
   ]);
 
-  const ensurePersistedPlan = useCallback(async (): Promise<string | null> => {
+  const ensurePersistedPlan = useCallback(async (overrides?: Partial<{
+    target_columns: string[];
+    target_schema: Record<string, string>;
+  }>): Promise<string | null> => {
     if (!currentSourceColumns.length) return null;
     const payload = buildPlanPayload();
+    if (overrides) {
+      if (overrides.target_columns !== undefined) payload.target_columns = overrides.target_columns;
+      if (overrides.target_schema !== undefined) payload.target_schema = overrides.target_schema;
+    }
     try {
       if (persistedPlanId) {
         await updateTransferPlan(persistedPlanId, payload);
@@ -527,7 +534,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         [];
       if (!sourceCols.length) return;
       const threshold = confidenceThresholdForMode(validationMode);
-      const planId = await ensurePersistedPlan();
+      const planId = await ensurePersistedPlan(
+        targetCols?.length
+          ? { target_columns: targetCols, target_schema: targetSchema ?? {} }
+          : undefined,
+      );
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
       try {
@@ -1199,7 +1210,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         setTransferPlan(routePlan);
       }
 
-      const planId = await ensurePersistedPlan();
+      const planId = await ensurePersistedPlan(
+        destKindMode === "database" && destColumns.length
+          ? { target_columns: destColumns, target_schema: destSchemaMap }
+          : undefined,
+      );
       if (planId) {
         await syncTransferPlanMappings(planId, mappings);
         const pf = await preflightTransferPlan(planId);
@@ -1241,6 +1256,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
         dest_schema: destKindMode === "database" && !connectorId && destType === "snowflake" ? destSchema || "PUBLIC" : undefined,
         dest_warehouse: destKindMode === "database" && !connectorId && destType === "snowflake" ? destWarehouse || undefined : undefined,
+        destination_column_types: destKindMode === "database" ? destSchemaMap : undefined,
         sample_rows: sampleRows,
         estimated_bytes: estimatedBytes,
         sync_mode: syncMode,

@@ -25,6 +25,7 @@ class MappingItem(BaseModel):
     confidence: float = 0.9
     reason: str = ""
     transform: str | None = None
+    target_type: str | None = None
     requires_review: bool = False
     score_gap: float = 1.0
     user_override: bool = False
@@ -213,4 +214,5 @@ async def run_preflight(body: PreflightRequest):
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
         ),
+        validation_mode=body.validation_mode,
     )

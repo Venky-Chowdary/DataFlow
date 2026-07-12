@@ -100,7 +100,17 @@ export async function runPreflight(payload: {
   columns: string[];
   column_types: Record<string, string>;
   row_count: number;
-  mappings: { source: string; target: string; confidence: number; reason?: string }[];
+  mappings: {
+    source: string;
+    target: string;
+    confidence: number;
+    reason?: string;
+    transform?: string;
+    target_type?: string;
+    requires_review?: boolean;
+    score_gap?: number;
+    user_override?: boolean;
+  }[];
   connector_id?: string;
   source_connector_id?: string;
   dest_type?: string;
@@ -113,6 +123,7 @@ export async function runPreflight(payload: {
   dest_schema?: string;
   dest_warehouse?: string;
   dest_kind?: string;
+  destination_column_types?: Record<string, string>;
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
