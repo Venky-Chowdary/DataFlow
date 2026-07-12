@@ -1,6 +1,20 @@
 """Writer row-mapping resilience tests."""
 
-from connectors.writer_common import build_mapped_rows
+from connectors.writer_common import build_mapped_rows, resolve_target_columns, sanitize_identifier
+
+
+def test_sanitize_identifier_preserves_mongodb_id():
+    # MongoDB's primary key must survive normalization.
+    assert sanitize_identifier("_id") == "_id"
+    assert sanitize_identifier("_id_") == "_id"
+    assert sanitize_identifier("customer_id") == "customer_id"
+    assert sanitize_identifier("NAME") == "name"
+
+
+def test_resolve_target_columns_preserves_mongodb_id():
+    mappings = [{"source": "_id", "target": "_id"}, {"source": "name", "target": "name"}]
+    target_cols, _ = resolve_target_columns(mappings, column_types={"_id": "VARCHAR", "name": "VARCHAR"})
+    assert target_cols == ["_id", "name"]
 
 
 def test_quarantine_policy_skips_bad_rows():

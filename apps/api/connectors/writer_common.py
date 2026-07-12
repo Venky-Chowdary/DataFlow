@@ -18,7 +18,7 @@ VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 def sanitize_identifier(name: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_]", "_", name.strip().lower())
-    s = re.sub(r"_+", "_", s).strip("_")
+    s = re.sub(r"_+", "_", s).rstrip("_")
     if not s or s[0].isdigit():
         s = f"col_{s or 'field'}"
     return s[:63]
