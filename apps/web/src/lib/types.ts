@@ -147,7 +147,7 @@ export interface PreflightResult {
 export interface TransferResult {
   success: boolean;
   records_transferred?: number;
-  destination?: { database: string; collection: string; path?: string; format?: string };
+  destination?: { database: string; collection: string; path?: string; format?: string; filename?: string; download_url?: string };
   destination_summary?: {
     type?: string;
     schema?: string;
@@ -161,6 +161,8 @@ export interface TransferResult {
     rejected_rows?: number;
     warnings?: string[];
     error_policy?: string;
+    filename?: string;
+    download_url?: string;
   };
   ddl_executed?: string[];
   operation?: string;

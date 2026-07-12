@@ -2580,8 +2580,45 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <div>
               <span className="df2-badge df2-badge-live df2-result-badge"><DtIcon name="check" size={14} /> Transfer Complete</span>
               <p className="df2-result-stat">{result.records_transferred?.toLocaleString()} records transferred</p>
-              {result.destination?.path && (
+              {result.operation && (
+                <p className="df2-result-meta">Operation: {result.operation}</p>
+              )}
+              {result.destination?.download_url && (
+                <p className="df2-result-meta">
+                  <a
+                    href={result.destination.download_url}
+                    className="df2-btn df2-btn-sm"
+                    download={result.destination.filename || `export.${result.destination?.format || "json"}`}
+                  >
+                    <DtIcon name="download" size={14} /> Download {result.destination.filename || "export"}
+                  </a>
+                </p>
+              )}
+              {result.destination?.path && !result.destination?.download_url && (
                 <p className="df2-result-meta">Exported to {result.destination.path}</p>
+              )}
+              {result.destination_summary && (
+                <div className="df2-result-meta">
+                  {result.destination_summary.type && <p>Destination type: {result.destination_summary.type}</p>}
+                  {result.destination_summary.driver && <p>Driver: {result.destination_summary.driver}</p>}
+                  {result.destination_summary.database && result.destination_summary.table && (
+                    <p>Target: {result.destination_summary.database}.{result.destination_summary.table}</p>
+                  )}
+                  {result.destination_summary.collection && (
+                    <p>Collection: {result.destination_summary.collection}</p>
+                  )}
+                  {result.destination_summary.checksum && (
+                    <p>Checksum: {result.destination_summary.checksum}</p>
+                  )}
+                  {Boolean(result.destination_summary.rejected_rows) && (
+                    <p>Rejected rows: {result.destination_summary.rejected_rows}</p>
+                  )}
+                  {result.destination_summary.warnings && result.destination_summary.warnings.length > 0 && (
+                    <ul className="df2-result-warnings">
+                      {result.destination_summary.warnings.map((w) => <li key={w}>{w}</li>)}
+                    </ul>
+                  )}
+                </div>
               )}
               {result.ddl_executed && result.ddl_executed.length > 0 && (
                 <ul className="df2-result-ddl">
@@ -2602,7 +2639,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
               </div>
             </div>
           ) : (
-            <span className="df2-badge df2-badge-error"><DtIcon name="x" size={14} /> {result.error || "Transfer failed"}</span>
+            <div>
+              <span className="df2-badge df2-badge-error"><DtIcon name="x" size={14} /> {result.error || "Transfer failed"}</span>
+              {result.error && (
+                <p className="df2-result-error-detail">{result.error}</p>
+              )}
+              {result.destination_summary?.warnings && result.destination_summary.warnings.length > 0 && (
+                <ul className="df2-result-warnings">
+                  {result.destination_summary.warnings.map((w) => <li key={w}>{w}</li>)}
+                </ul>
+              )}
+            </div>
           )}
         </div>
       )}

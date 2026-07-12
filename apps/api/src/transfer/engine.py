@@ -240,11 +240,15 @@ class UniversalTransferEngine:
                 rows_written = len(records)
                 export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")
                 os.makedirs(export_dir, exist_ok=True)
-                export_path = os.path.join(export_dir, export_name)
+                ext = os.path.splitext(export_name)[1].lstrip(".") or (request.destination.format or "json")
+                unique_name = f"export_{job_id}.{ext}"
+                export_path = os.path.join(export_dir, unique_name)
                 with open(export_path, "wb") as f:
                     f.write(export_bytes)
+                dest_summary["filename"] = unique_name
                 dest_summary["path"] = export_path
-                ddl_log.append(f"Exported {rows_written} rows to {export_name}")
+                dest_summary["download_url"] = f"/api/v1/transfer/download/{unique_name}"
+                ddl_log.append(f"Exported {rows_written} rows to {unique_name}")
             else:
                 mongo.update_job_status(job_id, "failed", error=f"Unknown destination: {request.destination.kind}", phase="failed")
                 return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}", job_id=job_id)

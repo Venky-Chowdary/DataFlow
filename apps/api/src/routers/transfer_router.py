@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
@@ -565,3 +569,16 @@ async def run_universal_transfer(
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
     }
+
+
+@router.get("/download/{filename}")
+async def download_export(filename: str):
+    """Serve an exported file from the exports directory."""
+    export_dir = Path(__file__).resolve().parents[2] / "exports"
+    file_path = export_dir / filename
+    # Security: refuse to serve files outside the exports directory
+    if not file_path.resolve().is_relative_to(export_dir.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Export not found")
+    return FileResponse(file_path, filename=filename)
