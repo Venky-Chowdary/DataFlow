@@ -435,7 +435,7 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         return _maybe_nullable(sa.Boolean())
     if t == "date":
         return _maybe_nullable(sa.Date())
-    if t == "datetime":
+    if t in ("datetime", "timestamp"):
         if db_type == "questdb":
             return sa.DateTime()
         # Preserve timezone metadata when the target dialect supports it.
@@ -528,7 +528,7 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return value
         return value
 
-    if t == "datetime":
+    if t in ("datetime", "timestamp"):
         def _ensure_utc(dt: datetime) -> datetime:
             if dt.tzinfo is None:
                 return dt.replace(tzinfo=timezone.utc)
@@ -833,26 +833,25 @@ def introspect_table_schema(
 
 
 def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bool:
-    """Drop a table using SQLAlchemy dialect-aware DDL."""
+    """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback."""
     if not SQLALCHEMY_AVAILABLE:
         return False
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
-        db_type = (cfg.get("type") or "").lower()
-        if db_type == "questdb":
-            # QuestDB's pg_catalog reflection is incomplete, so use a plain DDL drop.
-            q = "\""
-            qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
-            with engine.connect() as conn:
-                conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
-                conn.commit()
-            return True
-        table_obj = sa.Table(table, sa.MetaData(), schema=schema)
-        table_obj.drop(engine, checkfirst=True)
+        q = "\""
+        qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+        with engine.connect() as conn:
+            conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
+            conn.commit()
         return True
     except Exception:
-        return False
+        try:
+            table_obj = sa.Table(table, sa.MetaData(), schema=schema)
+            table_obj.drop(engine, checkfirst=True)
+            return True
+        except Exception:
+            return False
     finally:
         engine.dispose()
 

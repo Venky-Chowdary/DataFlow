@@ -18,6 +18,61 @@ def _bson_decimal_type():
 _BSON_DECIMAL = _bson_decimal_type()
 
 
+def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str | None:
+    """Use DataFlow value inference to narrow TEXT/CHAR columns."""
+    try:
+        from services.schema_inference import infer_type
+
+        mapped = {
+            "JSON": "JSON",
+            "BINARY": "BINARY",
+            "UUID": "UUID",
+            "DATE": "DATE",
+            "TIMESTAMP": "DATETIME",
+            "TIME": "TIME",
+            "INTEGER": "INTEGER",
+            "DECIMAL": "DECIMAL",
+            "BOOLEAN": "BOOLEAN",
+            "VARCHAR": "TEXT",
+            "TEXT": "TEXT",
+        }
+        return mapped.get(infer_type(samples, field_name=field_name))
+    except Exception:
+        return None
+
+
+def _refine_columns_by_samples(
+    conn: Any,
+    columns: list[dict],
+    table: str,
+    schema: str,
+    sample_limit: int = 200,
+) -> list[dict]:
+    """Sample string columns and use heuristics to recover UUID/JSON/BINARY/etc."""
+    candidates = [c for c in columns if c["inferred_type"] in ("TEXT", "VARCHAR", "CHAR", "CHARACTER VARYING")]
+    if not candidates:
+        return columns
+
+    name_to_idx = {c["name"]: i for i, c in enumerate(candidates)}
+    cols_sql = ", ".join(f'"{c["name"]}"' for c in candidates)
+    qualified = f'"{schema}"."{table}"' if schema else f'"{table}"'
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))
+            rows = cur.fetchall()
+        for idx, c in enumerate(candidates):
+            values = [row[idx] for row in rows if row[idx] is not None]
+            if not values:
+                continue
+            str_values = [str(v) for v in values]
+            inferred = _infer_logical_from_strings(str_values, field_name=c["name"])
+            if inferred and inferred != "TEXT":
+                c["inferred_type"] = inferred
+    except Exception:
+        pass
+    return columns
+
+
 def introspect_schema(
     db_type: str,
     *,
@@ -260,6 +315,8 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                             "nullable": nullable == "YES",
                         }
                     )
+                if table:
+                    columns = _refine_columns_by_samples(conn, columns, table, schema)
             elif tables:
                 cur.execute(
                     """
@@ -278,6 +335,8 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                             "nullable": nullable == "YES",
                         }
                     )
+                if tables:
+                    columns = _refine_columns_by_samples(conn, columns, tables[0], schema)
         conn.close()
         return {"ok": True, "tables": tables, "columns": columns, "schema": schema}
     except ImportError:
@@ -398,6 +457,8 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         "inferred_type": _mysql_to_logical(dtype),
                         "nullable": nullable == "YES",
                     })
+                if target:
+                    columns = _refine_columns_by_samples(conn, columns, target, kwargs.get("database", ""))
         conn.close()
         return {"ok": True, "tables": tables, "columns": columns, "schema": kwargs.get("database", "")}
     except ImportError:
@@ -478,7 +539,7 @@ def _pg_to_logical(dtype: str) -> str:
              "varchar", "character", "char", "name", "interval", "point",
              "line", "lseg", "box", "path", "polygon", "circle", "geometry",
              "geography", "inet", "cidr", "macaddr", "macaddr8", "money",
-             "bit", "bit varying", "varbit", "hstore", "uuid", "pg_lsn",
+             "bit", "bit varying", "varbit", "hstore", "pg_lsn",
              "txid_snapshot", "pg_snapshot", "user-defined"):
         return "TEXT"
     return "TEXT"
