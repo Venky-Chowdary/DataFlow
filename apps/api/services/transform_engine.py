@@ -193,7 +193,7 @@ def _normalize_numeric_text(value: str) -> str:
 
 
 def _normalize_locale_separators(text: str) -> str | None:
-    """Resolve . / , separator ambiguity into a decimal string.
+    """Resolve . / , / space separator ambiguity into a decimal string.
 
     Returns None for unambiguous null sentinels and values that are not
     parseable numbers.
@@ -202,33 +202,67 @@ def _normalize_locale_separators(text: str) -> str | None:
         return None
     if not text:
         return None
+
+    # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
+    text = text.replace(" ", "").replace("\t", "")
+
     if "." in text and "," in text:
         last_dot = text.rfind(".")
         last_comma = text.rfind(",")
         if last_dot > last_comma:
-            return text.replace(",", "")
+            # Dot is the decimal separator; commas are thousands separators.
+            candidate = text.replace(",", "")
+            if candidate.count(".") <= 1:
+                return candidate
+            return None
         # Comma is the decimal separator; thousand dots are removed.
         text = text.replace(".", "")
         last_comma = text.rfind(",")
-        return text[:last_comma] + "." + text[last_comma + 1:]
+        candidate = text[:last_comma] + "." + text[last_comma + 1:]
+        if "," in candidate or candidate.count(".") > 1:
+            return None
+        return candidate
     if "," in text:
         parts = text.split(",")
-        # US-style thousands: 1,234 or 1,234,567 (all groups after first are 3 digits).
-        if parts[0] and not parts[0].startswith("0") and all(
-            part.isdigit() and len(part) == 3 for part in parts[1:]
+        if (
+            len(parts) >= 2
+            and parts[0]
+            and not parts[0].startswith("0")
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
         ):
             return text.replace(",", "")
-        # European decimal: 1,234 or 1,23
+        # European decimal / decimal with 3-digit groups and a short final group.
+        if (
+            len(parts) >= 2
+            and parts[0].isdigit()
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
+            and parts[-1].isdigit()
+            and 1 <= len(parts[-1]) <= 2
+            and len(parts[0]) <= 3
+        ):
+            return "".join(parts[:-1]) + "." + parts[-1]
         if len(parts) == 2:
             return parts[0] + "." + parts[1]
         return None
     if "." in text:
         parts = text.split(".")
-        # US-style thousands with multiple groups: 1.234.567
-        if len(parts) > 2 and parts[0] and not parts[0].startswith("0") and all(
-            part.isdigit() and len(part) == 3 for part in parts[1:]
+        # Multi-dot US/ISO thousands: 1.234.567 (but not 1.234, which is decimal).
+        if (
+            len(parts) > 2
+            and parts[0]
+            and not parts[0].startswith("0")
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
         ):
             return text.replace(".", "")
+        if (
+            len(parts) >= 2
+            and parts[0].isdigit()
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
+            and parts[-1].isdigit()
+            and 1 <= len(parts[-1]) <= 2
+            and len(parts[0]) <= 3
+        ):
+            return "".join(parts[:-1]) + "." + parts[-1]
         # Single dot is a decimal point (e.g. 1.234), not a thousands separator.
         return text
     return text
