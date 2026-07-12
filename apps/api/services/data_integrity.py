@@ -376,16 +376,26 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: prefer exact id/_id; for SQL fall back to the first
-    # *_id column if no exact id/_id is present. Schemaless stores only enforce _id.
+    # Primary-key heuristic: prefer exact id/_id target (e.g. id -> _id for MongoDB),
+    # then exact id/_id source, then first *_id source. Schemaless stores only enforce _id.
     pk = None
     if dest_kind in {"mongodb", "dynamodb", "redis"}:
-        pk = next((c for c in source_columns if c.lower() == "_id"), None)
-    else:
-        for col in source_columns:
-            if col.lower() in {"id", "_id"}:
-                pk = col
+        for m in mappings:
+            if (m.get("target") or "").lower() == "_id":
+                pk = m.get("source")
                 break
+        if not pk:
+            pk = next((c for c in source_columns if c.lower() == "_id"), None)
+    else:
+        for m in mappings:
+            if (m.get("target") or "").lower() in {"id", "_id"}:
+                pk = m.get("source")
+                break
+        if not pk:
+            for col in source_columns:
+                if col.lower() in {"id", "_id"}:
+                    pk = col
+                    break
         if not pk:
             for col in source_columns:
                 if col.lower().endswith("_id"):

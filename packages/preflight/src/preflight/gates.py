@@ -213,24 +213,31 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
     source_cols = [c.name for c in ctx.plan.source.columns]
+    tgt_by_src = {m.source: m.target for m in ctx.plan.mappings}
     pk = None
     if schemaless:
-        pk = next((c for c in source_cols if c.lower() == "_id"), None)
-    else:
-        for c in source_cols:
-            if c.lower() in {"id", "_id"}:
-                pk = c
+        for src, tgt in tgt_by_src.items():
+            if tgt == "_id":
+                pk = src
                 break
+        if not pk:
+            pk = next((c for c in source_cols if c.lower() == "_id"), None)
+    else:
+        for src, tgt in tgt_by_src.items():
+            if tgt.lower() in {"id", "_id"}:
+                pk = src
+                break
+        if not pk:
+            for c in source_cols:
+                if c.lower() in {"id", "_id"}:
+                    pk = c
+                    break
         if not pk:
             pk = next((c for c in source_cols if c.lower().endswith("_id")), None)
 
     pk_targets: list[str] = []
     if pk:
-        for m in ctx.plan.mappings:
-            if m.source == pk:
-                pk_targets.append(m.target)
-        if not pk_targets:
-            pk_targets.append(pk)
+        pk_targets.append(tgt_by_src.get(pk, pk))
     for col_group in [pk_targets] if pk_targets else []:
         dupes = ctx.probe_unique_constraint(col_group)
         if dupes:
