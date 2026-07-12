@@ -293,7 +293,7 @@ def read_source_database(
     if db_type == "mongodb":
         from connectors.mongodb_reader import read_collection_batch
 
-        coll_name = endpoint.collection
+        coll_name = endpoint.collection or endpoint.table
         if not coll_name:
             raise ValueError("Source MongoDB collection name required")
         db_name = endpoint.database or cfg["database"] or "test"

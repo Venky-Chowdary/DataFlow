@@ -28,6 +28,9 @@ def _connection_string(cfg: dict[str, Any]) -> str:
 def _serialize(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bytes):
+        import base64
+        return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list)):
         import json
 

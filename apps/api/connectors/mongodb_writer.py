@@ -134,7 +134,7 @@ def write_mapped_rows(
         
         from bson.binary import Binary
         from bson.decimal128 import Decimal128
-        from datetime import datetime as _datetime, time as _time
+        from datetime import date as _date, datetime as _datetime, time as _time
 
         def _to_bson(value: Any, stype: str) -> Any:
             if value is None:
@@ -155,12 +155,12 @@ def write_mapped_rows(
             if upper in {"DECIMAL", "NUMERIC"}:
                 return Decimal128(str(value))
             if upper == "DATE":
-                if isinstance(value, _datetime):
+                if isinstance(value, _date):
                     return value
                 text = value.strip() if isinstance(value, str) else str(value)
                 for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d"):
                     try:
-                        return _datetime.strptime(text, fmt)
+                        return _datetime.strptime(text, fmt).date()
                     except ValueError:
                         continue
                 return value
