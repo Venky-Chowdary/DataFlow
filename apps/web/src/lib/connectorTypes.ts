@@ -127,7 +127,7 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   if (type === "redis") return { host: "localhost", port: 6379, label: "Redis" };
   if (type === "elasticsearch") return { host: "localhost", port: 9200, label: "Elasticsearch" };
   if (type === "sqlite") return { host: "", port: 0, label: "SQLite" };
-  if (type === "generic_sql") return { host: "", port: 0, label: "Generic SQL (SQLAlchemy)" };
+  if (type === "generic_sql") return { host: "", port: 0, label: "Generic SQL (any SQLAlchemy engine)" };
   return {
     host: "localhost",
     port: item?.port ?? 5432,
@@ -145,6 +145,52 @@ export function isGcpConnector(type: string): boolean {
 
 export function isConfigurableInStudio(type: string): boolean {
   return !["csv", "tsv", "json", "jsonl", "parquet", "avro", "excel"].includes(type);
+}
+
+export const GENERIC_SQL_DRIVERS = [
+  { id: "postgresql", label: "PostgreSQL" },
+  { id: "mysql", label: "MySQL / MariaDB" },
+  { id: "mssql", label: "SQL Server" },
+  { id: "oracle", label: "Oracle" },
+  { id: "sqlite", label: "SQLite" },
+  { id: "duckdb", label: "DuckDB" },
+  { id: "clickhouse", label: "ClickHouse" },
+  { id: "trino", label: "Trino / Presto" },
+  { id: "dremio", label: "Dremio" },
+  { id: "firebolt", label: "Firebolt" },
+  { id: "risingwave", label: "RisingWave" },
+  { id: "materialize", label: "Materialize" },
+  { id: "db2", label: "IBM DB2" },
+  { id: "teradata", label: "Teradata" },
+  { id: "sap_hana", label: "SAP HANA" },
+  { id: "informix", label: "Informix" },
+  { id: "athena", label: "Amazon Athena" },
+  { id: "synapse", label: "Azure Synapse" },
+];
+
+export function getGenericSqlPlaceholder(driver: string): string {
+  const d = (driver || "postgresql").toLowerCase();
+  const map: Record<string, string> = {
+    postgresql: "postgresql+psycopg2://user:pass@host:5432/db",
+    mysql: "mysql+pymysql://user:pass@host:3306/db",
+    mssql: "mssql+pyodbc://user:pass@host:1433/db",
+    oracle: "oracle+oracledb://user:pass@host:1521/db",
+    sqlite: "sqlite:////path/to/db.sqlite",
+    duckdb: "duckdb:////path/to/db.duckdb",
+    clickhouse: "clickhouse+http://user:pass@host:8123/db",
+    trino: "trino://user:pass@host:8080/catalog",
+    dremio: "dremio+flight://user:pass@host:32010",
+    firebolt: "firebolt://user:pass@host:443/db",
+    risingwave: "postgresql+psycopg2://user:pass@host:4566/db",
+    materialize: "postgresql+psycopg2://user:pass@host:6875/db",
+    db2: "db2+ibm_db://user:pass@host:50000/db",
+    teradata: "teradatasql://user:pass@host:1025/db",
+    sap_hana: "hana+hdbcli://user:pass@host:30015/db",
+    informix: "informix+pyodbc://user:pass@host:9088/db",
+    athena: "awsathena+rest://@athena.region.amazonaws.com:443/?s3_staging_dir=s3://bucket",
+    synapse: "mssql+pyodbc://user:pass@host:1433/db",
+  };
+  return map[d] || "driver://user:pass@host:port/db";
 }
 
 export function defaultPortForType(type: string): number {

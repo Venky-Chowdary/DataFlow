@@ -42,7 +42,7 @@ import {
   updateTransferPlan,
   uploadFile,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, GENERIC_SQL_DRIVERS, getGenericSqlPlaceholder } from "../lib/connectorTypes";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -212,6 +212,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [destUsername, setDestUsername] = useState("");
   const [destPassword, setDestPassword] = useState("");
   const [destConnectionString, setDestConnectionString] = useState("");
+  const [destGenericSqlDriver, setDestGenericSqlDriver] = useState("postgresql");
   const [destWarehouse, setDestWarehouse] = useState("");
   const [transferring, setTransferring] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -2120,27 +2121,52 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
-              {destType === "mongodb" || destType === "generic_sql" ? (
+              {destType === "mongodb" ? (
                 <div className="df2-field df2-field-flex">
-                  <label className="df2-label">{destType === "generic_sql" ? "SQLAlchemy Connection String" : "Connection String (optional)"}</label>
+                  <label className="df2-label">Connection String (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
                     onChange={(e) => setDestConnectionString(e.target.value)}
-                    placeholder={destType === "generic_sql" ? "mssql+pyodbc://user:pass@host:1433/db" : "mongodb://localhost:27017/"}
+                    placeholder="mongodb://localhost:27017/"
                   />
                 </div>
               ) : null}
-              <div className="df2-field df2-field-md">
-                <label className="df2-label">Host</label>
-                <input className="df2-input" value={destHost} onChange={(e) => setDestHost(e.target.value)} />
-              </div>
-              <div className="df2-field df2-field-sm">
-                <label className="df2-label">Port</label>
-                <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
-              </div>
-              {destType !== "mongodb" && (
+              {destType === "generic_sql" ? (
                 <>
+                  <div className="df2-field df2-field-sm">
+                    <label className="df2-label">SQL engine</label>
+                    <select
+                      className="df2-select"
+                      value={destGenericSqlDriver}
+                      onChange={(e) => setDestGenericSqlDriver(e.target.value)}
+                    >
+                      {GENERIC_SQL_DRIVERS.map((d) => (
+                        <option key={d.id} value={d.id}>{d.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="df2-field df2-field-flex">
+                    <label className="df2-label">SQLAlchemy Connection String</label>
+                    <input
+                      className="df2-input"
+                      value={destConnectionString}
+                      onChange={(e) => setDestConnectionString(e.target.value)}
+                      placeholder={getGenericSqlPlaceholder(destGenericSqlDriver)}
+                    />
+                  </div>
+                </>
+              ) : null}
+              {destType !== "generic_sql" && destType !== "mongodb" && (
+                <>
+                  <div className="df2-field df2-field-md">
+                    <label className="df2-label">Host</label>
+                    <input className="df2-input" value={destHost} onChange={(e) => setDestHost(e.target.value)} />
+                  </div>
+                  <div className="df2-field df2-field-sm">
+                    <label className="df2-label">Port</label>
+                    <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
+                  </div>
                   <div className="df2-field df2-field-140">
                     <label className="df2-label">Username</label>
                     <input className="df2-input" value={destUsername} onChange={(e) => setDestUsername(e.target.value)} />
