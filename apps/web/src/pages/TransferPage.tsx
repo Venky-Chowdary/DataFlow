@@ -1401,10 +1401,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       success: job.status === "completed",
       records_transferred: job.records_processed,
       error: job.error,
+      operation: job.operation,
       destination: {
         database: job.destination_database,
         collection: job.destination_collection,
       },
+      destination_summary: job.destination_summary as TransferResult["destination_summary"],
     });
     if (job.status === "completed") onTransferComplete();
   };
