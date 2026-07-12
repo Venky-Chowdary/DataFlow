@@ -71,7 +71,7 @@ export function StructurePreview({
 
       {previewRows.length > 0 ? (
         <div className="df2-structure-table-wrap">
-          <table className="df2-structure-table">
+          <table className="df2-structure-table" style={{ "--cols": previewCols.length } as React.CSSProperties}>
             <thead>
               <tr>
                 {previewCols.map((col) => (

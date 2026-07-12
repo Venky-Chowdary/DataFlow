@@ -8,8 +8,6 @@ import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTil
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
-import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
@@ -21,6 +19,7 @@ import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
 import { ProofDashboard } from "../components/transfer/ProofDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
+import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { useActiveData } from "../lib/DataContext";
 import {
   analyzeDbTransfer,
@@ -1593,34 +1592,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
     return () => window.clearInterval(timer);
   }, [step, analyzing]);
 
-  const transferInsightTone =
-    transferring || activeJobId
-      ? "live"
-      : preflight && !preflight.passed
-        ? "warn"
-        : preflight?.passed
-          ? "ok"
-          : "info";
-  const transferInsightPill = transferring ? "Running" : STEPS[step - 1]?.label ?? `Step ${step}`;
-  const transferInsightMessage =
-    transferring || activeJobId
-      ? "Migration in progress — batch throughput and reconciliation stream to Job Theater."
-      : step === STEP_SOURCE
-        ? "Connect a file, database, or cloud object store as your source."
-        : step === STEP_DESTINATION
-          ? "Choose destination engine, connector, and sync policy before mapping."
-          : step === STEP_MAP
-          ? `${columnMappings.length || analysis?.columns.length || 0} columns mapped — review semantic matches against destination schema.`
-          : step === STEP_VALIDATE
-              ? preflight?.passed
-                ? "All preflight gates passed — ready to execute."
-                : preflight
-                  ? "Preflight reported issues — resolve before running."
-                  : "Run eight preflight gates before writing data."
-              : canExecute
-                ? "Execute the governed transfer with checksum proof."
-                : "Complete prior steps to unlock execution.";
-
   return (
     <PageShell
       wide
@@ -1628,27 +1599,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
       title="Transfer Studio"
       description="Source → Destination → Map → Validate → Run"
     >
-      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
-      <PageInsightStrip
-        tone={transferInsightTone}
-        pill={transferInsightPill}
-        message={transferInsightMessage}
-      />
-      <PageMetricsRow
-        compact
-        columns={4}
-        metrics={[
-          { label: "Step", value: `${step}/5`, icon: "transfer" },
-          { label: "Columns", value: columnMappings.length || analysis?.columns.length || "—", icon: "sparkle" },
-          {
-            label: "Preflight",
-            value: preflight?.passed ? "Passed" : preflight ? "Issues" : "Pending",
-            tone: preflight?.passed ? "green" : preflight ? "red" : undefined,
-            icon: "gate",
-          },
-          { label: "Source rows", value: parsed?.row_count != null ? parsed.row_count.toLocaleString() : "—", icon: "trend" },
-        ]}
-      />
+      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`}>
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
@@ -2673,86 +2624,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
       {step === STEP_RUN && result && !activeJobId && (
         <div className={`df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-banner df2-transfer-panel ${result.success ? "success" : "error"}`}>
-          {result.success ? (
-            <div>
-              <span className="df2-badge df2-badge-live df2-result-badge"><DtIcon name="check" size={14} /> Transfer Complete</span>
-              <p className="df2-result-stat">{result.records_transferred?.toLocaleString()} records transferred</p>
-              {result.operation && (
-                <p className="df2-result-meta">Operation: {result.operation}</p>
-              )}
-              {result.destination?.download_url && (
-                <p className="df2-result-meta">
-                  <a
-                    href={result.destination.download_url}
-                    className="df2-btn df2-btn-sm"
-                    download={result.destination.filename || `export.${result.destination?.format || "json"}`}
-                  >
-                    <DtIcon name="download" size={14} /> Download {result.destination.filename || "export"}
-                  </a>
-                </p>
-              )}
-              {result.destination?.path && !result.destination?.download_url && (
-                <p className="df2-result-meta">Exported to {result.destination.path}</p>
-              )}
-              {result.destination_summary && (
-                <div className="df2-result-meta">
-                  {result.destination_summary.type && <p>Destination type: {result.destination_summary.type}</p>}
-                  {result.destination_summary.driver && <p>Driver: {result.destination_summary.driver}</p>}
-                  {result.destination_summary.database && result.destination_summary.table && (
-                    <p>Target: {result.destination_summary.database}.{result.destination_summary.table}</p>
-                  )}
-                  {result.destination_summary.collection && (
-                    <p>Collection: {result.destination_summary.collection}</p>
-                  )}
-                  {result.destination_summary.checksum && (
-                    <p>Checksum: {result.destination_summary.checksum}</p>
-                  )}
-                  {Boolean(result.destination_summary.rejected_rows) && (
-                    <p>Rejected rows: {result.destination_summary.rejected_rows}</p>
-                  )}
-                  {result.destination_summary.warnings && result.destination_summary.warnings.length > 0 && (
-                    <ul className="df2-result-warnings">
-                      {result.destination_summary.warnings.map((w) => <li key={w}>{w}</li>)}
-                    </ul>
-                  )}
-                </div>
-              )}
-              {result.ddl_executed && result.ddl_executed.length > 0 && (
-                <ul className="df2-result-ddl">
-                  {result.ddl_executed.map((d) => <li key={d}>{d}</li>)}
-                </ul>
-              )}
-              <div className="df2-result-actions">
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => setStep(STEP_SOURCE)}>
-                  <DtIcon name="plus" size={14} /> New transfer
-                </button>
-                {onOpenJobs && (
-                  <button type="button" className="df2-btn" onClick={() => onOpenJobs()}>
-                    <DtIcon name="jobs" size={14} /> View Job Theater
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="df2-btn"
-                  onClick={() => void handleScheduleRoute()}
-                >
-                  <DtIcon name="activity" size={14} /> Schedule this route
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div>
-              <span className="df2-badge df2-badge-error"><DtIcon name="x" size={14} /> {result.error || "Transfer failed"}</span>
-              {result.error && (
-                <p className="df2-result-error-detail">{result.error}</p>
-              )}
-              {result.destination_summary?.warnings && result.destination_summary.warnings.length > 0 && (
-                <ul className="df2-result-warnings">
-                  {result.destination_summary.warnings.map((w) => <li key={w}>{w}</li>)}
-                </ul>
-              )}
-            </div>
-          )}
+          <TransferResultDashboard
+            result={result}
+            sourceLabel={sourceLabel}
+            sourceType={mapSourceType}
+            destLabel={mapDestRouteLabel}
+            destType={destKindMode === "file_export" ? exportFormat : destType}
+            onNewTransfer={() => setStep(STEP_SOURCE)}
+            onViewJobs={onOpenJobs}
+            onSchedule={() => void handleScheduleRoute()}
+          />
         </div>
       )}
       </main>

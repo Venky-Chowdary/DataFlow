@@ -132,6 +132,26 @@ const paths: Record<string, React.ReactNode> = {
       <line x1="12" y1="15" x2="12" y2="3" />
     </>
   ),
+  scan: (
+    <>
+      <path d="M3 7V5a2 2 0 012-2h2" />
+      <path d="M17 3h2a2 2 0 012 2v2" />
+      <path d="M21 17v2a2 2 0 01-2 2h-2" />
+      <path d="M7 21H5a2 2 0 01-2-2v-2" />
+    </>
+  ),
+  code: (
+    <>
+      <polyline points="16,18 22,12 16,6" />
+      <polyline points="8,6 2,12 8,18" />
+    </>
+  ),
+  lock: (
+    <>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M7 11V7a5 5 0 0110 0v4" />
+    </>
+  ),
   "chevron-left": <polyline points="15,18 9,12 15,6" />,
   "chevron-right": <polyline points="9,18 15,12 9,6" />,
   calendar: (

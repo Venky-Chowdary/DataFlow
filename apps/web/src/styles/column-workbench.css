@@ -163,9 +163,9 @@
 /* Split workspace — grid children MUST have min-height: 0 to scroll */
 .df2-map-step-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 34%);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 30%);
   grid-template-rows: minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   flex: 1 1 0;
   min-height: 0;
   height: 100%;
@@ -241,19 +241,19 @@
 
 .df2-column-review-chrome {
   flex-shrink: 0;
-  padding-top: 8px;
+  padding-top: 6px;
 }
 
 .df2-column-review-data-preview {
-  flex-shrink: 0;
-  min-height: 0;
-  max-height: min(460px, 42vh);
+  flex: 0 0 45%;
+  min-height: 240px;
+  max-height: 58%;
   overflow: hidden;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .df2-column-review-data-preview .df2-structure-preview {
-  padding: 10px 12px;
+  padding: 8px 10px;
   background: #fff;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
@@ -263,38 +263,64 @@
 }
 
 .df2-column-review-data-preview .df2-structure-preview-head {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  flex-shrink: 0;
 }
 
 .df2-column-review-data-preview .df2-structure-preview-head h4 {
-  font-size: 13px;
+  font-size: 12px;
   margin: 0;
 }
 
 .df2-column-review-data-preview .df2-structure-preview-head p {
-  font-size: 11px;
+  font-size: 10px;
   margin: 2px 0 0;
   color: #64748b;
 }
 
 .df2-column-review-data-preview .df2-structure-table-wrap {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
-  max-height: min(420px, 38vh);
+  max-height: 100%;
   overflow: auto;
 }
 
+.df2-column-review-data-preview .df2-structure-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.df2-column-review-data-preview .df2-structure-table th,
+.df2-column-review-data-preview .df2-structure-table td {
+  padding: 5px 7px;
+  font-size: 11px;
+  max-width: none;
+  width: calc(100% / var(--cols, 10));
+}
+
+.df2-column-review-data-preview .df2-structure-table th {
+  font-size: 10px;
+}
+
+.df2-column-review-data-preview .df2-structure-table th small {
+  display: none;
+}
+
+.df2-column-review-data-preview .df2-structure-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
 .df2-column-review.is-editor .df2-column-workbench-filters {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .df2-column-review.is-editor .df2-column-workbench-toolbar {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .df2-column-review.is-editor .df2-column-workbench-table-meta {
-  margin-bottom: 4px;
-  padding-bottom: 4px;
+  margin-bottom: 2px;
+  padding-bottom: 2px;
   border-bottom: 1px solid #f1f5f9;
 }
 
@@ -713,7 +739,7 @@
   width: 100%;
   padding-left: 36px !important;
   padding-right: 36px !important;
-  min-height: 40px;
+  min-height: 36px;
 }
 
 .df2-column-workbench-clear {

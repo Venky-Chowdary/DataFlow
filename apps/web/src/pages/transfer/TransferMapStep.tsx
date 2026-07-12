@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { ColumnReviewPanel } from "../../components/ColumnReviewPanel";
-import { MappingAccuracyBar } from "../../components/transfer/MappingAccuracyBar";
 import { MappingIntelligencePanel } from "../../components/MappingIntelligencePanel";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
@@ -124,11 +123,6 @@ export function TransferMapStep({
     <div className="df2-transfer-step-panel df2-map-step-panel">
       <div className="df2-card-head df2-map-step-head">
         <h3 className="df2-card-title">Map columns</h3>
-        <MappingAccuracyBar
-          mappings={columnMappings}
-          confidenceThreshold={confidenceThreshold}
-          llmUsed={llmUsed}
-        />
       </div>
 
       <div className="df2-card-body df2-map-step-body">

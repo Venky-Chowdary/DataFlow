@@ -53,6 +53,10 @@ export function PreflightTimeline({
         }]
       : [];
 
+  const passCount = gates.filter((g) => g.status === "pass").length;
+  const blockCount = gates.filter((g) => g.status === "block").length;
+  const skipCount = gates.filter((g) => g.status === "skip").length;
+
   const proof = result.proof_bundle;
   const decision = proof?.transfer_decision?.decision ?? (result.passed ? "approve" : "review");
   const decisionLabel = decision.toUpperCase();
@@ -183,9 +187,16 @@ export function PreflightTimeline({
 
       {compact && (
         <div className="df2-preflight-compact-head">
-          <h3 className="df2-preflight-title">
-            {running ? "Running checks…" : result.passed ? "All checks passed" : "Checks need attention"}
-          </h3>
+          <div>
+            <h3 className="df2-preflight-title">
+              {running ? "Running checks…" : result.passed ? "All checks passed" : "Checks need attention"}
+            </h3>
+            <div className="df2-preflight-compact-summary">
+              <span className="ok">{passCount} passed</span>
+              {blockCount > 0 && <span className="block">{blockCount} blocked</span>}
+              {skipCount > 0 && <span className="skip">{skipCount} skipped</span>}
+            </div>
+          </div>
           <span className="df2-preflight-compact-score">{result.passed_count}/{result.total_gates} passed</span>
         </div>
       )}
@@ -233,6 +244,36 @@ export function PreflightTimeline({
           </div>
         ))}
       </div>
+
+      {result.blockers.length > 0 && (
+        <div className="df2-preflight-diagnostics">
+          <div className="df2-preflight-diagnostics-head">
+            <DtIcon name="alert" size={14} />
+            <strong>Blockers</strong>
+            <span className="df2-preflight-diagnostics-count">{result.blockers.length}</span>
+          </div>
+          <ul className="df2-preflight-diagnostics-list">
+            {result.blockers.map((b) => (
+              <li key={b.id}>
+                <strong>{gateLabel(b.id)}:</strong> {b.message}
+                {b.details && typeof b.details === "object" && (
+                  <ul className="df2-preflight-diagnostics-sub">
+                    {Object.entries(b.details).map(([k, v]) => {
+                      const value = Array.isArray(v) ? v.slice(0, 3).join(", ") : String(v);
+                      if (!value || value === "[object Object]") return null;
+                      return (
+                        <li key={k}>
+                          <span>{k}:</span> {value}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

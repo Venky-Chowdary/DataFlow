@@ -3777,11 +3777,17 @@ body {
 
 .df2-preflight-step {
   display: grid;
-  grid-template-columns: 40px 1fr;
+  grid-template-columns: 40px minmax(0, 1fr);
   gap: 12px;
   padding: 12px 24px;
   border-left: 3px solid transparent;
   animation: df2-fade-in 0.3s ease both;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.df2-preflight-step > div {
+  min-width: 0;
 }
 
 .df2-preflight-step.pass { border-left-color: #059669; }
@@ -3803,7 +3809,7 @@ body {
 .df2-preflight-step.block .df2-preflight-marker { background: #fef2f2; color: #dc2626; }
 
 .df2-preflight-step-title { font-size: 14px; font-weight: 600; color: #0f172a; }
-.df2-preflight-step-msg { font-size: 13px; color: #64748b; margin-top: 2px; }
+.df2-preflight-step-msg { font-size: 13px; color: #64748b; margin-top: 2px; overflow-wrap: anywhere; }
 
 @keyframes df2-fade-in {
   from { opacity: 0; transform: translateY(4px); }

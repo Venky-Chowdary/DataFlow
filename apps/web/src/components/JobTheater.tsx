@@ -50,7 +50,7 @@ export function JobTheater({
 }: JobTheaterProps) {
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
-  const [logOpen, setLogOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(true);
   const [log, setLog] = useState<string[]>([]);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
@@ -158,7 +158,10 @@ export function JobTheater({
                 transform="rotate(-90 28 28)"
               />
             </svg>
-            <strong>{progress}%</strong>
+            <div className="df2-theater-v3-ring-label">
+              <strong>{progress}%</strong>
+              <small>{total > 0 ? `${processed.toLocaleString()}/${total.toLocaleString()}` : processed.toLocaleString()}</small>
+            </div>
           </div>
           <div className="df2-theater-v3-progress-copy">
             <h3>{isComplete ? "Transfer complete" : isFailed ? "Transfer failed" : job.phase || "Running"}</h3>

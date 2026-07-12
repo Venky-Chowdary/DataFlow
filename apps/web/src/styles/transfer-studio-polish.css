@@ -192,9 +192,11 @@
 .df2-mapping-accuracy-stat.block { color: #dc2626; }
 
 .df2-map-step-head {
-  flex-direction: column;
-  align-items: flex-start !important;
+  flex-direction: row;
+  align-items: center !important;
   gap: 10px !important;
+  padding: 10px 16px !important;
+  min-height: 42px;
 }
 
 .df2-mapping-progress {
@@ -420,7 +422,7 @@
 
 .df2-preflight-compact-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
@@ -431,6 +433,26 @@
   margin: 0;
   font-size: 15px;
 }
+
+.df2-preflight-compact-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.df2-preflight-compact-summary span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.df2-preflight-compact-summary .ok { background: #dcfce7; color: #15803d; }
+.df2-preflight-compact-summary .block { background: #fee2e2; color: #b91c1c; }
+.df2-preflight-compact-summary .skip { background: #fef9c3; color: #a16207; }
 
 .df2-preflight-compact-score {
   font-size: 12px;
@@ -471,6 +493,69 @@
 .df2-preflight.is-compact .df2-preflight-step-msg {
   font-size: 11px;
   line-height: 1.35;
+}
+
+.df2-preflight-diagnostics {
+  flex-shrink: 0;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  min-width: 0;
+}
+
+.df2-preflight-diagnostics-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #991b1b;
+  margin-bottom: 6px;
+}
+
+.df2-preflight-diagnostics-count {
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 10px;
+}
+
+.df2-preflight-diagnostics-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #7f1d1d;
+}
+
+.df2-preflight-diagnostics-list > li {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+.df2-preflight-diagnostics-list strong {
+  color: #991b1b;
+}
+
+.df2-preflight-diagnostics-sub {
+  margin: 4px 0 0;
+  padding-left: 14px;
+  font-size: 11px;
+  color: #7f1d1d;
+}
+
+.df2-preflight-diagnostics-sub li span {
+  font-weight: 600;
+  text-transform: capitalize;
 }
 
 /* Validate right rail */
@@ -593,6 +678,7 @@
   line-height: 1.4;
   color: #92400e;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .df2-validate-rail-review {
