@@ -1844,7 +1844,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           ) : (
             <div className="df2-source-connection">
               {dbSourceConnectors.length > 0 && (
-                <div className="df2-form-row" style={{ alignItems: "center", gap: 12 }}>
+                <div className="df2-form-row df2-connection-source-toggle">
                   <label className="df2-label">Connection source</label>
                   <button
                     type="button"
@@ -1859,10 +1859,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 </div>
               )}
               {sourceManualEnabled || dbSourceConnectors.length === 0 ? (
-                <div className="df2-form-rows" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div className="df2-form-rows df2-connection-form">
                   <div className="df2-form-row">
                     <div className="df2-field df2-field-sm">
-                      <label className="df2-label">Database type</label>
+                      <label className="df2-label">Engine</label>
                       <select
                         className="df2-select"
                         value={sourceManualType}
@@ -1890,7 +1890,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                           </select>
                         </div>
                         <div className="df2-field df2-field-flex">
-                          <label className="df2-label">SQLAlchemy Connection String</label>
+                          <label className="df2-label">Connection string</label>
                           <input
                             className="df2-input"
                             value={sourceManualConnectionString}
@@ -2151,12 +2151,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           />
 
           {!connectorId && destType !== "bigquery" && (
-          <div className="df2-dest-section df2-dest-manual-fields">
-            <label className="df2-label">Connection</label>
+          <div className="df2-dest-section df2-dest-manual-fields df2-connection-form">
+            <label className="df2-label">Database connection</label>
             <div className="df2-form-row">
               {destType === "mongodb" ? (
                 <div className="df2-field df2-field-flex">
-                  <label className="df2-label">Connection String (optional)</label>
+                  <label className="df2-label">Connection string (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
@@ -2180,7 +2180,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                     </select>
                   </div>
                   <div className="df2-field df2-field-flex">
-                    <label className="df2-label">SQLAlchemy Connection String</label>
+                    <label className="df2-label">Connection string</label>
                     <input
                       className="df2-input"
                       value={destConnectionString}

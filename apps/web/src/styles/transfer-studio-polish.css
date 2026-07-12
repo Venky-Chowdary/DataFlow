@@ -1,4 +1,41 @@
-/* ═══ Transfer Studio UX polish — destination, map, validate, theater ═══ */
+/* ═══ Transfer Studio UX polish — source, destination, map, validate, theater ═══ */
+
+.df2-connection-source-toggle {
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.df2-connection-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.df2-connection-form .df2-form-row {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.df2-connection-form .df2-field {
+  margin-bottom: 0;
+}
+
+.df2-connection-form .df2-label {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.df2-connection-form .df2-input,
+.df2-connection-form .df2-select {
+  min-height: 36px;
+}
 
 .df2-transfer-studio-body.is-full-width {
   grid-template-columns: 1fr !important;
