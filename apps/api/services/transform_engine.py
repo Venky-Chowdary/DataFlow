@@ -228,7 +228,11 @@ def _normalize_locale_separators(text: str) -> str | None:
 
 
 def _parse_decimal(value: str) -> str | None:
-    text = _normalize_numeric_text(value.strip())
+    text = value.strip()
+    # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
+    if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
+        return None
+    text = _normalize_numeric_text(text)
     text = _normalize_locale_separators(text)
     if text is None or text == "":
         return None

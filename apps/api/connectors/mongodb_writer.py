@@ -155,12 +155,14 @@ def write_mapped_rows(
             if upper in {"DECIMAL", "NUMERIC"}:
                 return Decimal128(str(value))
             if upper == "DATE":
-                if isinstance(value, _date):
+                if isinstance(value, _datetime):
                     return value
+                if isinstance(value, _date):
+                    return _datetime.combine(value, _time.min)
                 text = value.strip() if isinstance(value, str) else str(value)
                 for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d"):
                     try:
-                        return _datetime.strptime(text, fmt).date()
+                        return _datetime.strptime(text, fmt)
                     except ValueError:
                         continue
                 return value

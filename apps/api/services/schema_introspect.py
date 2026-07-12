@@ -49,8 +49,21 @@ def _refine_columns_by_samples(
     sample_limit: int = 200,
     quote_char: str = '"',
 ) -> list[dict]:
-    """Sample string columns and use heuristics to recover UUID/JSON/BINARY/etc."""
-    candidates = [c for c in columns if c["inferred_type"] in ("TEXT", "VARCHAR", "CHAR", "CHARACTER VARYING")]
+    """Sample string columns and use heuristics to recover UUID/JSON/BINARY/etc.
+
+    Only refine columns whose database type is character/text. PostgreSQL
+    types such as point, bit, interval, money, inet, cidr, macaddr, xml,
+    tsvector, and hstore are intentionally stored as TEXT to preserve their
+    native formatting, so value-based inference must not override them.
+    """
+    text_like_db_types = {
+        "text", "character varying", "varchar", "character", "char", "name",
+    }
+    candidates = [
+        c for c in columns
+        if c["inferred_type"] in ("TEXT", "VARCHAR", "CHAR", "CHARACTER VARYING")
+        and (c.get("data_type") or "").lower() in text_like_db_types
+    ]
     if not candidates:
         return columns
 
@@ -314,6 +327,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                             "name": name,
                             "inferred_type": _pg_to_logical(dtype),
                             "nullable": nullable == "YES",
+                            "data_type": dtype,
                         }
                     )
                 if table:
@@ -334,6 +348,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                             "name": name,
                             "inferred_type": _pg_to_logical(dtype),
                             "nullable": nullable == "YES",
+                            "data_type": dtype,
                         }
                     )
                 if tables:

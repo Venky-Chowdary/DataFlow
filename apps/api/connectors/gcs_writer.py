@@ -75,7 +75,7 @@ def write_mapped_rows(
         column_types=column_types,
     )
 
-    def _to_json_value(value: Any) -> Any:
+    def _to_json_value(value: Any, col: str) -> Any:
         if value is None:
             return None
         if isinstance(value, str):
@@ -83,12 +83,27 @@ def write_mapped_rows(
             if not text:
                 return value
             try:
+                from services.type_system import normalize_logical_type
+            except Exception:
+                normalize_logical_type = lambda x: str(x or "").lower()
+            ctype = normalize_logical_type(column_types.get(col, "")) if column_types else ""
+            # Structural types are parsed as JSON objects/arrays.
+            if ctype in {"json", "array", "object", "struct"}:
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    return value
+            # Text, dates, UUID, binary and other non-numeric types must stay as strings.
+            if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
+                return value
+            # Numeric / boolean types: allow JSON scalar parsing where valid.
+            try:
                 return json.loads(text)
             except json.JSONDecodeError:
                 return value
         return value
 
-    records = [{c: _to_json_value(v) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = [{c: _to_json_value(v, c) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
     if key.endswith(".csv"):
         def _csv_cell(value: Any) -> str:
