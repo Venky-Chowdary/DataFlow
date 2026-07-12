@@ -73,7 +73,6 @@ def read_table_batch(
     limit: int = 100_000,
     known_total_rows: int | None = None,
 ) -> ReadBatch:
-    del port
     account = normalize_account(host)
     conn = get_connection(
         account=account,

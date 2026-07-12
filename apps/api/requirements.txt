@@ -41,9 +41,15 @@ pyarrow>=14.0.0
 # Security
 cryptography>=42.0.0
 
-# Cloud SDKs (for future)
-# google-cloud-storage>=2.14.0  # GCP
-# azure-storage-blob>=12.19.0   # Azure
+# Cloud SDKs
+azure-storage-blob>=12.19.0
+
+# Local testing / emulators
+moto[server]>=5.0.0
+fakesnow>=0.8.0
+
+# Warehouses
+databricks-sqlalchemy>=2.0.0
 
 # Testing
 pytest>=7.4.0

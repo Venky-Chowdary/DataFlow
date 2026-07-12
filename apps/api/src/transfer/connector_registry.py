@@ -80,6 +80,12 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="read_object",
         writer="connectors.gcs_writer",
     ),
+    "adls": ConnectorModules(
+        probe=("connectors.adls", "test_adls"),
+        reader="connectors.adls_reader",
+        reader_fn="read_object",
+        writer="connectors.adls_writer",
+    ),
     "redis": ConnectorModules(
         probe=("connectors.redis_kv", "test_redis"),
         reader="connectors.redis_reader",

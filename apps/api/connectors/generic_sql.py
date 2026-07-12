@@ -123,7 +123,7 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "sap_hana": "hana",
     "hana": "hana",
     "duckdb": "duckdb",
-    "databricks": "databricks+connector",
+    "databricks": "databricks",
     "sqlite": "sqlite",
     # PostgreSQL-wire compatible engines
     "greenplum": "postgresql+psycopg2",

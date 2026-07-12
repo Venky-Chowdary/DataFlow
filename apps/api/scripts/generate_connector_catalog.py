@@ -14,6 +14,7 @@ LIVE = [
     ("snowflake", "Snowflake", "warehouse", "Cloud data warehouse with batched load"),
     ("csv", "CSV / TSV", "file", "Upload, parse, infer schema, semantic mapping"),
     ("json", "JSON", "file", "Nested document flattening and array expansion"),
+    ("adls", "Azure Blob Storage / ADLS Gen2", "cloud_storage", "Azure Blob and ADLS Gen2 read/write with connection string or account key"),
 ]
 
 BETA = [

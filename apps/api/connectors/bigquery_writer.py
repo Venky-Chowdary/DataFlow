@@ -55,7 +55,7 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     error_policy: str | None = None,
 ) -> WriteResult:
-    del port, username, password, ssl, warehouse
+    del username, password, ssl, warehouse
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_name = sanitize_identifier(table_name)
@@ -103,7 +103,13 @@ def write_mapped_rows(
         from google.cloud import bigquery
         from connectors.bigquery_conn import get_client
 
-        client = get_client(project_id=project_id, credentials_path=connection_string)
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            host=host,
+            port=port,
+            connection_string=connection_string,
+        )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
         schema_fields = [

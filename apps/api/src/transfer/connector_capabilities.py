@@ -19,6 +19,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "elasticsearch": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "redshift": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
 }
 
@@ -40,6 +41,10 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "aws_s3": "s3",
     "google_cloud_storage": "gcs",
     "gcs": "gcs",
+    "adls": "adls",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
     "minio": "s3",
     "wasabi": "s3",
     "backblaze_b2": "s3",
@@ -74,20 +79,21 @@ CATALOG_ID_ALIASES: dict[str, str] = {
 SUGGESTED_SOURCES = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
-    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
 TRANSFER_READY_CATALOG_IDS = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
-    "sqlite", "generic_sql",
+    "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "adls",
+    "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+    "redis", "elasticsearch", "sqlite", "generic_sql",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
 })
 
 SUGGESTED_DESTINATIONS = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
-    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
 ]
 
 
@@ -103,6 +109,7 @@ def default_port(driver_type: str) -> int:
         "dynamodb": 443,
         "s3": 443,
         "gcs": 443,
+        "adls": 443,
         "redshift": 5439,
         "sqlite": 0,
         "generic_sql": 0,
@@ -248,6 +255,7 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "dynamodb": "boto3",
     "s3": "boto3",
     "gcs": "google.cloud.storage",
+    "adls": "azure.storage.blob",
     "snowflake": "snowflake.connector",
     "bigquery": "google.cloud.bigquery",
     "sqlite": "sqlite3",
@@ -288,6 +296,7 @@ _GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
     "impala": "impyla",
     "spark": "pyhive",
     "phoenix": "phoenixdb",
+    "databricks": "databricks",
     "databricks+connector": "databricks",
     "dremio+flight": "dremio_sqlalchemy",
     "firebolt": "firebolt",

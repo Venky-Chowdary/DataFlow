@@ -38,7 +38,7 @@ def read_table_batch(
     limit: int = 500,
     known_total_rows: int | None = None,
 ) -> ReadBatch:
-    del port, username, password, ssl, warehouse
+    del username, password, ssl, warehouse
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_ref = f"`{project_id}.{dataset_id}.{table}`"
@@ -46,8 +46,13 @@ def read_table_batch(
     try:
         from connectors.bigquery_conn import get_client
 
-        table_ref = f"`{project_id}.{dataset_id}.{table}`"
-        client = get_client(project_id=project_id, credentials_path=connection_string)
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            host=host,
+            port=port,
+            connection_string=connection_string,
+        )
         if known_total_rows is not None:
             total = known_total_rows
         else:
@@ -57,7 +62,11 @@ def read_table_batch(
         query = f"SELECT {col_sql} FROM {table_ref} LIMIT {limit} OFFSET {offset}"
         job = client.query(query)
         rows_iter = job.result()
-        headers = [field.name for field in job.schema]
+        if job.schema:
+            headers = [field.name for field in job.schema]
+        else:
+            table = client.get_table(f"{project_id}.{dataset_id}.{table}")
+            headers = [field.name for field in table.schema]
         rows = [[cell_to_string(v) for v in row.values()] for row in rows_iter]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     except Exception as exc:

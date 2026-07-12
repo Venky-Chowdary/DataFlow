@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "total": 733,
+  "total": 734,
   "connectors": [
     {
       "id": "postgresql",
@@ -29,6 +29,13 @@
       "category": "file",
       "status": "live",
       "description": "Nested document flattening and array expansion"
+    },
+    {
+      "id": "adls",
+      "name": "Azure Blob Storage / ADLS Gen2",
+      "category": "cloud_storage",
+      "status": "live",
+      "description": "Azure Blob and ADLS Gen2 read/write with connection string or account key"
     },
     {
       "id": "excel",

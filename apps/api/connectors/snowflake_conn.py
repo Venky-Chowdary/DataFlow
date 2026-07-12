@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
@@ -12,6 +13,16 @@ def normalize_account(host: str) -> str:
     if ".snowflakecomputing.com" in host:
         return host.split(".snowflakecomputing.com")[0]
     return host
+
+
+def _is_local_account(account: str) -> bool:
+    return account.lower() in ("local", "localhost", "fakesnow")
+
+
+def _fakesnow_db_path() -> str:
+    path = os.environ.get("FAKESNOW_DB_PATH", "/tmp/fakesnow_data")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def get_connection(
@@ -45,4 +56,35 @@ def get_connection(
         kwargs["schema"] = schema
     if warehouse:
         kwargs["warehouse"] = warehouse
+
+    # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
+    # and persists databases to disk so read-after-write works across connections.
+    if _is_local_account(kwargs["account"]):
+        import fakesnow
+        import unittest.mock
+
+        # fakesnow cannot be nested, so reuse an active patch in this thread.
+        already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
+        if not already_patched:
+            patch_cm = fakesnow.patch(
+                db_path=_fakesnow_db_path(),
+                nop_regexes=[r"^USE WAREHOUSE"],
+            )
+            patch_cm.__enter__()
+        else:
+            patch_cm = None
+
+        conn = snowflake.connector.connect(**kwargs)
+        orig_close = conn.close
+
+        def _close() -> None:
+            try:
+                orig_close()
+            finally:
+                if patch_cm is not None:
+                    patch_cm.__exit__(None, None, None)
+
+        conn.close = _close  # type: ignore[assignment]
+        return conn
+
     return snowflake.connector.connect(**kwargs)

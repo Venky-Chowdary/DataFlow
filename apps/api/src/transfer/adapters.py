@@ -146,7 +146,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         5439 if fmt == "redshift" else
         0 if fmt == "sqlite" else
         0 if fmt == "generic_sql" else
-        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs") else 5432
+        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls") else 5432
     )
     default_schema = (
         "PUBLIC" if fmt == "snowflake" else
@@ -400,6 +400,20 @@ def read_source_database(
         schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
+    if db_type == "adls":
+        from connectors.adls_reader import read_object
+
+        container = cfg["database"]
+        key = endpoint.table or endpoint.collection or endpoint.schema or ""
+        if not container or not key:
+            raise ValueError("Azure Blob source requires container (database) and blob key (table/collection)")
+        batch = read_object(cfg=cfg, bucket=container, key=key, offset=0, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, key)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
     if db_type == "s3":
         from connectors.s3_reader import read_object
 
@@ -637,6 +651,20 @@ def write_destination_database(
         ddl_log.insert(0, f"PUT gs://{cfg['database']}/{result.table_name}")
         return result.rows_written, ddl_log, {
             "type": "gcs", "bucket": cfg["database"], "key": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "adls":
+        from connectors.adls_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"ADLS FIELD {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Azure Blob write failed")
+        ddl_log.insert(0, f"PUT abfs://{cfg['database']}/{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "adls", "container": cfg["database"], "key": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
             **_writer_diagnostics(result),
         }
