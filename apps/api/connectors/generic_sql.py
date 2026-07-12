@@ -197,7 +197,7 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
     "exasol": 8563,
     "firebird": 3050,
     "h2": 9092,
-    "clickhouse": 8123,
+    "clickhouse": 9000,  # native TCP port for clickhouse+native
     "druid": 8082,
     "pinot": 8099,
     "presto": 8080,
@@ -414,7 +414,7 @@ def _logical_type_from_sa(col_type: Any) -> str:
     return normalize_logical_type(repr_)
 
 
-def _sa_type_for_logical(logical: str, dialect_name: str) -> Any:
+def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
     """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine."""
     t = (logical or "string").lower().strip()
 
@@ -426,30 +426,38 @@ def _sa_type_for_logical(logical: str, dialect_name: str) -> Any:
     if t == "integer":
         return _maybe_nullable(sa.BigInteger())
     if t == "decimal":
+        if db_type == "risingwave":
+            return sa.Numeric()
+        if db_type == "questdb":
+            return sa.Float()
         return _maybe_nullable(sa.Numeric(38, 10))
     if t == "boolean":
         return _maybe_nullable(sa.Boolean())
     if t == "date":
         return _maybe_nullable(sa.Date())
     if t == "datetime":
+        if db_type == "questdb":
+            return sa.DateTime()
         # Preserve timezone metadata when the target dialect supports it.
         if dialect_name == "clickhouse":
             return _maybe_nullable(ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime())
-        if dialect_name == "trino" and TrinoTimestamp is not None:
+        if db_type == "trino" and TrinoTimestamp is not None:
             return TrinoTimestamp(precision=3, timezone=True)
         return sa.DateTime(timezone=True)
     if t == "time":
         return _maybe_nullable(sa.Time())
     if t == "uuid":
+        if db_type == "questdb":
+            return sa.Text()
         return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
-        if dialect_name in ("oracle", "clickhouse", "trino"):
+        if db_type in ("oracle", "clickhouse", "trino", "questdb"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
         return sa.JSON()
     if t == "binary":
-        if dialect_name in ("clickhouse", "trino"):
+        if db_type in ("clickhouse", "trino", "questdb"):
             return _maybe_nullable(sa.Text())
         return sa.LargeBinary()
     return _maybe_nullable(sa.Text())
@@ -467,7 +475,7 @@ def _is_string_type(sa_type: Any) -> bool:
     return False
 
 
-def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: str = "") -> Any:
+def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: str = "", db_type: str = "") -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
     if value is None:
         return None
@@ -526,16 +534,27 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc)
 
+        def _naive_utc(dt: datetime) -> datetime:
+            return _ensure_utc(dt).replace(tzinfo=None)
+
         if isinstance(value, datetime):
+            if db_type == "questdb":
+                return _naive_utc(value)
             return _ensure_utc(value)
         if isinstance(value, date):
-            return _ensure_utc(datetime.combine(value, time()))
+            dt = datetime.combine(value, time())
+            if db_type == "questdb":
+                return _naive_utc(dt)
+            return _ensure_utc(dt)
         if isinstance(value, str):
             text = value.strip()
             if text.endswith("Z"):
                 text = text[:-1] + "+00:00"
             try:
-                return _ensure_utc(datetime.fromisoformat(text))
+                dt = datetime.fromisoformat(text)
+                if db_type == "questdb":
+                    return _naive_utc(dt)
+                return _ensure_utc(dt)
             except Exception:
                 return value
         return value
@@ -585,10 +604,16 @@ def _cell_to_string(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, memoryview):
+        return base64.b64encode(value.tobytes()).decode("ascii")
+    if isinstance(value, bytearray):
+        return base64.b64encode(value).decode("ascii")
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, Decimal):
         return str(value)
+    if isinstance(value, datetime) and value.tzinfo is None and value.time() == time():
+        return value.date().isoformat()
     return str(value)
 
 
@@ -674,6 +699,7 @@ def _build_table_for_write(
     schema: str | None,
     columns: list[str],
     column_types: dict[str, str],
+    db_type: str = "",
 ) -> sa.Table:
     """Build an explicit Table definition for CREATE/INSERT using the target schema."""
     metadata = sa.MetaData()
@@ -684,7 +710,7 @@ def _build_table_for_write(
         cols.append(
             sa.Column(
                 col,
-                _sa_type_for_logical(logical, dialect_name),
+                _sa_type_for_logical(logical, dialect_name, db_type),
                 quote=True,
             )
         )
@@ -727,10 +753,19 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
             "VARCHAR": "string",
             "TEXT": "string",
         }
-        samples = [str(v) if v is not None else "" for v in values]
+        samples = [_cell_to_string(v) if v is not None else "" for v in values]
         return mapped.get(infer_type(samples, field_name=field_name))
     except Exception:
         return None
+
+
+def _sample_raw_table(conn: Any, table: str, schema: str | None) -> tuple[list[str], list[Any]]:
+    q = "\""
+    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    result = conn.execute(sa.text(f"SELECT * FROM {qualified} LIMIT 200"))
+    headers = list(result.keys())
+    rows = result.fetchall()
+    return headers, rows
 
 
 def introspect_table_schema(
@@ -744,7 +779,28 @@ def introspect_table_schema(
     try:
         schema = _schema_name(cfg)
         inspector = inspect(engine)
-        columns = inspector.get_columns(table, schema=schema)
+        try:
+            columns = inspector.get_columns(table, schema=schema)
+        except Exception:
+            # Engines like RisingWave/QuestDB expose a SQL endpoint but not full pg_catalog.
+            with engine.connect() as conn:
+                headers, sample_rows = _sample_raw_table(conn, table, schema)
+                result = [
+                    {
+                        "name": name,
+                        "inferred_type": "string",
+                        "nullable": True,
+                    }
+                    for name in headers
+                ]
+                if sample_rows:
+                    for idx, col in enumerate(result):
+                        values = [row[idx] for row in sample_rows if idx < len(row)]
+                        inferred = _infer_logical_from_samples(values, field_name=col["name"])
+                        if inferred:
+                            col["inferred_type"] = inferred
+                return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
+
         result = []
         for col in columns:
             result.append(
@@ -757,15 +813,9 @@ def introspect_table_schema(
 
         # Sample the table to narrow generic String columns to JSON, UUID, BINARY, etc.
         try:
-            dialect_name = engine.dialect.name if engine.dialect else ""
             with engine.connect() as conn:
-                if dialect_name == "clickhouse":
-                    sample_sql = f"SELECT * FROM {table} LIMIT 200"
-                else:
-                    sample_sql = f"SELECT * FROM {table} LIMIT 200"
-                sample_rows = conn.execute(sa.text(sample_sql)).fetchall()
+                headers, sample_rows = _sample_raw_table(conn, table, schema)
                 if sample_rows:
-                    col_names = [c["name"] for c in columns]
                     for idx, col in enumerate(result):
                         if col["inferred_type"] == "string":
                             values = [row[idx] for row in sample_rows if idx < len(row)]
@@ -789,6 +839,15 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
+        db_type = (cfg.get("type") or "").lower()
+        if db_type == "questdb":
+            # QuestDB's pg_catalog reflection is incomplete, so use a plain DDL drop.
+            q = "\""
+            qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+            with engine.connect() as conn:
+                conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
+                conn.commit()
+            return True
         table_obj = sa.Table(table, sa.MetaData(), schema=schema)
         table_obj.drop(engine, checkfirst=True)
         return True
@@ -796,6 +855,40 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
         return False
     finally:
         engine.dispose()
+
+
+def _read_table_raw(
+    conn: Any,
+    table: str,
+    schema: str | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[str], list[list[Any]]]:
+    """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
+    q = "\""
+    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    sql = f"SELECT * FROM {qualified}"
+    if offset > 0:
+        sql += f" LIMIT {limit} OFFSET {offset}"
+    else:
+        sql += f" LIMIT {limit}"
+    result = conn.execute(sa.text(sql))
+    headers = list(result.keys())
+    rows = [[_cell_to_string(value) for value in row] for row in result.fetchall()]
+    return headers, rows
+
+
+def _count_table_raw(
+    conn: Any,
+    table: str,
+    schema: str | None,
+) -> int:
+    q = "\""
+    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    try:
+        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar() or 0
+    except Exception:
+        return 0
 
 
 def read_table_batch(
@@ -827,33 +920,43 @@ def read_table_batch(
 
     try:
         with engine.connect() as conn:
-            table_obj = _reflect_table(engine, table, schema_name, columns)
-            selected_cols = list(table_obj.c)
-            if columns:
-                selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
-            else:
-                columns = selected_cols = list(table_obj.c)
+            try:
+                table_obj = _reflect_table(engine, table, schema_name, columns)
+                selected_cols = list(table_obj.c)
+                if columns:
+                    selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+                else:
+                    columns = selected_cols = list(table_obj.c)
 
-            stmt = sa.select(*selected_cols)
-            if offset > 0:
-                order_col = selected_cols[0]
-                stmt = stmt.order_by(order_col).offset(offset).limit(limit)
-            else:
-                stmt = stmt.limit(limit)
+                stmt = sa.select(*selected_cols)
+                if offset > 0:
+                    order_col = selected_cols[0]
+                    stmt = stmt.order_by(order_col).offset(offset).limit(limit)
+                else:
+                    stmt = stmt.limit(limit)
 
-            fetched = conn.execute(stmt).fetchall()
-            headers = [c.name for c in selected_cols]
-            rows = [[_cell_to_string(value) for value in row] for row in fetched]
+                fetched = conn.execute(stmt).fetchall()
+                headers = [c.name for c in selected_cols]
+                rows = [[_cell_to_string(value) for value in row] for row in fetched]
 
-            if known_total_rows is not None:
-                total = known_total_rows
-            else:
-                try:
-                    total = conn.execute(
-                        sa.select(sa.func.count()).select_from(table_obj)
-                    ).scalar()
-                except Exception:
-                    total = len(rows)
+                if known_total_rows is not None:
+                    total = known_total_rows
+                else:
+                    try:
+                        total = conn.execute(
+                            sa.select(sa.func.count()).select_from(table_obj)
+                        ).scalar()
+                    except Exception:
+                        total = len(rows)
+            except Exception:
+                # Engines like RisingWave/QuestDB have incomplete pg_catalog reflection.
+                headers, rows = _read_table_raw(conn, table, schema_name, offset, limit)
+                if known_total_rows is not None:
+                    total = known_total_rows
+                else:
+                    total = _count_table_raw(conn, table, schema_name)
+                    if not total:
+                        total = len(rows)
 
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
@@ -983,21 +1086,26 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
 
-    table_obj = _build_table_for_write(engine, table_name, schema_name, target_cols, target_column_types)
+    table_obj = _build_table_for_write(engine, table_name, schema_name, target_cols, target_column_types, db_type=cfg.get("type", ""))
 
     dialect_name = engine.dialect.name if engine.dialect else ""
-    sa_col_types = {col: _sa_type_for_logical(target_column_types.get(col, "string"), dialect_name) for col in target_cols}
+    sa_col_types = {col: _sa_type_for_logical(target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")) for col in target_cols}
 
     converted_rows: list[dict] = []
     for row in mapped_rows:
         converted_rows.append(
-            {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string"), sa_col_types.get(target_cols[i]), dialect_name) for i in range(len(target_cols))}
+            {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string"), sa_col_types.get(target_cols[i]), dialect_name, cfg.get("type", "")) for i in range(len(target_cols))}
         )
 
     try:
         with engine.connect() as conn:
-            inspector = inspect(engine)
-            table_exists = inspector.has_table(table_name, schema=schema_name)
+            db_type = (cfg.get("type") or "").lower()
+            if db_type == "questdb":
+                # QuestDB's pg_catalog reflection is incomplete; use idempotent DDL.
+                table_exists = False
+            else:
+                inspector = inspect(engine)
+                table_exists = inspector.has_table(table_name, schema=schema_name)
 
             if write_mode == "replace" and table_exists:
                 conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
@@ -1005,7 +1113,13 @@ def write_mapped_rows(
                 table_exists = False
 
             if create_table and not table_exists:
-                conn.execute(sa.schema.CreateTable(table_obj))
+                if db_type == "questdb":
+                    # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
+                    ddl = str(sa.schema.CreateTable(table_obj, if_not_exists=True).compile(dialect=engine.dialect))
+                    ddl = ddl.replace("TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP").replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
+                    conn.execute(sa.text(ddl))
+                else:
+                    conn.execute(sa.schema.CreateTable(table_obj))
                 conn.commit()
 
             total = len(converted_rows)
