@@ -637,13 +637,20 @@ def map_columns(
             tgt_types[t] = "VARCHAR"
 
     if not target_columns:
+        # Destination schema is unknown/empty — preserve source columns and types.
+        # This is a passthrough identity mapping: source columns become the target
+        # schema, and the source type is carried forward so writers can create the
+        # destination table with safe, fidelity-preserving types.
         return [
             {
                 "source": src,
                 "target": _semantic_form(src),
-                "confidence": 0.72,
-                "reasoning": "Inferred target name from semantic expansion",
+                "confidence": 0.95,
+                "reasoning": "Target schema unknown — preserving source column and type",
                 "user_override": False,
+                "source_type": src_types.get(src, "VARCHAR"),
+                "target_type": src_types.get(src, "VARCHAR"),
+                "assignment_strategy": "identity_passthrough",
             }
             for src in source_columns
         ]

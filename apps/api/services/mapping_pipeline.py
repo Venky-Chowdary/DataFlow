@@ -214,6 +214,21 @@ def run_mapping_pipeline(
         source_schemas=source_schemas,
         target_schemas=target_schemas,
     )
+
+    # If the destination schema is unknown, derive it from the identity mapping.
+    # This lets the type-coercion and transform resolvers produce correct target
+    # types and DDL when the user has not created a destination table yet.
+    if not target_columns and not target_schemas and base_mappings:
+        target_columns = [m["target"] for m in base_mappings]
+        target_schemas = [
+            {
+                "name": m["target"],
+                "inferred_type": m.get("target_type", "VARCHAR"),
+                "samples": [],
+            }
+            for m in base_mappings
+        ]
+
     pruned, dropped = entailment_prune(base_mappings, target_columns)
     unmapped_after_prune = [s for s in source_columns if s not in {m["source"] for m in pruned}]
 
