@@ -312,10 +312,10 @@ function AppShell({
               </span>
               <span>{item.label}</span>
               {item.id === "connectors" && connectors.length > 0 && (
-                <span className="df2-nav-badge" aria-hidden="true">{connectors.length}</span>
+                <span className="df2-nav-badge" aria-hidden="true"> {connectors.length}</span>
               )}
               {item.id === "jobs" && jobs.length > 0 && (
-                <span className="df2-nav-badge" aria-hidden="true">{jobs.length}</span>
+                <span className="df2-nav-badge" aria-hidden="true"> {jobs.length}</span>
               )}
             </button>
           ))}
@@ -387,7 +387,7 @@ function AppShell({
             </button>
             <div className="df2-breadcrumb">
               <span>Workspace</span>
-              <strong>{currentNav?.label ?? "DataFlow"}</strong>
+              <strong> {currentNav?.label ?? "DataFlow"}</strong>
             </div>
             <WorkspaceSearch
               query={searchQuery}
