@@ -455,10 +455,14 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     if t == "decimal":
         if db_type == "risingwave":
             return sa.Numeric()
-        if db_type == "questdb":
-            return sa.Float()
+        if db_type in ("questdb", "duckdb"):
+            return sa.Double()
         if db_type == "presto":
             return sa.DECIMAL(38, 15)
+        # PostgreSQL-wire engines (Citus, Materialize, CrateDB, etc.) store
+        # arbitrary-scale NUMERIC without padding, so avoid fixed scale.
+        if dialect_name == "postgresql":
+            return sa.Numeric()
         return _maybe_nullable(sa.Numeric(38, 15))
     if t == "boolean":
         return _maybe_nullable(sa.Boolean())
@@ -476,8 +480,9 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return sa.TIMESTAMP()
         return sa.DateTime(timezone=True)
     if t == "time":
-        # ClickHouse and QuestDB do not have a native TIME column; store as string.
-        if dialect_name == "clickhouse" or db_type in ("clickhouse", "questdb"):
+        # ClickHouse, QuestDB and Presto (PyHive) do not bind Python time objects
+        # reliably; store as string in these engines.
+        if dialect_name == "clickhouse" or db_type in ("clickhouse", "questdb", "presto"):
             return _maybe_nullable(sa.String())
         return _maybe_nullable(sa.Time())
     if t == "uuid":
@@ -489,6 +494,8 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         # FixedString(36) padding/failure for non-canonical UUIDs.
         if dialect_name == "clickhouse":
             return _maybe_nullable(sa.String())
+        if dialect_name == "postgresql":
+            return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
@@ -609,12 +616,21 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return value
             return str(value)
         if isinstance(value, time):
+            # PyHive / Presto does not accept Python time objects; send an ISO string.
+            if db_type == "presto" or dialect_name == "presto":
+                return value.isoformat()
             return value
         if isinstance(value, datetime):
-            return value.time()
+            t = value.time()
+            if db_type == "presto" or dialect_name == "presto":
+                return t.isoformat()
+            return t
         if isinstance(value, str):
             try:
-                return time.fromisoformat(value)
+                t = time.fromisoformat(value)
+                if db_type == "presto" or dialect_name == "presto":
+                    return value
+                return t
             except Exception:
                 return value
         return value
@@ -841,6 +857,47 @@ def introspect_table_schema(
             columns = inspector.get_columns(table, schema=schema)
         except Exception:
             # Engines like RisingWave/QuestDB expose a SQL endpoint but not full pg_catalog.
+            # Try information_schema.columns before falling back to raw value sampling.
+            try:
+                with engine.connect() as conn:
+                    from services.type_system import normalize_logical_type
+                    schema_expr = "current_schema()" if schema is None else ":schema"
+                    params: dict = {"table": table}
+                    if schema is not None:
+                        params["schema"] = schema
+                    sql = (
+                        f"SELECT column_name, data_type, is_nullable "
+                        f"FROM information_schema.columns "
+                        f"WHERE table_name = :table AND table_schema = {schema_expr} "
+                        f"ORDER BY ordinal_position"
+                    )
+                    rows = conn.execute(sa.text(sql), params).fetchall()
+                    if rows:
+                        result = [
+                            {
+                                "name": name,
+                                "inferred_type": normalize_logical_type(data_type),
+                                "nullable": str(nullable).upper() != "NO",
+                            }
+                            for name, data_type, nullable in rows
+                        ]
+                        # Refine text columns from a sample to recover JSON, UUID, BINARY, etc.
+                        headers, sample_rows = _sample_raw_table(conn, table, schema)
+                        if sample_rows and headers:
+                            name_to_idx = {n: i for i, n in enumerate(headers)}
+                            for col in result:
+                                if col["inferred_type"] == "string":
+                                    idx = name_to_idx.get(col["name"])
+                                    if idx is None:
+                                        continue
+                                    values = [row[idx] for row in sample_rows if idx < len(row)]
+                                    inferred = _infer_logical_from_samples(values, field_name=col["name"])
+                                    if inferred and inferred != "string":
+                                        col["inferred_type"] = inferred
+                        return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
+            except Exception:
+                pass
+
             with engine.connect() as conn:
                 headers, sample_rows = _sample_raw_table(conn, table, schema)
                 result = [
