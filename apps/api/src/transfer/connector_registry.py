@@ -129,6 +129,8 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
 
         return test_generic_sql(**cfg)
 
+    # Resolve catalog aliases (e.g. cockroachdb -> postgresql) to a registered driver
+    db_type = resolved
     spec = CONNECTOR_MODULES.get(db_type)
     if not spec:
         return False, f"No connectivity probe for {db_type}"
