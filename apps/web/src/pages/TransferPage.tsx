@@ -173,6 +173,15 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
+  const [sourceManualEnabled, setSourceManualEnabled] = useState(false);
+  const [sourceManualType, setSourceManualType] = useState("postgresql");
+  const [sourceManualHost, setSourceManualHost] = useState("localhost");
+  const [sourceManualPort, setSourceManualPort] = useState(5432);
+  const [sourceManualUsername, setSourceManualUsername] = useState("");
+  const [sourceManualPassword, setSourceManualPassword] = useState("");
+  const [sourceManualDatabase, setSourceManualDatabase] = useState("");
+  const [sourceManualSchema, setSourceManualSchema] = useState("public");
+  const [sourceManualConnectionString, setSourceManualConnectionString] = useState("");
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -368,6 +377,25 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         kind: "file",
         format: parsed?.file_type ?? file?.name.split(".").pop() ?? "csv",
         filename: file?.name,
+      };
+    }
+    if (sourceManualEnabled && sourceKind === "database") {
+      const isMongo = sourceManualType === "mongodb";
+      const isDynamo = sourceManualType === "dynamodb";
+      const tableOrPath = isMongo ? (sourceCollection || sourceTable) : (isDynamo ? (sourceTable || sourceManualDatabase || "") : sourceTable);
+      return {
+        kind: "database",
+        format: sourceManualType,
+        connector_id: "",
+        host: sourceManualHost,
+        port: sourceManualPort,
+        username: sourceManualUsername || undefined,
+        password: sourceManualPassword || undefined,
+        database: isDynamo ? tableOrPath : sourceManualDatabase,
+        schema: sourceManualSchema,
+        table: isMongo ? undefined : tableOrPath || undefined,
+        collection: isMongo ? tableOrPath : undefined,
+        connection_string: sourceManualConnectionString || undefined,
       };
     }
     if (!sourceConnector) return { kind: "database", format: "json" };
@@ -919,22 +947,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   };
 
   const introspectConnectorSource = async (): Promise<boolean> => {
-    if (!sourceConnector) return false;
-    const isMongo = sourceConnector.type === "mongodb";
-    const tableOrPath = sourceKind === "cloud"
-      ? cloudPath.trim()
-      : (isMongo ? (sourceCollection || sourceTable) : sourceTable);
-    const sourceEndpoint: Record<string, unknown> = {
-      kind: "database",
-      format: sourceConnector.type,
-      connector_id: sourceConnectorId,
-      database: sourceConnector.database,
-    };
-    if (isMongo) {
-      sourceEndpoint.collection = tableOrPath;
-    } else {
-      sourceEndpoint.table = tableOrPath;
-    }
+    const sourceEndpoint = buildSourceEndpoint();
+    if (sourceEndpoint.kind !== "database") return false;
     const { source: intro } = await introspectTransferEndpoints({
       source: sourceEndpoint,
       destination: { kind: "file_export", format: "json" },
@@ -965,7 +979,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       source_schema: intro.schema ?? {},
     }));
     setActiveData({
-      name: tableOrPath || sourceConnector.name,
+      name: sourceTable || sourceCollection || sourceConnector?.name || sourceManualType || "source_stream",
       columns: intro.columns,
       row_count: intro.row_estimate ?? 0,
       samples: columnSamples,
@@ -1131,25 +1145,32 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           activeMappings.length ? activeMappings : columnMappings,
         );
       } else {
-        if (!sourceConnector) {
+        if (!sourceConnector && !sourceManualEnabled) {
           toast({
             title: "Source required",
             message: sourceKind === "cloud"
               ? "Select a cloud connector and object path."
-              : "Select a source connector and table.",
+              : "Select a source connector and table, or enable manual connection.",
             tone: "warning",
           });
           setStep(STEP_SOURCE);
           return;
         }
+        const isManual = sourceManualEnabled && sourceKind === "database";
         const routePlan = await analyzeDbTransfer({
-          sourceConnectorId: sourceConnectorId,
-          sourceFormat: sourceConnector.type,
-          sourceDatabase: sourceConnector.database,
+          sourceConnectorId: isManual ? "" : sourceConnectorId,
+          sourceFormat: isManual ? sourceManualType : sourceConnector?.type ?? "",
+          sourceDatabase: isManual ? sourceManualDatabase : sourceConnector?.database,
           sourceTable: sourceKind === "cloud" ? cloudPath || undefined : sourceTable || undefined,
           sourceCollection: sourceKind === "cloud"
             ? cloudPath || undefined
             : sourceCollection || undefined,
+          sourceHost: isManual ? sourceManualHost : undefined,
+          sourcePort: isManual ? sourceManualPort : undefined,
+          sourceUsername: isManual ? sourceManualUsername : undefined,
+          sourcePassword: isManual ? sourceManualPassword : undefined,
+          sourceSchema: isManual ? sourceManualSchema : undefined,
+          sourceConnectionString: isManual ? sourceManualConnectionString : undefined,
           destFormat: destType,
           destDatabase: targetDb,
           destTable: destType !== "mongodb" ? targetCollection : undefined,
@@ -1299,18 +1320,29 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
+      const isManualSource = sourceManualEnabled && sourceKind === "database";
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
         sourceKind: sourceKind === "cloud" ? "database" : sourceKind,
-        sourceFormat: sourceConnector?.type,
+        sourceFormat: isManualSource ? sourceManualType : sourceConnector?.type,
         sourceConnectorId: isConnectorSource ? sourceConnectorId || undefined : undefined,
-        sourceDatabase: sourceConnector?.database,
+        sourceHost: isManualSource ? sourceManualHost : undefined,
+        sourcePort: isManualSource ? sourceManualPort : undefined,
+        sourceUsername: isManualSource ? sourceManualUsername : undefined,
+        sourcePassword: isManualSource ? sourceManualPassword : undefined,
+        sourceDatabase: isManualSource ? sourceManualDatabase : sourceConnector?.database,
+        sourceSchema: isManualSource ? sourceManualSchema : undefined,
         sourceTable: sourceKind === "cloud"
           ? cloudPath || undefined
-          : sourceConnector?.type !== "mongodb" ? sourceTable || sourceCollection : undefined,
+          : isManualSource
+            ? (sourceManualType !== "mongodb" ? sourceTable || sourceCollection : undefined)
+            : sourceConnector?.type !== "mongodb" ? sourceTable || sourceCollection : undefined,
         sourceCollection: sourceKind === "cloud"
           ? cloudPath || undefined
-          : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
+          : isManualSource
+            ? (sourceManualType === "mongodb" ? sourceCollection || sourceTable : undefined)
+            : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
+        sourceConnectionString: isManualSource ? sourceManualConnectionString : undefined,
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
@@ -1427,10 +1459,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const sourceInputsReady =
     sourceKind === "file"
       ? Boolean(parsed)
-      : Boolean(
-          sourceConnectorId
-          && (sourceKind === "cloud" ? cloudPath.trim() : (sourceTable || sourceCollection)),
-        );
+      : sourceKind === "cloud"
+        ? Boolean(sourceConnectorId && cloudPath.trim())
+        : Boolean(
+            (sourceManualEnabled
+              ? sourceManualType && (sourceManualHost || sourceManualConnectionString) && (sourceManualDatabase || sourceManualConnectionString) && (sourceTable || sourceCollection)
+              : sourceConnectorId)
+            && (sourceTable || sourceCollection),
+          );
 
   const canConfigureDest =
     sourceKind === "file"
@@ -1801,47 +1837,171 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 </p>
               </>
             )
-          ) : dbSourceConnectors.length === 0 ? (
-            <EmptyState
-              icon="connectors"
-              title="No database connectors"
-              description="Add a PostgreSQL, MySQL, MongoDB, or warehouse connector first."
-              compact
-            />
           ) : (
-            <div className="df2-form-row">
-              <ConnectorSelect
-                id="source-connector"
-                label="Source Connector"
-                value={sourceConnectorId}
-                onChange={setSourceConnectorId}
-                connectors={dbSourceConnectors}
-                placeholder="Select connector…"
-              />
-              <div className="df2-field df2-field-md">
-                <label className="df2-label">
-                  {sourceConnector?.type === "mongodb"
-                    ? "Collection"
-                    : sourceConnector?.type === "dynamodb"
-                      ? "Table"
-                      : "Table"}
-                </label>
-                <input
-                  className="df2-input"
-                  value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
-                  onChange={(e) => {
-                    if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
-                    else setSourceTable(e.target.value);
-                  }}
-                  placeholder={
-                    sourceConnector?.type === "mongodb"
-                      ? "orders"
-                      : sourceConnector?.type === "dynamodb"
-                        ? sourceConnector.database || "orders"
-                        : "public.orders"
-                  }
-                />
-              </div>
+            <div className="df2-source-connection">
+              {dbSourceConnectors.length > 0 && (
+                <div className="df2-form-row" style={{ alignItems: "center", gap: 12 }}>
+                  <label className="df2-label">Connection source</label>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-ghost df2-btn-sm"
+                    onClick={() => {
+                      setSourceManualEnabled((v) => !v);
+                      setSourceConnectorId("");
+                    }}
+                  >
+                    {sourceManualEnabled ? "Use a saved connector" : "Connect manually"}
+                  </button>
+                </div>
+              )}
+              {sourceManualEnabled || dbSourceConnectors.length === 0 ? (
+                <div className="df2-form-rows" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div className="df2-form-row">
+                    <div className="df2-field df2-field-sm">
+                      <label className="df2-label">Database type</label>
+                      <select
+                        className="df2-select"
+                        value={sourceManualType}
+                        onChange={(e) => setSourceManualType(e.target.value)}
+                      >
+                        {(liveSourceDbs.length ? liveSourceDbs : FALLBACK_SOURCE_DBS).map((t) => (
+                          <option key={t} value={t}>
+                            {getConnectorDefaults(t).label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="df2-field df2-field-flex">
+                      <label className="df2-label">Host / endpoint</label>
+                      <input
+                        className="df2-input"
+                        value={sourceManualHost}
+                        onChange={(e) => setSourceManualHost(e.target.value)}
+                        placeholder={sourceManualType === "dynamodb" ? "us-east-1" : "localhost"}
+                      />
+                    </div>
+                    <div className="df2-field df2-field-xs">
+                      <label className="df2-label">Port</label>
+                      <input
+                        className="df2-input"
+                        type="number"
+                        value={sourceManualPort}
+                        onChange={(e) => setSourceManualPort(parseInt(e.target.value || "0", 10))}
+                        placeholder={String(getConnectorDefaults(sourceManualType).port)}
+                      />
+                    </div>
+                  </div>
+                  <div className="df2-form-row">
+                    <div className="df2-field df2-field-md">
+                      <label className="df2-label">Database</label>
+                      <input
+                        className="df2-input"
+                        value={sourceManualDatabase}
+                        onChange={(e) => setSourceManualDatabase(e.target.value)}
+                        placeholder={sourceManualType === "dynamodb" ? "table-name" : "dataflow"}
+                      />
+                    </div>
+                    {["postgresql", "snowflake", "redshift"].includes(sourceManualType) && (
+                      <div className="df2-field df2-field-md">
+                        <label className="df2-label">Schema</label>
+                        <input
+                          className="df2-input"
+                          value={sourceManualSchema}
+                          onChange={(e) => setSourceManualSchema(e.target.value)}
+                          placeholder="public"
+                        />
+                      </div>
+                    )}
+                    <div className="df2-field df2-field-md">
+                      <label className="df2-label">Username</label>
+                      <input
+                        className="df2-input"
+                        value={sourceManualUsername}
+                        onChange={(e) => setSourceManualUsername(e.target.value)}
+                        placeholder="dataflow"
+                      />
+                    </div>
+                    <div className="df2-field df2-field-md">
+                      <label className="df2-label">Password</label>
+                      <input
+                        className="df2-input"
+                        type="password"
+                        value={sourceManualPassword}
+                        onChange={(e) => setSourceManualPassword(e.target.value)}
+                        placeholder="••••••••"
+                      />
+                    </div>
+                  </div>
+                  <div className="df2-form-row">
+                    <div className="df2-field df2-field-flex">
+                      <label className="df2-label">Connection string (optional — overrides host fields)</label>
+                      <input
+                        className="df2-input"
+                        value={sourceManualConnectionString}
+                        onChange={(e) => setSourceManualConnectionString(e.target.value)}
+                        placeholder="postgres://user:pass@host:5432/db or /path/to/db.sqlite"
+                      />
+                    </div>
+                  </div>
+                  <div className="df2-form-row">
+                    <div className="df2-field df2-field-md">
+                      <label className="df2-label">
+                        {sourceManualType === "mongodb" ? "Collection" : sourceManualType === "dynamodb" ? "Table" : "Table"}
+                      </label>
+                      <input
+                        className="df2-input"
+                        value={sourceManualType === "mongodb" ? sourceCollection : sourceTable}
+                        onChange={(e) => {
+                          if (sourceManualType === "mongodb") setSourceCollection(e.target.value);
+                          else setSourceTable(e.target.value);
+                        }}
+                        placeholder={
+                          sourceManualType === "mongodb"
+                            ? "orders"
+                            : sourceManualType === "dynamodb"
+                              ? sourceManualDatabase || "orders"
+                              : "public.orders"
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="df2-form-row">
+                  <ConnectorSelect
+                    id="source-connector"
+                    label="Source Connector"
+                    value={sourceConnectorId}
+                    onChange={setSourceConnectorId}
+                    connectors={dbSourceConnectors}
+                    placeholder="Select connector…"
+                  />
+                  <div className="df2-field df2-field-md">
+                    <label className="df2-label">
+                      {sourceConnector?.type === "mongodb"
+                        ? "Collection"
+                        : sourceConnector?.type === "dynamodb"
+                          ? "Table"
+                          : "Table"}
+                    </label>
+                    <input
+                      className="df2-input"
+                      value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
+                      onChange={(e) => {
+                        if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
+                        else setSourceTable(e.target.value);
+                      }}
+                      placeholder={
+                        sourceConnector?.type === "mongodb"
+                          ? "orders"
+                          : sourceConnector?.type === "dynamodb"
+                            ? sourceConnector.database || "orders"
+                            : "public.orders"
+                      }
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1859,6 +2019,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 dbConnectors={dbSourceConnectors}
                 cloudConnectors={cloudSourceConnectors}
                 uploading={uploading}
+                sourceManual={sourceManualEnabled}
+                sourceManualType={sourceManualType}
               />
             </div>
           </div>

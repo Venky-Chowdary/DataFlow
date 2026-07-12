@@ -23,6 +23,8 @@ interface SourceStepAsideProps {
   dbConnectors: Connector[];
   cloudConnectors: Connector[];
   uploading?: boolean;
+  sourceManual?: boolean;
+  sourceManualType?: string;
 }
 
 function ProfilingSteps({ active }: { active: boolean }) {
@@ -127,6 +129,8 @@ export function SourceStepAside({
   dbConnectors,
   cloudConnectors,
   uploading,
+  sourceManual,
+  sourceManualType,
 }: SourceStepAsideProps) {
   if (sourceKind === "file" && parsed) {
     return (
@@ -168,11 +172,13 @@ export function SourceStepAside({
           <div>
             <h4>Connector preview</h4>
             <p>
-              {sourceConnector
-                ? `Schema from ${sourceConnector.name} loads when you continue.`
-                : pool.length
-                  ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
-                  : "Add a database connector to read tables and collections."}
+              {sourceManual
+                ? `Manual ${sourceManualType} source. Schema loads when you continue.`
+                : sourceConnector
+                  ? `Schema from ${sourceConnector.name} loads when you continue.`
+                  : pool.length
+                    ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
+                    : "Add a database connector to read tables and collections, or use manual connection."}
             </p>
           </div>
         </div>

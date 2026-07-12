@@ -137,6 +137,12 @@ export async function analyzeDbTransfer(payload: {
   sourceDatabase?: string;
   sourceTable?: string;
   sourceCollection?: string;
+  sourceHost?: string;
+  sourcePort?: number;
+  sourceUsername?: string;
+  sourcePassword?: string;
+  sourceSchema?: string;
+  sourceConnectionString?: string;
   destFormat: string;
   destDatabase: string;
   destTable?: string;
@@ -145,7 +151,7 @@ export async function analyzeDbTransfer(payload: {
 }): Promise<TransferPlan & { source_columns?: string[]; source_schema?: Record<string, string> }> {
   const isMongo = payload.sourceFormat === "mongodb";
   const isDestMongo = payload.destFormat === "mongodb";
-  const body = {
+  const body: Record<string, unknown> = {
     source: {
       kind: "database",
       format: payload.sourceFormat,
@@ -153,6 +159,12 @@ export async function analyzeDbTransfer(payload: {
       database: payload.sourceDatabase || "",
       table: isMongo ? "" : payload.sourceTable || "",
       collection: isMongo ? payload.sourceCollection || payload.sourceTable || "" : "",
+      host: payload.sourceHost || "",
+      port: payload.sourcePort || 0,
+      username: payload.sourceUsername || "",
+      password: payload.sourcePassword || "",
+      schema: payload.sourceSchema || "",
+      connection_string: payload.sourceConnectionString || "",
     },
     destination: {
       kind: "database",
