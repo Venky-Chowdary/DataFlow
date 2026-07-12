@@ -225,7 +225,11 @@ def run_transfer_policy_gates(
     return gates
 
 
-def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]]) -> dict[str, Any]:
+def apply_policy_gates(
+    result: dict[str, Any],
+    policy_gates: list[dict[str, Any]],
+    validation_mode: str = "strict",
+) -> dict[str, Any]:
     proof_bundle = result.get("proof_bundle") or {}
     transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
     proof_blockers = (proof_bundle.get("transfer_decision") or {}).get("blockers") or []
@@ -252,7 +256,21 @@ def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]
     passed_count = sum(1 for g in gates if g.get("status") == GateStatus.PASS.value)
     total_gates = len(gates)
     has_blocks = any(g.get("status") == GateStatus.BLOCK.value for g in gates)
-    proof_blocks = transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
+
+    # Strict/Maximum validation blocks on proof-bundle "block" and any failed proof.
+    # Balanced/Minimum only blocks proof-bundle blocks when the reason is not purely
+    # a PII/compliance review (so real transfers with email fields can proceed with
+    # a warning while reconciliation failures still stop the transfer).
+    is_strict = validation_mode.lower() in {"strict", "maximum"}
+    non_compliance_blockers = [b for b in proof_blockers if "PII/compliance" not in b and "compliance review" not in b.lower()]
+    proof_blocks = transfer_decision == "block" or proof_bundle.get("passed") is False
+    if proof_blocks and not is_strict:
+        if transfer_decision == "review":
+            proof_blocks = False
+        elif transfer_decision == "block" and non_compliance_blockers:
+            proof_blocks = True
+        else:
+            proof_blocks = False
 
     if proof_blocks:
         has_blocks = True
@@ -465,7 +483,7 @@ def run_file_preflight(
 
 def probe_destination(endpoint) -> tuple[bool, str]:
     """Live connectivity probe for database destinations (Gate G2)."""
-    from ..transfer.adapters import resolve_connector_config
+    from ..transfer.adapters import resolve_connector_config, resolve_dest_table
     from ..transfer.connector_registry import run_probe
 
     if endpoint.kind != "database":
@@ -473,6 +491,10 @@ def probe_destination(endpoint) -> tuple[bool, str]:
 
     db_type = (endpoint.format or "").lower()
     cfg = resolve_connector_config(endpoint)
+    # DynamoDB uses the table name as the database identifier; ensure the
+    # connectivity probe sees the intended destination table.
+    if db_type == "dynamodb":
+        cfg["table"] = resolve_dest_table(db_type, endpoint)
     return run_probe(db_type, cfg)
 
 

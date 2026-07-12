@@ -159,6 +159,7 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "connection_string": cfg.get("connection_string", ""),
         "ssl": cfg.get("ssl", False),
         "warehouse": cfg.get("warehouse", ""),
+        "table": cfg.get("table", ""),
     }
     sig = inspect.signature(probe_fn)
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())

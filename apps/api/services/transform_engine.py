@@ -33,6 +33,28 @@ DATE_PATTERNS = (
     "%Y-%b-%d",
 )
 
+# Additional patterns that represent a full date but may contain time.
+# Used only for the "date" transform so it can parse a datetime string and
+# return the date portion without widening schema inference to classify
+# datetime values as plain DATE.
+DATE_WITH_TIME_PATTERNS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%SZ",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y/%m/%d %H:%M:%S",
+    "%m/%d/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S",
+    "%m-%d-%Y %H:%M:%S",
+    "%d-%m-%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%Y-%m-%d %I:%M %p",
+    "%d-%b-%Y %H:%M:%S",
+    "%d-%B-%Y %H:%M:%S",
+)
+
 DATETIME_PATTERNS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M:%S.%f",
@@ -125,7 +147,7 @@ _EPOCH_MS_RE = re.compile(r"^\d{13}$")
 _EPOCH_S_RE = re.compile(r"^\d{10}$")
 
 
-def _parse_date(value: str) -> str | None:
+def _parse_date(value: str, *, with_time: bool = False) -> str | None:
     text = value.strip()
     if not text:
         return None
@@ -137,7 +159,10 @@ def _parse_date(value: str) -> str | None:
             return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
         except ValueError:
             pass
-    for fmt in DATE_PATTERNS:
+    patterns = list(DATE_PATTERNS)
+    if with_time:
+        patterns += list(DATE_WITH_TIME_PATTERNS)
+    for fmt in patterns:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -401,7 +426,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return parsed_bool, None
 
     if transform == "date":
-        parsed = _parse_date(text)
+        parsed = _parse_date(text, with_time=True)
         if parsed is None:
             return None, f"Invalid date: {text!r}"
         return parsed, None
@@ -460,6 +485,9 @@ def dry_run_sample(
     column_types: dict[str, str],
     sample_size: int = 100,
 ) -> tuple[bool, list[str]]:
+    if not sample_rows:
+        return False, ["No sample rows available for dry-run validation"]
+
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
@@ -474,15 +502,11 @@ def dry_run_sample(
         if idx is None:
             errors.append(f"Source column missing: {m['source']}")
             continue
-        checked = 0
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
             if err:
                 errors.append(f"{m['source']}→{m['target']}: {err}")
                 break
-            checked += 1
-        if checked == 0 and sample_rows:
-            errors.append(f"No sample values for {m['source']}")
 
     return len(errors) == 0, errors[:25]

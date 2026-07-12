@@ -247,8 +247,11 @@ def _read_batch(
     if src_type == "redis":
         from connectors.redis_reader import read_keys_batch
 
+        pattern = table or "*"
+        if pattern != "*" and "*" not in pattern and "?" not in pattern:
+            pattern = f"{pattern}:*"
         return read_keys_batch(
-            cfg=cfg, pattern=table or "*", limit=limit,
+            cfg=cfg, pattern=pattern, limit=limit,
             known_total_rows=known_total_rows, scan_state=redis_scan_state,
         )
     if src_type == "sqlite":

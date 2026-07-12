@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import datetime
 from typing import Any
+
+
+def _bson_decimal_type():
+    try:
+        from bson.decimal128 import Decimal128
+        return Decimal128
+    except Exception:
+        return None
+
+
+_BSON_DECIMAL = _bson_decimal_type()
 
 
 def introspect_schema(
@@ -89,6 +101,7 @@ def introspect_schema(
     if db_type == "dynamodb":
         return _introspect_dynamodb(
             host=host,
+            port=port,
             username=username,
             password=password,
             database=database,
@@ -511,11 +524,35 @@ def _sample_logical_type(value: Any) -> str:
         return "INTEGER"
     if isinstance(value, float):
         return "DECIMAL"
+    if isinstance(value, datetime.datetime):
+        return "TIMESTAMP"
+    if isinstance(value, datetime.date):
+        return "DATE"
+    if _BSON_DECIMAL and isinstance(value, _BSON_DECIMAL):
+        return "DECIMAL"
     if isinstance(value, list):
         return "ARRAY"
     if isinstance(value, dict):
         return "OBJECT"
     return "TEXT"
+
+
+def _widen_mongodb_type(current: str, observed: str) -> str:
+    """Widen inferred type across sampled documents; prefer more specific type.
+
+    TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE.
+    """
+    order = {
+        "TEXT": 0,
+        "BOOLEAN": 1,
+        "INTEGER": 2,
+        "DECIMAL": 3,
+        "DATE": 4,
+        "TIMESTAMP": 5,
+        "ARRAY": 6,
+        "OBJECT": 7,
+    }
+    return observed if order.get(observed, 0) > order.get(current, 0) else current
 
 
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
@@ -536,19 +573,22 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         db_name = kwargs.get("database") or "test"
         db = client[db_name]
         tables = db.list_collection_names()[:100]
-        columns: list[dict] = []
         target = table or (tables[0] if tables else None)
+        columns: dict[str, dict[str, Any]] = {}
         if target:
             for doc in db[target].find().limit(50):
                 if "_id" in doc:
                     doc["_id"] = str(doc["_id"])
                 for key, val in doc.items():
-                    existing = next((c for c in columns if c["name"] == key), None)
                     inferred = _sample_logical_type(val)
-                    if existing is None:
-                        columns.append({"name": key, "inferred_type": inferred, "nullable": True})
+                    if key not in columns:
+                        columns[key] = {"name": key, "inferred_type": inferred, "nullable": True}
+                    else:
+                        columns[key]["inferred_type"] = _widen_mongodb_type(
+                            columns[key]["inferred_type"], inferred
+                        )
         client.close()
-        return {"ok": True, "tables": tables, "columns": columns, "schema": db_name}
+        return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
@@ -568,6 +608,25 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "connection_string": kwargs.get("connection_string") or "",
         }
         names, types = describe_table_schema(cfg, table)
+        # Sample real items and let the schema inference engine decide types for
+        # attributes not defined by the table key schema.
+        try:
+            from connectors.dynamodb_reader import read_table_batch
+            from services.schema_inference import infer_type
+
+            sample, _ = read_table_batch(cfg=cfg, table=table, limit=50)
+            if sample.rows:
+                samples_by_col: dict[str, list[str]] = {h: [] for h in sample.headers}
+                for row in sample.rows:
+                    for i, h in enumerate(sample.headers):
+                        if i < len(row):
+                            samples_by_col[h].append(row[i])
+                for name in names:
+                    if name in samples_by_col and (types.get(name) == "TEXT" or name not in types):
+                        types[name] = infer_type(samples_by_col[name], field_name=name)
+        except Exception:
+            pass
+
         columns = [
             {"name": name, "inferred_type": types.get(name, "TEXT"), "nullable": True}
             for name in names

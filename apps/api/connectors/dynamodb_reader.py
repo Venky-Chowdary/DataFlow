@@ -102,6 +102,14 @@ def _cell(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
+    if isinstance(value, (bytes, bytearray)):
+        import base64
+
+        return base64.b64encode(value).decode("ascii")
+    if value.__class__.__name__ == "Binary":
+        import base64
+
+        return base64.b64encode(value.value).decode("ascii")
     return str(value)
 
 

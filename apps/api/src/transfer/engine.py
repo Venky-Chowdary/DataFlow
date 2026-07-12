@@ -173,6 +173,7 @@ class UniversalTransferEngine:
                         stream_contracts=request.stream_contracts,
                         backfill_new_fields=request.backfill_new_fields,
                     ),
+                    validation_mode=request.validation_mode,
                 )
                 if not dest_ok:
                     mongo.update_job_status(
@@ -389,6 +390,7 @@ class UniversalTransferEngine:
                         stream_contracts=request.stream_contracts,
                         backfill_new_fields=request.backfill_new_fields,
                     ),
+                    validation_mode=request.validation_mode,
                 )
                 if not dest_ok:
                     mongo.update_job_status(
@@ -575,6 +577,7 @@ class UniversalTransferEngine:
                         stream_contracts=request.stream_contracts,
                         backfill_new_fields=request.backfill_new_fields,
                     ),
+                    validation_mode=request.validation_mode,
                 )
                 if not dest_ok:
                     mongo.update_job_status(

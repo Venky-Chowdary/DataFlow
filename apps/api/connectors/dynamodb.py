@@ -26,12 +26,13 @@ def test_dynamodb(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    table: str = "",
 ) -> ConnectResult:
     from connectors.base import ConnectResult
 
     del schema, ssl, warehouse
 
-    table = (database or "").strip()
+    table = (table or database or "").strip()
     cfg = _cfg(host, port, username, password, connection_string)
     region = resolve_region(cfg)
     endpoint = resolve_endpoint_url(cfg)
@@ -83,7 +84,12 @@ def test_dynamodb(
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in ("ResourceNotFoundException",):
-            return ConnectResult(ok=False, tables=[], error=f"Table `{table}` not found.")
+            return ConnectResult(
+                ok=True,
+                tables=[table],
+                message=f"Table `{table}` not found; it will be created on write.",
+                driver="boto3",
+            )
         return ConnectResult(ok=False, tables=[], error=str(exc))
     except BotoCoreError as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc))
