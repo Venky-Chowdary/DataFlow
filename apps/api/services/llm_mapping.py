@@ -89,6 +89,37 @@ def _normalize_llm_mapping(
     }
 
 
+def _compute_llm_review(
+    source: str,
+    llm: dict[str, Any],
+    base: dict[str, Any] | None,
+) -> tuple[float, bool]:
+    """Compute score gap and review flag from LLM confidence and baseline alternatives.
+
+    The LLM confidence is the winner; the strongest baseline alternative that targets a
+    different column is the runner-up.  If the gap is small and the mapping is not an exact
+    identity match, flag it for review.
+    """
+    winner_conf = llm["confidence"]
+    target = llm["target"].lower()
+    runner_up = 0.0
+    if base and isinstance(base.get("alternatives"), list):
+        runner_up = max(
+            (
+                a.get("confidence", 0.0)
+                for a in base["alternatives"]
+                if a.get("target", "").lower() != target
+            ),
+            default=0.0,
+        )
+    score_gap = max(round(winner_conf - runner_up, 3), 0.0)
+
+    reason = str(llm.get("reasoning") or base.get("reasoning") or "")
+    is_exact = source.lower().strip() == target or reason.startswith("Exact")
+    requires_review = score_gap < 0.08 and not is_exact
+    return score_gap, requires_review
+
+
 def llm_provider_available() -> bool:
     try:
         from src.ai.llm.provider import (
@@ -169,6 +200,9 @@ def refine_mappings_with_llm(
                 pick = {**(base or {}), **llm}
                 if base and llm["confidence"] < base.get("confidence", 0):
                     pick = {**llm, **base, "reasoning": f"{llm['reasoning']} · baseline={base.get('confidence', 0):.0%}"}
+                score_gap, requires_review = _compute_llm_review(src, llm, base)
+                pick["score_gap"] = score_gap
+                pick["requires_review"] = requires_review
                 pick["method"] = "hybrid_llm"
                 pick["agent"] = "LLMMappingAgent"
                 merged.append(pick)
