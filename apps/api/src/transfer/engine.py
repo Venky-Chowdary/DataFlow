@@ -24,7 +24,7 @@ try:
         run_transfer_policy_gates,
     )
     from services import lineage_telemetry as lineage
-    from services.error_handling import classify_error, TransferCancelled
+    from services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
         run_transfer_policy_gates,
     )
     from src.services import lineage_telemetry as lineage
-    from src.services.error_handling import classify_error, TransferCancelled
+    from src.services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
 from .adapters import (
     parse_file_content,
@@ -296,7 +296,10 @@ class UniversalTransferEngine:
                 job_id, "running", phase="reading", progress_pct=5,
                 message="Reading source data…",
             )
-            records, columns, schema = self._read_source(request)
+            records, columns, schema = with_retry(
+                lambda: self._read_source(request),
+                budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+            )
             if not records and request.source.kind != "database":
                 mongo.update_job_status(job_id, "failed", error="No records to transfer", phase="failed")
                 return TransferResult(success=False, error="No records to transfer", operation=request.operation, job_id=job_id)
@@ -468,24 +471,30 @@ class UniversalTransferEngine:
                 if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
                     if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
                         _drop_destination_table(request.destination)
-                rows_written, ddl_log, dest_summary = write_destination_database(
-                    request.destination, records, columns, schema, mappings,
-                    on_checkpoint=throttled_checkpoint,
-                    validation_mode=request.validation_mode,
-                    backfill_new_fields=request.backfill_new_fields,
-                    write_mode=write_mode,
-                    conflict_columns=conflict_columns,
+                rows_written, ddl_log, dest_summary = with_retry(
+                    lambda: write_destination_database(
+                        request.destination, records, columns, schema, mappings,
+                        on_checkpoint=throttled_checkpoint,
+                        validation_mode=request.validation_mode,
+                        backfill_new_fields=request.backfill_new_fields,
+                        write_mode=write_mode,
+                        conflict_columns=conflict_columns,
+                    ),
+                    budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                 )
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
             elif request.destination.kind == "file_export":
-                export_bytes, export_name, dest_summary = write_destination_file(
-                    request.destination,
-                    records,
-                    columns,
-                    source_format=src_fmt,
-                    mappings=mappings,
-                    column_types=request.column_types or schema,
+                export_bytes, export_name, dest_summary = with_retry(
+                    lambda: write_destination_file(
+                        request.destination,
+                        records,
+                        columns,
+                        source_format=src_fmt,
+                        mappings=mappings,
+                        column_types=request.column_types or schema,
+                    ),
+                    budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                 )
                 rows_written = len(records)
                 export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")
