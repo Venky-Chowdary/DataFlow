@@ -327,6 +327,40 @@ def verify_duckdb_table(
         return -1, ""
 
 
+def verify_mongodb_collection(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+) -> tuple[int, str]:
+    """Reconcile a MongoDB target by counting and fingerprinting documents."""
+    try:
+        from pymongo import MongoClient
+        from bson.decimal128 import Decimal128
+
+        client = MongoClient(
+            connection_string or "localhost", serverSelectionTimeoutMS=5000
+        )
+        db = client[database or "test"]
+        coll = db[table_name]
+        count = coll.count_documents({})
+        rows = list(coll.find({}, {"_id": 0}).limit(5000))
+        client.close()
+        h = hashlib.sha256()
+        for doc in rows:
+            h.update(
+                "|".join(
+                    normalize_cell(
+                        v.to_decimal() if isinstance(v, Decimal128) else v
+                    )
+                    for v in doc.values()
+                ).encode()
+            )
+        return int(count), h.hexdigest()[:16]
+    except Exception:
+        return -1, ""
+
+
 def verify_target(
     db_type: str,
     dest: dict[str, Any],
@@ -336,7 +370,13 @@ def verify_target(
     fallback_rows: int,
     fallback_checksum: str,
 ) -> tuple[int, str]:
-    if db_type == "sqlite":
+    if db_type == "mongodb":
+        count, chk = verify_mongodb_collection(
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", ""),
+            table_name=table_name,
+        )
+    elif db_type == "sqlite":
         count, chk = verify_sqlite_table(
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
