@@ -15,6 +15,7 @@ from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
+    dedupe_rows,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -150,6 +151,11 @@ def write_mapped_rows(
         column_types=column_types,
         error_policy=policy,
     )
+
+    # Within a single batch, the last occurrence of an upsert key wins.
+    if write_mode == "upsert" and conflict_columns:
+        mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+
     rejected_rows = len(data_rows) - len(mapped_rows)
     rejected_details = [
         {"message": msg, "policy": policy}

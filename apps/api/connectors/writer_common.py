@@ -32,6 +32,24 @@ def row_checksum(rows: list[tuple]) -> str:
     return h.hexdigest()[:16]
 
 
+def dedupe_rows(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+) -> list[tuple]:
+    """Keep the last occurrence of each conflict key, preserving tuple order."""
+    if not conflict_columns or not rows:
+        return rows
+    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
+    if not indices:
+        return rows
+    seen: dict[tuple, tuple] = {}
+    for row in rows:
+        key = tuple(row[i] for i in indices)
+        seen[key] = row
+    return list(seen.values())
+
+
 def transform_error_policy(policy: str | None = None) -> str:
     selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
     return selected if selected in VALID_ERROR_POLICIES else "quarantine"

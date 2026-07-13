@@ -12,6 +12,7 @@ from connectors.mysql_conn import get_connection
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
+    dedupe_rows,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -166,6 +167,11 @@ def write_mapped_rows(
                 error_policy=policy,
                 preserve_case=True,
             )
+
+            # Within a single batch, the last occurrence of an upsert key wins.
+            if write_mode == "upsert" and conflict_columns:
+                mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+
             rejected_rows = len(data_rows) - len(mapped_rows)
             if transform_errors and policy == "fail":
                 return WriteResult(
