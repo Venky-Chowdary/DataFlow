@@ -175,15 +175,15 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
             <dl className="lp-stats">
               <div>
                 <dt>Catalog</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.total} suffix="+" /> : "733+"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.total} suffix="+" /> : "…"}</dd>
               </div>
               <div>
                 <dt>Transfer ready</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.transfer_live} /> : "121"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.transfer_live} /> : "…"}</dd>
               </div>
               <div>
                 <dt>Categories</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.categories} /> : "12"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.categories} /> : "…"}</dd>
               </div>
               <div>
                 <dt>Preflight gates</dt>
@@ -365,11 +365,11 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
           </div>
           <div className="lp-security-visual">
             <div className="lp-security-stat">
-              <strong>{stats ? <AnimatedCounter value={stats.transfer_live} suffix="+" /> : "18+"}</strong>
+              <strong>{stats ? <AnimatedCounter value={stats.transfer_live} suffix="+" /> : "…"}</strong>
               <span>production transfer routes</span>
             </div>
             <div className="lp-security-stat">
-              <strong>{stats ? <AnimatedCounter value={stats.roadmap} suffix="+" /> : "600+"}</strong>
+              <strong>{stats ? <AnimatedCounter value={stats.roadmap} suffix="+" /> : "…"}</strong>
               <span>catalog roadmap entries</span>
             </div>
           </div>
