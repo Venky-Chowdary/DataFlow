@@ -7,39 +7,14 @@ import re
 from typing import Any
 
 
-# PII patterns we never want to send to a third-party LLM in sample data.
-_PII_RE = re.compile(
-    r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"  # email
-    r"|(\b\d{3}-\d{2}-\d{4}\b)"  # SSN
-    r"|(\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b)"  # credit card
-    r"|(\b\d{3}-\d{3}-\d{4}\b)"  # phone
-    r"|((?:\d{1,3}\.){3}\d{1,3})"  # IPv4
-    r"|(https?://[^\s]+)",  # URL
-    re.IGNORECASE,
-)
+from services.llm_policy import is_llm_enabled, is_pii_masking_enabled, mask_pii_samples
 
 
-def _sanitize_sample_value(value: str) -> str:
-    """Replace PII-like sample values with placeholders before sending to an LLM."""
-    if not isinstance(value, str):
-        value = str(value)
-    if not value:
-        return value
-    if _PII_RE.search(value):
-        return "<redacted>"
-    return value
-
-
-def _sanitize_samples(
-    samples: dict[str, list[str]] | None,
-) -> dict[str, list[str]]:
+def _sanitize_samples(samples: dict[str, list[str]] | None) -> dict[str, list[str]]:
     """Mask PII in the sample values used for LLM prompts."""
-    if not samples:
+    if not is_pii_masking_enabled():
         return {}
-    return {
-        col: [_sanitize_sample_value(v) for v in vals]
-        for col, vals in samples.items()
-    }
+    return mask_pii_samples(samples)
 
 _LLM_SYSTEM = (
     "You are a data engineering expert. Map source columns to destination columns. "
@@ -192,7 +167,13 @@ def refine_mappings_with_llm(
         "strategy": "deterministic_only",
     }
 
-    if not enabled or not target_columns or not source_columns:
+    if not enabled or not is_llm_enabled() or not target_columns or not source_columns:
+        if not is_llm_enabled():
+            meta["llm_policy"] = "disabled"
+        return baseline_mappings, meta
+
+    if not is_pii_masking_enabled():
+        meta["llm_policy"] = "pii_masking_required"
         return baseline_mappings, meta
 
     if not llm_provider_available():
