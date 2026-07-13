@@ -21,6 +21,8 @@ from preflight.models import (
     SourceConfig,
     TransferPlan,
 )
+from services.connector_capability_registry import classify_payload, recommended_batch_size
+from services.validation_plan import build_validation_plan
 
 
 class FilePreflightContext(PreflightContext):
@@ -37,8 +39,14 @@ class FilePreflightContext(PreflightContext):
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
         rows = [[str(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
+        dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
         mapping_dicts = [
-            {"source": m.source, "target": m.target, "transform": getattr(m, "transform", "")}
+            {
+                "source": m.source,
+                "target": m.target,
+                "transform": getattr(m, "transform", ""),
+                "target_type": dest_types_by_name.get(m.target),
+            }
             for m in self.plan.mappings
         ]
 
@@ -114,6 +122,7 @@ class FilePreflightContext(PreflightContext):
             target_schemas=target_schemas,
             sample_rows=self.sample_rows,
             validation_mode=mode,
+            destination_db_type=self.plan.destination.db_type,
         )
 
 
@@ -142,7 +151,7 @@ def run_transfer_policy_gates(
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
     requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
-    requires_primary_key = sync in {"incremental_deduped", "cdc", "full_refresh_overwrite_deduped"}
+    requires_primary_key = sync in {"upsert", "incremental_deduped", "cdc"}
 
     missing_cursor = [
         c.get("name") or c.get("stream") or "stream"
@@ -225,10 +234,40 @@ def run_transfer_policy_gates(
     return gates
 
 
-def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]]) -> dict[str, Any]:
+def is_compliance_only_block(proof_blockers: list[str]) -> bool:
+    """Return True when every proof blocker is purely a PII/compliance review."""
+    if not proof_blockers:
+        return False
+    return all(
+        "PII/compliance" in b or "compliance review" in b.lower()
+        for b in proof_blockers
+    )
+
+
+def apply_policy_gates(
+    result: dict[str, Any],
+    policy_gates: list[dict[str, Any]],
+    validation_mode: str = "strict",
+    destination_db_type: str = "postgresql",
+) -> dict[str, Any]:
     proof_bundle = result.get("proof_bundle") or {}
     transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
     proof_blockers = (proof_bundle.get("transfer_decision") or {}).get("blockers") or []
+
+    is_strict = (validation_mode or "strict").lower() in {"strict", "maximum"}
+    compliance_only = is_compliance_only_block(proof_blockers)
+
+    # In non-strict modes, PII/compliance review is a warning, not a hard blocker.
+    # Real transfers with email/name fields should be able to proceed after the user
+    # sees the compliance risk. Reconciliation failures and semantic confidence issues
+    # still stop the transfer.
+    if is_strict:
+        active_proof_blockers = list(proof_blockers)
+    else:
+        active_proof_blockers = [
+            b for b in proof_blockers
+            if "PII/compliance" not in b and "compliance review" not in b.lower()
+        ]
 
     blockers = [
         {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
@@ -236,7 +275,7 @@ def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]
     ]
     blockers.extend(
         {"id": f"proof_{idx}", "message": str(message), "details": {}}
-        for idx, message in enumerate(proof_blockers)
+        for idx, message in enumerate(active_proof_blockers)
     )
 
     if policy_gates:
@@ -252,10 +291,58 @@ def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]
     passed_count = sum(1 for g in gates if g.get("status") == GateStatus.PASS.value)
     total_gates = len(gates)
     has_blocks = any(g.get("status") == GateStatus.BLOCK.value for g in gates)
+
     proof_blocks = transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
+    if proof_blocks and not is_strict:
+        if active_proof_blockers:
+            proof_blocks = True
+        else:
+            proof_blocks = False
 
     if proof_blocks:
         has_blocks = True
+
+    if proof_bundle:
+        proof_bundle = {**proof_bundle}
+        base_decision = proof_bundle.get("transfer_decision") or {}
+        if has_blocks:
+            gate_blocker_messages = [b["message"] for b in blockers]
+            decision_blockers = list(base_decision.get("blockers") or [])
+            for msg in gate_blocker_messages:
+                if msg not in decision_blockers:
+                    decision_blockers.append(msg)
+            proof_bundle["passed"] = False
+            proof_bundle["transfer_decision"] = {
+                "decision": "block",
+                "blockers": decision_blockers,
+                "reason": "; ".join(decision_blockers) if decision_blockers else "Preflight gates blocked the transfer",
+                "warnings": [],
+            }
+        else:
+            # No hard gate blocks; downgrade proof decision to review/approve and surface
+            # compliance warnings so the UI shows the risk without disabling the transfer.
+            warnings = [b for b in proof_blockers if b not in active_proof_blockers]
+            decision = "review" if (transfer_decision in {"block", "review"} or compliance_only) else "approve"
+            proof_bundle["passed"] = True
+            proof_bundle["transfer_decision"] = {
+                "decision": decision,
+                "blockers": [],
+                "reason": (
+                    "No blocking issues detected" if not warnings
+                    else "; ".join(warnings)
+                ),
+                "warnings": warnings,
+            }
+
+    from services.ddl_compatibility import _normalize_dest_kind
+    from services.preflight_rules import enrich_blockers
+
+    dest_kind = _normalize_dest_kind(destination_db_type)
+    enriched_blockers = enrich_blockers(
+        blockers,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
 
     return {
         **result,
@@ -264,7 +351,8 @@ def apply_policy_gates(result: dict[str, Any], policy_gates: list[dict[str, Any]
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
         "gates": gates,
-        "blockers": blockers,
+        "blockers": enriched_blockers,
+        "proof_bundle": proof_bundle,
     }
 
 
@@ -279,6 +367,8 @@ def run_file_preflight(
     source_connected: bool = True,
     source_error: str | None = None,
     source_kind: str = "file",
+    source_format: str = "",
+    sync_mode: str = "append",
     sample_rows: list[dict] | None = None,
     estimated_bytes: int = 0,
     confidence_threshold: float = 0.85,
@@ -301,7 +391,10 @@ def run_file_preflight(
     dest_cols = [
         ColumnSchema(
             name=m["target"],
-            inferred_type=dest_types.get(m["target"], column_types.get(m["source"], "VARCHAR")).upper(),
+            inferred_type=dest_types.get(
+                m["target"],
+                m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
+            ).upper(),
         )
         for m in mappings
     ]
@@ -329,8 +422,11 @@ def run_file_preflight(
     dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
     dest_table_exists = destination_table_exists if destination_table_exists is not None else False
 
-    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.ddl_compatibility import _normalize_dest_kind, evaluate_ddl_compatibility
     from services.schema_drift import detect_schema_drift
+
+    dest_kind = _normalize_dest_kind(destination_db_type)
+    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
 
     target_cols = list((destination_column_types or {}).keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
@@ -363,12 +459,16 @@ def run_file_preflight(
     if sample_rows and columns:
         from services.sample_quality import analyze_dataset_quality
 
-        sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types)
-        if sample_quality.get("blocks_transfer"):
+        sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types, dest_kind=dest_kind)
+        # For schemaless destinations (MongoDB, DynamoDB, Redis) missing/optional fields
+        # are normal; high null rates should not be treated as DDL blockers.
+        if sample_quality.get("blocks_transfer") and not schemaless:
             ddl_compatible = False
             for issue in sample_quality.get("issues", [])[:10]:
                 if issue not in ddl_issues:
                     ddl_issues.append(issue)
+        if schemaless:
+            sample_quality["blocks_transfer"] = False
 
     plan = TransferPlan(
         source=SourceConfig(
@@ -382,6 +482,7 @@ def run_file_preflight(
         ),
         destination=DestinationConfig(
             kind="database",
+            db_type=dest_kind,
             connected=destination_connected,
             can_create_table=dest_can_create,
             can_write=destination_connected,
@@ -419,6 +520,40 @@ def run_file_preflight(
         ],
         source_records=sample_rows or [],
         target_records=[],
+        validation_mode=validation_mode,
+        confidence_threshold=confidence_threshold,
+    )
+
+    from services.preflight_rules import enrich_blockers
+
+    blockers = [
+        {"id": b.gate_id.value, "message": b.message, "details": b.details}
+        for b in result.blockers
+    ]
+    enriched_blockers = enrich_blockers(
+        blockers,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
+
+    from services.type_system import is_binary_type, is_structural_type
+
+    has_binary = any(is_binary_type(t) for t in column_types.values())
+    has_unstructured = any(is_structural_type(t) for t in column_types.values())
+    _src_fmt = (source_format or source_kind).lower()
+    _tgt_fmt = (destination_db_type or "").lower()
+    payload_shape = classify_payload(
+        source_format=_src_fmt,
+        target_format=_tgt_fmt,
+        has_binary=has_binary,
+        has_unstructured=has_unstructured,
+    )
+    validation_plan = build_validation_plan(
+        source_format=_src_fmt,
+        target_format=_tgt_fmt,
+        validation_mode=validation_mode,
+        write_semantics=sync_mode,
+        confidence_threshold=confidence_threshold,
     )
 
     out = {
@@ -436,21 +571,24 @@ def run_file_preflight(
             }
             for g in result.gates
         ],
-        "blockers": [
-            {"id": b.gate_id.value, "message": b.message, "details": b.details}
-            for b in result.blockers
-        ],
+        "blockers": enriched_blockers,
         "schema_drift": drift,
         "ddl_issues": ddl_issues,
         "sample_quality": sample_quality,
         "proof_bundle": proof_bundle,
+        "payload_shape": payload_shape,
+        "validation_plan": validation_plan.to_dict(),
+        "recommended_batch_size": min(
+            recommended_batch_size(_src_fmt),
+            recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
+        ),
     }
     return out
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:
     """Live connectivity probe for database destinations (Gate G2)."""
-    from ..transfer.adapters import resolve_connector_config
+    from ..transfer.adapters import resolve_connector_config, resolve_dest_table
     from ..transfer.connector_registry import run_probe
 
     if endpoint.kind != "database":
@@ -458,6 +596,10 @@ def probe_destination(endpoint) -> tuple[bool, str]:
 
     db_type = (endpoint.format or "").lower()
     cfg = resolve_connector_config(endpoint)
+    # DynamoDB uses the table name as the database identifier; ensure the
+    # connectivity probe sees the intended destination table.
+    if db_type == "dynamodb":
+        cfg["table"] = resolve_dest_table(db_type, endpoint)
     return run_probe(db_type, cfg)
 
 

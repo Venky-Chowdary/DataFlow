@@ -8,9 +8,35 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from services.transform_engine import (
+    _parse_boolean,
+    _parse_date,
+    _parse_datetime,
+    _parse_decimal,
+    NULL_SENTINELS,
+)
+
+_BOOLEAN_FIELD_RE = re.compile(
+    r"(?:^|_)(?:is|has|was|are|can|should|will|do|does|did|enable|enabled|disabled|active|flag|bool|status|"
+    r"confirmed|verified|valid|success|passed|failed|locked|paid|sent|done|toggled|archived|deleted|"
+    r"subscribed|premium|hidden|visible|public|private|readonly|read_only|write|approved|rejected|"
+    r"processed|resolved|completed|cancelled|canceled|cancel|on|off|yes|no|true|false)"
+    r"\d*(?:$|_)",
+    re.I,
+)
+
+# Values accepted as boolean when the field name looks boolean
+_BOOLEAN_STRINGS = {
+    "0", "1", "true", "false", "yes", "no", "y", "n", "t", "f",
+}
+
+
+def _is_boolean_field_name(name: str) -> bool:
+    return bool(_BOOLEAN_FIELD_RE.search(name or ""))
+
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
-    "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP",
+    "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP", "TIME",
     "VARCHAR", "TEXT", "UUID", "JSON", "BINARY",
 })
 
@@ -19,6 +45,8 @@ _UUID_RE = re.compile(
     re.I,
 )
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_YYYYMMDD_RE = re.compile(r"^\d{8}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _is_base64(value: str) -> bool:
@@ -32,16 +60,25 @@ def _is_base64(value: str) -> bool:
         return False
     if s.isalpha() and len(s) > 32:
         return False
+    # Pure hex strings (e.g. ObjectId, hashes) are not base64 payloads.
+    if all(c in "0123456789abcdefABCDEF" for c in s):
+        return False
     return True
-_EPOCH_MS_RE = re.compile(r"^\d{13}$")
-_EPOCH_S_RE = re.compile(r"^\d{10}$")
-_YYYYMMDD_RE = re.compile(r"^\d{8}$")
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+_BINARY_FIELD_RE = re.compile(
+    r"(?:^|_)(?:payload|binary|blob|bytea|bytes|b64|base64|data|file|doc|content|image|audio|video|pdf|signature|hash|checksum|key|secret|token|cipher|iv|salt|nonce|encoded|raw|dump|attachment)(?:_?\d*)?(?:$|_)",
+    re.I,
+)
+
+
+def _is_binary_field_name(name: str) -> bool:
+    return bool(_BINARY_FIELD_RE.search(name or ""))
 
 
 def _classify_value(value: str) -> str:
     s = value.strip()
-    if not s:
+    if not s or s.lower() in NULL_SENTINELS:
         return "VARCHAR"
 
     if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
@@ -57,54 +94,31 @@ def _classify_value(value: str) -> str:
     if _is_base64(s):
         return "BINARY"
 
-    low = s.lower()
-    if low in {"true", "false", "yes", "no", "y", "n"}:
+    boolean_parsed = _parse_boolean(s)
+    if boolean_parsed is not None:
+        # Defer 0/1 disambiguation to infer_type, where the field name is known.
+        if s in {"0", "1"}:
+            return "INTEGER"
         return "BOOLEAN"
-    if low in {"0", "1"} and len(s) == 1:
-        return "BOOLEAN"
 
-    if _EPOCH_MS_RE.match(s):
+    if _parse_date(s) is not None:
+        return "DATE"
+
+    if _parse_datetime(s) is not None:
         return "TIMESTAMP"
-    if _EPOCH_S_RE.match(s):
-        return "TIMESTAMP"
 
-    if _YYYYMMDD_RE.match(s):
-        try:
-            datetime.strptime(s, "%Y%m%d")
-            return "DATE"
-        except ValueError:
-            pass
-
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S%z",
-    ):
+    for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
         try:
             datetime.strptime(s.replace("Z", "+0000"), fmt.replace("Z", "+0000"))
-            return "TIMESTAMP"
+            return "TIME"
         except ValueError:
             continue
 
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            datetime.strptime(s, fmt)
-            return "DATE"
-        except ValueError:
-            continue
-
-    cleaned = s.replace(",", "")
-    if re.match(r"^-?\d+$", cleaned):
-        return "INTEGER"
-    try:
-        float(cleaned)
-        if "." in cleaned or "e" in cleaned.lower():
+    decimal_parsed = _parse_decimal(s)
+    if decimal_parsed is not None:
+        if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
         return "INTEGER"
-    except ValueError:
-        pass
 
     if len(s) > 255:
         return "TEXT"
@@ -113,7 +127,9 @@ def _classify_value(value: str) -> str:
     return "VARCHAR"
 
 
-def infer_type(samples: list[str], *, threshold: float = 0.85) -> str:
+def infer_type(
+    samples: list[str], *, threshold: float = 0.85, field_name: str | None = None
+) -> str:
     """Majority-vote type inference across sample values."""
     non_empty = [s.strip() for s in samples if s and str(s).strip()]
     if not non_empty:
@@ -124,17 +140,49 @@ def infer_type(samples: list[str], *, threshold: float = 0.85) -> str:
     ratio = best_count / len(non_empty)
 
     if ratio >= threshold:
-        return best_type
+        inferred = best_type
+    else:
+        # Mixed column — prefer safer wider types
+        if "TEXT" in counts and max(len(s) for s in non_empty) > 255:
+            inferred = "TEXT"
+        elif counts.get("DECIMAL", 0) + counts.get("INTEGER", 0) >= len(non_empty) * 0.66:
+            inferred = "DECIMAL" if counts.get("DECIMAL", 0) > 0 else "INTEGER"
+        elif counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) + counts.get("TIME", 0) >= len(non_empty) * 0.7:
+            if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
+                inferred = "TIMESTAMP"
+            elif counts.get("DATE", 0) >= counts.get("TIME", 0):
+                inferred = "DATE"
+            else:
+                inferred = "TIME"
+        else:
+            inferred = best_type if ratio >= 0.6 else "VARCHAR"
 
-    # Mixed column — prefer safer wider types
-    if "TEXT" in counts and max(len(s) for s in non_empty) > 255:
-        return "TEXT"
-    if counts.get("DECIMAL", 0) + counts.get("INTEGER", 0) >= len(non_empty) * 0.66:
-        return "DECIMAL" if counts.get("DECIMAL", 0) > 0 else "INTEGER"
-    if counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) >= len(non_empty) * 0.7:
-        return "TIMESTAMP" if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) else "DATE"
+    # Disambiguate 0/1 numeric columns from boolean flags using the field name
+    if (
+        inferred in {"INTEGER", "VARCHAR"}
+        and field_name
+        and _is_boolean_field_name(field_name)
+        and all(v.lower() in _BOOLEAN_STRINGS for v in non_empty)
+    ):
+        return "BOOLEAN"
 
-    return best_type if ratio >= 0.6 else "VARCHAR"
+    # Short base64 payloads in fields like payload, binary, b64, blob, etc.
+    if field_name and _is_binary_field_name(field_name):
+        valid = 0
+        for v in non_empty:
+            s = v.strip()
+            if len(s) >= 4 and len(s) % 4 == 0 and _BASE64_RE.match(s):
+                try:
+                    import base64
+
+                    base64.b64decode(s, validate=True)
+                    valid += 1
+                except Exception:
+                    pass
+        if valid == len(non_empty):
+            return "BINARY"
+
+    return inferred
 
 
 def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_samples: int = 50) -> list[dict]:
@@ -145,7 +193,7 @@ def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_sa
         columns.append(
             {
                 "name": name.strip() or f"column_{i + 1}",
-                "inferred_type": infer_type(samples),
+                "inferred_type": infer_type(samples, field_name=name),
                 "nullable": any(not str(s).strip() for s in samples),
                 "samples": [s for s in samples[:5] if str(s).strip()],
             }

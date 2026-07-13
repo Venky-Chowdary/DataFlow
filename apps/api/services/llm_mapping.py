@@ -6,6 +6,16 @@ import json
 import re
 from typing import Any
 
+
+from services.llm_policy import is_llm_enabled, is_pii_masking_enabled, mask_pii_samples
+
+
+def _sanitize_samples(samples: dict[str, list[str]] | None) -> dict[str, list[str]]:
+    """Mask PII in the sample values used for LLM prompts."""
+    if not is_pii_masking_enabled():
+        return {}
+    return mask_pii_samples(samples)
+
 _LLM_SYSTEM = (
     "You are a data engineering expert. Map source columns to destination columns. "
     "Respond with valid JSON only. Never invent destination columns not in the target list."
@@ -40,6 +50,8 @@ def _build_prompt(
 ) -> str:
     from src.ai.llm.prompts import COLUMN_MAPPING_PROMPT
 
+    sanitized_samples = _sanitize_samples(source_samples)
+
     context_lines = []
     if baseline:
         context_lines.append("Deterministic baseline (use as hints, improve if wrong):")
@@ -48,16 +60,16 @@ def _build_prompt(
                 f"  {m.get('source')} -> {m.get('target')} "
                 f"(conf={m.get('confidence', 0):.2f}, review={m.get('requires_review', False)})"
             )
-    if source_samples:
+    if sanitized_samples:
         for col in source_columns[:12]:
-            samples = source_samples.get(col, [])[:3]
+            samples = sanitized_samples.get(col, [])[:3]
             if samples:
                 context_lines.append(f"  samples[{col}]: {samples}")
 
     return COLUMN_MAPPING_PROMPT.format(
         source_columns=source_columns,
         target_columns=target_columns,
-        source_samples=source_samples or {},
+        source_samples=sanitized_samples,
         context="\n".join(context_lines) if context_lines else "None",
     )
 
@@ -87,6 +99,37 @@ def _normalize_llm_mapping(
         "requires_review": conf < 0.88,
         "score_gap": 0.12,
     }
+
+
+def _compute_llm_review(
+    source: str,
+    llm: dict[str, Any],
+    base: dict[str, Any] | None,
+) -> tuple[float, bool]:
+    """Compute score gap and review flag from LLM confidence and baseline alternatives.
+
+    The LLM confidence is the winner; the strongest baseline alternative that targets a
+    different column is the runner-up.  If the gap is small and the mapping is not an exact
+    identity match, flag it for review.
+    """
+    winner_conf = llm["confidence"]
+    target = llm["target"].lower()
+    runner_up = 0.0
+    if base and isinstance(base.get("alternatives"), list):
+        runner_up = max(
+            (
+                a.get("confidence", 0.0)
+                for a in base["alternatives"]
+                if a.get("target", "").lower() != target
+            ),
+            default=0.0,
+        )
+    score_gap = max(round(winner_conf - runner_up, 3), 0.0)
+
+    reason = str(llm.get("reasoning") or base.get("reasoning") or "")
+    is_exact = source.lower().strip() == target or reason.startswith("Exact")
+    requires_review = score_gap < 0.08 and not is_exact
+    return score_gap, requires_review
 
 
 def llm_provider_available() -> bool:
@@ -124,7 +167,13 @@ def refine_mappings_with_llm(
         "strategy": "deterministic_only",
     }
 
-    if not enabled or not target_columns or not source_columns:
+    if not enabled or not is_llm_enabled() or not target_columns or not source_columns:
+        if not is_llm_enabled():
+            meta["llm_policy"] = "disabled"
+        return baseline_mappings, meta
+
+    if not is_pii_masking_enabled():
+        meta["llm_policy"] = "pii_masking_required"
         return baseline_mappings, meta
 
     if not llm_provider_available():
@@ -169,6 +218,9 @@ def refine_mappings_with_llm(
                 pick = {**(base or {}), **llm}
                 if base and llm["confidence"] < base.get("confidence", 0):
                     pick = {**llm, **base, "reasoning": f"{llm['reasoning']} · baseline={base.get('confidence', 0):.0%}"}
+                score_gap, requires_review = _compute_llm_review(src, llm, base)
+                pick["score_gap"] = score_gap
+                pick["requires_review"] = requires_review
                 pick["method"] = "hybrid_llm"
                 pick["agent"] = "LLMMappingAgent"
                 merged.append(pick)

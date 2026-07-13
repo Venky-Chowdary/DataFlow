@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
@@ -25,6 +29,11 @@ class EndpointDTO(BaseModel):
     password: str = ""
     connection_string: str = ""
     warehouse: str = ""
+    ssl: bool = False
+    auth_mode: str = ""
+    auth_role: str = ""
+    api_key: str = ""
+    service_account: str = ""
 
 
 class AnalyzeRequest(BaseModel):
@@ -180,6 +189,7 @@ async def map_columns_route(body: MapColumnsRequest):
         confidence_threshold=threshold,
         use_llm=body.use_llm,
         source_samples=body.source_samples or None,
+        validation_mode=body.validation_mode,
     )
     nested_fields: list[dict[str, str]] = []
     try:
@@ -405,7 +415,7 @@ async def run_universal_transfer(
     dest_kind: str = Form("database"),
     dest_format: str = Form("mongodb"),
     dest_database: str = Form("test_db"),
-    dest_schema: str = Form("public"),
+    dest_schema: str = Form(""),
     dest_table: str = Form(""),
     dest_collection: str = Form(""),
     dest_connector_id: Optional[str] = Form(None),
@@ -416,9 +426,15 @@ async def run_universal_transfer(
     dest_connection_string: str = Form(""),
     dest_warehouse: str = Form(""),
     source_connector_id: Optional[str] = Form(None),
+    source_host: str = Form(""),
+    source_port: int = Form(0),
+    source_username: str = Form(""),
+    source_password: str = Form(""),
     source_database: str = Form(""),
+    source_schema: str = Form(""),
     source_table: str = Form(""),
     source_collection: str = Form(""),
+    source_connection_string: str = Form(""),
     skip_preflight: str = Form("false"),
     async_mode: str = Form("true"),
     mappings_json: str = Form(""),
@@ -454,9 +470,15 @@ async def run_universal_transfer(
         kind=source_kind,
         format=src_fmt,
         connector_id=source_connector_id,
+        host=source_host,
+        port=source_port,
+        username=source_username,
+        password=source_password,
         database=source_database,
+        schema=source_schema,
         table=source_table,
         collection=source_collection,
+        connection_string=source_connection_string,
     )
     destination = EndpointConfig(
         kind=dest_kind,
@@ -541,6 +563,7 @@ async def run_universal_transfer(
             "error": result.error,
             "operation": result.operation,
             "job_id": result.job_id,
+            "error_details": result.error_details,
         })
     return {
         "success": True,
@@ -552,4 +575,19 @@ async def run_universal_transfer(
         "destination": result.destination_summary,
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
+        "validation_plan": result.validation_plan,
+        "payload_shape": result.payload_shape,
     }
+
+
+@router.get("/download/{filename}")
+async def download_export(filename: str):
+    """Serve an exported file from the exports directory."""
+    export_dir = Path(__file__).resolve().parents[2] / "exports"
+    file_path = export_dir / filename
+    # Security: refuse to serve files outside the exports directory
+    if not file_path.resolve().is_relative_to(export_dir.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Export not found")
+    return FileResponse(file_path, filename=filename)

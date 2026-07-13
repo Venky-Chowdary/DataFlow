@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import json
+import sys
 from dataclasses import dataclass
-from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from connectors.aws_common import boto3_client
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -75,10 +81,9 @@ def _ddb_attr_type(attr_type: str) -> str:
 
 
 def _deserialize(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        if value % 1 == 0:
-            return int(value)
-        return float(value)
+    """Recursively deserialize DynamoDB set/list/map values while preserving Decimal."""
+    if isinstance(value, set):
+        return sorted(_deserialize(v) for v in value)
     if isinstance(value, dict):
         return {k: _deserialize(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -94,11 +99,7 @@ def _item_to_record(item: dict) -> dict[str, Any]:
 
 
 def _cell(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str)
-    return str(value)
+    return cell_to_string(value)
 
 
 def estimate_item_count(cfg: dict[str, Any], table: str) -> int:

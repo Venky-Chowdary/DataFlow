@@ -35,87 +35,192 @@ def _load_ml_baseline():
 
 
 ABBREVIATIONS: dict[str, str] = {
+    # Amounts and quantities
     "amt": "amount",
     "amount": "amount",
-    "salary_amt": "salary_amount",
     "salary": "salary_amount",
-    "pay_amt": "payment_amount",
+    "salary_amt": "salary_amount",
+    "salary_amount": "salary_amount",
+    "pay": "payment",
     "pmt": "payment",
     "pymt": "payment",
-    "pay": "payment",
-    "qty": "quantity",
-    "dt": "date",
-    "txn": "transaction",
-    "txn_dt": "transaction_date",
-    "trans_dt": "transaction_date",
-    "trans_date": "transaction_date",
-    "created_at": "created_timestamp",
-    "updated_at": "updated_timestamp",
-    "mod_dt": "modified_date",
-    "cust_nm": "customer_name",
-    "cust": "customer",
-    "cust_id": "customer_id",
-    "acct": "account",
-    "acct_no": "account_number",
-    "acct_num": "account_number",
-    "desc": "description",
-    "descr": "description",
-    "nm": "name",
-    "fname": "first_name",
-    "lname": "last_name",
-    "addr": "address",
-    "zip": "postal_code",
-    "curr": "currency",
-    "ccy": "currency_code",
-    "ref": "reference",
-    "ref_no": "reference_number",
-    "inv": "invoice",
-    "inv_no": "invoice_number",
-    "sku": "product_sku",
-    "prod": "product",
-    "prod_id": "product_id",
-    "sts": "status",
-    "stat": "status",
-    "bal": "balance",
-    "tot": "total",
-    "subtot": "subtotal",
+    "pay_amt": "payment_amount",
+    "payment_amount": "payment_amount",
+    "tax": "tax",
     "tax_amt": "tax_amount",
+    "tax_amount": "tax_amount",
+    "net": "net",
+    "net_amt": "net_amount",
+    "net_amount": "net_amount",
+    "gross": "gross",
+    "gross_amt": "gross_amount",
+    "gross_amount": "gross_amount",
+    "line": "line",
+    "line_amt": "line_amount",
+    "line_amount": "line_amount",
+    "bal": "balance",
+    "balance": "balance",
+    "tot": "total",
+    "total": "total",
+    "subtot": "subtotal",
+    "subtotal": "subtotal",
     "disc": "discount",
-    "emp": "employee",
-    "emp_id": "employee_id",
-    "full_name": "full_name",
-    "dept": "department",
-    "dept_code": "department_code",
-    "hire_dt": "hire_date",
-    "loc": "location",
-    "src": "source",
-    "tgt": "target",
-    "ts": "timestamp",
-    "created": "created_at",
-    "updated": "updated_at",
-    "mod_dt": "modified_at",
-    "email": "email_address",
-    "e_mail": "email_address",
-    "phone": "phone_number",
-    "tel": "phone_number",
-    "mob": "mobile_number",
-    "zipcode": "postal_code",
-    "postal": "postal_code",
-    "country_cd": "country_code",
-    "cntry": "country_code",
-    "curr_cd": "currency_code",
-    "iso_curr": "currency_code",
-    "ord": "order",
-    "ord_id": "order_id",
-    "order_no": "order_number",
-    "ship_dt": "ship_date",
-    "del_dt": "delivery_date",
+    "discount": "discount",
+    "qty": "quantity",
+    "quantity": "quantity",
     "qty_ord": "quantity_ordered",
+    "quantity_ordered": "quantity_ordered",
+    "price": "price",
+    "prc": "price",
     "unit_prc": "unit_price",
     "unit_price": "unit_price",
-    "line_amt": "line_amount",
-    "net_amt": "net_amount",
-    "gross_amt": "gross_amount",
+    "cost": "cost",
+    "unit_cost": "unit_cost",
+    # Dates and timestamps
+    "dt": "date",
+    "date": "date",
+    "ts": "timestamp",
+    "timestamp": "timestamp",
+    "created": "created",
+    "created_at": "created_at",
+    "created_dt": "created_at",
+    "created_date": "created_at",
+    "created_ts": "created_timestamp",
+    "created_timestamp": "created_timestamp",
+    "updated": "updated",
+    "updated_at": "updated_at",
+    "updated_dt": "updated_at",
+    "updated_date": "updated_at",
+    "updated_ts": "updated_timestamp",
+    "updated_timestamp": "updated_timestamp",
+    "mod": "modified",
+    "modified": "modified",
+    "modified_at": "modified_at",
+    "mod_at": "modified_at",
+    "mod_dt": "modified_at",
+    "modified_dt": "modified_at",
+    "modified_date": "modified_at",
+    "modified_ts": "modified_timestamp",
+    "modified_timestamp": "modified_timestamp",
+    "txn": "transaction",
+    "transaction": "transaction",
+    "txn_dt": "transaction_date",
+    "transaction_date": "transaction_date",
+    "txn_id": "transaction_id",
+    "transaction_id": "transaction_id",
+    "trans_dt": "transaction_date",
+    "trans_date": "transaction_date",
+    "hire_dt": "hire_date",
+    "hire_date": "hire_date",
+    "ship_dt": "ship_date",
+    "ship_date": "ship_date",
+    "del": "delivery",
+    "delivery": "delivery",
+    "del_dt": "delivery_date",
+    "delivery_date": "delivery_date",
+    "pay_dt": "payment_date",
+    "payment_dt": "payment_date",
+    "payment_date": "payment_date",
+    # Identifiers and customers
+    "no": "number",
+    "num": "number",
+    "nbr": "number",
+    "nr": "number",
+    "number": "number",
+    "ref": "reference",
+    "reference": "reference",
+    "ref_no": "reference_number",
+    "reference_number": "reference_number",
+    "inv": "invoice",
+    "invoice": "invoice",
+    "inv_no": "invoice_number",
+    "invoice_number": "invoice_number",
+    "ord": "order",
+    "order": "order",
+    "ord_id": "order_id",
+    "order_id": "order_id",
+    "order_no": "order_number",
+    "order_number": "order_number",
+    "cust": "customer",
+    "customer": "customer",
+    "cust_id": "customer_id",
+    "customer_id": "customer_id",
+    "cust_nm": "customer_name",
+    "customer_name": "customer_name",
+    "acct": "account",
+    "account": "account",
+    "acct_no": "account_number",
+    "acct_num": "account_number",
+    "account_number": "account_number",
+    "emp": "employee",
+    "employee": "employee",
+    "emp_id": "employee_id",
+    "employee_id": "employee_id",
+    "dept": "department",
+    "department": "department",
+    "dept_code": "department_code",
+    "department_code": "department_code",
+    "product": "product",
+    "prod": "product",
+    "prod_id": "product_id",
+    "product_id": "product_id",
+    "sku": "product_sku",
+    "product_sku": "product_sku",
+    "src": "source",
+    "source": "source",
+    "tgt": "target",
+    "target": "target",
+    "loc": "location",
+    "location": "location",
+    # Names and contact
+    "nm": "name",
+    "name": "name",
+    "fname": "first_name",
+    "first_name": "first_name",
+    "lname": "last_name",
+    "last_name": "last_name",
+    "full_name": "full_name",
+    "desc": "description",
+    "descr": "description",
+    "description": "description",
+    "addr": "address",
+    "address": "address",
+    "email": "email_address",
+    "e_mail": "email_address",
+    "email_address": "email_address",
+    "phone": "phone",
+    "tel": "phone",
+    "phone_number": "phone_number",
+    "mobile": "mobile",
+    "mob": "mobile",
+    "cell": "mobile",
+    "mobile_number": "mobile_number",
+    # Status and location
+    "sts": "status",
+    "stat": "status",
+    "status": "status",
+    "zip": "postal_code",
+    "zipcode": "postal_code",
+    "postal": "postal_code",
+    "postal_code": "postal_code",
+    "country": "country",
+    "country_cd": "country_code",
+    "country_code": "country_code",
+    "cntry": "country",
+    "state": "state",
+    "state_code": "state_code",
+    "province": "province",
+    "province_code": "province_code",
+    "city": "city",
+    "city_name": "city_name",
+    "region": "region",
+    "region_code": "region_code",
+    "curr": "currency",
+    "currency": "currency",
+    "ccy": "currency_code",
+    "curr_cd": "currency_code",
+    "iso_curr": "currency_code",
+    "currency_code": "currency_code",
 }
 
 
@@ -124,7 +229,7 @@ def _normalize(name: str) -> str:
     s = re.sub(r"([a-z])([A-Z])", r"\1_\2", s)
     s = s.lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
-    return re.sub(r"_+", "_", s).strip("_")
+    return re.sub(r"_+", "_", s).rstrip("_")
 
 
 def _expand_abbrev(token: str) -> str:
@@ -134,7 +239,23 @@ def _expand_abbrev(token: str) -> str:
 def _semantic_tokens(name: str) -> list[str]:
     norm = _normalize(name)
     parts = norm.split("_")
-    return [_expand_abbrev(p) for p in parts]
+    tokens: list[str] = []
+    i = 0
+    # Match longest abbreviation phrase first so multi-token abbreviations like
+    # "txn_dt" or "created_at" resolve to their canonical form.
+    while i < len(parts):
+        matched = False
+        for j in range(len(parts), i, -1):
+            phrase = "_".join(parts[i:j])
+            if phrase in ABBREVIATIONS:
+                tokens.append(ABBREVIATIONS[phrase])
+                i = j
+                matched = True
+                break
+        if not matched:
+            tokens.append(_expand_abbrev(parts[i]))
+            i += 1
+    return tokens
 
 
 def _semantic_form(name: str) -> str:
@@ -189,38 +310,45 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
-    """Reduce score for incompatible type pairs."""
-    s, t = src_type.upper(), tgt_type.upper()
-    text_types = {"TEXT", "CLOB", "LONGTEXT", "BLOB", "BYTEA", "BINARY", "VARCHAR", "STRING"}
-    numeric_types = {"INTEGER", "DECIMAL", "FLOAT", "NUMBER", "NUMERIC"}
-    date_types = {"DATE", "TIMESTAMP"}
-    
-    if s in text_types and t in date_types:
-        return 0.35
-    if s in {"BINARY", "BLOB", "BYTEA"} and t not in text_types | {"BINARY", "BLOB", "BYTEA"}:
-        return 0.4
-    if s in text_types and t in numeric_types:
-        return 0.25  # text to numeric needs parsing, slightly less ideal
-        
+    """Reduce score for incompatible type pairs using the canonical type-system rules."""
+    from services.type_system import is_lossy_coercion, normalize_logical_type
+
+    if not src_type or not tgt_type:
+        return 0.0
+    if is_lossy_coercion(src_type, tgt_type):
+        src = normalize_logical_type(src_type)
+        tgt = normalize_logical_type(tgt_type)
+        if src == "binary" and tgt != "binary":
+            return 0.4
+        if src in ("json", "array") and tgt in ("integer", "decimal", "boolean", "date", "datetime", "time", "binary", "uuid"):
+            return 0.35
+        if src in ("decimal",) and tgt == "integer":
+            return 0.15
+        return 0.25
     return 0.0
 
 def _type_aware_boost(src_type: str, tgt_type: str) -> float:
     """Boost score for exact or highly compatible type matches."""
-    s, t = src_type.upper(), tgt_type.upper()
-    if s == t:
+    from services.type_system import is_lossy_coercion, normalize_logical_type
+
+    if not src_type or not tgt_type:
+        return 0.0
+    src = normalize_logical_type(src_type)
+    tgt = normalize_logical_type(tgt_type)
+    if src == tgt:
         return 0.05
-    
-    numeric_types = {"INTEGER", "DECIMAL", "FLOAT", "NUMBER", "NUMERIC"}
-    date_types = {"DATE", "TIMESTAMP"}
-    text_types = {"VARCHAR", "STRING", "TEXT"}
-    
-    if s in numeric_types and t in numeric_types:
+    if is_lossy_coercion(src_type, tgt_type):
+        return 0.0
+    # Safe widening / cross-cast pairs that are not lossy.
+    safe_pairs: set[tuple[str, str]] = {
+        ("integer", "decimal"), ("boolean", "integer"), ("boolean", "decimal"),
+        ("date", "datetime"), ("string", "text"), ("uuid", "string"), ("uuid", "text"),
+        ("json", "text"), ("array", "text"), ("json", "string"), ("array", "string"),
+    }
+    if (src, tgt) in safe_pairs:
         return 0.03
-    if s in date_types and t in date_types:
-        return 0.03
-    if s in text_types and t in text_types:
+    if src in ("string", "text", "uuid") and tgt in ("string", "text", "uuid"):
         return 0.02
-        
     return 0.0
 
 
@@ -516,13 +644,20 @@ def map_columns(
             tgt_types[t] = "VARCHAR"
 
     if not target_columns:
+        # Destination schema is unknown/empty — preserve source columns and types.
+        # This is a passthrough identity mapping: source columns become the target
+        # schema, and the source type is carried forward so writers can create the
+        # destination table with safe, fidelity-preserving types.
         return [
             {
                 "source": src,
                 "target": _semantic_form(src),
-                "confidence": 0.72,
-                "reasoning": "Inferred target name from semantic expansion",
+                "confidence": 0.95,
+                "reasoning": "Target schema unknown — preserving source column and type",
                 "user_override": False,
+                "source_type": src_types.get(src, "VARCHAR"),
+                "target_type": src_types.get(src, "VARCHAR"),
+                "assignment_strategy": "identity_passthrough",
             }
             for src in source_columns
         ]

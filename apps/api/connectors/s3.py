@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from connectors.aws_common import boto3_client
 from connectors.base import ConnectResult
 
 
@@ -17,10 +18,9 @@ def test_s3(
     ssl: bool,
     warehouse: str = "",
 ) -> ConnectResult:
-    del port, schema, ssl, warehouse
+    del schema, warehouse
 
-    region = (host or "").strip() or "us-east-1"
-    bucket = (database or connection_string or "").strip()
+    bucket = (database or "").strip()
     access_key = (username or "").strip()
     secret_key = (password or "").strip()
 
@@ -32,6 +32,16 @@ def test_s3(
             tables=[],
             error="AWS Access Key ID (username) and Secret Access Key (password) are required.",
         )
+
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "ssl": ssl,
+    }
 
     try:
         import boto3
@@ -46,18 +56,13 @@ def test_s3(
         )
 
     try:
-        client = boto3.client(
-            "s3",
-            region_name=region,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-        )
+        client = boto3_client("s3", cfg)
         client.head_bucket(Bucket=bucket)
         keys: list[str] = []
         try:
             from connectors.s3_reader import list_objects
 
-            keys = list_objects({"host": region, "username": access_key, "password": secret_key}, bucket)
+            keys = list_objects(cfg, bucket)
         except Exception:
             keys = []
         objects = keys or [bucket]

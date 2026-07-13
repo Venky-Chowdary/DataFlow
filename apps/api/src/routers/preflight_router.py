@@ -25,6 +25,7 @@ class MappingItem(BaseModel):
     confidence: float = 0.9
     reason: str = ""
     transform: str | None = None
+    target_type: str | None = None
     requires_review: bool = False
     score_gap: float = 1.0
     user_override: bool = False
@@ -37,6 +38,8 @@ class PreflightRequest(BaseModel):
     mappings: list[MappingItem]
     connector_id: Optional[str] = None
     source_connector_id: Optional[str] = None
+    source_kind: str = "file"
+    source_type: Optional[str] = None
     dest_kind: str = "database"
     dest_type: Optional[str] = None
     dest_host: Optional[str] = None
@@ -195,7 +198,9 @@ async def run_preflight(body: PreflightRequest):
         destination_error=dest_error,
         source_connected=source_connected,
         source_error=source_error,
-        source_kind="database" if body.source_connector_id else "file",
+        source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+        source_format=body.source_type or body.source_kind,
+        sync_mode=body.sync_mode,
         sample_rows=body.sample_rows,
         estimated_bytes=body.estimated_bytes,
         confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
@@ -213,4 +218,5 @@ async def run_preflight(body: PreflightRequest):
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
         ),
+        validation_mode=body.validation_mode,
     )

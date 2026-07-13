@@ -185,3 +185,81 @@
   flex: 1;
   min-height: 0;
 }
+
+/* ─── Page head typography consistency ─── */
+.df-page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.df-page-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.df-page-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.df-page-title {
+  margin: 0;
+  font-size: var(--df-text-title, 20px);
+  font-weight: 700;
+  color: var(--df-text-primary, #111827);
+  line-height: 1.25;
+}
+
+.df-page-desc {
+  margin: 0;
+  color: var(--df-text-secondary, #4b5563);
+  font-size: var(--df-text-body, 14px);
+  line-height: 1.45;
+  max-width: 72ch;
+}
+
+/* ─── Accessibility & focus consistency ─── */
+.df2-app :focus {
+  outline: none;
+}
+
+.df2-app :focus-visible {
+  outline: 2px solid var(--df-focus-ring, rgba(15, 118, 110, 0.35));
+  outline-offset: 2px;
+}
+
+.df2-app .df2-input:focus-visible,
+.df2-app select.df2-input:focus-visible,
+.df2-app select.df2-select:focus-visible {
+  outline: 2px solid var(--df-focus-ring, rgba(15, 118, 110, 0.35));
+  outline-offset: 0;
+}
+
+.df2-app button:focus:not(:focus-visible),
+.df2-app [role="button"]:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Respect reduced motion for UI polish */
+@media (prefers-reduced-motion: reduce) {
+  .df2-app *,
+  .df2-app *::before,
+  .df2-app *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Selection colour consistent with brand */
+.df2-app ::selection {
+  background: var(--df-brand-ring, rgba(15, 118, 110, 0.22));
+  color: var(--df-text-primary, #111827);
+}

@@ -41,37 +41,9 @@ def run_reconciliation(
         }
 
     db_type = endpoint.format.lower()
-    if db_type == "mongodb":
-        if not records and rows_written > 0:
-            return {
-                "passed": True,
-                "message": f"MongoDB streaming transfer verified ({rows_written} documents)",
-                "source_rows": source_rows,
-                "target_rows": rows_written,
-                "rejected_rows": rejected_rows,
-            }
-        return {
-            "passed": rows_written == expected_written,
-            "message": (
-                f"MongoDB insert verified ({rows_written} documents"
-                + (f", {rejected_rows} rejected" if rejected_rows else "")
-                + ")"
-            ),
-            "source_rows": source_rows,
-            "target_rows": rows_written,
-            "rejected_rows": rejected_rows,
-        }
 
     _, data_rows = records_to_matrix(records, columns)
     source_checksum = writer_checksum or checksum_rows(data_rows)
-    if records:
-        mapped_cols = list(dict.fromkeys(
-            str(m.get("target") or m.get("source") or "")
-            for m in (mappings or [])
-            if m.get("target") or m.get("source")
-        )) or columns
-        from services.reconciliation import aggregate_checksum
-        source_checksum = aggregate_checksum(records, mapped_cols)
     cfg = resolve_connector_config(endpoint)
     schema = dest_summary.get("schema") or cfg.get("schema", "public")
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""

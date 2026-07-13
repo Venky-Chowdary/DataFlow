@@ -4,7 +4,6 @@ import { EmptyState } from "../components/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
@@ -269,22 +268,9 @@ export function SettingsPage() {
     [auditEvents],
   );
 
-  const activeTab = TABS.find((t) => t.id === tab)!;
-
   return (
-    <PageShell
-      wide
-      className="df2-page-settings"
-      kicker="Workspace"
-      title="Settings"
-      description="Organization profile, security, SSO, team access, API keys, and audit logs."
-    >
-      <PageFrame className="df2-settings-workspace" showHonesty>
-        <PageInsightStrip
-          tone={tab === "logs" && auditEvents.some((e) => e.level === "error") ? "warn" : "info"}
-          pill={activeTab.label}
-          message={`${activeTab.desc}. Changes apply workspace-wide across Transfer Studio, jobs, and connectors.`}
-        />
+    <PageShell wide className="df2-page-settings" title="Settings">
+      <PageFrame className="df2-settings-workspace">
         <PageMetricsRow
           compact
           columns={4}
@@ -318,7 +304,7 @@ export function SettingsPage() {
             ))}
           </nav>
 
-          <div className="df2-settings-panel" role="tabpanel" aria-label={activeTab.label}>
+          <div className="df2-settings-panel" role="tabpanel" aria-label={TABS.find((t) => t.id === tab)?.label ?? "Settings"}>
             {tab === "general" && (
               <>
                 <section className="df2-settings-section">
@@ -329,7 +315,7 @@ export function SettingsPage() {
                     </div>
                   </div>
                   <div className="df2-settings-section-body">
-                    <div className="df2-settings-grid">
+                    <div className="df2-settings-grid df2-settings-grid--row">
                       <div className="df2-settings-field">
                         <label htmlFor="org-name">Organization name</label>
                         <input id="org-name" className="df2-input" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
@@ -346,14 +332,13 @@ export function SettingsPage() {
                       <div className="df2-settings-field">
                         <label htmlFor="retention">Job retention (days)</label>
                         <input id="retention" className="df2-input" type="number" value={retention} onChange={(e) => setRetention(e.target.value)} />
-                        <p className="df2-settings-hint">Completed jobs older than this are archived automatically.</p>
                       </div>
                       <div className="df2-settings-field">
                         <label>Default destination</label>
                         <input className="df2-input" placeholder="Configure via Connectors" disabled />
-                        <p className="df2-settings-hint">Managed on the Connectors page when saving connections.</p>
                       </div>
                     </div>
+                    <p className="df2-settings-hint">Completed jobs older than retention are archived. Default destination is managed on Connectors.</p>
                   </div>
                   <div className="df2-settings-section-footer">
                     <button

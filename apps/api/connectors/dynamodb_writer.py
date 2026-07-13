@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.aws_common import boto3_client
@@ -23,11 +26,42 @@ class WriteResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _to_attr(value: Any) -> dict:
+def _to_dynamo_value(value: Any, source_type: str) -> Any:
+    """Convert transform-engine values to DynamoDB-serializable native types."""
+    if value is None:
+        return None
+    upper = source_type.upper()
+    if upper in {"DECIMAL", "NUMERIC"}:
+        try:
+            return Decimal(value)
+        except Exception:
+            return value
+    if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value, parse_float=Decimal, parse_constant=lambda v: None)
+            except json.JSONDecodeError:
+                return value
+        return value
+    if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            try:
+                return base64.b64decode(value, validate=True)
+            except Exception:
+                return value.encode("utf-8")
+        return value
+    return value
+
+
+def _to_attr(value: Any, source_type: str) -> dict:
     from boto3.dynamodb.types import TypeSerializer
 
     ser = TypeSerializer()
-    return ser.serialize(value)
+    return ser.serialize(_to_dynamo_value(value, source_type))
 
 
 def write_mapped_rows(
@@ -48,8 +82,10 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
+    backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
-    del schema, ssl, error_policy
+    del schema, ssl, error_policy, backfill_new_fields
     table = table_name or database
     cfg = {
         "host": host,
@@ -58,18 +94,21 @@ def write_mapped_rows(
         "password": password,
         "connection_string": connection_string,
     }
-    target_cols = resolve_target_columns(mappings, headers)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        preserve_case=True,
     )
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
-        _ensure_table(client, table, target_cols, mappings)
+        _ensure_table(client, table, target_cols, mappings, source_types)
+
+    key_types = _table_key_types(client, table)
 
     written = 0
     batch_size = 25
@@ -80,7 +119,21 @@ def write_mapped_rows(
             slice_rows = mapped_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
             for row in slice_rows:
-                item = {col: _to_attr(val) for col, val in zip(target_cols, row)}
+                item = {}
+                for i, col in enumerate(target_cols):
+                    value = row[i]
+                    attr_type = key_types.get(col)
+                    if attr_type == "S":
+                        value = str(value) if value is not None else ""
+                    elif attr_type == "N":
+                        try:
+                            value = Decimal(value) if value is not None else None
+                        except Exception:
+                            value = value
+                    elif attr_type == "B":
+                        if isinstance(value, str):
+                            value = value.encode("utf-8")
+                    item[col] = _to_attr(value, source_types[i])
                 request_items.append({"PutRequest": {"Item": item}})
             _batch_write_with_retry(client, table, request_items)
             written += len(slice_rows)
@@ -108,6 +161,22 @@ def write_mapped_rows(
         )
 
 
+def _table_key_types(client, table: str) -> dict[str, str]:
+    """Return key attribute names -> DynamoDB type ('S', 'N', 'B') for an existing table."""
+    from botocore.exceptions import ClientError
+    try:
+        info = client.describe_table(TableName=table)["Table"]
+        attrs = {a["AttributeName"]: a["AttributeType"] for a in info.get("AttributeDefinitions", [])}
+        keys = {}
+        for ks in info.get("KeySchema", []):
+            name = ks["AttributeName"]
+            if name in attrs:
+                keys[name] = attrs[name]
+        return keys
+    except ClientError:
+        return {}
+
+
 def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
     preferred = {"id", "_id", "pk", "sk", "uuid", "key"}
     lower_map = {c.lower(): c for c in target_cols}
@@ -125,7 +194,7 @@ def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
     return target_cols[0] if target_cols else "id"
 
 
-def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dict]) -> None:
+def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dict], source_types: list[str] | None = None) -> None:
     from botocore.exceptions import ClientError
 
     try:
@@ -137,7 +206,13 @@ def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dic
     if not target_cols:
         raise ValueError(f"DynamoDB table `{table}` does not exist and no columns were provided to create it.")
     hash_key = _pick_hash_key(target_cols, mappings)
-    attr_type = "N" if hash_key.lower().endswith("_id") and hash_key.lower() != "uuid" else "S"
+    attr_type = "S"
+    if source_types and hash_key in target_cols:
+        logical = (source_types[target_cols.index(hash_key)] or "").upper()
+        if logical in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT"}:
+            attr_type = "N"
+        elif logical in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+            attr_type = "B"
     client.create_table(
         TableName=table,
         AttributeDefinitions=[{"AttributeName": hash_key, "AttributeType": attr_type}],

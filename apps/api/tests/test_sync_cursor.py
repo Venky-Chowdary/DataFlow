@@ -4,6 +4,7 @@ import json
 
 from services.sync_cursor import (
     build_cursor_key,
+    compare_cursor_values,
     map_source_to_target,
     max_cursor_value,
     requires_incremental,
@@ -61,3 +62,13 @@ def test_map_source_to_target():
     mappings = [{"source": "order_id", "target": "id"}]
     assert map_source_to_target("order_id", mappings) == "id"
     assert map_source_to_target("missing", mappings) == "missing"
+
+
+def test_compare_cursor_values_uses_typed_order():
+    # Integer watermarks must compare numerically, not lexicographically.
+    assert compare_cursor_values("1000", "500") == 1
+    assert compare_cursor_values("500", "1000") == -1
+    assert compare_cursor_values("500", "500") == 0
+    assert compare_cursor_values("2025-06-01", "2025-01-01") == 1
+    assert compare_cursor_values(None, "500") == -1
+    assert compare_cursor_values("500", None) == 1

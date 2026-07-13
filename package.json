@@ -5,16 +5,20 @@
     "apps/web",
     "packages/design-system"
   ],
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
   "scripts": {
     "dev": "npm run dev --workspace=@dataflow/web",
-    "setup:api": "cd apps/api && python3 -m pip install -r requirements.txt",
-    "dev:api": "npm run setup:api && cd apps/api && python3 -m uvicorn src.main:app --reload --host 127.0.0.1 --port 8001",
+    "setup:api": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pip install -r requirements.txt'",
+    "dev:api": "npm run setup:api && cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m uvicorn src.main:app --reload --host 127.0.0.1 --port 8001'",
     "build": "npm run build --workspace=@dataflow/web",
     "storybook": "npm run storybook --workspace=@dataflow/design-system",
     "test": "npm run test:api && npm run test:preflight",
-    "test:preflight": "cd packages/preflight && python -m pytest tests -v",
-    "test:api": "cd apps/api && python3 -m pytest tests -v",
-    "test:e2e": "cd apps/api && python3 -m pytest tests/test_e2e_pipeline.py tests/test_schema_inference.py tests/test_sample_files.py tests/test_catalog_api.py tests/test_connectors_flow.py -v",
+    "test:preflight": "cd packages/preflight && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests -v'",
+    "test:api": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests -v'",
+    "test:e2e": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests/test_e2e_pipeline.py tests/test_schema_inference.py tests/test_sample_files.py tests/test_catalog_api.py tests/test_connectors_flow.py -v'",
+    "audit": "npm audit",
     "docker:secrets": "bash scripts/generate-production-secrets.sh",
     "docker:prod": "docker compose -f docker-compose.prod.yml up -d --build",
     "docker:prod:down": "docker compose -f docker-compose.prod.yml down",

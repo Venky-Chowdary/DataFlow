@@ -67,15 +67,48 @@ def _normalize_dest_kind(dest_db_type: str | None) -> str:
     return raw
 
 
-def _pk_candidates(mappings: list[dict]) -> list[str]:
-    keys: list[str] = []
-    for m in mappings:
-        tgt = str(m.get("target") or "")
-        src = str(m.get("source") or "")
-        label = f"{src}->{tgt}".lower()
-        if tgt.lower() in {"id", "_id"} or tgt.lower().endswith("_id") or "primary" in label:
-            keys.append(tgt)
-    return keys or []
+def _primary_key_target(
+    mappings: list[dict],
+    dest_kind: str,
+) -> str | None:
+    """Return the target column for the most likely primary key.
+
+    For schemaless destinations the target `_id` is the only hard uniqueness
+    contract. For SQL destinations prefer exact `id`/`_id` target, then exact
+    `id`/`_id` source, then the first `*_id` source.
+    """
+    src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
+    tgt_by_src = {str(m.get("source") or ""): str(m.get("target") or "") for m in mappings if m.get("source")}
+    srcs = [str(m.get("source") or "") for m in mappings if m.get("source")]
+    tgts = [str(m.get("target") or "") for m in mappings if m.get("target")]
+
+    if dest_kind in _SCHEMALESS_DESTS:
+        for t in tgts:
+            if t.lower() == "_id":
+                return t
+        pk_src = next((s for s in srcs if s.lower() == "_id"), None)
+        if pk_src:
+            return tgt_by_src.get(pk_src, pk_src)
+        return None
+
+    for t in tgts:
+        if t.lower() in {"id", "_id"}:
+            return t
+
+    pk_src = None
+    for s in srcs:
+        if s.lower() in {"id", "_id"}:
+            pk_src = s
+            break
+    if not pk_src:
+        for s in srcs:
+            if s.lower().endswith("_id"):
+                pk_src = s
+                break
+
+    if pk_src:
+        return tgt_by_src.get(pk_src, pk_src)
+    return None
 
 
 def _duplicate_pk_in_source(
@@ -87,27 +120,24 @@ def _duplicate_pk_in_source(
     if not sample_rows:
         return []
     issues: list[str] = []
-    src_by_tgt = {str(m["target"]): str(m["source"]) for m in mappings if m.get("target")}
+    src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
 
-    # For schemaless destinations, only `_id` is a true uniqueness contract.
-    if dest_kind in _SCHEMALESS_DESTS:
-        targets = ["_id"] if "_id" in {str(m.get("target", "")).lower() for m in mappings} else []
-    else:
-        targets = _pk_candidates(mappings)
+    pk_tgt = _primary_key_target(mappings, dest_kind)
+    if not pk_tgt:
+        return issues
+    src = src_by_tgt.get(pk_tgt, pk_tgt)
 
-    for tgt in targets:
-        src = src_by_tgt.get(tgt, tgt)
-        seen: dict[str, int] = {}
-        for row in sample_rows:
-            val = str(row.get(src, "")).strip()
-            if not val:
-                continue
-            seen[val] = seen.get(val, 0) + 1
-        dupes = [v for v, n in seen.items() if n > 1]
-        if dupes:
-            issues.append(
-                f"Primary key candidate '{tgt}' has {len(dupes)} duplicate value(s) in source sample"
-            )
+    seen: dict[str, int] = {}
+    for row in sample_rows:
+        val = str(row.get(src, "")).strip()
+        if not val:
+            continue
+        seen[val] = seen.get(val, 0) + 1
+    dupes = [v for v, n in seen.items() if n > 1]
+    if dupes:
+        issues.append(
+            f"Primary key candidate '{pk_tgt}' has {len(dupes)} duplicate value(s) in source sample"
+        )
     return issues
 
 
@@ -120,7 +150,7 @@ def evaluate_ddl_compatibility(
     table_exists: bool = False,
     dest_connected: bool = False,
     dest_db_type: str = "postgresql",
-    allow_create: bool = True,
+    allow_create: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -151,8 +181,12 @@ def evaluate_ddl_compatibility(
         tgt_type = _ci_get(target_schema, tgt)
 
         if not schemaless and table_exists and target_schema and tgt_type is None:
-            issues.append(f"Target column '{tgt}' does not exist in destination table")
-            continue
+            # If the destination connector supports creating tables, we can evolve
+            # the target schema (e.g. CREATE TABLE or ALTER TABLE ADD COLUMN) so
+            # missing columns do not block the transfer.
+            if not allow_create:
+                issues.append(f"Target column '{tgt}' does not exist in destination table")
+                continue
 
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             issues.append(

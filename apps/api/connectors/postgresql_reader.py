@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
 from connectors.driver_guard import require_driver
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 def _ensure_psycopg2() -> None:
@@ -14,6 +22,10 @@ def _ensure_psycopg2() -> None:
         import psycopg2  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(require_driver("psycopg2", "psycopg2-binary")) from exc
+
+
+def _cell(value: Any) -> str:
+    return cell_to_string(value)
 
 
 @dataclass
@@ -122,7 +134,7 @@ def read_table_batch(
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            rows = [["" if v is None else str(v) for v in row] for row in fetched]
+            rows = [[_cell(v) for v in row] for row in fetched]
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -216,7 +228,7 @@ def read_table_cursor_batch(
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            rows = [["" if v is None else str(v) for v in row] for row in fetched]
+            rows = [[_cell(v) for v in row] for row in fetched]
             return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
     finally:
         conn.close()

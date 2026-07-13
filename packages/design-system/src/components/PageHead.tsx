@@ -6,13 +6,16 @@ interface PageHeadProps {
   action?: ReactNode;
 }
 
-export function PageHead({ description, action }: PageHeadProps) {
-  if (!description && !action) return null;
+export function PageHead({ title, description, action }: PageHeadProps) {
+  if (!title && !description && !action) return null;
 
   return (
-    <header className="df-page-head">
+    <header className="df-page-head" aria-label={title ? `${title} page header` : "Page header"}>
       <div className="df-page-head-row">
-        {description && <p className="df-page-desc">{description}</p>}
+        <div className="df-page-head-text">
+          {title && <h1 className="df-page-title">{title}</h1>}
+          {description && <p className="df-page-desc">{description}</p>}
+        </div>
         {action}
       </div>
     </header>

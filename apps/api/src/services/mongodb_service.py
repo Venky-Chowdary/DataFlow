@@ -251,7 +251,7 @@ class MongoDBService:
         
         if status == "running":
             updates.setdefault("started_at", datetime.utcnow())
-        elif status in ("completed", "failed"):
+        elif status in ("completed", "failed", "cancelled"):
             updates["completed_at"] = datetime.utcnow()
 
         phase_label = kwargs.get("phase")
@@ -265,7 +265,7 @@ class MongoDBService:
                 mapped = phase_from_engine_label(str(phase_label))
                 if status in ("completed",):
                     phases = complete_phases(phases, success=True, message=message or "")
-                elif status == "failed":
+                elif status in ("failed", "cancelled"):
                     phases = complete_phases(phases, success=False, message=kwargs.get("error") or message or "")
                 else:
                     phases = advance_phase(phases, mapped, status="active", message=message or "")

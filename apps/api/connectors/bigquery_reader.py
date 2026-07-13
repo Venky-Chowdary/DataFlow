@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -29,8 +37,9 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 500,
     known_total_rows: int | None = None,
+    service_account: str = "",
 ) -> ReadBatch:
-    del port, username, password, ssl, warehouse
+    del username, password, ssl, warehouse
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_ref = f"`{project_id}.{dataset_id}.{table}`"
@@ -38,8 +47,14 @@ def read_table_batch(
     try:
         from connectors.bigquery_conn import get_client
 
-        table_ref = f"`{project_id}.{dataset_id}.{table}`"
-        client = get_client(project_id=project_id, credentials_path=connection_string)
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            service_account=service_account,
+            host=host,
+            port=port,
+            connection_string=connection_string,
+        )
         if known_total_rows is not None:
             total = known_total_rows
         else:
@@ -49,8 +64,12 @@ def read_table_batch(
         query = f"SELECT {col_sql} FROM {table_ref} LIMIT {limit} OFFSET {offset}"
         job = client.query(query)
         rows_iter = job.result()
-        headers = [field.name for field in job.schema]
-        rows = [["" if v is None else str(v) for v in row.values()] for row in rows_iter]
+        if job.schema:
+            headers = [field.name for field in job.schema]
+        else:
+            table = client.get_table(f"{project_id}.{dataset_id}.{table}")
+            headers = [field.name for field in table.schema]
+        rows = [[cell_to_string(v) for v in row.values()] for row in rows_iter]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     except Exception as exc:
         raise RuntimeError(f"BigQuery read failed for {table_ref}: {exc}") from exc

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .adapters import mongodb_connection_string, parse_file_content, probe_mongodb, read_source_database, resolve_connector_config
+from .adapters import _introspect_table_schema, mongodb_connection_string, parse_file_content, probe_mongodb, read_source_database, resolve_connector_config
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 

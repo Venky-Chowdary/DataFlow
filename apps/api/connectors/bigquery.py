@@ -17,8 +17,9 @@ def test_bigquery(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    service_account: str = "",
 ) -> ConnectResult:
-    del port, username, password, ssl, warehouse
+    del username, password, ssl, warehouse
     project_id = database or host
     dataset_id = schema or "dataflow"
     if not project_id:
@@ -37,7 +38,14 @@ def test_bigquery(
     try:
         from connectors.bigquery_conn import get_client
 
-        client = get_client(project_id=project_id, credentials_path=connection_string)
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            service_account=service_account,
+            host=host,
+            port=port,
+            connection_string=connection_string,
+        )
         tables: list[str] = []
         for table in client.list_tables(f"{project_id}.{dataset_id}", max_results=50):
             tables.append(table.table_id)

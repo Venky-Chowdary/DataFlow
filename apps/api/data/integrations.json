@@ -27,7 +27,7 @@
   "ai_providers": {
     "openai": {
       "enabled": true,
-      "api_key": "",
+      "api_key": "enc:v0:c2stcHJvai1FNVZaSlJzOU93YUN5TDVubjM4bDdiamI4d1pOWWRJc0FjeV84bWwwNmRtNWx6Yzlud2RxY3J5cmFDU3RtNWpmbGI2UER3OFdBSVQzQmxia0ZKdHpCeDVtMlNaY3VkVDVoNkljY2hRa2Rya1FobWxIbzZ6OVNHMFV3S1BCa21CN0o3RGQyUmRtMUlEeWdMRVg1VHpRQ092V2lWb0E=",
       "model": "gpt-4o-mini"
     },
     "anthropic": {
@@ -42,5 +42,6 @@
       "model": "llama3.2"
     }
   },
-  "api_keys": []
+  "api_keys": [],
+  "updated_at": "2026-07-12T16:50:48.630340+00:00"
 }

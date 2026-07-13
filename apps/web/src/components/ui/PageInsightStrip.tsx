@@ -21,7 +21,7 @@ export function PageInsightStrip({
   return (
     <div className={`df2-page-insight ${className}`.trim()} role="status">
       <span className={`df2-page-insight-pill df2-page-insight-pill--${tone}`}>{pill}</span>
-      <p className="df2-page-insight-message">{message}</p>
+      <p className="df2-page-insight-message"> {message}</p>
       {actions && <div className="df2-page-insight-actions">{actions}</div>}
     </div>
   );

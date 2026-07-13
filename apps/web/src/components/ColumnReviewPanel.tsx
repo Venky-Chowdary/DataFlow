@@ -1,5 +1,6 @@
 import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
+import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAPPING_TRANSFORMS,
@@ -22,6 +23,7 @@ import {
 interface ColumnReviewPanelProps {
   mappings: EditableMapping[];
   rowCount?: number;
+  sampleRows?: Record<string, unknown>[];
   onChange: (mappings: EditableMapping[]) => void;
   confidenceThreshold?: number;
   compact?: boolean;
@@ -46,17 +48,18 @@ function confidenceClass(c: number, threshold: number, approved: boolean): strin
 
 const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "all", label: "All" },
-  { id: "review", label: "Needs review" },
+  { id: "review", label: "Review" },
   { id: "block", label: "Critical" },
-  { id: "warn", label: "Low confidence" },
+  { id: "warn", label: "Low" },
   { id: "pii", label: "PII" },
-  { id: "new", label: "New fields" },
+  { id: "new", label: "New" },
   { id: "ready", label: "Ready" },
 ];
 
 export function ColumnReviewPanel({
   mappings,
   rowCount,
+  sampleRows,
   onChange,
   confidenceThreshold = 0.85,
   compact = false,
@@ -76,6 +79,8 @@ export function ColumnReviewPanel({
   const [sort, setSort] = useState<ColumnSort>("confidence-asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [previewPageSize, setPreviewPageSize] = useState(12);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const search = searchProp ?? internalSearch;
@@ -113,6 +118,10 @@ export function ColumnReviewPanel({
   useEffect(() => {
     setPage(1);
   }, [search, filter, sort, pageSize, mappings.length]);
+
+  useEffect(() => {
+    setPreviewPage(1);
+  }, [sampleRows, previewPageSize]);
 
   useEffect(() => {
     if (page > pages) setPage(pages);
@@ -167,6 +176,51 @@ export function ColumnReviewPanel({
   const pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
   const pageEnd = Math.min(page * pageSize, filtered.length);
 
+  const previewRows = useMemo(() => {
+    if (!sampleRows || sampleRows.length === 0) return [];
+    const start = (previewPage - 1) * previewPageSize;
+    return sampleRows.slice(start, start + previewPageSize);
+  }, [sampleRows, previewPage, previewPageSize]);
+  const previewTotal = sampleRows?.length || 0;
+  const previewPages = Math.max(1, Math.ceil(previewTotal / previewPageSize));
+  const previewStart = previewTotal === 0 ? 0 : (previewPage - 1) * previewPageSize + 1;
+  const previewEnd = Math.min(previewPage * previewPageSize, previewTotal);
+  const previewSubtitle = previewTotal
+    ? `Rows ${previewStart.toLocaleString()}–${previewEnd.toLocaleString()} of ${previewTotal.toLocaleString()} sample rows`
+    : "Source data preview";
+
+  const tableControls = (
+    <div className="df2-column-workbench-table-controls">
+      <label className="df2-column-workbench-sort-label">
+        Sort
+        <select
+          className="df2-input df2-select df2-column-workbench-sort"
+          value={sort}
+          onChange={(e) => setSort(e.target.value as ColumnSort)}
+          aria-label="Sort columns"
+        >
+          <option value="confidence-asc">Issues first</option>
+          <option value="confidence-desc">Highest confidence</option>
+          <option value="name-asc">Name A–Z</option>
+          <option value="name-desc">Name Z–A</option>
+        </select>
+      </label>
+      <label className="df2-column-workbench-sort-label">
+        Page size
+        <select
+          className="df2-input df2-select df2-column-workbench-pagesize"
+          value={pageSize}
+          onChange={(e) => setPageSize(Number(e.target.value) as ColumnPageSize)}
+          aria-label="Rows per page"
+        >
+          {COLUMN_PAGE_SIZES.map((size) => (
+            <option key={size} value={size}>{size}</option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+
   if (!mappings.length) {
     return (
       <div className="df2-column-review df2-column-review-empty">
@@ -177,11 +231,11 @@ export function ColumnReviewPanel({
 
   const filterTabItems = FILTER_TABS.map((tab) => ({
     ...tab,
-    count: filterCounts[tab.id],
+    count: compact ? undefined : filterCounts[tab.id],
   }));
 
   return (
-    <div className={`df2-column-review ${compact ? "is-compact is-editor" : ""}`}>
+    <div className={`df2-column-review ${compact ? "is-compact is-editor" : ""} ${compact && sampleRows && sampleRows.length > 0 ? "is-split" : ""}`}>
       {!hideTitle && (
         <div className="df2-column-review-head">
           <div>
@@ -204,6 +258,62 @@ export function ColumnReviewPanel({
         </div>
       )}
 
+      {sampleRows && sampleRows.length > 0 && (
+        <div className="df2-column-review-data-preview">
+          <StructurePreview
+            columns={mappings.map((m) => m.source)}
+            schema={Object.fromEntries(mappings.map((m) => [m.source, m.inferredType || "string"]))}
+            rows={previewRows}
+            rowCount={rowCount}
+            title="Source data preview"
+            subtitle={previewSubtitle}
+            showFieldStrip={false}
+            showBadge={false}
+            maxRows={previewPageSize}
+            maxCols={mappings.length}
+          />
+          <div className="df2-column-review-preview-controls">
+            <span className="df2-column-review-preview-pager">
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={previewPage <= 1}
+                onClick={() => setPreviewPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous preview rows"
+              >
+                ← Prev
+              </button>
+              <span>
+                Page {previewPage.toLocaleString()} of {previewPages.toLocaleString()}
+              </span>
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={previewPage >= previewPages}
+                onClick={() => setPreviewPage((p) => Math.min(previewPages, p + 1))}
+                aria-label="Next preview rows"
+              >
+                Next →
+              </button>
+            </span>
+            <label className="df2-column-workbench-sort-label">
+              Rows per page
+              <select
+                className="df2-input df2-select df2-column-workbench-pagesize"
+                value={previewPageSize}
+                onChange={(e) => setPreviewPageSize(Number(e.target.value))}
+                aria-label="Preview rows per page"
+              >
+                {[12, 25, 50, 100].map((size) => (
+                  <option key={size} value={size}>{size}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+      )}
+
+      <div className="df2-column-review-editor">
       <div className="df2-column-review-chrome">
         {!compact && (
           <div className="df2-column-workbench-stats" role="status" aria-label="Mapping summary">
@@ -235,12 +345,19 @@ export function ColumnReviewPanel({
         )}
 
         <div className="df2-column-workbench-toolbar">
+          <FilterTabs
+            items={filterTabItems}
+            value={filter}
+            onChange={setFilter}
+            className="df2-column-workbench-filters"
+            ariaLabel="Filter columns"
+          />
           <div className="df2-column-workbench-search-wrap">
             <DtIcon name="search" size={16} />
             <input
               type="search"
               className="df2-input df2-column-workbench-search"
-              placeholder="Search source or destination column…"
+              placeholder="Search columns…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search columns"
@@ -258,8 +375,8 @@ export function ColumnReviewPanel({
               </button>
             )}
           </div>
-
           <div className="df2-column-workbench-actions">
+            {tableControls}
             {filterCounts.review > 0 && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={focusIssues}>
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
@@ -273,14 +390,6 @@ export function ColumnReviewPanel({
           </div>
         </div>
 
-        <FilterTabs
-          items={filterTabItems}
-          value={filter}
-          onChange={setFilter}
-          className="df2-column-workbench-filters"
-          ariaLabel="Filter columns"
-        />
-
         {needsReview.length > 0 && filter === "review" && !compact && (
           <div className="df2-column-review-alert" role="status">
             <DtIcon name="alert" size={16} />
@@ -290,57 +399,22 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        <div className="df2-column-workbench-table-meta">
-          <span>
-            {filtered.length === 0
-              ? "No matching columns"
-              : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
-          </span>
-          <div className="df2-column-workbench-table-controls">
-            <label className="df2-column-workbench-sort-label">
-              Sort
-              <select
-                className="df2-input df2-select df2-column-workbench-sort"
-                value={sort}
-                onChange={(e) => setSort(e.target.value as ColumnSort)}
-                aria-label="Sort columns"
-              >
-                <option value="confidence-asc">Issues first</option>
-                <option value="confidence-desc">Highest confidence</option>
-                <option value="name-asc">Name A–Z</option>
-                <option value="name-desc">Name Z–A</option>
-              </select>
-            </label>
-            <label className="df2-column-workbench-sort-label">
-              Page size
-              <select
-                className="df2-input df2-select df2-column-workbench-pagesize"
-                value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value) as ColumnPageSize)}
-                aria-label="Rows per page"
-              >
-                {COLUMN_PAGE_SIZES.map((size) => (
-                  <option key={size} value={size}>{size}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-        </div>
+
       </div>
 
       <div className="df2-column-review-table-wrap df2-column-review-scroll">
         <table className="df2-column-review-table df2-column-review-table-sticky">
           <thead>
             <tr>
-              <th>Source</th>
-              <th>Sample</th>
-              <th>Type</th>
-              <th aria-hidden>→</th>
-              <th>Destination</th>
-              {showTransforms && <th>Transform</th>}
-              <th>Why</th>
-              <th>Confidence</th>
-              <th>Status</th>
+              <th className="df2-column-th-source" style={{ width: "14%" }}>Source</th>
+              <th className="df2-column-th-sample" style={{ width: showTransforms ? "11%" : "12%" }}>Sample</th>
+              <th className="df2-column-th-type" style={{ width: "8%" }}>Type</th>
+              <th className="df2-column-th-arrow" aria-hidden style={{ width: "4%" }}>→</th>
+              <th className="df2-column-th-destination" style={{ width: showTransforms ? "15%" : "18%" }}>Destination</th>
+              {showTransforms && <th className="df2-column-th-transform" style={{ width: "11%" }}>Transform</th>}
+              <th className="df2-column-th-reason" style={{ width: showTransforms ? "20%" : "23%" }}>Why</th>
+              <th className="df2-column-th-confidence" style={{ width: showTransforms ? "8%" : "10%" }}>Confidence</th>
+              <th className="df2-column-th-status" style={{ width: showTransforms ? "9%" : "11%" }}>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -357,59 +431,65 @@ export function ColumnReviewPanel({
                   }}
                   data-source={m.source}
                 >
-                  <td>
-                    <span className="df2-column-source">{m.source}</span>
-                    {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                    {m.requiresReview && !m.approved && (
-                      <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
-                    )}
+                  <td className="df2-column-source-cell">
+                    <div className="df2-column-cell-content">
+                      <span className="df2-column-source">{m.source}</span>
+                      {m.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
+                      {m.requiresReview && !m.approved && (
+                        <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
+                      )}
+                    </div>
                   </td>
                   <td className="df2-column-sample" title={m.sample}>
                     {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
                   </td>
                   <td className="df2-column-type">{m.inferredType ?? "string"}</td>
                   <td className="df2-column-arrow" aria-hidden>→</td>
-                  <td>
-                    <input
-                      className="df2-input df2-column-target-input"
-                      value={m.target}
-                      onChange={(e) => updateMapping(index, { target: e.target.value, approved: false })}
-                      aria-label={`Destination name for ${m.source}`}
-                    />
-                    {m.existsInDestination && (
-                      <span className="df2-col-badge-exists df2-col-badge-new">exists</span>
-                    )}
-                    {!m.existsInDestination && destColumnSet.size > 0 && (
-                      <span className="df2-col-badge-new">new</span>
-                    )}
+                  <td className="df2-column-destination-cell">
+                    <div className="df2-column-cell-content">
+                      <input
+                        className="df2-input df2-column-target-input"
+                        value={m.target}
+                        onChange={(e) => updateMapping(index, { target: e.target.value, approved: false })}
+                        aria-label={`Destination name for ${m.source}`}
+                      />
+                      {m.existsInDestination && (
+                        <span className="df2-col-badge-exists df2-col-badge-new">exists</span>
+                      )}
+                      {!m.existsInDestination && destColumnSet.size > 0 && (
+                        <span className="df2-col-badge-new">new</span>
+                      )}
+                    </div>
                   </td>
                   {showTransforms && (
-                    <td>
-                      <select
-                        className="df2-input df2-select df2-column-transform"
-                        value={m.transform ?? "none"}
-                        onChange={(e) =>
-                          updateMapping(index, {
-                            transform: e.target.value as MappingTransform,
-                            approved: false,
-                          })
-                        }
-                        aria-label={`Transform for ${m.source}`}
-                        title={MAPPING_TRANSFORMS.find((t) => t.id === (m.transform ?? "none"))?.detail}
-                      >
-                        {MAPPING_TRANSFORMS.map((t) => (
-                          <option key={t.id} value={t.id}>{t.label}</option>
-                        ))}
-                      </select>
+                    <td className="df2-column-transform-cell">
+                      <div className="df2-column-cell-content">
+                        <select
+                          className="df2-input df2-select df2-column-transform"
+                          value={m.transform ?? "none"}
+                          onChange={(e) =>
+                            updateMapping(index, {
+                              transform: e.target.value as MappingTransform,
+                              approved: false,
+                            })
+                          }
+                          aria-label={`Transform for ${m.source}`}
+                          title={MAPPING_TRANSFORMS.find((t) => t.id === (m.transform ?? "none"))?.detail}
+                        >
+                          {MAPPING_TRANSFORMS.map((t) => (
+                            <option key={t.id} value={t.id}>{t.label}</option>
+                          ))}
+                        </select>
+                      </div>
                     </td>
                   )}
                   <td className="df2-column-reason" title={m.reason}>
                     {m.reason || "Semantic match"}
                   </td>
-                  <td>
+                  <td className="df2-column-confidence">
                     <span className={`df2-column-conf ${tier}`}>{(m.confidence * 100).toFixed(0)}%</span>
                   </td>
-                  <td>
+                  <td className="df2-column-status">
                     {ready ? (
                       <span className="df2-badge df2-badge-live df2-badge-xs">Ready</span>
                     ) : (
@@ -436,7 +516,38 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {filtered.length > pageSize && (
+      {compact ? (
+        <div className="df2-column-review-footer df2-column-workbench-pagination">
+          <span>
+            {filtered.length === 0
+              ? "No matching columns"
+              : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
+          </span>
+          {filtered.length > pageSize && (
+            <div className="df2-column-workbench-pagination">
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                ← Previous
+              </button>
+              <span className="df2-column-workbench-page-label">
+                Page {page} of {pages}
+              </span>
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={page >= pages}
+                onClick={() => setPage((p) => Math.min(pages, p + 1))}
+              >
+                Next →
+              </button>
+            </div>
+          )}
+        </div>
+      ) : filtered.length > pageSize ? (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           <button
             type="button"
@@ -458,7 +569,8 @@ export function ColumnReviewPanel({
             Next →
           </button>
         </div>
-      )}
+      ) : null}
+      </div>
     </div>
   );
 }

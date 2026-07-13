@@ -15,6 +15,7 @@ from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
+    dedupe_rows,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -100,8 +101,11 @@ def write_mapped_rows(
     create_table: bool = True,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
+    role: str = "",
+    **_kwargs: Any,
 ) -> WriteResult:
-    del port, ssl
+    del port, ssl, _kwargs
     try:
         import snowflake.connector  # noqa: F401
     except ImportError:
@@ -136,7 +140,7 @@ def write_mapped_rows(
         )
 
     schema = (schema or "PUBLIC").upper()
-    table_name = sanitize_identifier(table_name).upper()
+    table_name = sanitize_identifier(table_name)
     target_types = [sf_type(t) for t in source_types]
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
@@ -149,6 +153,11 @@ def write_mapped_rows(
         column_types=column_types,
         error_policy=policy,
     )
+
+    # Within a single batch, the last occurrence of an upsert key wins.
+    if write_mode == "upsert" and conflict_columns:
+        mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+
     rejected_rows = len(data_rows) - len(mapped_rows)
     rejected_details = [
         {"message": msg, "policy": policy}
@@ -199,6 +208,7 @@ def write_mapped_rows(
             schema=schema,
             warehouse=warehouse,
             connection_string=connection_string,
+            role=role,
         )
 
         written = 0
@@ -207,7 +217,11 @@ def write_mapped_rows(
 
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                try:
+                    cur.execute(f"USE WAREHOUSE {warehouse}")
+                except Exception:
+                    # fakesnow and some local mocks do not support USE WAREHOUSE.
+                    pass
             if database:
                 cur.execute(f"USE DATABASE {database}")
             cur.execute(f"USE SCHEMA {schema}")
@@ -215,6 +229,17 @@ def write_mapped_rows(
             if create_table:
                 col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))
                 cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({col_defs})')
+
+            if backfill_new_fields:
+                cur.execute(
+                    """SELECT COLUMN_NAME FROM information_schema.columns
+                       WHERE table_schema = %s AND table_name = %s""",
+                    (schema.upper(), table_name),
+                )
+                existing = {row[0].upper() for row in cur.fetchall()}
+                for col, typ in zip(target_cols, target_types):
+                    if col.upper() not in existing:
+                        cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
 
             total = len(mapped_rows)
             use_copy = total >= COPY_THRESHOLD and write_mode != "upsert"

@@ -1,10 +1,17 @@
+import { Spinner } from "../LoadingState";
 import type { PreflightResult } from "../../lib/types";
 
 interface ProofDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
+  /** @deprecated kept for callers — dashboard always renders expanded */
+  defaultOpen?: boolean;
 }
 
+/**
+ * Always-visible proof summary for Validate / Run.
+ * No disclosure — primary dashboard content stays on screen when space exists.
+ */
 export function ProofDashboard({ preflight, running = false }: ProofDashboardProps) {
   const proof = preflight?.proof_bundle;
   const decision = proof?.transfer_decision?.decision ?? (preflight?.passed ? "approve" : "review");
@@ -14,43 +21,62 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
   const semanticScore = proof?.semantic_mapping_score ?? 0;
   const qualityScore = proof?.quality_score ?? 0;
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
-  const statusTone = running ? "live" : preflight?.passed ? "ok" : preflight ? "warn" : "info";
+  const statusTone = running
+    ? "live"
+    : decision === "block"
+      ? "warn"
+      : decision === "review"
+        ? "warn"
+        : preflight?.passed
+          ? "ok"
+          : preflight
+            ? "warn"
+            : "info";
 
   const chips = [
-    { label: "Proof decision", value: decision.toUpperCase() },
+    { label: "Decision", value: decision.toUpperCase() },
     { label: "Confidence", value: confidenceBand },
     { label: "Quality", value: qualityGrade },
-    { label: "Compliance risk", value: complianceRisk.toFixed(2) },
+    { label: "Compliance", value: complianceRisk.toFixed(2) },
   ];
 
   return (
-    <section className={`df2-proof-dashboard ${statusTone}`} aria-label="Proof dashboard">
+    <section className={`df2-proof-dashboard df2-proof-dashboard-open ${statusTone}`} aria-label="Proof dashboard">
       <div className="df2-proof-dashboard-head">
         <div>
-          <p className="df2-proof-dashboard-kicker">Enterprise proof command center</p>
-          <h3 className="df2-proof-dashboard-title">Route intelligence and trust posture</h3>
-        </div>
-        <div className="df2-proof-dashboard-trust">
-          <span className="df2-status-chip">Deterministic safety gates</span>
-          <span className="df2-status-chip">Operator review ready</span>
+          <p className="df2-proof-dashboard-kicker">Proof dashboard</p>
+          <h3 className="df2-proof-dashboard-title">
+            {running ? (
+              <>
+                <Spinner size="sm" label="" />
+                <span>Running validation…</span>
+              </>
+            ) : preflight ? (
+              <span>
+                {readiness.toFixed(0)}% ready · {decision.toUpperCase()} · {preflight.passed_count}/{preflight.total_gates} gates
+              </span>
+            ) : (
+              <span>Route intelligence and trust posture</span>
+            )}
+          </h3>
         </div>
       </div>
 
       <div className="df2-proof-dashboard-grid">
         <div className="df2-proof-dashboard-stat">
           <span>Readiness</span>
-          <strong>{readiness.toFixed(0)}%</strong>
+          <strong>{running ? "—" : `${readiness.toFixed(0)}%`}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
-          <span>Semantic confidence</span>
-          <strong>{semanticScore.toFixed(2)}</strong>
+          <span>Semantic</span>
+          <strong>{running ? "—" : semanticScore.toFixed(2)}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
-          <span>Sample quality</span>
-          <strong>{qualityScore.toFixed(2)}</strong>
+          <span>Quality</span>
+          <strong>{running ? "—" : qualityScore.toFixed(2)}</strong>
         </div>
         <div className="df2-proof-dashboard-stat">
-          <span>Gate score</span>
+          <span>Gates</span>
           <strong>{preflight ? `${preflight.passed_count}/${preflight.total_gates}` : "—"}</strong>
         </div>
       </div>
@@ -59,13 +85,15 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
         {chips.map((chip) => (
           <span key={chip.label} className="df2-proof-chip">
             <small>{chip.label}</small>
-            <strong>{chip.value}</strong>
+            <strong>{running ? "—" : chip.value}</strong>
           </span>
         ))}
       </div>
 
       <p className="df2-proof-dashboard-summary">
-        {proof?.evidence_summary ?? "No proof bundle available yet — run preflight to surface deterministic transfer evidence."}
+        {running
+          ? "Executing schema, mapping, transform, and data-integrity gates against the source and destination."
+          : (proof?.evidence_summary ?? "Run preflight to surface deterministic transfer evidence.")}
       </p>
     </section>
   );

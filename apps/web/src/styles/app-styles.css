@@ -1,9 +1,10 @@
-/** Consolidated app styles — single entry for Vite (replaces 17 separate imports). */
+/** Consolidated app styles — single entry for Vite. */
 @import "./tokens.css";
 @import "./dataflow-ui.css";
 @import "./jarvis-ui.css";
 @import "./landing.css";
 @import "./enterprise-platform.css";
+@import "./enterprise-motion.css";
 @import "./premium-theme.css";
 @import "./brand-system.css";
 @import "./shell-polish.css";
@@ -16,54 +17,16 @@
 @import "./responsive-fixes.css";
 @import "./pipeline-topology.css";
 @import "./transfer-studio-v2.css";
-@import "./platform-ui-audit.css";
-@import "./design-system-unified.css";
-@import "./ux-polish.css";
-@import "./production-polish.css";
 @import "./responsive-shell-fixes.css";
 @import "./column-workbench.css";
 @import "./transfer-viewport.css";
 @import "./transfer-studio-polish.css";
-@import "./page-redesign-v3.css";
-@import "./ui-stability-layer.css";
-@import "./enterprise-final.css";
-
-.df2-honesty-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(15, 118, 110, 0.22);
-  background: linear-gradient(135deg, rgba(240, 253, 250, 0.95), rgba(255, 255, 255, 0.98));
-  color: #0f172a;
-  font-size: 13px;
-}
-
-.df2-honesty-banner.is-compact {
-  padding: 8px 12px;
-  font-size: 12px;
-}
-
-.df2-honesty-banner-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.df2-honesty-banner-copy strong {
-  font-weight: 650;
-}
-
-.df2-honesty-banner-copy span {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.df2-transfer-honesty {
-  margin-bottom: 4px;
-}
+@import "./connectors-page.css";
+@import "./pilot-chat.css";
+@import "./docs-page.css";
+/* Canonical final layer — replaces page-redesign-v3, enterprise-final,
+   ui-density, ui-stability, enterprise-ui-v4, jobs-page-redesign, polish overlays */
+@import "./enterprise-ui.css";
 
 .df2-map-step-body {
   display: flex;

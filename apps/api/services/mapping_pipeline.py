@@ -19,11 +19,19 @@ def classify_format(source_columns: list[str], file_format: str | None = None) -
     semantic_hits = 0
     for col in source_columns[:12]:
         analyzed = analyze_column(col, "VARCHAR", [])
-        if analyzed.get("semantic_type") not in ("unknown", "text", ""):
+        if analyzed.get("detection_source") != "unknown":
             semantic_hits += 1
 
     hints = [c.upper() for c in source_columns[:8]]
-    payment_tokens = {"AMT", "CUST_ID", "TXN_DT", "ACCT_NO", "CCY", "REF_NO", "PAY_AMT"}
+    payment_tokens = {
+        "AMT", "PAY_AMT", "PAY_AMOUNT", "PAYMENT_AMOUNT",
+        "PAYMENT", "PAY", "PMT", "PYMT",
+        "TXN_AMT", "TRANSACTION_AMOUNT",
+        "TXN_DT", "TRANSACTION_DATE", "PAY_DATE", "PAYMENT_DATE",
+        "PAY_DT", "VALUE_DATE", "DTPMT",
+        "CUST_ID", "ACCT_NO", "REF_NO", "CCY", "CURRENCY", "CURRENCY_CODE",
+        "PAYMENT_ID", "MERCHANT_ID", "PAYER_ID", "BENEFICIARY_ACCOUNT",
+    }
     overlap = len(set(hints) & payment_tokens)
 
     if overlap >= 2:
@@ -162,6 +170,8 @@ def run_mapping_pipeline(
     confidence_threshold: float = 0.85,
     use_llm: bool = True,
     source_samples: dict[str, list[str]] | None = None,
+    validation_mode: str = "strict",
+    destination_db_type: str = "",
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -206,6 +216,21 @@ def run_mapping_pipeline(
         source_schemas=source_schemas,
         target_schemas=target_schemas,
     )
+
+    # If the destination schema is unknown, derive it from the identity mapping.
+    # This lets the type-coercion and transform resolvers produce correct target
+    # types and DDL when the user has not created a destination table yet.
+    if not target_columns and not target_schemas and base_mappings:
+        target_columns = [m["target"] for m in base_mappings]
+        target_schemas = [
+            {
+                "name": m["target"],
+                "inferred_type": m.get("target_type", "VARCHAR"),
+                "samples": [],
+            }
+            for m in base_mappings
+        ]
+
     pruned, dropped = entailment_prune(base_mappings, target_columns)
     unmapped_after_prune = [s for s in source_columns if s not in {m["source"] for m in pruned}]
 
@@ -346,7 +371,8 @@ def run_mapping_pipeline(
         source_schemas=source_schemas,
         target_schemas=target_schemas,
         source_samples=source_samples,
-        validation_mode="strict",
+        validation_mode=validation_mode,
+        destination_db_type=destination_db_type,
     )
     if integrity.get("blocks_transfer"):
         validation = {

@@ -14,13 +14,47 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.value_serializer import json_default
+
 DATE_PATTERNS = (
     "%Y-%m-%d",
     "%m/%d/%Y",
     "%d/%m/%Y",
     "%Y/%m/%d",
     "%m-%d-%Y",
+    "%d-%m-%Y",
     "%Y%m%d",
+    "%d.%m.%Y",
+    "%Y.%m.%d",
+    "%d-%b-%Y",
+    "%d-%B-%Y",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%Y-%b-%d",
+)
+
+# Additional patterns that represent a full date but may contain time.
+# Used only for the "date" transform so it can parse a datetime string and
+# return the date portion without widening schema inference to classify
+# datetime values as plain DATE.
+DATE_WITH_TIME_PATTERNS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%SZ",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y/%m/%d %H:%M:%S",
+    "%m/%d/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S",
+    "%m-%d-%Y %H:%M:%S",
+    "%d-%m-%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%Y-%m-%d %I:%M %p",
+    "%d-%b-%Y %H:%M:%S",
+    "%d-%B-%Y %H:%M:%S",
 )
 
 DATETIME_PATTERNS = (
@@ -31,6 +65,53 @@ DATETIME_PATTERNS = (
     "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S%z",
     "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y/%m/%d %H:%M:%S",
+    "%m/%d/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S",
+    "%m-%d-%Y %H:%M:%S",
+    "%d-%m-%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%Y-%m-%d %I:%M %p",
+    "%d-%b-%Y %H:%M:%S",
+    "%d-%B-%Y %H:%M:%S",
+)
+
+# Values that are unambiguously empty/missing for non-string types.
+NULL_SENTINELS = frozenset({
+    "null", "none", "nil", "undefined", "n/a", "na", "nan", "",
+    "-", "--", "—", "empty", "blank", "missing", "not available",
+    "not applicable", "not_applicable",
+})
+
+# Currency symbols and codes that are safe to strip from numeric values.
+_CURRENCY_SYMBOLS = "".join({
+    "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₴", "₱", "₫", "₭", "₦", "₲",
+    "₮", "₣", "₤", "₨", "₪", "₸", "₾", "₼", "₿", "Ξ", "Ð", "₳", "✕", "Ł",
+    "⚛", "∞", "Ȧ", "฿", "﷼", "؋", "৳",
+})
+
+# ISO / common letter codes and regional dollar notations.
+_CURRENCY_CODES = "|".join(sorted({
+    "USD", "EUR", "GBP", "INR", "JPY", "CNY", "CAD", "AUD", "CHF", "SEK",
+    "DKK", "NOK", "NZD", "SGD", "HKD", "MXN", "BRL", "ZAR", "SAR", "AED",
+    "KRW", "RUB", "TRY", "PLN", "THB", "IDR", "MYR", "PHP", "VND", "CZK",
+    "HUF", "ILS", "CLP", "PEN", "COP", "ARS", "PKR", "BDT", "EGP", "NGN",
+    "KES", "GHS", "XOF", "XAF", "XCD", "XPF", "XDR", "USDC", "USDT", "BUSD",
+    "DAI", "BTC", "ETH", "DOGE", "ADA", "SOL", "XRP", "LTC", "BCH", "BNB",
+    "DOT", "MATIC", "LINK", "UNI", "AAVE", "MKR", "COMP", "CRV", "SUSHI",
+    "1INCH", "YFI", "BAL", "GRT", "SNX", "ZRX", "KNC", "BNT", "REN", "ANT",
+    "BAND", "KAVA", "SC", "OCEAN", "STORJ", "FET", "AGIX", "RNDR", "COTI",
+    "CELO", "NEAR", "ALGO", "XLM", "VET", "TRX", "EOS", "XTZ", "AVAX", "LDO",
+    "ATOM", "IMX", "GALA", "MANA", "SAND", "ENJ", "AXS", "GODS", "BICO", "ANKR",
+}, key=len, reverse=True))
+
+_CURRENCY_RE = re.compile(
+    rf"(?:^|\s)({_CURRENCY_CODES})(?:\s|$)|"
+    rf"(?:^|\s)(US\$|A\$|C\$|HK\$|NZ\$|S\$|MX\$|R\$|CA\$|AU\$|SG\$)(?:\s|$)|"
+    rf"(?:^|\s)(Rs\.?|Rp|RM|kr|Ft|Kč|zł|lei|лв|ден|ман|Нэм|CHF|Fr\.?|SFr)(?:\s|$)|"
+    rf"[{re.escape(_CURRENCY_SYMBOLS)}]",
+    re.IGNORECASE,
 )
 
 
@@ -47,7 +128,7 @@ def _parse_datetime(value: str) -> str | None:
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
         return _to_utc_z(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
-    if re.match(r"^\d{10}$", text):
+    if _EPOCH_S_RE.match(text):
         return _to_utc_z(datetime.fromtimestamp(int(text), tz=timezone.utc))
     try:
         iso = text.replace("Z", "+00:00")
@@ -65,13 +146,25 @@ def _parse_datetime(value: str) -> str | None:
 
 
 _EPOCH_MS_RE = re.compile(r"^\d{13}$")
+_EPOCH_S_RE = re.compile(r"^\d{10}$")
 
 
-def _parse_date(value: str) -> str | None:
+def _parse_date(value: str, *, with_time: bool = False) -> str | None:
     text = value.strip()
     if not text:
         return None
-    for fmt in DATE_PATTERNS:
+    if text.lower() in NULL_SENTINELS:
+        return None
+    # Plain YYYYMMDD integer
+    if re.match(r"^\d{8}$", text):
+        try:
+            return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    patterns = list(DATE_PATTERNS)
+    if with_time:
+        patterns += list(DATE_WITH_TIME_PATTERNS)
+    for fmt in patterns:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -80,9 +173,11 @@ def _parse_date(value: str) -> str | None:
 
 
 def _normalize_numeric_text(value: str) -> str:
-    """Normalize unicode spaces, accounting formats, and percent suffixes."""
+    """Normalize unicode spaces, currency markers, accounting negatives, and percent signs."""
     text = unicodedata.normalize("NFKC", value)
-    for ch in ("\u00a0", "\u2007", "\u202f", "\u2009"):
+    for ch in ("\u00a0", "\u2007", "\u202f", "\u2009", "\u2002", "\u2003",
+               "\u2000", "\u2001", "\u2004", "\u2005", "\u2006", "\u2008",
+               "\u200a", "\u205f", "\u3000"):
         text = text.replace(ch, "")
     text = text.strip()
     if text.endswith("%"):
@@ -92,21 +187,102 @@ def _normalize_numeric_text(value: str) -> str:
         text = f"-{text[1:-1].strip()}"
     if text.endswith("-") and text[:-1].strip():
         text = f"-{text[:-1].strip()}"
+    # Remove currency symbols and common codes.
+    text = _CURRENCY_RE.sub("", text)
+    return text.strip()
+
+
+def _normalize_locale_separators(text: str) -> str | None:
+    """Resolve . / , / space separator ambiguity into a decimal string.
+
+    Returns None for unambiguous null sentinels and values that are not
+    parseable numbers.
+    """
+    if text.lower() in NULL_SENTINELS:
+        return None
+    if not text:
+        return None
+
+    # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
+    text = text.replace(" ", "").replace("\t", "")
+
+    if "." in text and "," in text:
+        last_dot = text.rfind(".")
+        last_comma = text.rfind(",")
+        if last_dot > last_comma:
+            # Dot is the decimal separator; commas are thousands separators.
+            candidate = text.replace(",", "")
+            if candidate.count(".") <= 1:
+                return candidate
+            return None
+        # Comma is the decimal separator; thousand dots are removed.
+        text = text.replace(".", "")
+        last_comma = text.rfind(",")
+        candidate = text[:last_comma] + "." + text[last_comma + 1:]
+        if "," in candidate or candidate.count(".") > 1:
+            return None
+        return candidate
+    if "," in text:
+        parts = text.split(",")
+        if (
+            len(parts) >= 2
+            and parts[0]
+            and not parts[0].startswith("0")
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
+        ):
+            return text.replace(",", "")
+        # European decimal / decimal with 3-digit groups and a short final group.
+        if (
+            len(parts) >= 2
+            and parts[0].isdigit()
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
+            and parts[-1].isdigit()
+            and 1 <= len(parts[-1]) <= 2
+            and len(parts[0]) <= 3
+        ):
+            return "".join(parts[:-1]) + "." + parts[-1]
+        if len(parts) == 2:
+            return parts[0] + "." + parts[1]
+        return None
+    if "." in text:
+        parts = text.split(".")
+        # Multi-dot US/ISO thousands: 1.234.567 (but not 1.234, which is decimal).
+        if (
+            len(parts) > 2
+            and parts[0]
+            and not parts[0].startswith("0")
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
+        ):
+            return text.replace(".", "")
+        if (
+            len(parts) >= 2
+            and parts[0].isdigit()
+            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
+            and parts[-1].isdigit()
+            and 1 <= len(parts[-1]) <= 2
+            and len(parts[0]) <= 3
+        ):
+            return "".join(parts[:-1]) + "." + parts[-1]
+        # Single dot is a decimal point (e.g. 1.234), not a thousands separator.
+        return text
     return text
 
 
 def _parse_decimal(value: str) -> str | None:
-    text = _normalize_numeric_text(value.strip())
-    for sym in ("$", "€", "£", "¥", "₹", "₩"):
-        text = text.replace(sym, "")
-    text = text.replace(",", "").strip()
-    if not text:
+    text = value.strip()
+    # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
+    if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
+        return None
+    text = _normalize_numeric_text(text)
+    text = _normalize_locale_separators(text)
+    if text is None or text == "":
         return None
     try:
         dec = Decimal(text)
     except InvalidOperation:
         return None
 
+    # Percent is parsed as the numeric value (50% -> 50) to preserve magnitude.
     # Scientific notation: 1.5e3, 2E-4. Convert to fixed-point form so
     # downstream numeric checks stay stable and comparable across formats.
     if "e" in text.lower():
@@ -118,8 +294,9 @@ def _parse_decimal(value: str) -> str | None:
 
 
 def _parse_integer(value: str) -> int | None:
-    text = _normalize_numeric_text(value.strip()).replace(",", "")
-    if not text:
+    text = _normalize_numeric_text(value.strip())
+    text = _normalize_locale_separators(text)
+    if text is None or text == "":
         return None
     if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
         try:
@@ -140,19 +317,21 @@ def _parse_integer(value: str) -> int | None:
 
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
-    if text in {"true", "t", "yes", "y", "1"}:
+    if text in NULL_SENTINELS:
+        return None
+    if text in {"true", "t", "yes", "y", "1", "on", "enabled", "active", "ok", "aye", "positive"}:
         return True
-    if text in {"false", "f", "no", "n", "0"}:
+    if text in {"false", "f", "no", "n", "0", "off", "disabled", "inactive", "nope", "negative"}:
         return False
     return None
 
 
 def _parse_json(value: str) -> str | None:
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(value, parse_constant=lambda v: None)
     except json.JSONDecodeError:
         return None
-    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default, allow_nan=False)
 
 
 def _parse_uuid(value: str) -> str | None:
@@ -268,6 +447,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if text == "":
         return None, None
 
+    # Null/missing sentinels for typed transforms are treated as None.
+    if transform in {"decimal", "integer", "boolean", "date", "datetime", "json", "uuid", "binary"}:
+        if text.lower() in NULL_SENTINELS:
+            return None, None
+
     if transform == "decimal":
         parsed = _parse_decimal(text)
         if parsed is None:
@@ -287,7 +471,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return parsed_bool, None
 
     if transform == "date":
-        parsed = _parse_date(text)
+        parsed = _parse_date(text, with_time=True)
         if parsed is None:
             return None, f"Invalid date: {text!r}"
         return parsed, None
@@ -346,6 +530,9 @@ def dry_run_sample(
     column_types: dict[str, str],
     sample_size: int = 100,
 ) -> tuple[bool, list[str]]:
+    if not sample_rows:
+        return False, ["No sample rows available for dry-run validation"]
+
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
@@ -360,15 +547,11 @@ def dry_run_sample(
         if idx is None:
             errors.append(f"Source column missing: {m['source']}")
             continue
-        checked = 0
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
             if err:
                 errors.append(f"{m['source']}→{m['target']}: {err}")
                 break
-            checked += 1
-        if checked == 0 and sample_rows:
-            errors.append(f"No sample values for {m['source']}")
 
     return len(errors) == 0, errors[:25]

@@ -464,9 +464,10 @@
 }
 
 .df2-page-transfer-studio .df2-structure-table-wrap {
-  flex: 1;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: auto;
-  max-height: clamp(200px, 28vh, 320px);
+  max-height: none;
 }
 
 /* Map / destination steps — table-first on map step */

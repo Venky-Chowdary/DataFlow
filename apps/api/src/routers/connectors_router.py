@@ -5,6 +5,7 @@ Manage connector configurations and data transfers
 
 import asyncio
 import json
+import os
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -13,6 +14,8 @@ from typing import Optional
 from pymongo.errors import PyMongoError
 from ..services.mongodb_service import get_mongodb_service
 from ..services.file_parser import FileParser
+from ..transfer.connector_capabilities import resolve_driver_type, get_capabilities
+from ..transfer.connector_registry import CONNECTOR_MODULES, run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
@@ -32,7 +35,14 @@ class ConnectorConfig(BaseModel):
     username: Optional[str] = Field(default=None, description="Username")
     password: Optional[str] = Field(default=None, description="Password")
     connection_string: Optional[str] = Field(default=None, description="Full connection string")
+    warehouse: Optional[str] = Field(default=None, description="Snowflake warehouse")
+    ssl: bool = Field(default=False, description="Use SSL/TLS")
+    auth_mode: Optional[str] = Field(default=None, description="Authentication mode")
+    auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
+    api_key: Optional[str] = Field(default=None, description="API key")
+    service_account: Optional[str] = Field(default=None, description="Service account JSON")
     options: dict = Field(default_factory=dict, description="Additional options")
+    role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
 
 
 class ConnectorResponse(BaseModel):
@@ -57,6 +67,12 @@ class TestConnectionRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     connection_string: Optional[str] = None
+    warehouse: Optional[str] = ""
+    ssl: Optional[bool] = False
+    auth_mode: Optional[str] = ""
+    auth_role: Optional[str] = ""
+    api_key: Optional[str] = None
+    service_account: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
@@ -100,92 +116,66 @@ async def test_connection(request: TestConnectionRequest):
                     "port": request.port,
                 }
             }
-        if request.type == "postgresql":
-            from connectors.postgresql import test_postgresql
-            probe = test_postgresql(
-                host=request.host, port=request.port or 5432, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="public", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "mysql":
-            from connectors.mysql import test_mysql
-            probe = test_mysql(
-                host=request.host, port=request.port or 3306, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "bigquery":
-            from connectors.bigquery import test_bigquery
-            probe = test_bigquery(
-                host=request.host or "bigquery.googleapis.com", port=request.port or 443, database=request.database,
-                username="", password="", schema=request.schema or "dataflow",
-                connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "snowflake":
-            from connectors.snowflake import test_snowflake
-            probe = test_snowflake(
-                host=request.host, port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="PUBLIC", connection_string=request.connection_string or "", ssl=True,
-                warehouse="",
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "redshift":
-            from connectors.redshift import test_redshift
-            probe = test_redshift(
-                host=request.host or "localhost", port=request.port or 5439, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema=request.schema or "public", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "dynamodb":
-            from connectors.dynamodb import test_dynamodb
-            probe = test_dynamodb(
-                host=request.host or "us-east-1", port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "redis":
-            from connectors.redis_kv import test_redis
-            probe = test_redis(
-                host=request.host or "localhost", port=request.port or 6379, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "s3":
-            from connectors.s3 import test_s3
-            probe = test_s3(
-                host=request.host or "us-east-1", port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type in ("gcs", "google_cloud_storage"):
-            from connectors.gcs import test_gcs
-            probe = test_gcs(
-                host=request.host or "", port=request.port or 443, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=True,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
-        if request.type == "elasticsearch":
-            from connectors.elasticsearch import test_elasticsearch
-            probe = test_elasticsearch(
-                host=request.host or "localhost", port=request.port or 9200, database=request.database,
-                username=request.username or "", password=request.password or "",
-                schema="", connection_string=request.connection_string or "", ssl=False,
-            )
-            return {"success": probe.ok, "message": probe.message if probe.ok else (probe.error or "Failed")}
+        driver = resolve_driver_type(request.type)
+        if driver in CONNECTOR_MODULES:
+            cfg = {
+                "host": request.host or "",
+                "port": request.port or 0,
+                "database": request.database or "",
+                "username": request.username or "",
+                "password": request.password or "",
+                "schema": request.schema or "",
+                "connection_string": request.connection_string or "",
+                "ssl": bool(request.ssl) if request.ssl is not None else False,
+                "warehouse": request.warehouse or "",
+                "auth_mode": request.auth_mode or "",
+                "auth_role": request.auth_role or "",
+                "role": request.auth_role or "",
+                "api_key": request.api_key or "",
+                "service_account": request.service_account or "",
+            }
+            ok, msg = run_probe(driver, cfg)
+            return {"success": ok, "message": msg, "driver": driver}
+
+        if driver == "generic_sql":
+            cfg = {
+                "host": request.host or "",
+                "port": request.port or 0,
+                "database": request.database or "",
+                "username": request.username or "",
+                "password": request.password or "",
+                "schema": request.schema or "",
+                "connection_string": request.connection_string or "",
+                "ssl": bool(request.ssl) if request.ssl is not None else False,
+                "warehouse": request.warehouse or "",
+                "type": request.type,
+                "auth_mode": request.auth_mode or "",
+                "auth_role": request.auth_role or "",
+                "role": request.auth_role or "",
+                "api_key": request.api_key or "",
+                "service_account": request.service_account or "",
+            }
+            ok, msg = run_probe(driver, cfg)
+            return {"success": ok, "message": msg, "driver": driver}
 
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
+            path = (request.connection_string or request.host or "").strip()
+            if path:
+                if "://" in path:
+                    return {
+                        "success": True,
+                        "message": f"{request.type.upper()} file source configured — data will be read from the provided URL or object-store URI.",
+                        "details": {"format": request.type, "mode": "file_source", "path": path},
+                    }
+                if not os.path.exists(path):
+                    return {
+                        "success": False,
+                        "message": f"Path not found: {path}. Create the directory or mount the volume before running.",
+                        "details": {"format": request.type, "mode": "file_source", "path": path},
+                    }
             return {
                 "success": True,
-                "message": f"{request.type.upper()} file format supported — upload a sample file to validate parsing",
+                "message": f"{request.type.upper()} file format supported — upload a sample file or provide a file path to validate parsing",
                 "details": {"format": request.type, "mode": "file_source"},
             }
 
@@ -214,9 +204,14 @@ async def create_connector(config: ConnectorConfig):
         "username": config.username,
         "password": config.password,
         "connection_string": config.connection_string,
+        "warehouse": config.warehouse,
+        "ssl": config.ssl,
+        "auth_mode": config.auth_mode,
+        "auth_role": config.auth_role,
+        "role": config.role or "both",
+        "api_key": config.api_key,
+        "service_account": config.service_account,
         "options": config.options,
-        "role": "both",
-        "ssl": False,
         "status": "configured",
     }
 
@@ -394,7 +389,7 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
         new_job_id = engine._create_pending_job(request)
         mongo.update_job_status(new_job_id, "pending", retry_of=job_id, message=f"Retry of job {job_id}")
 
-        background_tasks.add_task(run_transfer_async, new_job_id, request)
+        background_tasks.add_task(run_transfer_async, new_job_id, request, resume=True, resume_from_job_id=job_id)
         return {
             "success": True,
             "async": True,
@@ -403,6 +398,69 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
             "status": "running",
             "message": "Retry started — stream progress on the new job.",
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks):
+    """Resume a failed or paused transfer from its last durable checkpoint."""
+    try:
+        from ..transfer.background import run_transfer_async
+        from ..transfer.models import transfer_request_from_dict
+
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        payload = job.get("transfer_request")
+        if not payload:
+            raise HTTPException(
+                status_code=400,
+                detail="This job has no saved configuration — re-run from Transfer Studio.",
+            )
+        if payload.get("requires_file_reupload"):
+            raise HTTPException(
+                status_code=400,
+                detail="File uploads must be re-submitted from Transfer Studio.",
+            )
+
+        request = transfer_request_from_dict(payload)
+        mongo.update_job_status(job_id, "pending", message=f"Resume requested for job {job_id}")
+        background_tasks.add_task(run_transfer_async, job_id, request, resume=True)
+        return {
+            "success": True,
+            "async": True,
+            "job_id": job_id,
+            "status": "running",
+            "message": "Resume started — stream progress on the job.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_transfer_job(job_id: str):
+    """Request cancellation of a running/pending transfer job."""
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.get("status") in ("completed", "failed", "cancelled"):
+            return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
+        mongo.update_job_status(
+            job_id, "cancelled",
+            phase="cancelled",
+            message="Transfer cancelled by user",
+            progress_pct=job.get("progress_pct", 0),
+        )
+        return {"success": True, "job_id": job_id, "status": "cancelled", "message": "Cancellation requested"}
     except HTTPException:
         raise
     except Exception as e:

@@ -100,7 +100,17 @@ export async function runPreflight(payload: {
   columns: string[];
   column_types: Record<string, string>;
   row_count: number;
-  mappings: { source: string; target: string; confidence: number; reason?: string }[];
+  mappings: {
+    source: string;
+    target: string;
+    confidence: number;
+    reason?: string;
+    transform?: string;
+    target_type?: string;
+    requires_review?: boolean;
+    score_gap?: number;
+    user_override?: boolean;
+  }[];
   connector_id?: string;
   source_connector_id?: string;
   dest_type?: string;
@@ -113,6 +123,7 @@ export async function runPreflight(payload: {
   dest_schema?: string;
   dest_warehouse?: string;
   dest_kind?: string;
+  destination_column_types?: Record<string, string>;
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
@@ -137,6 +148,12 @@ export async function analyzeDbTransfer(payload: {
   sourceDatabase?: string;
   sourceTable?: string;
   sourceCollection?: string;
+  sourceHost?: string;
+  sourcePort?: number;
+  sourceUsername?: string;
+  sourcePassword?: string;
+  sourceSchema?: string;
+  sourceConnectionString?: string;
   destFormat: string;
   destDatabase: string;
   destTable?: string;
@@ -145,7 +162,7 @@ export async function analyzeDbTransfer(payload: {
 }): Promise<TransferPlan & { source_columns?: string[]; source_schema?: Record<string, string> }> {
   const isMongo = payload.sourceFormat === "mongodb";
   const isDestMongo = payload.destFormat === "mongodb";
-  const body = {
+  const body: Record<string, unknown> = {
     source: {
       kind: "database",
       format: payload.sourceFormat,
@@ -153,6 +170,12 @@ export async function analyzeDbTransfer(payload: {
       database: payload.sourceDatabase || "",
       table: isMongo ? "" : payload.sourceTable || "",
       collection: isMongo ? payload.sourceCollection || payload.sourceTable || "" : "",
+      host: payload.sourceHost || "",
+      port: payload.sourcePort || 0,
+      username: payload.sourceUsername || "",
+      password: payload.sourcePassword || "",
+      schema: payload.sourceSchema || "",
+      connection_string: payload.sourceConnectionString || "",
     },
     destination: {
       kind: "database",
@@ -396,6 +419,16 @@ export async function fetchConnectors(): Promise<Connector[]> {
       database: String(c.database ?? ""),
       status: c.last_test_ok === false ? "error" : String(c.status ?? "configured"),
       role: c.role ? String(c.role) : undefined,
+      username: c.username ? String(c.username) : undefined,
+      password: c.password ? String(c.password) : undefined,
+      schema: c.schema ? String(c.schema) : undefined,
+      connection_string: c.connection_string ? String(c.connection_string) : undefined,
+      warehouse: c.warehouse ? String(c.warehouse) : undefined,
+      ssl: c.ssl === true,
+      auth_mode: c.auth_mode ? String(c.auth_mode) : undefined,
+      auth_role: c.auth_role ? String(c.auth_role) : undefined,
+      api_key: c.api_key ? String(c.api_key) : undefined,
+      service_account: c.service_account ? String(c.service_account) : undefined,
       created_at: String(c.created_at ?? new Date().toISOString()),
       last_test_ok: c.last_test_ok === true,
     };
@@ -652,6 +685,12 @@ export async function testConnection(payload: {
   username?: string;
   password?: string;
   connection_string?: string;
+  warehouse?: string;
+  ssl?: boolean;
+  auth_mode?: string;
+  auth_role?: string;
+  api_key?: string;
+  service_account?: string;
 }): Promise<{ success: boolean; message: string }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
@@ -674,6 +713,10 @@ export async function saveConnector(payload: {
   connection_string?: string;
   warehouse?: string;
   ssl?: boolean;
+  auth_mode?: string;
+  auth_role?: string;
+  api_key?: string;
+  service_account?: string;
 }): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
   const res = await apiFetch(`${API_BASE}/connectors/saved`, {
@@ -711,6 +754,10 @@ export async function updateConnector(
     connection_string?: string;
     warehouse?: string;
     ssl?: boolean;
+    auth_mode?: string;
+    auth_role?: string;
+    api_key?: string;
+    service_account?: string;
   },
 ): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
@@ -950,9 +997,15 @@ export async function runUniversalTransfer(options: {
   sourceKind?: string;
   sourceFormat?: string;
   sourceConnectorId?: string;
+  sourceHost?: string;
+  sourcePort?: number;
+  sourceUsername?: string;
+  sourcePassword?: string;
   sourceDatabase?: string;
+  sourceSchema?: string;
   sourceTable?: string;
   sourceCollection?: string;
+  sourceConnectionString?: string;
   destKind?: string;
   destFormat?: string;
   destDatabase?: string;
@@ -991,9 +1044,15 @@ export async function runUniversalTransfer(options: {
   if (options.destCollection) formData.append("dest_collection", options.destCollection);
   formData.append("skip_preflight", options.skipPreflight === true ? "true" : "false");
   if (options.sourceConnectorId) formData.append("source_connector_id", options.sourceConnectorId);
+  if (options.sourceHost) formData.append("source_host", options.sourceHost);
+  if (options.sourcePort) formData.append("source_port", String(options.sourcePort));
+  if (options.sourceUsername) formData.append("source_username", options.sourceUsername);
+  if (options.sourcePassword) formData.append("source_password", options.sourcePassword);
   if (options.sourceDatabase) formData.append("source_database", options.sourceDatabase);
+  if (options.sourceSchema) formData.append("source_schema", options.sourceSchema);
   if (options.sourceTable) formData.append("source_table", options.sourceTable);
   if (options.sourceCollection) formData.append("source_collection", options.sourceCollection);
+  if (options.sourceConnectionString) formData.append("source_connection_string", options.sourceConnectionString);
   if (options.destConnectorId) formData.append("dest_connector_id", options.destConnectorId);
   if (options.destHost) formData.append("dest_host", options.destHost);
   if (options.destPort) formData.append("dest_port", String(options.destPort));

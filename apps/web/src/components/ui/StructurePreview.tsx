@@ -8,6 +8,13 @@ interface StructurePreviewProps {
   rowCount?: number;
   title?: string;
   subtitle?: string;
+  maxRows?: number;
+  maxCols?: number;
+  showFieldStrip?: boolean;
+  showBadge?: boolean;
+  className?: string;
+  /** When true, show more sample rows so the fill-height card stays useful on large screens */
+  fill?: boolean;
 }
 
 export function StructurePreview({
@@ -17,13 +24,20 @@ export function StructurePreview({
   rowCount,
   title = "Structure preview",
   subtitle,
+  maxRows,
+  maxCols = 12,
+  showFieldStrip = true,
+  showBadge = false,
+  className = "",
+  fill = false,
 }: StructurePreviewProps) {
-  const previewCols = columns.slice(0, 8);
-  const previewRows = rows.slice(0, 5);
+  const resolvedMaxRows = maxRows ?? (fill ? 40 : 10);
+  const previewCols = columns.slice(0, maxCols);
+  const previewRows = rows.slice(0, resolvedMaxRows);
 
   if (!columns.length) {
     return (
-      <div className="df2-structure-preview is-empty">
+      <div className={`df2-structure-preview is-empty ${className}`.trim()}>
         <DtIcon name="database" size={20} />
         <p>Connect a source to preview columns and sample values.</p>
       </div>
@@ -31,7 +45,7 @@ export function StructurePreview({
   }
 
   return (
-    <div className="df2-structure-preview">
+    <div className={`df2-structure-preview ${fill ? "df2-structure-preview--fill" : ""} ${className}`.trim()}>
       <div className="df2-structure-preview-head">
         <div>
           <h4>{title}</h4>
@@ -40,26 +54,30 @@ export function StructurePreview({
               ?? `${columns.length} fields${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""} · sample below`}
           </p>
         </div>
-        <span className="df2-badge df2-badge-live">
-          <DtIcon name="check" size={12} /> Detected
-        </span>
-      </div>
-
-      <div className="df2-structure-field-strip" aria-label="Detected fields">
-        {columns.slice(0, 12).map((col) => (
-          <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}>
-            <strong>{col}</strong>
-            <small className="df2-type-badge">{schema[col] || "string"}</small>
+        {showBadge && (
+          <span className="df2-badge df2-badge-live">
+            <DtIcon name="check" size={12} /> Detected
           </span>
-        ))}
-        {columns.length > 12 && (
-          <span className="df2-structure-field-chip muted">+{columns.length - 12} more</span>
         )}
       </div>
 
+      {showFieldStrip && (
+        <div className="df2-structure-field-strip" aria-label="Detected fields">
+          {columns.slice(0, maxCols).map((col) => (
+            <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}>
+              <strong>{col}</strong>
+              <small className="df2-type-badge">{schema[col] || "string"}</small>
+            </span>
+          ))}
+          {columns.length > maxCols && (
+            <span className="df2-structure-field-chip muted">+{columns.length - maxCols} more</span>
+          )}
+        </div>
+      )}
+
       {previewRows.length > 0 ? (
         <div className="df2-structure-table-wrap">
-          <table className="df2-structure-table">
+          <table className="df2-structure-table" style={{ "--cols": previewCols.length } as React.CSSProperties}>
             <thead>
               <tr>
                 {previewCols.map((col) => (
@@ -86,6 +104,11 @@ export function StructurePreview({
               ))}
             </tbody>
           </table>
+          {rows.length > resolvedMaxRows && (
+            <p className="df2-structure-more-hint">
+              Showing {resolvedMaxRows} of {rows.length.toLocaleString()} sample rows
+            </p>
+          )}
         </div>
       ) : (
         <p className="df2-structure-empty-rows">

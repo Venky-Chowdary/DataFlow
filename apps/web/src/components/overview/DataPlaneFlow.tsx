@@ -36,6 +36,8 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
     [nodes],
   );
   const liveCount = edges.filter((e) => e.active).length;
+  const connectedCount = nodes.filter((n) => n.linked && !n.isVirtual).length;
+  const disconnectedCount = Math.max(0, connectionCount - connectedCount);
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
   const routes = useMemo(
@@ -79,7 +81,7 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
           destTypes={destTypes}
           sourceCount={sources.length || connectionCount}
           destCount={destinations.length || connectionCount}
-          animated={hasRoutes}
+          animated={liveCount > 0}
         />
       </div>
 
@@ -87,6 +89,14 @@ export function DataPlaneFlow({ nodes, edges, connectionCount, onOpenConnectors 
         <span>{connectionCount} connection{connectionCount === 1 ? "" : "s"}</span>
         <span className="df2-flow-meta-dot" aria-hidden>·</span>
         <span>{edges.length} route{edges.length === 1 ? "" : "s"}</span>
+        <span className="df2-flow-meta-dot" aria-hidden>·</span>
+        <span className="df2-flow-meta-connected">{connectedCount} connected</span>
+        {disconnectedCount > 0 && (
+          <>
+            <span className="df2-flow-meta-dot" aria-hidden>·</span>
+            <span className="df2-flow-meta-disconnected">{disconnectedCount} disconnected</span>
+          </>
+        )}
         {liveCount > 0 && (
           <>
             <span className="df2-flow-meta-dot" aria-hidden>·</span>

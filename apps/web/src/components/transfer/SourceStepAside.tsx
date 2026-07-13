@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { StructurePreview } from "../ui/StructurePreview";
@@ -23,6 +24,8 @@ interface SourceStepAsideProps {
   dbConnectors: Connector[];
   cloudConnectors: Connector[];
   uploading?: boolean;
+  sourceManual?: boolean;
+  sourceManualType?: string;
 }
 
 function ProfilingSteps({ active }: { active: boolean }) {
@@ -103,7 +106,11 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           <div className="df2-source-aside-format-chips">
             {FILE_FORMATS.map((fmt) => (
               <span key={fmt} className="df2-source-aside-format-chip">{fmt}</span>
-            ))}
+            )).reduce((acc: React.ReactNode[], chip, i) => {
+              acc.push(chip);
+              if (i < FILE_FORMATS.length - 1) acc.push(" ");
+              return acc;
+            }, [])}
           </div>
         </div>
       )}
@@ -127,6 +134,8 @@ export function SourceStepAside({
   dbConnectors,
   cloudConnectors,
   uploading,
+  sourceManual,
+  sourceManualType,
 }: SourceStepAsideProps) {
   if (sourceKind === "file" && parsed) {
     return (
@@ -137,6 +146,8 @@ export function SourceStepAside({
         rowCount={parsed.row_count}
         title="Detected structure"
         subtitle={`${parsed.columns.length} fields · ${parsed.row_count.toLocaleString()} rows`}
+        fill
+        showBadge
       />
     );
   }
@@ -168,11 +179,13 @@ export function SourceStepAside({
           <div>
             <h4>Connector preview</h4>
             <p>
-              {sourceConnector
-                ? `Schema from ${sourceConnector.name} loads when you continue.`
-                : pool.length
-                  ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
-                  : "Add a database connector to read tables and collections."}
+              {sourceManual
+                ? `Manual ${sourceManualType} source. Schema loads when you continue.`
+                : sourceConnector
+                  ? `Schema from ${sourceConnector.name} loads when you continue.`
+                  : pool.length
+                    ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
+                    : "Add a database connector to read tables and collections, or use manual connection."}
             </p>
           </div>
         </div>

@@ -54,8 +54,11 @@ def write_mapped_rows(
     column_types: dict[str, str],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     error_policy: str | None = None,
+    backfill_new_fields: bool = False,
+    service_account: str = "",
+    **_kwargs: Any,
 ) -> WriteResult:
-    del port, username, password, ssl, warehouse
+    del username, password, ssl, warehouse, _kwargs
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_name = sanitize_identifier(table_name)
@@ -103,14 +106,33 @@ def write_mapped_rows(
         from google.cloud import bigquery
         from connectors.bigquery_conn import get_client
 
-        client = get_client(project_id=project_id, credentials_path=connection_string)
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            service_account=service_account,
+            host=host,
+            port=port,
+            connection_string=connection_string,
+        )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
         schema_fields = [
             bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types)
         ]
+        dataset_ref = f"{project_id}.{dataset_id}"
+        existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
+        if dataset_id not in existing_datasets:
+            client.create_dataset(bigquery.Dataset(dataset_ref))
         table = bigquery.Table(table_id, schema=schema_fields)
         client.create_table(table, exists_ok=True)
+
+        if backfill_new_fields:
+            table = client.get_table(table_id)
+            existing = {f.name for f in table.schema}
+            new_fields = [bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types) if col not in existing]
+            if new_fields:
+                table.schema = list(table.schema) + new_fields
+                client.update_table(table, ["schema"])
 
         mapped_rows, transform_errors = build_mapped_rows(
             headers=headers,

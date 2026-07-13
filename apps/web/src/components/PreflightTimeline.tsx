@@ -1,5 +1,7 @@
 import { DtIcon } from "./DtIcon";
+import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
+import { useEffect, useState } from "react";
 
 const GATE_LABELS: Record<string, string> = {
   g1_source: "Source readable",
@@ -15,6 +17,8 @@ const GATE_LABELS: Record<string, string> = {
   g10_schema_policy: "Schema change policy",
   g11_validation_posture: "Validation posture",
 };
+
+const GATE_ORDER = Object.keys(GATE_LABELS);
 
 function gateLabel(id: string): string {
   const entry = Object.entries(GATE_LABELS).find(([key]) => id.includes(key));
@@ -42,16 +46,48 @@ export function PreflightTimeline({
   onRerun,
   onUseBalanced,
 }: PreflightTimelineProps) {
+  const [preflightProgress, setPreflightProgress] = useState(0);
+  const totalGates = result.total_gates || GATE_ORDER.length;
+  const currentGateIndex = Math.min(totalGates - 1, Math.max(0, Math.floor((preflightProgress / 100) * totalGates)));
+  const currentGateId = GATE_ORDER[currentGateIndex] || GATE_ORDER[0];
+  const currentGateLabel = gateLabel(currentGateId);
+  const currentGateNumber = currentGateIndex + 1;
+  const phaseLabel = running
+    ? preflightProgress >= 100
+      ? "Done — finishing validation…"
+      : `Step ${currentGateNumber}/${totalGates} · ${currentGateLabel}`
+    : `${currentGateLabel}`;
+
+  useEffect(() => {
+    if (!running) {
+      setPreflightProgress(0);
+      return;
+    }
+    setPreflightProgress(10);
+    const timer = window.setInterval(() => {
+      setPreflightProgress((prev) => {
+        if (prev >= 99) return prev;
+        const step = prev >= 90 ? 1 : prev >= 75 ? Math.max(1, Math.round(Math.random() * 3)) : Math.max(2, Math.round(Math.random() * 8));
+        const next = Math.min(prev + step, 99);
+        return next;
+      });
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [running]);
   const gates = result.gates.length > 0
     ? result.gates
     : running
       ? [{
-          id: "preflight_running",
-          status: "skip" as const,
-          message: "Running validation…",
+          id: currentGateId,
+          status: "running" as const,
+          message: `Running ${currentGateLabel.toLowerCase()}…`,
           duration_ms: 0,
         }]
       : [];
+
+  const passCount = gates.filter((g) => g.status === "pass").length;
+  const blockCount = gates.filter((g) => g.status === "block").length;
+  const skipCount = gates.filter((g) => g.status === "skip").length;
 
   const proof = result.proof_bundle;
   const decision = proof?.transfer_decision?.decision ?? (result.passed ? "approve" : "review");
@@ -79,7 +115,7 @@ export function PreflightTimeline({
   };
 
   return (
-    <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}`}>
+    <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}${running ? " is-validating" : ""}`}>
       {!compact && (
       <div className="df2-preflight-head">
         <div className="df2-preflight-score">
@@ -104,8 +140,10 @@ export function PreflightTimeline({
             {running ? "Running validation…" : result.passed ? "Ready to transfer" : "Validation — action needed"}
           </h3>
           <p className="df2-preflight-sub">
-            {result.passed_count}/{result.total_gates} checks passed
-            {result.passed ? " · you can execute the transfer" : " · fix items below, then re-run"}
+            {running
+              ? phaseLabel
+              : `${passCount} passed · ${blockCount} blocked · ${skipCount} skipped · ${result.total_gates} total`}
+            {result.passed ? " · you can execute the transfer" : !running ? " · fix items below, then re-run" : ""}
           </p>
           {proof && (
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
@@ -181,11 +219,18 @@ export function PreflightTimeline({
       </div>
       )}
 
-      {compact && (
+      {compact && !running && (
         <div className="df2-preflight-compact-head">
-          <h3 className="df2-preflight-title">
-            {running ? "Running checks…" : result.passed ? "All checks passed" : "Checks need attention"}
-          </h3>
+          <div>
+            <h3 className="df2-preflight-title">
+              {result.passed ? "All checks passed" : "Checks need attention"}
+            </h3>
+            <div className="df2-preflight-compact-summary">
+              <span className="ok">{passCount} passed</span>
+              {blockCount > 0 && <span className="block">{blockCount} blocked</span>}
+              {skipCount > 0 && <span className="skip">{skipCount} skipped</span>}
+            </div>
+          </div>
           <span className="df2-preflight-compact-score">{result.passed_count}/{result.total_gates} passed</span>
         </div>
       )}
@@ -218,21 +263,98 @@ export function PreflightTimeline({
         </div>
       )}
 
+      {running && (
+        <div className="df2-validate-stage" role="status" aria-live="polite">
+          <div className="df2-validate-stage-glow" aria-hidden />
+          <div className="df2-validate-stage-core">
+            <Spinner size="sm" label="" />
+            <h3>Validating route</h3>
+            <p title={phaseLabel}>{phaseLabel}</p>
+            <div
+              className="df2-preflight-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={preflightProgress}
+            >
+              <div className="df2-mapping-progress-meta">
+                <strong>{preflightProgress}%</strong>
+                <span>Safety gates</span>
+              </div>
+              <div className="df2-mapping-progress-track">
+                <span
+                  className={`df2-mapping-progress-fill ${preflightProgress >= 80 ? "is-finishing" : ""} is-animating`}
+                  style={{ width: `${preflightProgress}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="df2-preflight-track">
         {gates.map((gate, i) => (
-          <div key={gate.id} className={`df2-preflight-step ${gate.status}`} style={{ animationDelay: `${i * 80}ms` }}>
+          <div
+            key={gate.id}
+            className={`df2-preflight-step ${gate.status}`}
+            style={{ animationDelay: `${i * 40}ms` }}
+            title={gate.message}
+          >
             <div className="df2-preflight-marker">
-              {gate.status === "pass" && <DtIcon name="check" size={14} />}
-              {gate.status === "block" && <DtIcon name="x" size={14} />}
+              {gate.status === "pass" && <DtIcon name="check" size={12} />}
+              {gate.status === "block" && <DtIcon name="x" size={12} />}
+              {gate.status === "running" && <Spinner size="sm" label="" />}
               {gate.status === "skip" && <span>—</span>}
             </div>
-            <div>
+            <div className="df2-preflight-step-copy">
               <div className="df2-preflight-step-title">{gateLabel(gate.id)}</div>
               <div className="df2-preflight-step-msg">{gate.message}</div>
             </div>
           </div>
         ))}
       </div>
+
+      {result.blockers.length > 0 && !running && (
+        <details className="df2-disclosure df2-preflight-diagnostics" open>
+          <summary className="df2-preflight-diagnostics-head">
+            <DtIcon name="alert" size={14} />
+            <strong>Blockers</strong>
+            <span className="df2-preflight-diagnostics-count">{result.blockers.length}</span>
+            <span className="df2-disclosure-chevron" aria-hidden />
+          </summary>
+          <ul className="df2-preflight-diagnostics-list">
+            {result.blockers.map((b) => (
+              <li key={b.id}>
+                <strong>{gateLabel(b.id)}:</strong> {b.message}
+                {b.guidance && (
+                  <div className="df2-preflight-diagnostics-guidance">
+                    {b.guidance.why && <p><strong>Why:</strong> {b.guidance.why}</p>}
+                    {b.guidance.fix && <p><strong>Fix:</strong> {b.guidance.fix}</p>}
+                    {b.guidance.examples && b.guidance.examples.length > 0 && (
+                      <ul>
+                        {b.guidance.examples.map((ex, i) => <li key={i}>{ex}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                {b.details && typeof b.details === "object" && (
+                  <ul className="df2-preflight-diagnostics-sub">
+                    {Object.entries(b.details).map(([k, v]) => {
+                      const value = Array.isArray(v) ? v.slice(0, 3).join(", ") : String(v);
+                      if (!value || value === "[object Object]" || k === "guidance") return null;
+                      return (
+                        <li key={k}>
+                          <span>{k}:</span> {value}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }

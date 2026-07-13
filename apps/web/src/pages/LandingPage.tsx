@@ -153,16 +153,15 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
             <p className="lp-eyebrow">
               <span className="lp-eyebrow-pulse" />
               <DtIcon name="sparkle" size={14} />
-              Enterprise data operations platform
+              Universal data transfer platform
             </p>
             <h1>
-              The governed layer for
-              <span className="lp-gradient-text"> every data route</span>
+              Move any data,
+              <span className="lp-gradient-text"> anywhere</span>
             </h1>
             <p className="lp-lead">
-              {stats
-                ? `${stats.transfer_live} transfer-ready connectors · ${stats.total}+ in catalog · Hybrid mapping, eight preflight gates, and checksum reconciliation.`
-                : "Transfer-ready connectors with semantic mapping, preflight validation, and reconciliation across databases, warehouses, and files."}
+              Database to warehouse. Warehouse to files. Files to database. Any type to any type —
+              with schema intelligence, eight preflight gates, and checksum-proven loads.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="df2-btn df2-btn-primary df2-btn-lg lp-btn-glow" onClick={onStartTransfer}>
@@ -176,19 +175,19 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
             <dl className="lp-stats">
               <div>
                 <dt>Catalog</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.total} suffix="+" /> : "673+"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.total} suffix="+" /> : "…"}</dd>
               </div>
               <div>
                 <dt>Transfer ready</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.transfer_live} /> : "120+"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.transfer_live} /> : "…"}</dd>
               </div>
               <div>
                 <dt>Categories</dt>
-                <dd>{stats ? <AnimatedCounter value={stats.categories} /> : "6"}</dd>
+                <dd>{stats ? <AnimatedCounter value={stats.categories} /> : "…"}</dd>
               </div>
               <div>
                 <dt>Preflight gates</dt>
-                <dd><AnimatedCounter value={8} /></dd>
+                <dd>8</dd>
               </div>
             </dl>
           </div>
@@ -198,6 +197,24 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
           </div>
         </div>
       </section>
+
+      <div className="lp-value-strip" aria-label="Product pillars">
+        {[
+          { icon: "transfer", title: "Anywhere → anywhere", body: "Sources and destinations across databases, warehouses, lakes, files, and SaaS." },
+          { icon: "sparkle", title: "Schema intelligence", body: "Semantic column maps that understand roles — not just string similarity." },
+          { icon: "gate", title: "Governed by default", body: "Eight preflight gates and post-load reconciliation before and after every move." },
+        ].map((item) => (
+          <div key={item.title} className="lp-value-item">
+            <span className="lp-value-icon" aria-hidden>
+              <DtIcon name={item.icon} size={18} />
+            </span>
+            <div>
+              <strong>{item.title}</strong>
+              <span>{item.body}</span>
+            </div>
+          </div>
+        ))}
+      </div>
 
       <ConnectorMarquee />
 
@@ -348,11 +365,11 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
           </div>
           <div className="lp-security-visual">
             <div className="lp-security-stat">
-              <strong>{stats ? <AnimatedCounter value={stats.transfer_live} suffix="+" /> : "18+"}</strong>
+              <strong>{stats ? <AnimatedCounter value={stats.transfer_live} suffix="+" /> : "…"}</strong>
               <span>production transfer routes</span>
             </div>
             <div className="lp-security-stat">
-              <strong>{stats ? <AnimatedCounter value={stats.roadmap} suffix="+" /> : "600+"}</strong>
+              <strong>{stats ? <AnimatedCounter value={stats.roadmap} suffix="+" /> : "…"}</strong>
               <span>catalog roadmap entries</span>
             </div>
           </div>

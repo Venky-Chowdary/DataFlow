@@ -30,6 +30,10 @@ class SavedConnector:
     connection_string: str = ""
     ssl: bool = True
     warehouse: str = ""
+    auth_mode: str = ""
+    auth_role: str = ""
+    api_key: str = ""
+    service_account: str = ""
     last_tested_at: str | None = None
     last_test_ok: bool = False
     created_at: str = field(default_factory=lambda: _now())
@@ -57,6 +61,10 @@ class SavedConnector:
             connection_string=conn_str,
             ssl=bool(data.get("ssl", True)),
             warehouse=data.get("warehouse", ""),
+            auth_mode=data.get("auth_mode", ""),
+            auth_role=data.get("auth_role", ""),
+            api_key=data.get("api_key", ""),
+            service_account=data.get("service_account", ""),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=bool(data.get("last_test_ok", False)),
             created_at=data.get("created_at", _now()),
@@ -161,6 +169,10 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         connection_string=data.get("connection_string", ""),
         ssl=bool(data.get("ssl", True)),
         warehouse=data.get("warehouse", ""),
+        auth_mode=data.get("auth_mode", ""),
+        auth_role=data.get("auth_role", ""),
+        api_key=data.get("api_key", ""),
+        service_account=data.get("service_account", ""),
     )
     connectors.append(conn)
     _save_all(connectors)
@@ -207,6 +219,10 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
         d["connection_string"] = d["connection_string"].replace(
             d.get("password", "xxxx"), "****"
         ) if "password" in c.to_dict() and c.password else _mask_conn_str(d["connection_string"])
+    if d.get("api_key"):
+        d["api_key"] = "****"
+    if d.get("service_account"):
+        d["service_account"] = "****"
     return d
 
 

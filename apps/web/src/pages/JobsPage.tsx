@@ -15,7 +15,15 @@ import { JobProgress, TransferJob } from "../lib/types";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
-    mappings?: { source?: string; target?: string; source_column?: string; target_column?: string; confidence?: number }[];
+    mappings?: {
+      source?: string;
+      target?: string;
+      source_column?: string;
+      target_column?: string;
+      source_type?: string;
+      target_type?: string;
+      confidence?: number;
+    }[];
     column_types?: Record<string, string>;
     sync_mode?: string;
     validation_mode?: string;
@@ -142,8 +150,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
 
-  const totalRows = jobs.reduce((s, j) => s + (j.records_processed || 0), 0);
-  const latestFailed = jobs.find((j) => j.status === "failed");
+
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const jobPhases = liveJob?.phases?.length
@@ -154,62 +161,8 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const ddlLog = liveJob?.ddl_log ?? [];
 
   return (
-    <PageShell
-      wide
-      className="df2-page-jobs"
-      kicker="Runtime"
-      title="Job Theater"
-      description="Live migration progress, throughput, and reconciliation."
-      actions={
-        <>
-          {onRefresh && (
-            <button type="button" className="df2-btn" onClick={onRefresh}>
-              <DtIcon name="activity" size={16} /> Refresh
-            </button>
-          )}
-          {onStartTransfer && (
-            <button type="button" className="df2-btn df2-btn-primary" onClick={onStartTransfer}>
-              <DtIcon name="plus" size={16} /> New transfer
-            </button>
-          )}
-        </>
-      }
-    >
-      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3" showHonesty>
-        <header className="df2-jobs-v3-header">
-          <div className="df2-jobs-v3-stats">
-            <div className="df2-jobs-v3-stat">
-              <span>Total</span>
-              <strong>{counts.all}</strong>
-            </div>
-            <div className={`df2-jobs-v3-stat ${counts.running ? "live" : ""}`}>
-              <span>Running</span>
-              <strong>{counts.running}</strong>
-            </div>
-            <div className="df2-jobs-v3-stat ok">
-              <span>Completed</span>
-              <strong>{counts.completed}</strong>
-            </div>
-            <div className={`df2-jobs-v3-stat ${counts.failed ? "warn" : ""}`}>
-              <span>Failed</span>
-              <strong>{counts.failed}</strong>
-            </div>
-            <div className="df2-jobs-v3-stat">
-              <span>Rows moved</span>
-              <strong>{totalRows.toLocaleString()}</strong>
-            </div>
-          </div>
-          {latestFailed && (
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm"
-              onClick={() => { setFilter("failed"); setSelectedId(latestFailed._id); }}
-            >
-              <DtIcon name="alert" size={14} /> Triage failed
-            </button>
-          )}
-        </header>
-
+    <PageShell fit className="df2-page-jobs" title="Job Theater">
+      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
         {jobs.length === 0 ? (
           <EmptyState
             icon="jobs"
@@ -225,24 +178,31 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
           />
         ) : (
           <>
-            <div className="df2-jobs-v3-toolbar">
-              <FilterTabs
-                ariaLabel="Filter jobs by status"
-                value={filter}
-                onChange={setFilter}
-                items={([
-                  { id: "all", label: "All", count: counts.all },
-                  { id: "running", label: "Running", count: counts.running },
-                  { id: "completed", label: "Completed", count: counts.completed },
-                  { id: "failed", label: "Failed", count: counts.failed },
-                ] as const)}
-              />
-              <PageToolbar
-                searchValue={jobSearch}
-                onSearchChange={setJobSearch}
-                searchPlaceholder="Search route, type, status, job id…"
-              />
-            </div>
+            <PageToolbar
+              searchValue={jobSearch}
+              onSearchChange={setJobSearch}
+              searchPlaceholder="Search route, type, status, job id…"
+              filters={
+                <FilterTabs
+                  ariaLabel="Filter jobs by status"
+                  value={filter}
+                  onChange={setFilter}
+                  items={([
+                    { id: "all", label: "All", count: counts.all },
+                    { id: "running", label: "Running", count: counts.running },
+                    { id: "completed", label: "Completed", count: counts.completed },
+                    { id: "failed", label: "Failed", count: counts.failed },
+                  ] as const)}
+                />
+              }
+              actions={
+                onRefresh ? (
+                  <button type="button" className="df2-btn df2-btn-sm" onClick={onRefresh}>
+                    <DtIcon name="activity" size={14} /> Refresh
+                  </button>
+                ) : undefined
+              }
+            />
 
             <div className="df2-jobs-v3-layout">
               <aside className="df2-jobs-v3-list" role="list" aria-label="Transfer jobs">
@@ -258,47 +218,55 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                     }
                   />
                 ) : (
-                  filtered.map((job) => (
-                    <button
-                      key={job._id}
-                      id={`job-item-${job._id}`}
-                      type="button"
-                      role="listitem"
-                      className={`df2-jobs-v3-item ${selectedId === job._id ? "active" : ""} ${job.status === "failed" ? "failed" : ""} ${job.status === "running" || job.status === "pending" ? "live" : ""}`}
-                      onClick={() => setSelectedId(job._id)}
-                    >
-                      <span className={`df2-jobs-v3-item-status df2-jobs-v3-item-status--${job.status}`} aria-hidden>
-                        <DtIcon name={statusIcon(job.status)} size={14} />
-                      </span>
-                      <div className="df2-jobs-v3-item-body">
-                        <div className="df2-jobs-v3-item-top">
-                          <div className="df2-jobs-v3-item-route">
-                            <ConnectorIcon id={job.source_type} size={16} />
-                            <span className="df2-jobs-v3-item-source">{job.source_name}</span>
-                            <DtIcon name="transfer" size={12} />
-                            <ConnectorIcon id={job.destination_type} size={16} />
-                            <span className="df2-jobs-v3-item-dest">
-                              {job.destination_collection || job.destination_database}
+                  filtered.map((job) => {
+                    const destLabel = job.destination_collection || job.destination_database || "destination";
+                    const isLive = job.status === "running" || job.status === "pending";
+                    return (
+                      <button
+                        key={job._id}
+                        id={`job-item-${job._id}`}
+                        type="button"
+                        role="listitem"
+                        className={[
+                          "df2-job-row",
+                          selectedId === job._id ? "is-active" : "",
+                          job.status === "failed" ? "is-failed" : "",
+                          isLive ? "is-live" : "",
+                        ].filter(Boolean).join(" ")}
+                        onClick={() => setSelectedId(job._id)}
+                      >
+                        <span className={`df2-job-row-status is-${job.status}`} aria-hidden>
+                          <DtIcon name={statusIcon(job.status)} size={14} />
+                        </span>
+                        <div className="df2-job-row-main">
+                          <div className="df2-job-row-title">
+                            <span className="df2-job-row-route" title={`${job.source_name} → ${destLabel}`}>
+                              {job.source_name} → {destLabel}
+                            </span>
+                            <span className={`${jobStatusBadgeClass(job.status)} df2-job-row-badge`}>
+                              {job.status}
                             </span>
                           </div>
-                          <span className={jobStatusBadgeClass(job.status)}>{job.status}</span>
-                        </div>
-                        <div className="df2-jobs-v3-item-meta">
-                          <span>{(job.records_processed ?? 0).toLocaleString()} rows</span>
-                          <span>{new Date(job.created_at).toLocaleString()}</span>
-                          <span className="df2-jobs-v3-item-id">#{job._id.slice(0, 8)}</span>
-                        </div>
-                        {(job.status === "running" || job.status === "pending") && job.progress_pct != null && (
-                          <div className="df2-jobs-v3-item-bar">
-                            <div className="df2-jobs-v3-item-bar-fill" style={{ width: `${job.progress_pct}%` }} />
+                          <div className="df2-job-row-meta">
+                            <span>{(job.records_processed ?? 0).toLocaleString()} rows</span>
+                            <span>
+                              {new Date(job.created_at).toLocaleString(undefined, {
+                                month: "short",
+                                day: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </span>
                           </div>
-                        )}
-                        {job.status === "failed" && job.error && (
-                          <p className="df2-jobs-v3-item-error">{job.error.slice(0, 100)}{job.error.length > 100 ? "…" : ""}</p>
-                        )}
-                      </div>
-                    </button>
-                  ))
+                          {isLive && job.progress_pct != null && (
+                            <div className="df2-job-row-bar" aria-hidden>
+                              <i style={{ width: `${job.progress_pct}%` }} />
+                            </div>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })
                 )}
               </aside>
 
@@ -365,7 +333,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
                     {(jobMappings.length > 0 || Object.keys(columnTypes).length > 0) && (
                       <div className="df2-jobs-v3-mappings">
-                        <h3>Column mapping</h3>
+                        <div className="df2-jobs-v3-mappings-head">
+                          <h3>Column mapping</h3>
+                          <span className="df2-jobs-v3-mappings-count">
+                            {(jobMappings.length || Object.keys(columnTypes).length).toLocaleString()} columns
+                          </span>
+                        </div>
                         <div className="df2-jobs-v3-mappings-scroll">
                           <table>
                             <thead>
@@ -376,23 +349,33 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                               </tr>
                             </thead>
                             <tbody>
-                              {jobMappings.length > 0 ? jobMappings.slice(0, 20).map((m, i) => {
-                                const src = m.source ?? m.source_column ?? "—";
-                                const tgt = m.target ?? m.target_column ?? "—";
-                                return (
-                                  <tr key={`${src}-${tgt}-${i}`}>
-                                    <td>{src}</td>
-                                    <td>{tgt}</td>
-                                    <td>{columnTypes[src] ?? columnTypes[tgt] ?? "—"}</td>
-                                  </tr>
-                                );
-                              }) : Object.entries(columnTypes).slice(0, 20).map(([col, typ]) => (
-                                <tr key={col}>
-                                  <td>{col}</td>
-                                  <td>{col}</td>
-                                  <td>{typ}</td>
-                                </tr>
-                              ))}
+                              {jobMappings.length > 0
+                                ? jobMappings.map((m, i) => {
+                                    const src = String(m.source ?? m.source_column ?? "").trim() || "—";
+                                    const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
+                                    const typ =
+                                      columnTypes[src]
+                                      ?? m.source_type
+                                      ?? m.target_type
+                                      ?? columnTypes[tgt]
+                                      ?? columnTypes[src.toLowerCase()]
+                                      ?? columnTypes[tgt.toLowerCase()]
+                                      ?? "—";
+                                    return (
+                                      <tr key={`${src}-${tgt}-${i}`}>
+                                        <td title={src}>{src}</td>
+                                        <td title={tgt}>{tgt}</td>
+                                        <td title={typ}>{typ}</td>
+                                      </tr>
+                                    );
+                                  })
+                                : Object.entries(columnTypes).map(([col, typ]) => (
+                                    <tr key={col}>
+                                      <td title={col}>{col}</td>
+                                      <td title={col}>{col}</td>
+                                      <td title={String(typ)}>{String(typ)}</td>
+                                    </tr>
+                                  ))}
                             </tbody>
                           </table>
                         </div>

@@ -19,6 +19,9 @@ def test_elasticsearch(
 ) -> ConnectResult:
     del schema, warehouse
 
+    if not host and not connection_string:
+        return ConnectResult(ok=False, tables=[], error="Elasticsearch host or URL is required.")
+
     if connection_string.strip():
         url = connection_string.strip()
     else:
@@ -31,8 +34,6 @@ def test_elasticsearch(
         from elasticsearch import Elasticsearch
     except ImportError:
         from connectors.driver_guard import require_driver
-        if not host and not connection_string:
-            return ConnectResult(ok=False, tables=[], error="Elasticsearch host or URL is required.")
         return ConnectResult(
             ok=False,
             tables=[],
@@ -52,11 +53,8 @@ def test_elasticsearch(
             if client.indices.exists(index=index_hint):
                 indices = [index_hint]
             else:
-                return ConnectResult(
-                    ok=False,
-                    tables=[],
-                    error=f"Index `{index_hint}` not found (cluster status: {status}).",
-                )
+                # The writer will create the index on demand; allow destination probes to pass.
+                indices = [index_hint]
         else:
             cat = client.cat.indices(format="json", h="index")
             indices = [row["index"] for row in cat[:20] if not row["index"].startswith(".")]

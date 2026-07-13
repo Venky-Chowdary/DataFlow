@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from services.schema_fingerprint import fingerprint_schema, schemas_match
+from services.type_system import is_lossy_coercion
 
 _SCHEMALESS_DESTS = {"mongodb", "dynamodb", "redis"}
 _DB_TYPE_ALIASES = {
@@ -89,10 +90,10 @@ def detect_schema_drift(
             tgt = str(m.get("target") or "")
             if not src or not tgt:
                 continue
-            src_type = _norm_type(source_schema.get(src))
-            tgt_type = _norm_type(_ci_get(target_schema, tgt))
-            if target_schema and src_type != tgt_type and src_type != "VARCHAR" and tgt_type != "VARCHAR":
-                type_mismatches.append({"source": src, "target": tgt, "source_type": src_type, "target_type": tgt_type})
+            src_type = source_schema.get(src) or "VARCHAR"
+            tgt_type = _ci_get(target_schema, tgt) or "VARCHAR"
+            if target_schema and is_lossy_coercion(src_type, tgt_type):
+                type_mismatches.append({"source": src, "target": tgt, "source_type": src_type.upper(), "target_type": tgt_type.upper()})
 
     issues: list[str] = []
     if source_changed:

@@ -91,8 +91,8 @@ def test_build_preflight_proof_bundle_requires_review_when_mapping_confidence_is
         columns=["id", "email"],
         sample_rows=[{"id": "1", "email": "alice@example.com"}],
         mappings=[
-            {"source": "id", "target": "id", "confidence": 0.60},
-            {"source": "email", "target": "email", "confidence": 0.58},
+            {"source": "id", "target": "id", "confidence": 0.45},
+            {"source": "email", "target": "email", "confidence": 0.50},
         ],
         source_schemas=[
             {"name": "id", "inferred_type": "INTEGER", "samples": ["1"]},

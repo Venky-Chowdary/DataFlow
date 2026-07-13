@@ -1,6 +1,6 @@
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "connectors" | "schedules" | "jobs" | "mcp" | "settings";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs";
 
 export interface Connector {
   id: string;
@@ -11,6 +11,16 @@ export interface Connector {
   database: string;
   status: string;
   role?: string;
+  username?: string;
+  password?: string;
+  schema?: string;
+  connection_string?: string;
+  warehouse?: string;
+  ssl?: boolean;
+  auth_mode?: string;
+  auth_role?: string;
+  api_key?: string;
+  service_account?: string;
   created_at: string;
   last_test_ok?: boolean;
 }
@@ -107,7 +117,7 @@ export interface EnhancedAnalysis {
 
 export interface PreflightGate {
   id: string;
-  status: "pass" | "block" | "skip";
+  status: "pass" | "block" | "skip" | "running";
   message: string;
   duration_ms: number;
   details?: Record<string, unknown>;
@@ -141,6 +151,7 @@ export interface PreflightProofBundle {
     decision: "approve" | "review" | "block";
     blockers: string[];
     reason: string;
+    warnings?: string[];
   };
 }
 
@@ -150,14 +161,14 @@ export interface PreflightResult {
   total_gates: number;
   readiness_score: number;
   gates: PreflightGate[];
-  blockers: { id: string; message: string; details?: Record<string, unknown> }[];
+  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
   proof_bundle?: PreflightProofBundle;
 }
 
 export interface TransferResult {
   success: boolean;
   records_transferred?: number;
-  destination?: { database: string; collection: string; path?: string; format?: string };
+  destination?: { database: string; collection: string; path?: string; format?: string; filename?: string; download_url?: string };
   destination_summary?: {
     type?: string;
     schema?: string;
@@ -171,6 +182,8 @@ export interface TransferResult {
     rejected_rows?: number;
     warnings?: string[];
     error_policy?: string;
+    filename?: string;
+    download_url?: string;
   };
   ddl_executed?: string[];
   operation?: string;
@@ -184,6 +197,9 @@ export interface TransferResult {
     source_checksum?: string;
     target_checksum?: string;
   };
+  job_id?: string;
+  /** Full client-captured event log from live theater (persisted for result dashboard) */
+  event_log?: string[];
 }
 
 export interface TransferPlan {

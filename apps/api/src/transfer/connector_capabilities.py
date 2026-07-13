@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+from functools import lru_cache
 from typing import Any
 
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
@@ -17,6 +19,8 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "elasticsearch": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "redshift": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
+    "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -25,9 +29,9 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "tsv": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "json": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "jsonl": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
-    "ndjson": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
-    "excel": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
-    "parquet": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
+    "ndjson": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "excel": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "parquet": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
 }
 
 # Catalog marketplace id → driver / format type
@@ -37,6 +41,10 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "aws_s3": "s3",
     "google_cloud_storage": "gcs",
     "gcs": "gcs",
+    "adls": "adls",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
     "minio": "s3",
     "wasabi": "s3",
     "backblaze_b2": "s3",
@@ -71,19 +79,21 @@ CATALOG_ID_ALIASES: dict[str, str] = {
 SUGGESTED_SOURCES = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
-    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
 TRANSFER_READY_CATALOG_IDS = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+    "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "adls",
+    "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+    "redis", "elasticsearch", "sqlite", "generic_sql",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
 })
 
 SUGGESTED_DESTINATIONS = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
-    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
+    "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
 ]
 
 
@@ -99,7 +109,10 @@ def default_port(driver_type: str) -> int:
         "dynamodb": 443,
         "s3": 443,
         "gcs": 443,
+        "adls": 443,
         "redshift": 5439,
+        "sqlite": 0,
+        "generic_sql": 0,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -108,6 +121,8 @@ def resolve_driver_type(catalog_id: str) -> str:
     cid = (catalog_id or "").lower().strip()
     if not cid:
         return "unknown"
+    if cid == "generic_sql":
+        return "generic_sql"
     if cid in CATALOG_ID_ALIASES:
         return CATALOG_ID_ALIASES[cid]
     if cid in _DRIVER_CAPS:
@@ -115,8 +130,12 @@ def resolve_driver_type(catalog_id: str) -> str:
     if cid in _FILE_CAPS:
         return cid
 
-    # Strict substring match — only if target is a known implemented type
+    # Generic SQL fallback handles any SQL engine with a SQLAlchemy dialect.
+    def _valid(driver: str) -> bool:
+        return driver in _DRIVER_CAPS or driver in _FILE_CAPS or driver == "generic_sql"
+
     for needle, driver in [
+        # Existing first-class drivers
         ("postgres", "postgresql"),
         ("mongo", "mongodb"),
         ("documentdb", "mongodb"),
@@ -150,8 +169,54 @@ def resolve_driver_type(catalog_id: str) -> str:
         ("backblaze", "s3"),
         ("spaces", "s3"),
         ("object_storage", "s3"),
+        # Generic SQL engines
+        ("mssql", "generic_sql"),
+        ("sql_server", "generic_sql"),
+        ("microsoft_sql", "generic_sql"),
+        ("azure_sql", "generic_sql"),
+        ("oracle", "generic_sql"),
+        ("db2", "generic_sql"),
+        ("ibm_db2", "generic_sql"),
+        ("teradata", "generic_sql"),
+        ("netezza", "generic_sql"),
+        ("vertica", "generic_sql"),
+        ("exasol", "generic_sql"),
+        ("sybase", "generic_sql"),
+        ("sap_ase", "generic_sql"),
+        ("sap_iq", "generic_sql"),
+        ("sap_hana", "generic_sql"),
+        ("hana", "generic_sql"),
+        ("firebird", "generic_sql"),
+        ("h2", "generic_sql"),
+        ("clickhouse", "generic_sql"),
+        ("druid", "generic_sql"),
+        ("pinot", "generic_sql"),
+        ("presto", "generic_sql"),
+        ("trino", "generic_sql"),
+        ("hive", "generic_sql"),
+        ("spark", "generic_sql"),
+        ("impala", "generic_sql"),
+        ("phoenix", "generic_sql"),
+        ("duckdb", "generic_sql"),
+        ("databricks", "generic_sql"),
+        ("greenplum", "generic_sql"),
+        ("cratedb", "generic_sql"),
+        ("questdb", "generic_sql"),
+        ("doris", "generic_sql"),
+        ("starrocks", "generic_sql"),
+        ("citus", "generic_sql"),
+        ("dremio", "generic_sql"),
+        ("firebolt", "generic_sql"),
+        ("risingwave", "generic_sql"),
+        ("materialize", "generic_sql"),
+        ("yellowbrick", "generic_sql"),
+        ("actian", "generic_sql"),
+        ("informix", "generic_sql"),
+        ("athena", "generic_sql"),
+        ("synapse", "generic_sql"),
+        ("azure_synapse", "generic_sql"),
     ]:
-        if needle in cid and driver in _DRIVER_CAPS:
+        if needle in cid and _valid(driver):
             return driver
     if "gcs" in cid or "google_cloud_storage" in cid or ("cloud_storage" in cid and "google" in cid):
         return "gcs"
@@ -167,16 +232,158 @@ def resolve_driver_type(catalog_id: str) -> str:
         return "csv"
 
     base = cid.replace("___", "_").split("_")[0]
-    if base in _DRIVER_CAPS or base in _FILE_CAPS:
+    if base in _DRIVER_CAPS or base in _FILE_CAPS or base == "generic_sql":
         return base
     return base
 
 
-def get_capabilities(driver_type: str) -> dict[str, bool]:
-    if driver_type in _DRIVER_CAPS:
-        return dict(_DRIVER_CAPS[driver_type])
-    if driver_type in _FILE_CAPS:
-        return dict(_FILE_CAPS[driver_type])
+def _sqlalchemy_available() -> bool:
+    try:
+        return importlib.util.find_spec("sqlalchemy") is not None
+    except Exception:
+        return False
+
+
+# First-class / file drivers and the DBAPI / library modules they need
+_DRIVER_MODULE: dict[str, str | None] = {
+    "postgresql": "psycopg2",
+    "mysql": "pymysql",
+    "redshift": "psycopg2",
+    "mongodb": "pymongo",
+    "redis": "redis",
+    "elasticsearch": "elasticsearch",
+    "dynamodb": "boto3",
+    "s3": "boto3",
+    "gcs": "google.cloud.storage",
+    "adls": "azure.storage.blob",
+    "snowflake": "snowflake.connector",
+    "bigquery": "google.cloud.bigquery",
+    "sqlite": "sqlite3",
+    "csv": None,
+    "tsv": None,
+    "json": None,
+    "jsonl": None,
+    "ndjson": None,
+    "excel": "openpyxl",
+    "parquet": "pyarrow",
+}
+
+
+# Map a generic SQL engine drivername to the DBAPI module it requires
+_GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
+    "postgresql+psycopg2": "psycopg2",
+    "mysql+pymysql": "pymysql",
+    "duckdb": "duckdb",
+    "sqlite": "sqlite3",
+    "mssql+pyodbc": "pyodbc",
+    "oracle+oracledb": "oracledb",
+    "ibm_db_sa": "ibm_db",
+    "teradatasql": "teradatasql",
+    "nzpsql": "nzpsql",
+    "vertica+vertica_python": "vertica_python",
+    "exasol+pyodbc": "pyodbc",
+    "sybase+pyodbc": "pyodbc",
+    "sap_hana": "hdbcli",
+    "hana": "hdbcli",
+    "firebird+fdb": "fdb",
+    "h2": "h2",
+    "clickhouse+native": "clickhouse_driver",
+    "druid": "pydruid",
+    "pinot": "pinotdb",
+    "presto": "pyhive",
+    "trino": "trino",
+    "hive": "pyhive",
+    "impala": "impyla",
+    "spark": "pyhive",
+    "phoenix": "phoenixdb",
+    "databricks": "databricks",
+    "databricks+connector": "databricks",
+    "dremio+flight": "dremio_sqlalchemy",
+    "firebolt": "firebolt",
+    "informix+pyodbc": "pyodbc",
+    "awsathena+rest": "pyathena",
+    "db2": "ibm_db",
+}
+
+
+def _module_is_installed(name: str | None) -> bool:
+    if name is None:
+        return True
+    if not name or not isinstance(name, str):
+        return False
+    try:
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        # find_spec can raise for namespace packages, missing __init__,
+        # invalid module paths, or broken parent packages. Treat all as
+        # "not installed" rather than crash the catalog.
+        return False
+
+
+@lru_cache(maxsize=1)
+def _generic_sql_drivername_map() -> dict[str, str]:
+    """Lazy import of generic_sql drivername map to avoid heavy startup import."""
+    try:
+        from connectors.generic_sql import _DRIVERNAME_MAP
+
+        return _DRIVERNAME_MAP
+    except Exception:
+        return {}
+
+
+def _generic_sql_dbapi_module(drivername: str) -> str | None:
+    if not drivername:
+        return None
+    if drivername in _GENERIC_DRIVERNAME_TO_MODULE:
+        return _GENERIC_DRIVERNAME_TO_MODULE[drivername]
+    # Try to derive from the DBAPI suffix after the "+" separator
+    if "+" in drivername:
+        return drivername.split("+", 1)[1]
+    return None
+
+
+def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
+    """Check whether the runtime dependencies for a driver are installed.
+
+    For generic SQL this is catalog-id aware: a PostgreSQL-wire alias is only
+    ready when psycopg2 is installed, a MySQL-wire alias when pymysql is
+    installed, etc. This keeps the catalog honest and avoids claiming "Full
+    transfer" for engines whose DBAPI drivers are not present.
+    """
+    if driver_type == "generic_sql":
+        if not _sqlalchemy_available():
+            return False
+        if not catalog_id:
+            return True
+        drivername = _generic_sql_drivername_map().get(catalog_id, catalog_id)
+        module = _generic_sql_dbapi_module(drivername)
+        if module is None or not _module_is_installed(module):
+            return False
+        # ClickHouse needs the separate SQLAlchemy dialect package too.
+        if "clickhouse" in drivername:
+            return _module_is_installed("clickhouse_sqlalchemy")
+        return True
+
+    module = _DRIVER_MODULE.get(driver_type)
+    return _module_is_installed(module)
+
+
+def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
+    try:
+        if driver_type == "generic_sql":
+            base = {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+            if not catalog_id:
+                return base if driver_available("generic_sql") else {k: False for k in base}
+            return base if driver_available("generic_sql", catalog_id) else {k: False for k in base}
+        if driver_type in _DRIVER_CAPS:
+            caps = dict(_DRIVER_CAPS[driver_type])
+            return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
+        if driver_type in _FILE_CAPS:
+            caps = dict(_FILE_CAPS[driver_type])
+            return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
+    except Exception:
+        # Capability discovery should never crash the catalog; degrade gracefully.
+        pass
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 
@@ -212,16 +419,14 @@ def capability_label(caps: dict[str, bool]) -> str:
 
 
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
-    """True only for native catalog ids — aliases resolve for routing but stay roadmap."""
+    """True when the resolved driver is implemented and live (aliases inherit readiness)."""
     if not transfer_ready(caps):
         return False
-    cid = (catalog_id or "").lower().strip()
-    if not cid:
-        return False
-    # Native driver/format ids only — no alias inflation (e.g. amazon_rds_postgresql → planned)
-    if cid in TRANSFER_READY_CATALOG_IDS:
+    if driver in TRANSFER_READY_CATALOG_IDS:
         return True
-    if cid in _DRIVER_CAPS or cid in _FILE_CAPS:
+    if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
+        return True
+    if driver == "generic_sql":
         return True
     return False
 
@@ -229,7 +434,7 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
 def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     catalog_id = (entry.get("id") or "").lower().strip()
     driver = resolve_driver_type(catalog_id)
-    caps = get_capabilities(driver)
+    caps = get_capabilities(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
     eff = "live" if ready else (
         "connect_only" if connect_only(caps) else effective_status(caps, entry.get("status", "planned"))
@@ -248,7 +453,7 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def transfer_live_driver_types() -> list[str]:
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS}.items():
+    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
         if transfer_ready(caps):
             live.append(k)
     return sorted(set(live))

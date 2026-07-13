@@ -17,7 +17,7 @@ def test_can_convert_csv_to_json():
 
 
 def test_cannot_convert_unsupported():
-    assert can_convert("parquet", "csv") is False
+    assert can_convert("pdf", "csv") is False
 
 
 def test_convert_csv_to_json():
@@ -55,4 +55,20 @@ def test_conversion_matrix_structure():
 
 def test_convert_unsupported_raises():
     with pytest.raises(ValueError, match="not supported"):
-        convert_rows(["a"], [["1"]], source_format="parquet", target_format="csv")
+        convert_rows(["a"], [["1"]], source_format="pdf", target_format="csv")
+
+
+def test_convert_csv_to_parquet():
+    headers = ["id", "name"]
+    rows = [["1", "Alice"], ["2", "Bob"]]
+    content, mime = convert_rows(headers, rows, source_format="csv", target_format="parquet")
+    assert mime == "application/vnd.apache.parquet"
+    assert content.startswith(b"PAR1")
+
+
+def test_convert_csv_to_excel():
+    headers = ["id", "name"]
+    rows = [["1", "Alice"], ["2", "Bob"]]
+    content, mime = convert_rows(headers, rows, source_format="csv", target_format="excel")
+    assert mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert content.startswith(b"PK")

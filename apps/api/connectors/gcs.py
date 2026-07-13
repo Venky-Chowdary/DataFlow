@@ -18,7 +18,7 @@ def test_gcs(
     ssl: bool,
     warehouse: str = "",
 ) -> ConnectResult:
-    del port, username, schema, ssl, warehouse
+    del username, schema, ssl, warehouse
 
     bucket = (database or connection_string or "").strip()
     if not bucket:
@@ -39,6 +39,7 @@ def test_gcs(
     try:
         client = gcs_client({
             "host": host,
+            "port": port,
             "connection_string": connection_string or password,
             "password": password,
         })

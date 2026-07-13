@@ -60,6 +60,14 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     dest_by_name = {c.name.lower(): c for c in ctx.plan.destination.target_columns}
     issues: list[str] = []
 
+    # Schemaless document stores (MongoDB, DynamoDB, Redis) do not enforce a
+    # column-level type contract; every field can hold any BSON/DynamoDB type.
+    # Skip lossy-coercion checks for these destinations.
+    dest_kind = (ctx.plan.destination.db_type or "").lower()
+    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    if schemaless:
+        return _pass(GateId.G3_SCHEMA_CONTRACT, "Schemaless destination — no DDL type contract to validate", start)
+
     try:
         from services.type_system import is_lossy_coercion
     except ImportError:
@@ -83,11 +91,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             )
 
     if issues:
-        return _block(
+        if (ctx.plan.validation_mode or "strict").lower() in {"strict", "maximum"}:
+            return _block(
+                GateId.G3_SCHEMA_CONTRACT,
+                f"{len(issues)} type coercion issue(s)",
+                start,
+                {"issues": issues},
+            )
+        return _pass(
             GateId.G3_SCHEMA_CONTRACT,
-            f"{len(issues)} type coercion issue(s)",
+            f"{len(issues)} type coercion warning(s) — will be verified by dry-run",
             start,
-            {"issues": issues},
+            {"issues": issues, "warnings": issues},
         )
     return _pass(GateId.G3_SCHEMA_CONTRACT, "Schema contract valid", start)
 
@@ -201,8 +216,37 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             {"issues": ctx.plan.ddl_issues},
         )
 
-    pk_candidates = [m.target for m in ctx.plan.mappings if m.target.lower().endswith("_id")]
-    for col_group in [pk_candidates] if pk_candidates else []:
+    # Schemaless destinations (MongoDB/DynamoDB/Redis) only have a hard uniqueness
+    # contract on `_id`; other `*_id` fields are foreign keys and may repeat.
+    dest_kind = (ctx.plan.destination.db_type or "").lower()
+    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    source_cols = [c.name for c in ctx.plan.source.columns]
+    tgt_by_src = {m.source: m.target for m in ctx.plan.mappings}
+    pk = None
+    if schemaless:
+        for src, tgt in tgt_by_src.items():
+            if tgt == "_id":
+                pk = src
+                break
+        if not pk:
+            pk = next((c for c in source_cols if c.lower() == "_id"), None)
+    else:
+        for src, tgt in tgt_by_src.items():
+            if tgt.lower() in {"id", "_id"}:
+                pk = src
+                break
+        if not pk:
+            for c in source_cols:
+                if c.lower() in {"id", "_id"}:
+                    pk = c
+                    break
+        if not pk:
+            pk = next((c for c in source_cols if c.lower().endswith("_id")), None)
+
+    pk_targets: list[str] = []
+    if pk:
+        pk_targets.append(tgt_by_src.get(pk, pk))
+    for col_group in [pk_targets] if pk_targets else []:
         dupes = ctx.probe_unique_constraint(col_group)
         if dupes:
             return _block(

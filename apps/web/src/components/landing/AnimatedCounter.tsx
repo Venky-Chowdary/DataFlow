@@ -7,7 +7,7 @@ interface AnimatedCounterProps {
 }
 
 export function AnimatedCounter({ value, suffix = "", duration = 1200 }: AnimatedCounterProps) {
-  const [display, setDisplay] = useState(0);
+  const [display, setDisplay] = useState(value);
 
   useEffect(() => {
     if (value <= 0) {
@@ -19,17 +19,24 @@ export function AnimatedCounter({ value, suffix = "", duration = 1200 }: Animate
       setDisplay(value);
       return;
     }
+    // Skip animated counting when the page is not visible so the correct
+    // value is shown immediately (e.g. headless screenshots, prerender).
+    if (document.hidden) {
+      setDisplay(value);
+      return;
+    }
 
-    let frame = 0;
     const start = performance.now();
+    const from = display;
     const tick = (now: number) => {
       const t = Math.min(1, (now - start) / duration);
       const eased = 1 - (1 - t) ** 3;
-      setDisplay(Math.round(value * eased));
-      if (t < 1) frame = requestAnimationFrame(tick);
+      setDisplay(Math.round(from + (value - from) * eased));
+      if (t < 1) {
+        requestAnimationFrame(tick);
+      }
     };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
+    requestAnimationFrame(tick);
   }, [value, duration]);
 
   return (

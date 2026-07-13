@@ -41,8 +41,10 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "dynamodb": ("connectors.dynamodb", "test_dynamodb"),
         "s3": ("connectors.s3", "test_s3"),
         "gcs": ("connectors.gcs", "test_gcs"),
+        "adls": ("connectors.adls", "test_adls"),
         "redis": ("connectors.redis_kv", "test_redis"),
         "elasticsearch": ("connectors.elasticsearch", "test_elasticsearch"),
+        "sqlite": ("connectors.sqlite", "test_sqlite"),
     }
     if driver == "mongodb":
         import pymongo  # noqa: F401
@@ -60,8 +62,10 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "dynamodb": "connectors.dynamodb_reader",
         "s3": "connectors.s3_reader",
         "gcs": "connectors.gcs_reader",
+        "adls": "connectors.adls_reader",
         "redis": "connectors.redis_reader",
         "elasticsearch": "connectors.elasticsearch_reader",
+        "sqlite": "connectors.sqlite_reader",
     }
     writers = {
         "postgresql": "connectors.postgresql_writer",
@@ -73,8 +77,10 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "dynamodb": "connectors.dynamodb_writer",
         "s3": "connectors.s3_writer",
         "gcs": "connectors.gcs_writer",
+        "adls": "connectors.adls_writer",
         "redis": "connectors.redis_writer",
         "elasticsearch": "connectors.elasticsearch_writer",
+        "sqlite": "connectors.sqlite_writer",
     }
     assert importlib.import_module(readers[driver])
     assert callable(importlib.import_module(writers[driver]).write_mapped_rows)

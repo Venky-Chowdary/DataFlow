@@ -8,10 +8,12 @@ from collections import Counter
 
 
 def detect_encoding(content: bytes) -> str:
+    """Return encoding without loading the whole file into a decoded string."""
     if content.startswith(b"\xef\xbb\xbf"):
         return "utf-8-sig"
+    sample = content[:65536]
     try:
-        content.decode("utf-8")
+        sample.decode("utf-8")
         return "utf-8"
     except UnicodeDecodeError:
         return "latin-1"
@@ -37,42 +39,54 @@ def detect_delimiter(sample: str) -> str:
     return max(scores, key=scores.get)
 
 
-def _decode(content: bytes, encoding: str | None) -> tuple[str, str]:
+def _text_reader(content: bytes, encoding: str | None = None):
+    """Return a streaming text reader for CSV content without a full decode."""
     enc = encoding or detect_encoding(content)
-    return content.decode(enc, errors="replace"), enc
+    return io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
 
 
 def parse_csv_preview(content: bytes, encoding: str | None = None, preview_rows: int = 100) -> tuple[list[str], list[list[str]], str, str]:
-    """Parse header + preview rows for upload UI and dry-run."""
-    text, enc = _decode(content, encoding)
-    delim = detect_delimiter(text[:8192])
-    reader = csv.reader(io.StringIO(text), delimiter=delim)
-    rows = list(reader)
-    if not rows:
-        return [], [], enc, delim
-    data = rows[1 : preview_rows + 1]
-    return rows[0], data, enc, delim
+    """Parse header + preview rows without loading the whole file into memory."""
+    enc = encoding or detect_encoding(content)
+    sample = content[:8192].decode(enc, errors="replace")
+    delim = detect_delimiter(sample)
+    with _text_reader(content, enc) as reader_file:
+        reader = csv.reader(reader_file, delimiter=delim)
+        try:
+            headers = next(reader)
+        except StopIteration:
+            return [], [], enc, delim
+        preview: list[list[str]] = []
+        for i, row in enumerate(reader):
+            if i >= preview_rows:
+                break
+            preview.append(row)
+    return headers, preview, enc, delim
 
 
 def count_csv_rows(content: bytes, encoding: str | None = None) -> int:
     """Stream-count data rows without loading all cells into memory."""
-    text, _enc = _decode(content, encoding)
-    delim = detect_delimiter(text[:8192])
-    reader = csv.reader(io.StringIO(text), delimiter=delim)
-    count = 0
-    for i, _row in enumerate(reader):
-        if i == 0:
-            continue
-        count += 1
+    enc = encoding or detect_encoding(content)
+    sample = content[:8192].decode(enc, errors="replace")
+    delim = detect_delimiter(sample)
+    with _text_reader(content, enc) as reader_file:
+        reader = csv.reader(reader_file, delimiter=delim)
+        count = 0
+        for i, _row in enumerate(reader):
+            if i == 0:
+                continue
+            count += 1
     return count
 
 
 def parse_csv_full(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:
     """Full parse for transfer execution."""
-    text, enc = _decode(content, encoding)
-    delim = detect_delimiter(text[:8192])
-    reader = csv.reader(io.StringIO(text), delimiter=delim)
-    rows = list(reader)
+    enc = encoding or detect_encoding(content)
+    sample = content[:8192].decode(enc, errors="replace")
+    delim = detect_delimiter(sample)
+    with _text_reader(content, enc) as reader_file:
+        reader = csv.reader(reader_file, delimiter=delim)
+        rows = list(reader)
     if not rows:
         return [], [], enc, delim
     return rows[0], rows[1:], enc, delim

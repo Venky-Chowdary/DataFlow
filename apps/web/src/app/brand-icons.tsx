@@ -89,6 +89,14 @@ export const BrandIcons: Record<string, React.FC<{ size?: number }>> = {
       <path d="M6 4h12l8 8v16a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2z" fill="#F7B93E"/>
     </svg>
   ),
+  generic_sql: ({ size = 32 }) => (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
+      <ellipse cx="16" cy="10" rx="10" ry="4" fill="#2D65F7"/>
+      <path d="M6 10v12c0 2.2 4.5 4 10 4s10-1.8 10-4V10" stroke="#2D65F7" strokeWidth="2"/>
+      <path d="M6 14c0 2.2 4.5 4 10 4s10-1.8 10-4" stroke="#2D65F7" strokeWidth="2"/>
+      <path d="M6 18c0 2.2 4.5 4 10 4s10-1.8 10-4" stroke="#2D65F7" strokeWidth="2"/>
+    </svg>
+  ),
   default: ({ size = 32 }) => (
     <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
       <rect x="4" y="4" width="24" height="24" rx="4" fill="#78716c"/>

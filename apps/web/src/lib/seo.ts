@@ -86,6 +86,14 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     keywords: "DataFlow settings, team security, workspace configuration",
     robots: "noindex",
   },
+  docs: {
+    title: "Documentation",
+    description:
+      "How DataFlow moves, maps, and validates any data — architecture, preflight rules, connector coverage, and security.",
+    keywords:
+      "DataFlow documentation, data transfer architecture, ETL documentation, preflight gates, data migration guide",
+    robots: "noindex",
+  },
 };
 
 export function resolveSiteUrl(): string {

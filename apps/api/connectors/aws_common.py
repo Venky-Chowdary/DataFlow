@@ -21,8 +21,20 @@ def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
     host = (cfg.get("host") or "").strip()
     if host.startswith("http://") or host.startswith("https://"):
         return host.rstrip("/")
-    if host in ("localhost", "127.0.0.1") and cfg.get("port"):
-        return f"http://{host}:{int(cfg['port'])}"
+    if host.endswith(".amazonaws.com"):
+        return f"https://{host}"
+    # If host already includes a port, extract it so we don't duplicate the port param.
+    if ":" in host:
+        host, _, port_from_host = host.rpartition(":")
+        port = int(port_from_host) if port_from_host.isdigit() else cfg.get("port")
+    else:
+        port = cfg.get("port")
+    if host and port:
+        ssl = cfg.get("ssl", False)
+        scheme = "https" if ssl else "http"
+        return f"{scheme}://{host}:{int(port)}"
+    if host in ("localhost", "127.0.0.1", "host.docker.internal") and port:
+        return f"http://{host}:{int(port)}"
     return ""
 
 
@@ -36,10 +48,18 @@ def is_local_endpoint(cfg: dict[str, Any]) -> bool:
 
 
 def resolve_region(cfg: dict[str, Any]) -> str:
-    host = (cfg.get("host") or "").strip()
-    if host.startswith("http://") or host.startswith("https://"):
+    host = (cfg.get("host") or "").strip().split(":")[0]
+    if host.startswith("http://") or host.startswith("https://") or host.endswith(".amazonaws.com"):
+        if host == "s3.amazonaws.com":
+            return "us-east-1"
+        # Extract region from virtual-hosted style endpoints like s3.us-east-1.amazonaws.com
+        parts = host.split(".")
+        if host.endswith(".amazonaws.com") and len(parts) >= 3 and parts[-2] == "amazonaws":
+            candidate = parts[-3]
+            if candidate and candidate not in ("s3", "s3-website"):
+                return candidate
         return "us-east-1"
-    if host and host not in ("localhost", "127.0.0.1"):
+    if host and host not in ("localhost", "127.0.0.1", "host.docker.internal"):
         return host
     return "us-east-1"
 

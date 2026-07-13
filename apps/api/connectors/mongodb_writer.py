@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -59,7 +61,10 @@ def write_mapped_rows(
     error_policy: str | None = None,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
+    del backfill_new_fields
     try:
         from pymongo import MongoClient
     except ImportError:
@@ -82,7 +87,7 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -94,7 +99,7 @@ def write_mapped_rows(
             error="No column mappings",
         )
 
-    collection_name = sanitize_identifier(table_name)
+    collection_name = sanitize_identifier(table_name, preserve_case=True)
     db_name = database or schema or "test"
     policy = transform_error_policy(error_policy)
 
@@ -115,6 +120,7 @@ def write_mapped_rows(
             target_cols=target_cols,
             column_types=column_types,
             error_policy=policy,
+            preserve_case=True,
         )
         rejected_rows = len(data_rows) - len(mapped_rows)
         if transform_errors and policy == "fail":
@@ -130,18 +136,107 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
         
-        total = len(mapped_rows)
+        from bson.binary import Binary
+        from bson.decimal128 import Decimal128
+        from datetime import date as _date, datetime as _datetime, time as _time
+
+        def _to_bson(value: Any, stype: str) -> Any:
+            if value is None:
+                return None
+            upper = stype.upper()
+            if upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    return value
+            if upper in {"BOOLEAN", "BOOL"}:
+                text = str(value).strip().lower()
+                if text in {"true", "t", "yes", "y", "1"}:
+                    return True
+                if text in {"false", "f", "no", "n", "0"}:
+                    return False
+                return value
+            if upper in {"DECIMAL", "NUMERIC"}:
+                return Decimal128(str(value))
+            if upper == "DATE":
+                if isinstance(value, _datetime):
+                    return value
+                if isinstance(value, _date):
+                    return _datetime.combine(value, _time.min)
+                text = value.strip() if isinstance(value, str) else str(value)
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d"):
+                    try:
+                        return _datetime.strptime(text, fmt)
+                    except ValueError:
+                        continue
+                return value
+            if upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
+                if isinstance(value, _datetime):
+                    return value
+                text = value.strip() if isinstance(value, str) else str(value)
+                text = text.replace("Z", "+00:00")
+                try:
+                    return _datetime.fromisoformat(text)
+                except ValueError:
+                    pass
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S%z"):
+                    try:
+                        return _datetime.strptime(text, fmt)
+                    except ValueError:
+                        continue
+                return value
+            if upper in {"BINARY", "BYTEA", "BLOB"}:
+                if isinstance(value, bytes):
+                    return Binary(value)
+                if isinstance(value, str):
+                    try:
+                        return Binary(base64.b64decode(value, validate=True))
+                    except Exception:
+                        return Binary(value.encode("utf-8"))
+                return value
+            if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
+                if isinstance(value, (dict, list)):
+                    return value
+                if isinstance(value, str):
+                    try:
+                        return json.loads(value, parse_constant=lambda v: None)
+                    except Exception:
+                        return value
+                return value
+            if upper == "UUID":
+                return str(value)
+            if upper == "TIME":
+                return str(value)
+            return value
+
+        typed_rows: list[tuple] = []
+        for row in mapped_rows:
+            typed_rows.append(tuple(_to_bson(v, t) for v, t in zip(row, source_types)))
+
+        total = len(typed_rows)
         chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
         written = 0
 
         for chunk_idx in range(chunks):
             start = chunk_idx * CHUNK_SIZE
-            batch = mapped_rows[start : start + CHUNK_SIZE]
+            batch = typed_rows[start : start + CHUNK_SIZE]
             if not batch:
                 break
-            
+
             # Convert row tuples to documents
             docs = [dict(zip(target_cols, row)) for row in batch]
+
+            # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
+            from bson.objectid import ObjectId
+
+            for doc in docs:
+                if "_id" in doc and isinstance(doc["_id"], str):
+                    v = doc["_id"]
+                    if len(v) == 24 and ObjectId.is_valid(v):
+                        try:
+                            doc["_id"] = ObjectId(v)
+                        except Exception:
+                            pass
 
             if write_mode == "upsert" and conflict_columns:
                 from pymongo import ReplaceOne

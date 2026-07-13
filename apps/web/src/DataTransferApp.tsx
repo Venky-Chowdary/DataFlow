@@ -7,8 +7,9 @@ import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { SectionLoader } from "./components/LoadingState";
-import { ToastProvider, useToast } from "./components/Toast";
+import { useToast } from "./components/Toast";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
+import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
@@ -21,7 +22,6 @@ import { usePageMeta } from "./lib/usePageMeta";
 import { readAppHash, writeAppHash } from "./lib/appNavigation";
 import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
 
-const SYSTEM_BANNER_PREF_KEY = "df2.systemVisibilityBanner.hidden";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const PilotPage = lazy(() => import("./pages/PilotPage").then((m) => ({ default: m.PilotPage })));
@@ -31,6 +31,7 @@ const SchedulesPage = lazy(() => import("./pages/SchedulesPage").then((m) => ({ 
 const JobsPage = lazy(() => import("./pages/JobsPage").then((m) => ({ default: m.JobsPage })));
 const McpPage = lazy(() => import("./pages/McpPage").then((m) => ({ default: m.McpPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const DocsPage = lazy(() => import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })));
 const AICopilot = lazy(() => import("./components/AICopilot").then((m) => ({ default: m.AICopilot })));
 const ConnectorModal = lazy(() => import("./components/ConnectorModal").then((m) => ({ default: m.ConnectorModal })));
 
@@ -42,6 +43,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
   { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs" },
   { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress" },
   { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code" },
+  { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security & team" },
 ];
 
@@ -93,13 +95,6 @@ function AppShell({
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
-  const [showSystemBanner, setShowSystemBanner] = useState(() => {
-    try {
-      return localStorage.getItem(SYSTEM_BANNER_PREF_KEY) !== "1";
-    } catch {
-      return true;
-    }
-  });
   const searchRef = useRef<HTMLInputElement>(null);
 
   usePageMeta(metaForScreen(screen));
@@ -233,37 +228,6 @@ function AppShell({
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
   const unhealthyConnectorsCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
-  const hasAttentionItems = !apiOnline || failedJobsCount > 0 || unhealthyConnectorsCount > 0;
-  const systemTone: "ok" | "live" | "warn" = hasAttentionItems ? "warn" : runningJobsCount > 0 ? "live" : "ok";
-  const shouldRenderSystemBanner = showSystemBanner && (hasAttentionItems || runningJobsCount > 0);
-  const systemMessage = !apiOnline
-    ? "Control plane API is offline. Transfers and validation checks can fail until connectivity recovers."
-    : failedJobsCount > 0
-      ? `${failedJobsCount} failed job${failedJobsCount > 1 ? "s" : ""} need triage in Job Theater.`
-      : unhealthyConnectorsCount > 0
-        ? `${unhealthyConnectorsCount} connector${unhealthyConnectorsCount > 1 ? "s" : ""} need health checks before production transfers.`
-        : runningJobsCount > 0
-          ? `${runningJobsCount} active transfer${runningJobsCount > 1 ? "s" : ""} streaming now.`
-          : "All systems healthy. Preflight, routing, and transfer services are operational.";
-
-  const closeSystemBanner = () => {
-    setShowSystemBanner(false);
-    try {
-      localStorage.setItem(SYSTEM_BANNER_PREF_KEY, "1");
-    } catch {
-      // Ignore localStorage failures (private mode / policy).
-    }
-  };
-
-  const openSystemBanner = () => {
-    setShowSystemBanner(true);
-    try {
-      localStorage.removeItem(SYSTEM_BANNER_PREF_KEY);
-    } catch {
-      // Ignore localStorage failures (private mode / policy).
-    }
-  };
-
   return (
     <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
       {mobileNavOpen && (
@@ -303,10 +267,10 @@ function AppShell({
               </span>
               <span>{item.label}</span>
               {item.id === "connectors" && connectors.length > 0 && (
-                <span className="df2-nav-badge">{connectors.length}</span>
+                <span className="df2-nav-badge" aria-hidden="true"> {connectors.length}</span>
               )}
               {item.id === "jobs" && jobs.length > 0 && (
-                <span className="df2-nav-badge">{jobs.length}</span>
+                <span className="df2-nav-badge" aria-hidden="true"> {jobs.length}</span>
               )}
             </button>
           ))}
@@ -378,7 +342,7 @@ function AppShell({
             </button>
             <div className="df2-breadcrumb">
               <span>Workspace</span>
-              <strong>{currentNav?.label ?? "DataFlow"}</strong>
+              <strong> {currentNav?.label ?? "DataFlow"}</strong>
             </div>
             <WorkspaceSearch
               query={searchQuery}
@@ -396,18 +360,13 @@ function AppShell({
               <span className="df2-system-dot" />
               <span className="df2-topbar-pill-text">{apiOnline ? "Online" : "Offline"}</span>
             </div>
-            {!shouldRenderSystemBanner && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-ghost"
-                onClick={openSystemBanner}
-                aria-label="Show system visibility"
-                title="Show system visibility"
-              >
-                <DtIcon name="activity" size={16} />
-                <span className="df2-topbar-btn-text">Status</span>
-              </button>
-            )}
+            <StatusPopover
+              apiOnline={apiOnline}
+              failedJobsCount={failedJobsCount}
+              runningJobsCount={runningJobsCount}
+              unhealthyConnectorsCount={unhealthyConnectorsCount}
+              onNavigate={setScreen}
+            />
             {screen !== "pilot" && (
               <button
                 type="button"
@@ -419,10 +378,12 @@ function AppShell({
                 <span className="df2-topbar-btn-text">Pilot</span>
               </button>
             )}
-            <button type="button" className="df2-btn df2-btn-primary" onClick={() => setScreen("transfer")}>
-              <DtIcon name="plus" size={16} />
-              <span className="df2-topbar-btn-text">Transfer</span>
-            </button>
+            {screen !== "transfer" && (
+              <button type="button" className="df2-btn df2-btn-primary" onClick={() => setScreen("transfer")}>
+                <DtIcon name="plus" size={16} />
+                <span className="df2-topbar-btn-text">New transfer</span>
+              </button>
+            )}
           </div>
         </header>
 
@@ -433,54 +394,6 @@ function AppShell({
               <strong>{offlineCopy.title}</strong>
               <p>{offlineCopy.body}</p>
             </div>
-          </div>
-        )}
-
-        {shouldRenderSystemBanner && (
-          <div className={`df2-system-visibility-banner ${systemTone}`} role="status" aria-live="polite">
-            <div className="df2-system-visibility-copy">
-              <strong>System visibility</strong>
-              <p>{systemMessage}</p>
-            </div>
-            <div className="df2-system-visibility-meta">
-              <button
-                type="button"
-                className="df2-system-visibility-close"
-                onClick={closeSystemBanner}
-                aria-label="Dismiss system visibility"
-                title="Dismiss"
-              >
-                <DtIcon name="x" size={14} />
-              </button>
-              <div className="df2-system-visibility-metrics" aria-label="System status summary">
-                <span className={`df2-system-metric-pill ${!apiOnline ? "warn" : "ok"}`}>
-                  API {apiOnline ? "online" : "offline"}
-                </span>
-                <span className={`df2-system-metric-pill ${failedJobsCount > 0 ? "warn" : "ok"}`}>
-                  Failed {failedJobsCount}
-                </span>
-                <span className={`df2-system-metric-pill ${runningJobsCount > 0 ? "live" : "ok"}`}>
-                  Running {runningJobsCount}
-                </span>
-                <span className={`df2-system-metric-pill ${unhealthyConnectorsCount > 0 ? "warn" : "ok"}`}>
-                  Connector alerts {unhealthyConnectorsCount}
-                </span>
-              </div>
-            </div>
-            {(failedJobsCount > 0 || unhealthyConnectorsCount > 0) && (
-              <div className="df2-system-visibility-actions">
-                {failedJobsCount > 0 && (
-                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("jobs")}>
-                    Open Job Theater
-                  </button>
-                )}
-                {unhealthyConnectorsCount > 0 && (
-                  <button type="button" className="df2-btn df2-btn-sm" onClick={() => setScreen("connectors")}>
-                    Review connectors
-                  </button>
-                )}
-              </div>
-            )}
           </div>
         )}
 
@@ -533,7 +446,6 @@ function AppShell({
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
-                      setScreen("jobs");
                       toast({ title: "Transfer complete", message: "View progress in Job Theater.", tone: "success" });
                     }}
                   />
@@ -581,6 +493,11 @@ function AppShell({
               {screen === "mcp" && (
                 <PageErrorBoundary label="MCP Server">
                   <McpPage />
+                </PageErrorBoundary>
+              )}
+              {screen === "docs" && (
+                <PageErrorBoundary label="Docs">
+                  <DocsPage />
                 </PageErrorBoundary>
               )}
               {screen === "settings" && (
@@ -707,7 +624,7 @@ export function DataTransferApp() {
   }, [stage, entryScreen]);
 
   return (
-    <ToastProvider>
+    <>
       {stage === "landing" && (
       <LandingPage
           onEnterApp={() => requestApp("dashboard")}
@@ -730,6 +647,6 @@ export function DataTransferApp() {
           <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
         </DataProvider>
       )}
-    </ToastProvider>
+    </>
   );
 }

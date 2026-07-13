@@ -67,8 +67,8 @@ export function ConnectorCatalogPanel({
   limit = 96,
   compact = false,
   transferOnly = false,
-  requireAvailable = true,
-  initialStatus = "live",
+  requireAvailable = false,
+  initialStatus = "",
 }: ConnectorCatalogPanelProps) {
   const [query, setQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -145,7 +145,7 @@ export function ConnectorCatalogPanel({
           <span className="df2-search-icon"><DtIcon name="search" size={16} /></span>
           <input
             type="search"
-            placeholder={transferLive ? `Search ${total} catalog · ${transferLive} transfer-ready…` : "Search connectors…"}
+            placeholder="Search connectors…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search connector catalog"
@@ -180,10 +180,6 @@ export function ConnectorCatalogPanel({
             ))}
           </div>
         )}
-
-        <p className="df2-catalog-meta">
-          {loading ? "Loading…" : `${connectors.length} shown · ${transferLive || "—"} transfer-ready · ${total} in catalog`}
-        </p>
 
         {error ? (
           <div className="df2-empty" style={{ padding: "24px 0" }}>

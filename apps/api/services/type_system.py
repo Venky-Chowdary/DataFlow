@@ -86,6 +86,95 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "bytea": LOGICAL_BINARY,
     "blob": LOGICAL_BINARY,
     "varbinary": LOGICAL_BINARY,
+    "tinyblob": LOGICAL_BINARY,
+    "mediumblob": LOGICAL_BINARY,
+    "longblob": LOGICAL_BINARY,
+    "image": LOGICAL_BINARY,
+    "raw": LOGICAL_BINARY,
+    "long raw": LOGICAL_BINARY,
+    "binary varying": LOGICAL_BINARY,
+    "rowversion": LOGICAL_BINARY,
+    "money": LOGICAL_DECIMAL,
+    "smallmoney": LOGICAL_DECIMAL,
+    "dec": LOGICAL_DECIMAL,
+    "num": LOGICAL_DECIMAL,
+    "decfloat": LOGICAL_DECIMAL,
+    "float4": LOGICAL_DECIMAL,
+    "float8": LOGICAL_DECIMAL,
+    "binary_float": LOGICAL_DECIMAL,
+    "binary_double": LOGICAL_DECIMAL,
+    "single": LOGICAL_DECIMAL,
+    "int16": LOGICAL_INTEGER,
+    "int32": LOGICAL_INTEGER,
+    "int64": LOGICAL_INTEGER,
+    "int8": LOGICAL_INTEGER,
+    "uint8": LOGICAL_INTEGER,
+    "uint16": LOGICAL_INTEGER,
+    "uint32": LOGICAL_INTEGER,
+    "uint64": LOGICAL_INTEGER,
+    "mediumint": LOGICAL_INTEGER,
+    "mediumint unsigned": LOGICAL_INTEGER,
+    "tinyint unsigned": LOGICAL_INTEGER,
+    "smallint unsigned": LOGICAL_INTEGER,
+    "int unsigned": LOGICAL_INTEGER,
+    "bigint unsigned": LOGICAL_INTEGER,
+    "serial": LOGICAL_INTEGER,
+    "smallserial": LOGICAL_INTEGER,
+    "bigserial": LOGICAL_INTEGER,
+    "year": LOGICAL_INTEGER,
+    "bit": LOGICAL_BOOLEAN,
+    "year_month": LOGICAL_STRING,
+    "interval": LOGICAL_STRING,
+    "enum": LOGICAL_STRING,
+    "set": LOGICAL_STRING,
+    "inet": LOGICAL_STRING,
+    "cidr": LOGICAL_STRING,
+    "macaddr": LOGICAL_STRING,
+    "macaddr8": LOGICAL_STRING,
+    "geometry": LOGICAL_STRING,
+    "geography": LOGICAL_STRING,
+    "point": LOGICAL_STRING,
+    "linestring": LOGICAL_STRING,
+    "polygon": LOGICAL_STRING,
+    "multipoint": LOGICAL_STRING,
+    "multilinestring": LOGICAL_STRING,
+    "multipolygon": LOGICAL_STRING,
+    "geometrycollection": LOGICAL_STRING,
+    "hstore": LOGICAL_JSON,
+    "map": LOGICAL_JSON,
+    "xml": LOGICAL_TEXT,
+    "xmltype": LOGICAL_TEXT,
+    "tsvector": LOGICAL_TEXT,
+    "tsquery": LOGICAL_TEXT,
+    "jsonpath": LOGICAL_TEXT,
+    "uniqueidentifier": LOGICAL_UUID,
+    "sql_variant": LOGICAL_STRING,
+    "cursor": LOGICAL_STRING,
+    "refcursor": LOGICAL_STRING,
+    "oid": LOGICAL_INTEGER,
+    "xid": LOGICAL_INTEGER,
+    "tid": LOGICAL_INTEGER,
+    "cid": LOGICAL_INTEGER,
+    "vector": LOGICAL_STRING,
+    "pg_lsn": LOGICAL_STRING,
+    "character large object": LOGICAL_TEXT,
+    "national character varying": LOGICAL_STRING,
+    "national character": LOGICAL_STRING,
+    "nchar": LOGICAL_STRING,
+    "nvarchar": LOGICAL_STRING,
+    "nvarchar2": LOGICAL_STRING,
+    "varchar2": LOGICAL_STRING,
+    "ntext": LOGICAL_TEXT,
+    "tinytext": LOGICAL_TEXT,
+    "mediumtext": LOGICAL_TEXT,
+    "long varchar": LOGICAL_TEXT,
+    "national character large object": LOGICAL_TEXT,
+    "timestamp with time zone": LOGICAL_DATETIME,
+    "timestamp without time zone": LOGICAL_DATETIME,
+    "time with time zone": LOGICAL_TIME,
+    "time without time zone": LOGICAL_TIME,
+    "datetime2": LOGICAL_DATETIME,
+    "smalldatetime": LOGICAL_DATETIME,
 }
 
 DDL_TYPES: Final[dict[str, dict[str, str]]] = {
@@ -93,7 +182,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "TEXT",
         LOGICAL_TEXT: "TEXT",
         LOGICAL_INTEGER: "BIGINT",
-        LOGICAL_DECIMAL: "NUMERIC(38,10)",
+        LOGICAL_DECIMAL: "NUMERIC",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "TIMESTAMPTZ",
@@ -107,7 +196,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "TEXT",
         LOGICAL_TEXT: "LONGTEXT",
         LOGICAL_INTEGER: "BIGINT",
-        LOGICAL_DECIMAL: "DECIMAL(38,10)",
+        LOGICAL_DECIMAL: "DECIMAL(38,15)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "DATETIME(6)",
@@ -163,7 +252,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "VARCHAR(65535)",
         LOGICAL_TEXT: "VARCHAR(65535)",
         LOGICAL_INTEGER: "BIGINT",
-        LOGICAL_DECIMAL: "DECIMAL(38,10)",
+        LOGICAL_DECIMAL: "DECIMAL(38,15)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
         LOGICAL_DATETIME: "TIMESTAMP",
@@ -172,6 +261,34 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_JSON: "SUPER",
         LOGICAL_ARRAY: "SUPER",
         LOGICAL_BINARY: "VARBYTE",
+    },
+    "sqlite": {
+        LOGICAL_STRING: "TEXT",
+        LOGICAL_TEXT: "TEXT",
+        LOGICAL_INTEGER: "INTEGER",
+        LOGICAL_DECIMAL: "REAL",
+        LOGICAL_BOOLEAN: "INTEGER",
+        LOGICAL_DATE: "TEXT",
+        LOGICAL_DATETIME: "TEXT",
+        LOGICAL_TIME: "TEXT",
+        LOGICAL_UUID: "TEXT",
+        LOGICAL_JSON: "TEXT",
+        LOGICAL_ARRAY: "TEXT",
+        LOGICAL_BINARY: "BLOB",
+    },
+    "generic_sql": {
+        LOGICAL_STRING: "TEXT",
+        LOGICAL_TEXT: "TEXT",
+        LOGICAL_INTEGER: "BIGINT",
+        LOGICAL_DECIMAL: "NUMERIC(38,15)",
+        LOGICAL_BOOLEAN: "BOOLEAN",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "TIMESTAMP",
+        LOGICAL_TIME: "TIME",
+        LOGICAL_UUID: "UUID",
+        LOGICAL_JSON: "JSON",
+        LOGICAL_ARRAY: "JSON",
+        LOGICAL_BINARY: "BLOB",
     },
 }
 
@@ -182,6 +299,8 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "bigquery": "STRING",
     "mongodb": "string",
     "redshift": "VARCHAR(65535)",
+    "sqlite": "TEXT",
+    "generic_sql": "TEXT",
 }
 
 
@@ -228,21 +347,28 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     tgt = normalize_logical_type(target_type)
     if src == tgt:
         return False
-    if tgt in LOSSLESS_TEXT_TYPES or tgt == LOGICAL_JSON:
-        return False
-    if src in {LOGICAL_JSON, LOGICAL_ARRAY} and tgt in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN}:
-        return True
     if src == LOGICAL_BINARY and tgt != LOGICAL_BINARY:
         return True
-    if src in {LOGICAL_DATETIME, LOGICAL_DATE} and tgt == LOGICAL_DATE and src == LOGICAL_DATETIME:
+    if tgt in LOSSLESS_TEXT_TYPES or tgt == LOGICAL_JSON:
+        return False
+    if src in {LOGICAL_JSON, LOGICAL_ARRAY} and tgt in {
+        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_BINARY, LOGICAL_UUID,
+    }:
+        return True
+    if src in {LOGICAL_INTEGER, LOGICAL_DECIMAL} and tgt == LOGICAL_BOOLEAN:
+        return True
+    if src == LOGICAL_BOOLEAN and tgt in {LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_UUID, LOGICAL_BINARY}:
         return True
     if src == LOGICAL_DECIMAL and tgt == LOGICAL_INTEGER:
         return True
     if src in LOSSLESS_TEXT_TYPES and tgt in {
-        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_BINARY,
+        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_BINARY,
     }:
         return True
-    if src == LOGICAL_DATETIME and tgt == LOGICAL_DATE:
+    if src in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME} and tgt in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME}:
+        # Only date -> datetime is a safe widening; all other date/time/timezone trims lose information.
+        if src == LOGICAL_DATE and tgt == LOGICAL_DATETIME:
+            return False
         return True
     return False
 

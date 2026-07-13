@@ -9,36 +9,64 @@ from typing import Any
 SEMANTIC_ROLES: dict[str, list[str]] = {
     "payment_amount": [
         "amount", "payment_amount", "pay_amt", "amt", "txn_amt", "transaction_amount",
-        "payment", "pmt", "pymt", "fld_07",
+        "payment", "pmt", "pymt", "payment_amt", "paid_amount", "fld_07",
     ],
     "payment_date": [
         "payment_date", "pay_date", "txn_dt", "trans_dt", "transaction_date",
-        "value_date", "dtpmt",
+        "value_date", "dtpmt", "payment_dt", "paid_date", "settlement_date",
     ],
     "order_total": ["order_total", "cart_total", "invoice_total", "subtotal", "grand_total", "total"],
     "order_date": ["order_date", "purchase_date", "placed_at", "ordered_at"],
-    "created_timestamp": ["created_at", "created_on", "created_ts", "inserted_at"],
-    "updated_timestamp": ["updated_at", "updated_on", "modified_at", "modified_on", "last_updated"],
-    "date_value": ["date", "event_date", "effective_date"],
-    "numeric_value": ["value", "metric_value", "score", "measure"],
+    "created_timestamp": ["created_at", "created_on", "created_ts", "created_dt", "inserted_at"],
+    "updated_timestamp": ["updated_at", "updated_on", "modified_at", "modified_on", "last_updated", "updated_ts"],
+    "date_value": ["date", "event_date", "effective_date", "business_date"],
+    "numeric_value": ["value", "metric_value", "score", "measure", "count", "measure_value"],
     "identifier": ["id", "record_id", "row_id", "object_id", "external_id"],
+    "order_number": ["order_number", "order_no", "order_num", "order_id", "purchase_order"],
+    "invoice_number": ["invoice_number", "invoice_no", "invoice_num", "inv_no", "invoice_id"],
+    "transaction_id": ["transaction_id", "txn_id", "trans_id", "txn_no", "transaction_no"],
     "customer_id": [
         "customer_id", "cust_id", "customerid", "buyer_id", "client_id", "cust_no",
+        "user_id", "userid", "user", "account_id", "accountid", "account_no",
+        "member_id", "memberid", "subscriber_id", "subscriberid", "clientid",
     ],
+    "first_name": ["first_name", "firstname", "fname", "given_name", "forename"],
+    "last_name": ["last_name", "lastname", "lname", "surname", "family_name"],
+    "full_name": ["full_name", "fullname", "complete_name", "display_name", "name"],
+    "email_address": ["email", "e_mail", "email_address", "email_addr", "mail"],
+    "phone_number": ["phone", "telephone", "phone_number", "contact_number", "tel"],
+    "mobile_number": ["mobile", "mobile_number", "cell", "cell_phone", "cell_number"],
+    "country_code": ["country_code", "country_cd", "country_iso", "ctry_code", "country"],
+    "state_code": ["state_code", "state_cd", "province_code", "province_cd", "st", "state"],
+    "province_code": ["province_code", "province_cd", "prov_code", "prov_cd"],
+    "city_name": ["city", "city_name", "town", "municipality"],
+    "region_code": ["region_code", "region_cd", "region", "territory"],
+    "department": ["department", "dept", "division", "business_unit", "cost_center", "org_unit"],
+    "hire_date": ["hire_date", "hired_date", "start_date", "employment_date", "join_date", "onboarding_date"],
+    "ship_date": ["ship_date", "shipped_date", "shipping_date", "dispatch_date"],
+    "delivery_date": ["delivery_date", "delivered_date", "del_date", "receipt_date"],
     "account_number": [
         "account_number", "acct_no", "acct_num", "account_no", "iban", "beneficiary_account",
         "bank_account",
     ],
     "currency_code": ["currency_code", "currency", "ccy", "curr", "iso_currency"],
-    "reference_number": ["reference_number", "ref_no", "ref", "reference", "txn_ref", "invoice_number"],
+    "reference_number": ["reference_number", "ref_no", "ref", "reference", "txn_ref", "reference_num"],
     "description": ["description", "desc", "descr", "memo", "narrative", "details", "notes"],
-    "status": ["status", "sts", "stat", "state", "payment_status"],
-    "email": ["email", "e_mail", "email_address"],
-    "phone": ["phone", "telephone", "mobile", "phone_number"],
-    "name": ["name", "full_name", "customer_name", "contact_name"],
-    "quantity": ["quantity", "qty", "units", "count"],
+    "status": ["status", "sts", "stat", "state", "payment_status", "order_status"],
+    "quantity": ["quantity", "qty", "units", "count", "quantity_ordered", "qty_ordered"],
+    "quantity_ordered": ["quantity_ordered", "qty_ordered", "order_qty", "qty_ord"],
+    "unit_price": ["unit_price", "unit_cost", "unit_prc", "price", "cost", "list_price", "sale_price"],
+    "unit_cost": ["unit_cost", "cost", "cost_per_unit", "unit_prc"],
+    "tax_amount": ["tax_amount", "tax_amt", "tax", "vat", "gst", "sales_tax"],
+    "discount_amount": ["discount_amount", "discount_amt", "disc", "disc_amt", "rebate", "promo_amount"],
+    "line_amount": ["line_amount", "line_amt", "line_total", "line_item_amount"],
+    "net_amount": ["net_amount", "net_amt", "net"],
+    "gross_amount": ["gross_amount", "gross_amt", "gross"],
+    "salary_amount": ["salary", "salary_amount", "salary_amt", "compensation", "pay", "wage"],
+    "commission_amount": ["commission", "commission_amount", "commission_amt", "comm"],
+    "bonus_amount": ["bonus", "bonus_amount", "bonus_amt"],
     "sku": ["sku", "product_sku", "item_code", "product_id"],
-    "address": ["address", "addr", "street", "shipping_address"],
+    "address": ["address", "addr", "street", "shipping_address", "billing_address"],
     "postal_code": ["postal_code", "zip", "zipcode", "postcode"],
     "origin_city": ["origin_city", "orig_city", "from_city", "pickup_city", "origin"],
     "destination_city": ["destination_city", "dest_city", "to_city", "delivery_city", "destination"],
@@ -153,16 +181,42 @@ def _role_description(role: str) -> str:
         "date_value": "Generic date value",
         "numeric_value": "Generic numeric value",
         "identifier": "Generic record identifier",
+        "order_number": "Order number or purchase order identifier",
+        "invoice_number": "Invoice number or billing identifier",
+        "transaction_id": "Transaction identifier",
         "customer_id": "Customer or client identifier",
+        "first_name": "Person first / given name",
+        "last_name": "Person last / family name",
+        "full_name": "Person or entity full name",
+        "email_address": "Email address",
+        "phone_number": "Phone number",
+        "mobile_number": "Mobile / cell phone number",
+        "country_code": "Country code",
+        "state_code": "State or province code",
+        "province_code": "Province code",
+        "city_name": "City name",
+        "region_code": "Region or territory code",
+        "department": "Department or business unit",
+        "hire_date": "Employee hire / start date",
+        "ship_date": "Shipment dispatch date",
+        "delivery_date": "Delivery or receipt date",
         "account_number": "Bank or beneficiary account",
         "currency_code": "ISO currency code",
         "reference_number": "Transaction or invoice reference",
         "description": "Free-text description or memo",
         "status": "Status or state code",
-        "email": "Email address",
-        "phone": "Phone number",
-        "name": "Person or entity name",
         "quantity": "Quantity or count",
+        "quantity_ordered": "Quantity ordered",
+        "unit_price": "Unit price or sale price",
+        "unit_cost": "Unit cost",
+        "tax_amount": "Tax amount",
+        "discount_amount": "Discount or rebate amount",
+        "line_amount": "Line item amount",
+        "net_amount": "Net amount",
+        "gross_amount": "Gross amount",
+        "salary_amount": "Salary or compensation amount",
+        "commission_amount": "Commission amount",
+        "bonus_amount": "Bonus amount",
         "sku": "Product SKU or item code",
         "address": "Street or mailing address",
         "postal_code": "Postal / ZIP code",
@@ -196,11 +250,47 @@ def role_match_boost(source_role: str, target_role: str) -> float | None:
     tgt_base = target_role.replace("field_", "")
     if src_base == tgt_base:
         return 0.94
-    # payment_amount ↔ order_total etc.
-    amount_roles = {"payment_amount", "order_total"}
+
+    # Monetary amount roles are interchangeable.
+    amount_roles = {
+        "payment_amount", "order_total", "line_amount", "net_amount",
+        "gross_amount", "tax_amount", "discount_amount", "salary_amount",
+        "commission_amount", "bonus_amount", "unit_price", "unit_cost",
+        "numeric_value",
+    }
     if source_role in amount_roles and target_role in amount_roles:
         return 0.9
-    date_roles = {"payment_date", "order_date"}
+
+    # Date / timestamp roles are interchangeable.
+    date_roles = {
+        "payment_date", "order_date", "date_value", "created_timestamp",
+        "updated_timestamp", "hire_date", "ship_date", "delivery_date",
+    }
     if source_role in date_roles and target_role in date_roles:
         return 0.9
+
+    # Identifier roles are interchangeable.
+    id_roles = {
+        "identifier", "customer_id", "order_number", "invoice_number",
+        "transaction_id", "sku", "reference_number", "account_number",
+    }
+    if source_role in id_roles and target_role in id_roles:
+        return 0.88
+
+    # Name / contact roles are interchangeable.
+    name_roles = {
+        "name", "full_name", "first_name", "last_name", "email_address",
+        "phone_number", "mobile_number",
+    }
+    if source_role in name_roles and target_role in name_roles:
+        return 0.87
+
+    # Location / address roles are interchangeable.
+    location_roles = {
+        "address", "city_name", "state_code", "province_code", "country_code",
+        "region_code", "postal_code", "origin_city", "destination_city",
+    }
+    if source_role in location_roles and target_role in location_roles:
+        return 0.86
+
     return None

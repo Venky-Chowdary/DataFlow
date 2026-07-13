@@ -28,6 +28,7 @@ export interface EditableMapping {
   target: string;
   confidence: number;
   inferredType?: string;
+  destType?: string;
   sample?: string;
   approved: boolean;
   isPii?: boolean;
@@ -104,7 +105,7 @@ export function buildPreflightMappings(
       reason: m.reason || "User reviewed",
       user_override: m.approved,
       transform: toEngineTransform(m.transform),
-      target_type: m.inferredType,
+      target_type: m.destType || m.inferredType,
       requires_review: Boolean(m.requiresReview && !m.approved),
       score_gap: m.scoreGap ?? 1,
     }));
@@ -150,6 +151,7 @@ export function editableFromPipelineMappings(
     score_gap?: number;
     transform?: string;
     source_type?: string;
+    target_type?: string;
     is_pii?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
@@ -168,6 +170,7 @@ export function editableFromPipelineMappings(
       target: m.target,
       confidence: conf,
       inferredType: m.source_type,
+      destType: m.target_type || m.source_type,
       sample: sampleVal != null ? String(sampleVal) : undefined,
       approved: !requiresReview && (conf >= threshold || identityMatch),
       isPii: m.is_pii,

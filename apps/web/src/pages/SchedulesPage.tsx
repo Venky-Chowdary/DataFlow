@@ -6,9 +6,7 @@ import { CadenceTiles } from "../components/ui/CadenceTiles";
 import { EmptyState } from "../components/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
 import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -136,6 +134,13 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
   };
 
   const handleDelete = async (id: string) => {
+    const target = schedules.find((s) => s.id === id);
+    const ok = window.confirm(
+      target
+        ? `Delete pipeline “${target.name}”? This cannot be undone.`
+        : "Delete this pipeline? This cannot be undone.",
+    );
+    if (!ok) return;
     try {
       await deleteSchedule(id);
       await load();
@@ -162,70 +167,37 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
   };
 
   return (
-    <PageShell
-      wide
-      className="df2-page-pipelines"
-      kicker="Automation"
-      title="Scheduled pipelines"
-      description="Recurring database syncs — hourly, daily, or weekly."
-      actions={
-        <button type="button" className="df2-btn df2-btn-primary" onClick={() => setShowForm((v) => !v)}>
-          <DtIcon name="plus" size={16} />
-          {showForm ? "Cancel" : "New pipeline"}
-        </button>
-      }
-    >
-      <PageFrame className="df2-pipeline-page" showHonesty>
-      <PageInsightStrip
-        tone={connectors.length < 2 ? "warn" : enabledCount > 0 ? "live" : schedules.length ? "info" : "ok"}
-        pill={
-          connectors.length < 2
-            ? "Setup needed"
-            : enabledCount > 0
-              ? `${enabledCount} active`
-              : schedules.length
-                ? "All paused"
-                : "No pipelines"
-        }
-        message={
-          connectors.length < 2
-            ? "Add at least two saved connectors before creating a recurring sync."
-            : enabledCount
-              ? `${enabledCount} pipeline${enabledCount > 1 ? "s" : ""} running on schedule — track runs in Job Theater.`
-              : schedules.length
-                ? "Pipelines exist but none are enabled — toggle a card to resume syncs."
-                : "Create hourly, daily, or weekly syncs between saved connectors."
-        }
-      />
-      <PageMetricsRow
-        compact
-        columns={4}
-        metrics={[
-          { label: "Total pipelines", value: schedules.length, icon: "activity" },
-          { label: "Active", value: enabledCount, tone: "green", icon: "check" },
-          { label: "Paused", value: pausedCount, icon: "activity" },
-          { label: "Connectors", value: connectors.length, icon: "connectors" },
-        ]}
-      />
-
-      {schedules.length > 0 && !loading && (
-        <FilterTabs
-          ariaLabel="Filter pipelines"
-          value={filter}
-          onChange={setFilter}
-          items={[
-            { id: "all", label: "All", count: schedules.length },
-            { id: "active", label: "Active", count: enabledCount },
-            { id: "paused", label: "Paused", count: pausedCount },
-          ]}
-        />
-      )}
-
-      {schedules.length > 0 && !loading && (
+    <PageShell wide className="df2-page-pipelines" title="Pipelines">
+      <PageFrame className="df2-pipeline-page">
+      {!loading && (
         <PageToolbar
-          searchValue={pipelineSearch}
-          onSearchChange={setPipelineSearch}
+          searchValue={schedules.length > 0 ? pipelineSearch : undefined}
+          onSearchChange={schedules.length > 0 ? setPipelineSearch : undefined}
           searchPlaceholder="Search pipelines by name, table, or cadence…"
+          filters={
+            schedules.length > 0 ? (
+              <FilterTabs
+                ariaLabel="Filter pipelines"
+                value={filter}
+                onChange={setFilter}
+                items={[
+                  { id: "all", label: "All", count: schedules.length },
+                  { id: "active", label: "Active", count: enabledCount },
+                  { id: "paused", label: "Paused", count: pausedCount },
+                ]}
+              />
+            ) : undefined
+          }
+          actions={
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-primary"
+              onClick={() => setShowForm((v) => !v)}
+            >
+              <DtIcon name="plus" size={14} />
+              {showForm ? "Cancel" : "New pipeline"}
+            </button>
+          }
         />
       )}
 

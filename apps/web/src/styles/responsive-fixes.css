@@ -147,13 +147,29 @@
   display: inline-block;
   height: 14px;
   border-radius: 4px;
+  color: transparent;
+  user-select: none;
   background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
   background-size: 200% 100%;
   animation: df2-shimmer 1.2s ease-in-out infinite;
 }
 
 .df2-pilot-skeleton--wide { width: 100%; max-width: 140px; }
+.df2-pilot-skeleton--short { width: 70px; }
+.df2-pilot-skeleton--medium { width: 100px; }
 .df2-pilot-skeleton--block { width: 100%; height: 52px; border-radius: 8px; }
+
+.df2-pilot-capability-skeleton {
+  flex: 1 1 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+}
 
 @keyframes df2-shimmer {
   0% { background-position: 100% 0; }

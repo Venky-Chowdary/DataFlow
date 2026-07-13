@@ -1,0 +1,22 @@
+.df2-docs-illustration {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  max-height: 260px;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 12px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+.df2-docs-arch-sub tspan {
+  font-size: 9px;
+  fill: #64748b;
+}
+
+.df2-docs-arch-title {
+  font-size: 12px;
+  font-weight: 700;
+  fill: #0f172a;
+}

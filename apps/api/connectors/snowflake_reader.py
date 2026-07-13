@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from connectors.snowflake_conn import get_connection, normalize_account
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -26,6 +34,7 @@ def count_table_rows(
     connection_string: str,
     warehouse: str,
     table: str,
+    role: str = "",
 ) -> int:
     del port
     account = normalize_account(host)
@@ -37,6 +46,7 @@ def count_table_rows(
         schema=schema or "PUBLIC",
         warehouse=warehouse,
         connection_string=connection_string,
+        role=role,
     )
     try:
         with conn.cursor() as cur:
@@ -64,8 +74,8 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 100_000,
     known_total_rows: int | None = None,
+    role: str = "",
 ) -> ReadBatch:
-    del port
     account = normalize_account(host)
     conn = get_connection(
         account=account,
@@ -75,6 +85,7 @@ def read_table_batch(
         schema=schema or "PUBLIC",
         warehouse=warehouse,
         connection_string=connection_string,
+        role=role,
     )
     try:
         with conn.cursor() as cur:
@@ -87,13 +98,14 @@ def read_table_batch(
                 total = count_table_rows(
                     host=host, port=port, database=database, username=username, password=password,
                     schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
+                    role=role,
                 )
             col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
             cur.execute(
                 f'SELECT {col_sql} FROM "{sch}"."{table}" LIMIT {int(limit)} OFFSET {int(offset)}'
             )
             headers = [desc[0] for desc in cur.description]
-            rows = [[str(v) if v is not None else "" for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -114,6 +126,7 @@ def read_table_cursor_batch(
     cursor_after: str | None = None,
     columns: list[str] | None = None,
     limit: int = 500,
+    role: str = "",
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — incremental sync."""
     del port
@@ -126,6 +139,7 @@ def read_table_cursor_batch(
         schema=schema or "PUBLIC",
         warehouse=warehouse,
         connection_string=connection_string,
+        role=role,
     )
     try:
         with conn.cursor() as cur:
@@ -146,7 +160,7 @@ def read_table_cursor_batch(
                     (limit,),
                 )
             headers = [desc[0] for desc in cur.description]
-            rows = [[str(v) if v is not None else "" for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
     finally:
         conn.close()

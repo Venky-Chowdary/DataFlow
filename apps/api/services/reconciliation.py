@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, Sequence
+
+from services.transform_engine import _parse_date, _parse_datetime
 
 
 @dataclass
@@ -21,10 +26,20 @@ class ReconciliationReport:
         return asdict(self)
 
 
-def checksum_rows(rows: list[list[str]]) -> str:
-    h = hashlib.sha256()
+def checksum_rows(rows: list[Sequence[Any]]) -> str:
+    """Canonical, order-independent checksum over a matrix of typed values."""
+    if not rows:
+        return hashlib.sha256(b"").hexdigest()[:16]
+    fingerprints: list[str] = []
     for row in rows:
-        h.update("|".join(row).encode())
+        # Sort the normalized cells so rows with the same values in different
+        # column order produce the same fingerprint.
+        cells = sorted(normalize_cell(v) for v in row)
+        fingerprints.append("|".join(cells))
+    fingerprints.sort()
+    h = hashlib.sha256()
+    for fp in fingerprints:
+        h.update(fp.encode("utf-8"))
     return h.hexdigest()[:16]
 
 
@@ -166,10 +181,7 @@ def verify_postgres_table(
             cur.execute(f'SELECT * FROM "{schema}"."{table_name}" ORDER BY 1 LIMIT 5000')
             rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return count, h.hexdigest()[:16]
+        return count, checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -199,16 +211,16 @@ def verify_snowflake_table(
         )
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                try:
+                    cur.execute(f"USE WAREHOUSE {warehouse}")
+                except Exception:
+                    pass
             cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
             count = int(cur.fetchone()[0])
             cur.execute(f'SELECT * FROM "{table_name}" ORDER BY 1 LIMIT 5000')
             rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return count, h.hexdigest()[:16]
+        return count, checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -238,10 +250,7 @@ def verify_mysql_table(
             cur.execute(f"SELECT * FROM `{table_name}` ORDER BY 1 LIMIT 5000")
             rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return count, h.hexdigest()[:16]
+        return count, checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -261,10 +270,211 @@ def verify_bigquery_table(
         table = client.get_table(table_id)
         count = table.num_rows or 0
         rows = list(client.list_rows(table_id, max_results=5000))
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row.values()).encode())
-        return int(count), h.hexdigest()[:16]
+        return int(count), checksum_rows([list(row.values()) for row in rows])
+    except Exception:
+        return -1, ""
+
+
+def _rows_from_object_bytes(body: bytes, key: str) -> list[Sequence[Any]]:
+    """Parse S3/GCS object payload (JSON, JSONL, CSV) into a row matrix."""
+    import csv
+    import io
+
+    text = body.decode("utf-8", errors="replace")
+    lower_key = (key or "").lower()
+
+    if lower_key.endswith(".csv"):
+        reader = csv.DictReader(io.StringIO(text))
+        return [list(row.values()) for row in reader]
+
+    if lower_key.endswith(".jsonl"):
+        rows = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                rows.append(list(parsed.values()))
+            else:
+                rows.append([parsed])
+        return rows
+
+    # Default: JSON array or newline-delimited JSON.
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = []
+    if isinstance(data, list):
+        return [list(record.values()) for record in data if isinstance(record, dict)]
+    if isinstance(data, dict):
+        return [list(data.values())]
+    return []
+
+
+def verify_s3_object(
+    *,
+    bucket: str,
+    key: str,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    connection_string: str,
+    ssl: bool,
+) -> tuple[int, str]:
+    """Reconcile an S3 object by downloading and parsing its contents."""
+    try:
+        from connectors.aws_common import boto3_client
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "ssl": ssl,
+            "database": bucket,
+        }
+        client = boto3_client("s3", cfg)
+        obj = client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"].read()
+        rows = _rows_from_object_bytes(body, key)
+        return len(rows), checksum_rows(rows)
+    except Exception:
+        return -1, ""
+
+
+def verify_gcs_blob(
+    *,
+    bucket: str,
+    key: str,
+    host: str,
+    port: int,
+    connection_string: str,
+) -> tuple[int, str]:
+    """Reconcile a GCS blob by downloading and parsing its contents."""
+    try:
+        from connectors.gcs_common import gcs_client
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "connection_string": connection_string,
+        }
+        client = gcs_client(cfg)
+        blob = client.bucket(bucket).blob(key)
+        body = blob.download_as_bytes()
+        rows = _rows_from_object_bytes(body, key)
+        return len(rows), checksum_rows(rows)
+    except Exception:
+        return -1, ""
+
+
+def verify_sqlite_table(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+) -> tuple[int, str]:
+    """Reconcile a SQLite target by reading the local file."""
+    try:
+        import sqlite3
+
+        path = connection_string or database
+        if not path:
+            return -1, ""
+        conn = sqlite3.connect(str(path))
+        cur = conn.cursor()
+        cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+        count = cur.fetchone()[0]
+        cur.execute(f'SELECT * FROM "{table_name}" LIMIT 5000')
+        rows = cur.fetchall()
+        conn.close()
+        return int(count), checksum_rows(rows)
+    except Exception:
+        return -1, ""
+
+
+def verify_duckdb_table(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+) -> tuple[int, str]:
+    """Reconcile a DuckDB target by reading the local file."""
+    try:
+        import duckdb
+
+        path = connection_string or database
+        if not path:
+            return -1, ""
+        conn = duckdb.connect(str(path))
+        count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        rows = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 5000').fetchall()
+        conn.close()
+        return int(count), checksum_rows(rows)
+    except Exception:
+        return -1, ""
+
+
+def verify_mongodb_collection(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+) -> tuple[int, str]:
+    """Reconcile a MongoDB target by counting and fingerprinting documents."""
+    try:
+        from pymongo import MongoClient
+        from bson.decimal128 import Decimal128
+
+        client = MongoClient(
+            connection_string or "localhost", serverSelectionTimeoutMS=5000
+        )
+        db = client[database or "test"]
+        coll = db[table_name]
+        count = coll.count_documents({})
+        rows = list(coll.find({}, {"_id": 0}).limit(5000))
+        client.close()
+        return int(count), checksum_rows([list(doc.values()) for doc in rows])
+    except Exception:
+        return -1, ""
+
+
+def verify_dynamodb_table(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+    username: str = "local",
+    password: str = "local",
+) -> tuple[int, str]:
+    """Reconcile a DynamoDB target by Scan count and item fingerprint."""
+    try:
+        import boto3
+        from boto3.dynamodb.types import TypeDeserializer
+
+        endpoint = connection_string or "http://localhost:8000"
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url=endpoint,
+            aws_access_key_id=username.strip() or "local",
+            aws_secret_access_key=password.strip() or "local",
+            region_name="us-east-1",
+        )
+        paginator = client.get_paginator("scan")
+        count = sum(page["Count"] for page in paginator.paginate(
+            TableName=table_name, Select="COUNT"
+        ))
+
+        deserializer = TypeDeserializer()
+        rows = []
+        for page in paginator.paginate(TableName=table_name, Limit=5000):
+            for item in page.get("Items", []):
+                rows.append({k: deserializer.deserialize(v) for k, v in item.items()})
+
+        return int(count), checksum_rows([list(row.values()) for row in rows])
     except Exception:
         return -1, ""
 
@@ -278,7 +488,36 @@ def verify_target(
     fallback_rows: int,
     fallback_checksum: str,
 ) -> tuple[int, str]:
-    if db_type == "postgresql":
+    if db_type == "mongodb":
+        count, chk = verify_mongodb_collection(
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", ""),
+            table_name=table_name,
+        )
+    elif db_type == "dynamodb":
+        from connectors.aws_common import resolve_endpoint_url
+
+        conn_str = resolve_endpoint_url(dest) or "http://localhost:8000"
+        count, chk = verify_dynamodb_table(
+            connection_string=conn_str,
+            database=dest.get("database", ""),
+            table_name=table_name,
+            username=dest.get("username", "local"),
+            password=dest.get("password", "local"),
+        )
+    elif db_type == "sqlite":
+        count, chk = verify_sqlite_table(
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", ""),
+            table_name=table_name,
+        )
+    elif db_type == "duckdb":
+        count, chk = verify_duckdb_table(
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", ""),
+            table_name=table_name,
+        )
+    elif db_type == "postgresql":
         count, chk = verify_postgres_table(
             host=dest.get("host", ""),
             port=dest.get("port", 5432),
@@ -319,6 +558,25 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             table_name=table_name,
         )
+    elif db_type == "s3":
+        count, chk = verify_s3_object(
+            bucket=dest.get("database", ""),
+            key=table_name,
+            host=dest.get("host", ""),
+            port=int(dest.get("port", 0)),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+        )
+    elif db_type == "gcs":
+        count, chk = verify_gcs_blob(
+            bucket=dest.get("database", ""),
+            key=table_name,
+            host=dest.get("host", ""),
+            port=int(dest.get("port", 0)),
+            connection_string=dest.get("connection_string", ""),
+        )
     else:
         count, chk = -1, ""
 
@@ -333,8 +591,61 @@ def normalize_cell(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
-        return f"{value:.10g}"
-    return str(value).strip()
+        return _canonicalize_number(str(value)) or "nan"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        return _canonicalize_number(value) or "nan"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        # Bytes may be raw payload or a base64-encoded string stored as bytes
+        # (common in emulators). When the bytes are a valid base64 string,
+        # decode and re-encode so the canonical checksum matches the original
+        # encoded text; otherwise base64-encode the raw bytes.
+        try:
+            decoded = base64.b64decode(value, validate=True)
+            re_encoded = base64.b64encode(decoded)
+            if re_encoded == value:
+                return re_encoded.decode("ascii")
+        except Exception:
+            pass
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True, default=str)
+    text = str(value).strip()
+    canonical = _canonicalize_number(text)
+    if canonical is not None:
+        return canonical
+    # Normalize JSON payloads (e.g. jsonb) to a canonical string.
+    if text.startswith(("{", "[")):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(parsed, sort_keys=True, default=str)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Normalize date/time formatting differences ("T" vs " ", "Z" vs "+00:00", etc.).
+    if text:
+        dt = _parse_date(text)
+        if dt:
+            return dt
+        dtm = _parse_datetime(text)
+        if dtm:
+            return dtm
+    return text
+
+
+def _canonicalize_number(value: Any) -> str | None:
+    """Return a canonical string for numeric values so 9.5 == 9.5000000000."""
+    try:
+        d = Decimal(value) if not isinstance(value, Decimal) else value
+        if d.is_nan():
+            return None
+        s = format(d.normalize(), "f")
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def build_reconciliation_proof(

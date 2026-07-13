@@ -40,6 +40,10 @@ class ConnectorSaveDTO(BaseModel):
     connection_string: str = ""
     ssl: bool = False
     warehouse: str = ""
+    auth_mode: str = ""
+    auth_role: str = ""
+    api_key: str = ""
+    service_account: str = ""
 
 
 def _to_ui(c) -> dict[str, Any]:
@@ -89,58 +93,47 @@ def remove_saved_connector(connector_id: str):
     return {"ok": True}
 
 
+def _sentinel_secret(value: str) -> bool:
+    """Return True if the secret could not be decrypted."""
+    return "[encrypted-secret-unavailable]" in value or "[decryption-failed]" in value
+
+
 @router.post("/{connector_id}/test")
 def test_saved_connector(connector_id: str):
     conn = get_connector(connector_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    db_type = (conn.type or "").lower()
-    ok, message = False, "Unsupported type"
-
-    if db_type == "mongodb":
-        try:
-            from pymongo import MongoClient
-
-            conn_str = conn.connection_string or f"mongodb://{conn.host}:{conn.port or 27017}/"
-            if conn.username and conn.password:
-                conn_str = f"mongodb://{conn.username}:{conn.password}@{conn.host}:{conn.port or 27017}/"
-            client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
-            client.admin.command("ping")
-            client.close()
-            ok, message = True, "MongoDB reachable"
-        except Exception as exc:
-            ok, message = False, str(exc)
-    else:
-        probes = {
-            "postgresql": ("connectors.postgresql", "test_postgresql"),
-            "mysql": ("connectors.mysql", "test_mysql"),
-            "snowflake": ("connectors.snowflake", "test_snowflake"),
-            "bigquery": ("connectors.bigquery", "test_bigquery"),
-            "dynamodb": ("connectors.dynamodb", "test_dynamodb"),
-            "redis": ("connectors.redis_kv", "test_redis"),
-            "s3": ("connectors.s3", "test_s3"),
-            "elasticsearch": ("connectors.elasticsearch", "test_elasticsearch"),
+    if _sentinel_secret(conn.password or "") or _sentinel_secret(conn.connection_string or ""):
+        mark_tested(connector_id, False)
+        return {
+            "success": False,
+            "message": (
+                "Saved credentials cannot be decrypted. Install `cryptography` "
+                "(`pip install cryptography`) and ensure the same DATAFLOW_SECRETS_KEY "
+                "is set, then re-enter the password or connection string."
+            ),
         }
-        if db_type in probes:
-            mod_name, fn_name = probes[db_type]
-            mod = importlib.import_module(mod_name)
-            probe_fn = getattr(mod, fn_name)
-            kwargs = dict(
-                host=conn.host or "",
-                port=int(conn.port or 5432),
-                database=conn.database or "",
-                username=conn.username or "",
-                password=conn.password or "",
-                schema=conn.schema or "public",
-                connection_string=conn.connection_string or "",
-                ssl=conn.ssl,
-            )
-            if db_type in ("snowflake", "bigquery", "dynamodb", "redis", "s3", "elasticsearch"):
-                kwargs["warehouse"] = conn.warehouse or ""
-            result = probe_fn(**kwargs)
-            ok = result.ok
-            message = result.message if result.ok else (result.error or "Connection failed")
+
+    from ..transfer.connector_registry import run_probe
+
+    cfg = {
+        "host": conn.host or "",
+        "port": int(conn.port or 0),
+        "database": conn.database or "",
+        "username": conn.username or "",
+        "password": conn.password or "",
+        "schema": conn.schema or "",
+        "connection_string": conn.connection_string or "",
+        "warehouse": conn.warehouse or "",
+        "ssl": conn.ssl,
+        "auth_mode": conn.auth_mode or "",
+        "auth_role": conn.auth_role or "",
+        "role": conn.auth_role or "",
+        "api_key": conn.api_key or "",
+        "service_account": conn.service_account or "",
+    }
+    ok, message = run_probe(conn.type or "", cfg)
 
     mark_tested(connector_id, ok)
     return {"success": ok, "message": message}

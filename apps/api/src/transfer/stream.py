@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +18,16 @@ if str(_api_root) not in sys.path:
 from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 
 from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
+from .connector_capabilities import resolve_driver_type
+
+try:
+    from services.checkpoint_service import Checkpoint, CheckpointService
+    from services.error_handling import RetryBudget, with_retry
+    from services.resilience import adaptive_chunk_size
+except ImportError:  # pragma: no cover - tests with api root on path
+    from src.services.checkpoint_service import Checkpoint, CheckpointService
+    from src.services.error_handling import RetryBudget, with_retry
+    from src.services.resilience import adaptive_chunk_size
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -32,21 +43,24 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "s3", "gcs", "dynamodb", "elasticsearch", "redis",
+    "s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
 })
 
 
 def _source_name(source: EndpointConfig) -> str:
-    fmt = source.format.lower()
+    from .connector_capabilities import resolve_driver_type
+    fmt = resolve_driver_type(source.format or "")
     if fmt == "mongodb":
         return source.collection or source.table or ""
     if fmt == "dynamodb":
-        return source.database or source.table or ""
+        return source.table or source.collection or source.database or ""
     if fmt == "elasticsearch":
         return source.database or source.table or source.collection or ""
     if fmt == "s3":
         return source.table or source.collection or source.schema or ""
     if fmt == "gcs":
+        return source.table or source.collection or source.schema or ""
+    if fmt == "adls":
         return source.table or source.collection or source.schema or ""
     if fmt == "redis":
         return source.table or source.collection or source.schema or "*"
@@ -66,6 +80,7 @@ def _read_batch(
     *,
     cursor_column: str = "",
     cursor_after: str | None = None,
+    cursor_type: str | None = None,
     known_total_rows: int | None = None,
     es_search_after: list | None = None,
     redis_scan_state=None,
@@ -149,6 +164,7 @@ def _read_batch(
                 collection=table,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
+                cursor_type=cursor_type,
                 columns=columns,
                 limit=limit,
             )
@@ -174,6 +190,7 @@ def _read_batch(
                 schema=cfg.get("schema", "PUBLIC"),
                 connection_string=cfg.get("connection_string", ""),
                 warehouse=cfg.get("warehouse", ""),
+                role=cfg.get("role", ""),
                 table=table,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
@@ -189,6 +206,7 @@ def _read_batch(
             schema=cfg.get("schema", "PUBLIC"),
             connection_string=cfg.get("connection_string", ""),
             warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
             table=table,
             columns=columns,
             offset=offset,
@@ -213,6 +231,7 @@ def _read_batch(
             offset=offset,
             limit=limit,
             known_total_rows=known_total_rows,
+            service_account=cfg.get("service_account", ""),
         )
     if src_type == "gcs":
         from connectors.gcs_reader import read_object
@@ -220,6 +239,10 @@ def _read_batch(
         return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
     if src_type == "s3":
         from connectors.s3_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "adls":
+        from connectors.adls_reader import read_object
 
         return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
     if src_type == "dynamodb":
@@ -245,9 +268,65 @@ def _read_batch(
     if src_type == "redis":
         from connectors.redis_reader import read_keys_batch
 
+        pattern = table or "*"
+        if pattern != "*" and "*" not in pattern and "?" not in pattern:
+            pattern = f"{pattern}:*"
         return read_keys_batch(
-            cfg=cfg, pattern=table or "*", limit=limit,
+            cfg=cfg, pattern=pattern, limit=limit,
             known_total_rows=known_total_rows, scan_state=redis_scan_state,
+        )
+    if src_type == "sqlite":
+        from connectors.sqlite_reader import read_table_batch
+
+        return read_table_batch(
+            host=cfg["host"],
+            port=0,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            table=table,
+            limit=limit,
+            offset=offset,
+        )
+    if resolve_driver_type(src_type) == "generic_sql":
+        from connectors.generic_sql import read_table_batch, read_table_cursor_batch
+
+        type_name = cfg.get("type", "") or src_type
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=cfg["port"],
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                type=type_name,
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                columns=columns,
+                limit=limit,
+            )
+        return read_table_batch(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            type=type_name,
+            table=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
         )
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
@@ -269,13 +348,14 @@ def _write_batch(
     mappings: list[dict],
     column_types: dict[str, str],
     create_table: bool,
-    on_checkpoint: Callable[[int, int, int], None] | None,
+    on_checkpoint: Callable[..., None] | None,
     chunk_idx: int,
     total_chunks: int,
     rows_so_far: int,
     *,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
 ) -> tuple[int, str, dict]:
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
@@ -298,6 +378,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -332,6 +413,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -380,6 +462,41 @@ def _write_batch(
         }
         return result.rows_written, result.checksum, summary
 
+    if dest_type == "sqlite":
+        from connectors.sqlite_writer import write_mapped_rows
+
+        result = write_mapped_rows(
+            host=cfg["host"],
+            port=0,
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            table_name=table_name,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            create_table=create_table,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
+            on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or "SQLite batch write failed")
+        summary = {
+            "type": "sqlite",
+            "database": cfg["database"],
+            "table": result.table_name,
+            "checksum": result.checksum,
+            "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+        return result.rows_written, result.checksum, summary
+
     if dest_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
 
@@ -401,6 +518,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -427,6 +545,7 @@ def _write_batch(
             data_rows=data_rows,
             mappings=mappings,
             column_types=column_types,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -435,10 +554,11 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    if dest_type in ("s3", "gcs", "dynamodb", "elasticsearch", "redis"):
+    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis"):
         writers = {
             "s3": "connectors.s3_writer",
             "gcs": "connectors.gcs_writer",
+            "adls": "connectors.adls_writer",
             "dynamodb": "connectors.dynamodb_writer",
             "elasticsearch": "connectors.elasticsearch_writer",
             "redis": "connectors.redis_writer",
@@ -454,6 +574,11 @@ def _write_batch(
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
+            auth_mode=cfg.get("auth_mode", ""),
+            api_key=cfg.get("api_key", ""),
+            service_account=cfg.get("service_account", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
@@ -467,6 +592,37 @@ def _write_batch(
         summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
+    if resolve_driver_type(dest_type) == "generic_sql":
+        from connectors.generic_sql import write_mapped_rows
+
+        type_name = cfg.get("type", "") or dest_type
+        result = write_mapped_rows(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=False,
+            type=type_name,
+            table_name=table_name,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            create_table=create_table,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
+            on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+        summary = {"type": type_name, "schema": result.target_schema, "table": result.table_name,
+                   "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        return result.rows_written, result.checksum, summary
+
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
 
 
@@ -475,23 +631,29 @@ def stream_database_transfer(
     destination: EndpointConfig,
     mappings: list[dict],
     schema: dict[str, str],
-    on_checkpoint: Callable[[int, int, int], None] | None = None,
+    on_checkpoint: Callable[..., None] | None = None,
     *,
     sync_mode: str = "full_refresh_overwrite",
     stream_contracts: list[dict] | None = None,
     job_id: str | None = None,
+    checkpoint: Checkpoint | None = None,
+    checkpoint_service: CheckpointService | None = None,
+    retry_budget: RetryBudget | None = None,
+    backfill_new_fields: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
     """
-    src_type = source.format.lower()
-    dest_type = destination.format.lower()
+    from .connector_capabilities import resolve_driver_type
+    src_type = resolve_driver_type(source.format)
+    dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
 
     from services.sync_cursor import (
         build_cursor_key,
+        compare_cursor_values,
         get_watermark,
         map_source_to_target,
         max_cursor_value,
@@ -548,11 +710,28 @@ def stream_database_transfer(
 
         clear_object_cache()
 
-    probe, ddb_cursor = _unwrap_read(
+    # Memory-safe chunk sizing: sample a few rows, then size batches to keep
+    # per-batch memory within ~8 MB while respecting the configured CHUNK_SIZE.
+    sample_probe, _ = _unwrap_read(
         _read_batch(
-            src_type, src_cfg, table, None, 0, CHUNK_SIZE, database=src_db,
+            src_type, src_cfg, table, None, 0, 100, database=src_db,
             cursor_column=cursor_source_col if incremental else "",
             cursor_after=watermark if incremental else None,
+            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
+        )
+    )
+    sample_rows = sample_probe.rows or []
+    avg_row_size = 100
+    if sample_rows:
+        avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
+    chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE)
+
+    probe, ddb_cursor = _unwrap_read(
+        _read_batch(
+            src_type, src_cfg, table, None, 0, chunk_size, database=src_db,
+            cursor_column=cursor_source_col if incremental else "",
+            cursor_after=watermark if incremental else None,
+            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
     )
     columns = probe.headers
@@ -560,7 +739,7 @@ def stream_database_transfer(
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 
     if not schema:
-        if src_type in ("s3", "gcs"):
+        if src_type in ("s3", "gcs", "adls"):
             try:
                 from services.object_store_introspect import profile_object_batch
                 profiled = profile_object_batch(columns, probe.rows)
@@ -579,7 +758,29 @@ def stream_database_transfer(
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
     total_rows = probe.total_rows
-    chunks = max(1, (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE) if total_rows else 1
+
+    checkpoint_service = checkpoint_service or CheckpointService()
+    checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
+    checkpoint.source_type = src_type
+    checkpoint.dest_type = dest_type
+    checkpoint.write_mode = write_mode
+    checkpoint.conflict_columns = pk_target_cols or []
+
+    # Account for resume state when calculating progress so the UI doesn't see
+    # a chunk index greater than the total chunk estimate.
+    resume_offset = checkpoint.offset or 0
+    chunk_idx = checkpoint.chunk_index or 0
+    if chunk_idx == 0 and resume_offset == 0:
+        rows_accounted_for = len(probe.rows)
+        completed_chunks = 0
+    else:
+        rows_accounted_for = resume_offset
+        completed_chunks = chunk_idx
+    remaining_rows = max(0, (total_rows or 0) - rows_accounted_for)
+    remaining_chunks = (remaining_rows + chunk_size - 1) // chunk_size if remaining_rows else 0
+    if not total_rows and ddb_cursor:
+        remaining_chunks = max(remaining_chunks, 1)
+    chunks = max(1, completed_chunks + (1 if chunk_idx == 0 and resume_offset == 0 else 0) + remaining_chunks)
     dest_table = resolve_dest_table(dest_type, destination, table)
 
     ddl_log: list[str] = [
@@ -591,28 +792,147 @@ def stream_database_transfer(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
-    written = 0
-    offset = 0
-    chunk_idx = 0
+    written = checkpoint.rows_processed or 0
+    offset = checkpoint.offset or 0
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
     warning_samples: list[str] = []
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
-    batch = probe
-    running_cursor = watermark
-    es_search_after: list | None = None
-    redis_scan_state = None
-    keyset_col = columns[0] if columns and not incremental else ""
-    keyset_after: str | None = None
+    running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
+    es_search_after = checkpoint.es_search_after
+    redis_scan_state = checkpoint.redis_scan_state
+    keyset_col = checkpoint.cursor_column or (columns[0] if columns and not incremental else "")
+    keyset_after = checkpoint.cursor_value
     use_keyset = bool(keyset_col) and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+    ddb_cursor = checkpoint.dynamodb_cursor
 
+    retry = retry_budget or RetryBudget()
+
+    def _fetch_next_batch(last_batch):
+        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, running_cursor
+        if last_batch is not None and len(last_batch.rows) < chunk_size:
+            if (
+                src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+                and (incremental or use_keyset)
+            ) or src_type in ("elasticsearch", "redis"):
+                return None
+        if src_type == "dynamodb":
+            if not ddb_cursor:
+                return None
+            batch, ddb_cursor = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    chunk_size,
+                    database=src_db,
+                    dynamodb_cursor=ddb_cursor,
+                    dynamodb_total=ddb_total,
+                )
+            )
+            return batch
+        elif incremental and cursor_source_col and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb"):
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    chunk_size,
+                    database=src_db,
+                    cursor_column=cursor_source_col,
+                    cursor_after=running_cursor,
+                    cursor_type=column_types.get(cursor_source_col, "VARCHAR"),
+                    known_total_rows=total_rows,
+                )
+            )
+            return batch
+        elif use_keyset:
+            if keyset_col in columns and last_batch is not None and last_batch.rows:
+                keyset_after = last_batch.rows[-1][last_batch.headers.index(keyset_col)]
+            batch, extra = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    chunk_size,
+                    database=src_db,
+                    cursor_column=keyset_col,
+                    cursor_after=keyset_after,
+                    cursor_type=column_types.get(keyset_col, "VARCHAR"),
+                    known_total_rows=total_rows,
+                )
+            )
+            if src_type == "elasticsearch":
+                es_search_after = extra
+            elif src_type == "redis":
+                redis_scan_state = extra
+            return batch
+        elif src_type == "elasticsearch":
+            batch, es_search_after = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    chunk_size,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    es_search_after=es_search_after,
+                )
+            )
+            return batch
+        elif src_type == "redis":
+            batch, redis_scan_state = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    chunk_size,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    redis_scan_state=redis_scan_state,
+                )
+            )
+            return batch
+        elif offset >= total_rows:
+            return None
+        else:
+            batch, extra = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    chunk_size,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                )
+            )
+            if src_type == "elasticsearch":
+                es_search_after = extra
+            elif src_type == "redis":
+                redis_scan_state = extra
+            return batch
+
+    batch = _fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe
     while True:
-        if not batch.rows:
+        if not batch or not getattr(batch, "rows", None):
             break
 
         chunk_idx += 1
-        batch_written, last_checksum, dest_summary = _write_batch(
+        write_op = partial(
+            _write_batch,
             dest_type,
             destination,
             dest_cfg,
@@ -628,125 +948,37 @@ def stream_database_transfer(
             rows_so_far=written,
             write_mode=write_mode,
             conflict_columns=pk_target_cols or None,
+            backfill_new_fields=backfill_new_fields,
         )
+        batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
         written += batch_written
         if incremental and cursor_source_col:
             batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
-            if batch_max and (running_cursor is None or batch_max > running_cursor):
+            if batch_max and (running_cursor is None or compare_cursor_values(batch_max, running_cursor) > 0):
                 running_cursor = batch_max
         rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
         warning_samples.extend(dest_summary.get("warnings", []) or [])
-        if on_checkpoint:
-            on_checkpoint(chunk_idx, chunks, written)
+
         offset += len(batch.rows)
 
-        if src_type == "dynamodb":
-            if not ddb_cursor:
-                break
-            batch, ddb_cursor = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    offset,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    dynamodb_cursor=ddb_cursor,
-                    dynamodb_total=ddb_total,
-                )
-            )
-        elif incremental and cursor_source_col and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb"):
-            if len(batch.rows) < CHUNK_SIZE:
-                break
-            batch, _ = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    offset,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    cursor_column=cursor_source_col,
-                    cursor_after=running_cursor,
-                    known_total_rows=total_rows,
-                )
-            )
-        elif use_keyset:
-            if len(batch.rows) < CHUNK_SIZE:
-                break
-            if keyset_col in batch.headers and batch.rows:
-                keyset_after = batch.rows[-1][batch.headers.index(keyset_col)]
-            batch, extra = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    offset,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    cursor_column=keyset_col,
-                    cursor_after=keyset_after,
-                    known_total_rows=total_rows,
-                )
-            )
-            if src_type == "elasticsearch":
-                es_search_after = extra
-            elif src_type == "redis":
-                redis_scan_state = extra
-        elif src_type == "elasticsearch":
-            if len(batch.rows) < CHUNK_SIZE:
-                break
-            batch, es_search_after = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    offset,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    known_total_rows=total_rows,
-                    es_search_after=es_search_after,
-                )
-            )
-        elif src_type == "redis":
-            if len(batch.rows) < CHUNK_SIZE:
-                break
-            batch, redis_scan_state = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    offset,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    known_total_rows=total_rows,
-                    redis_scan_state=redis_scan_state,
-                )
-            )
-        elif offset >= total_rows:
-            break
-        else:
-            batch, extra = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    offset,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    known_total_rows=total_rows,
-                )
-            )
-            if src_type == "elasticsearch":
-                es_search_after = extra
-            elif src_type == "redis":
-                redis_scan_state = extra
+        # Persist durable checkpoint after the batch is committed
+        checkpoint.chunk_index = chunk_idx
+        checkpoint.offset = offset
+        checkpoint.rows_processed = written
+        checkpoint.cursor_value = running_cursor or keyset_after
+        checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
+        checkpoint.es_search_after = es_search_after
+        checkpoint.redis_scan_state = redis_scan_state
+        checkpoint.dynamodb_cursor = ddb_cursor
+        checkpoint.checksum = last_checksum
+        checkpoint.phase = "writing"
+        checkpoint.chunk_total = chunks
+        checkpoint.status = "running"
+        checkpoint_service.save(checkpoint)
+        if on_checkpoint:
+            on_checkpoint(chunk_idx, chunks, written, checkpoint.to_dict())
+
+        batch = _fetch_next_batch(batch)
 
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
@@ -755,6 +987,9 @@ def stream_database_transfer(
         return 0, ddl_log, dest_summary, columns
 
     if written == 0:
+        details = "; ".join(filter(None, warning_samples[:10]))
+        if details:
+            raise ValueError(f"No rows were written to the destination: {details}")
         raise ValueError("Source table is empty")
 
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
@@ -772,7 +1007,8 @@ def stream_database_transfer(
 
 def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:
     """Return columns, schema, row count, and sample rows for preflight."""
-    src_type = source.format.lower()
+    from .connector_capabilities import resolve_driver_type
+    src_type = resolve_driver_type(source.format or "")
     src_cfg = resolve_connector_config(source)
     table = _source_name(source)
     if not table:
@@ -785,7 +1021,7 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
     if not columns and probe.total_rows == 0:
         raise ValueError(f"Source `{table}` has no columns or is empty")
 
-    if src_type in ("s3", "gcs"):
+    if src_type in ("s3", "gcs", "adls"):
         try:
             from services.object_store_introspect import profile_object_batch
             profiled = profile_object_batch(columns, probe.rows)
@@ -805,7 +1041,8 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
+    from .connector_capabilities import resolve_driver_type
     return (
-        source.format.lower() in _STREAMING_TYPES
-        and destination.format.lower() in _STREAMING_TYPES
+        resolve_driver_type(source.format) in _STREAMING_TYPES
+        and resolve_driver_type(destination.format) in _STREAMING_TYPES
     )

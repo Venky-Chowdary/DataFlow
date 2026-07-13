@@ -54,6 +54,9 @@ const PAGE_ALIASES: Record<string, Screen> = {
   mcp: "mcp",
   settings: "settings",
   setting: "settings",
+  docs: "docs",
+  documentation: "docs",
+  help: "docs",
 };
 
 function matchesQuery(value: string | undefined | null, q: string): boolean {

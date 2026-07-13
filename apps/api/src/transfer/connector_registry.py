@@ -80,6 +80,12 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="read_object",
         writer="connectors.gcs_writer",
     ),
+    "adls": ConnectorModules(
+        probe=("connectors.adls", "test_adls"),
+        reader="connectors.adls_reader",
+        reader_fn="read_object",
+        writer="connectors.adls_writer",
+    ),
     "redis": ConnectorModules(
         probe=("connectors.redis_kv", "test_redis"),
         reader="connectors.redis_reader",
@@ -91,6 +97,12 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader="connectors.elasticsearch_reader",
         reader_fn="read_index_batch",
         writer="connectors.elasticsearch_writer",
+    ),
+    "sqlite": ConnectorModules(
+        probe=("connectors.sqlite", "test_sqlite"),
+        reader="connectors.sqlite_reader",
+        reader_fn="read_table_batch",
+        writer="connectors.sqlite_writer",
     ),
 }
 
@@ -113,22 +125,21 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     """Execute connectivity probe for a driver using resolved config."""
     import importlib
 
-    db_type = (db_type or "").lower()
-    spec = CONNECTOR_MODULES.get(db_type)
-    if not spec:
-        return False, f"No connectivity probe for {db_type}"
+    from .connector_capabilities import resolve_driver_type
 
-    if db_type == "mongodb":
+    db_type = (db_type or "").lower()
+    catalog_id = db_type
+    resolved = resolve_driver_type(db_type)
+
+    # Resolve catalog aliases (e.g. cockroachdb -> postgresql) to a registered driver
+    db_type = resolved
+    spec = CONNECTOR_MODULES.get(db_type)
+
+    if db_type == "mongodb" and spec:
         from .adapters import probe_mongodb
 
         return probe_mongodb(cfg)
 
-    if not spec.probe:
-        return False, f"No probe configured for {db_type}"
-
-    mod_name, fn_name = spec.probe
-    mod = importlib.import_module(mod_name)
-    probe_fn = getattr(mod, fn_name)
     schema_default = (
         "PUBLIC" if db_type == "snowflake"
         else "dataflow" if db_type == "bigquery"
@@ -136,7 +147,7 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     )
     probe_kwargs = {
         "host": cfg.get("host", ""),
-        "port": int(cfg.get("port") or default_port(db_type)),
+        "port": int(cfg.get("port") or default_port(db_type or catalog_id)),
         "database": cfg.get("database", ""),
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
@@ -144,7 +155,29 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "connection_string": cfg.get("connection_string", ""),
         "ssl": cfg.get("ssl", False),
         "warehouse": cfg.get("warehouse", ""),
+        "table": cfg.get("table", ""),
+        "auth_mode": cfg.get("auth_mode", ""),
+        "role": cfg.get("role", ""),
+        "api_key": cfg.get("api_key", ""),
+        "service_account": cfg.get("service_account", ""),
     }
+
+    if resolved == "generic_sql":
+        from connectors.generic_sql import test_generic_sql
+
+        # The catalog id (e.g. tidb, clickhouse) must reach the generic SQL engine
+        # builder so it can pick the right SQLAlchemy drivername and port.
+        return test_generic_sql(type=catalog_id, **probe_kwargs)
+
+    if not spec:
+        return False, f"No connectivity probe for {db_type}"
+
+    if not spec.probe:
+        return False, f"No probe configured for {db_type}"
+
+    mod_name, fn_name = spec.probe
+    mod = importlib.import_module(mod_name)
+    probe_fn = getattr(mod, fn_name)
     sig = inspect.signature(probe_fn)
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     if not accepts_var_kw:

@@ -42,21 +42,24 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
+    backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
-    del create_table, error_policy
+    del create_table, error_policy, backfill_new_fields
     prefix = table_name or schema or "dataflow"
     cfg = {
         "host": host, "port": port, "database": database,
         "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl,
     }
-    target_cols = resolve_target_columns(mappings, headers)
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        preserve_case=True,
     )
 
     client = _redis_client(cfg)
@@ -66,7 +69,7 @@ def write_mapped_rows(
         for i, row in enumerate(mapped_rows):
             doc = dict(zip(target_cols, row))
             key_id = doc.get(id_col) or str(i)
-            key = f"{prefix}:{sanitize_identifier(str(key_id))}"
+            key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
             client.set(key, json.dumps(doc, default=str))
             written += 1
         if on_checkpoint:

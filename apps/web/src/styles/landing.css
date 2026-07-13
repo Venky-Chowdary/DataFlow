@@ -171,7 +171,11 @@
 .lp-hero {
   position: relative;
   overflow: hidden;
-  padding: clamp(48px, 8vw, 88px) clamp(16px, 4vw, 40px) clamp(40px, 6vw, 64px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  align-items: center;
+  padding: clamp(32px, 5vw, 72px) clamp(16px, 4vw, 40px);
 }
 
 .lp-hero-bg {
@@ -237,11 +241,17 @@
 
 .lp-hero h1 {
   margin: 0 0 20px;
-  font-size: clamp(2.25rem, 5.5vw, 3.5rem);
+  font-size: clamp(2rem, 5vw, 3.25rem);
   font-weight: 800;
   line-height: 1.08;
   letter-spacing: -0.03em;
   color: #0f172a;
+}
+
+.lp-hero-visual {
+  width: 100%;
+  max-width: 480px;
+  justify-self: center;
 }
 
 .lp-gradient-text {
@@ -1430,7 +1440,7 @@
 
   .lp-hero-visual {
     order: -1;
-    max-width: 400px;
+    max-width: 360px;
     margin: 0 auto;
   }
 
@@ -1454,6 +1464,28 @@
   .lp-product-panel {
     grid-template-columns: 1fr;
     padding: 24px;
+  }
+}
+
+@media (max-height: 760px) and (min-width: 960px) {
+  .lp-hero {
+    padding: clamp(16px, 3vw, 40px) clamp(16px, 4vw, 40px);
+  }
+
+  .lp-hero h1 {
+    font-size: clamp(1.85rem, 4vw, 2.75rem);
+  }
+
+  .lp-lead {
+    font-size: clamp(0.9rem, 1.6vw, 1.05rem);
+  }
+
+  .lp-hero-visual {
+    max-width: 360px;
+  }
+
+  .lp-stats dd {
+    font-size: 1.15rem;
   }
 }
 

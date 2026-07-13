@@ -18,6 +18,7 @@ def test_snowflake(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    role: str = "",
 ) -> ConnectResult:
     del port, ssl
     try:
@@ -44,6 +45,7 @@ def test_snowflake(
             schema=schema or "PUBLIC",
             warehouse=warehouse,
             connection_string=connection_string,
+            role=role,
         )
         with conn.cursor() as cur:
             if warehouse:

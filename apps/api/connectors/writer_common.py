@@ -7,28 +7,51 @@ import os
 import re
 from typing import Any, Callable
 
-from services.transform_engine import apply_transform, infer_transform, infer_transform_for_mapping
+from services.reconciliation import checksum_rows
+from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 
-# Configurable batch size — default 5 000 rows per commit (enterprise scale)
-CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "5000"))
+# Configurable batch size — default 20 000 rows per commit (enterprise scale)
+CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "20000"))
 TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantine").lower()
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 
-def sanitize_identifier(name: str) -> str:
-    s = re.sub(r"[^a-zA-Z0-9_]", "_", name.strip().lower())
-    s = re.sub(r"_+", "_", s).strip("_")
+def sanitize_identifier(name: str, preserve_case: bool = False) -> str:
+    cleaned = name.strip() if preserve_case else name.strip().lower()
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", cleaned)
+    s = re.sub(r"_+", "_", s).rstrip("_")
     if not s or s[0].isdigit():
         s = f"col_{s or 'field'}"
     return s[:63]
 
 
+def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
+    """Quote a SQL identifier and escape embedded quote characters."""
+    escaped = name.replace(quote_char, quote_char + quote_char)
+    return f"{quote_char}{escaped}{quote_char}"
+
+
 def row_checksum(rows: list[tuple]) -> str:
-    h = hashlib.sha256()
+    return checksum_rows(rows)
+
+
+def dedupe_rows(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+) -> list[tuple]:
+    """Keep the last occurrence of each conflict key, preserving tuple order."""
+    if not conflict_columns or not rows:
+        return rows
+    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
+    if not indices:
+        return rows
+    seen: dict[tuple, tuple] = {}
     for row in rows:
-        h.update("|".join("" if v is None else str(v) for v in row).encode())
-    return h.hexdigest()[:16]
+        key = tuple(row[i] for i in indices)
+        seen[key] = row
+    return list(seen.values())
 
 
 def transform_error_policy(policy: str | None = None) -> str:
@@ -59,48 +82,67 @@ def build_mapped_rows(
     target_cols: list[str],
     column_types: dict[str, str] | None = None,
     error_policy: str | None = None,
+    dest_types: dict[str, str] | None = None,
+    preserve_case: bool = False,
 ) -> tuple[list[tuple], list[str]]:
     """Returns mapped rows and any transform errors (first 10)."""
     column_types = column_types or {}
     policy = transform_error_policy(error_policy)
     source_indices = {h: i for i, h in enumerate(headers)}
-    mapped: list[tuple] = []
+    sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
+    target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
 
+    mapping_infos = []
+    for m in mappings:
+        src = m["source"]
+        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        transform = resolve_transform(
+            m,
+            column_types=column_types,
+            dest_types=dest_types or column_types,
+        )
+        mapping_infos.append((
+            source_indices.get(src),
+            target_index.get(tgt, -1),
+            transform,
+            src,
+            tgt,
+        ))
+
+    mapped: list[tuple] = []
     for row_number, raw in enumerate(data_rows, start=1):
-        row_map: dict[str, Any] = {}
+        out = [None] * len(sanitized_target_cols)
         row_has_error = False
-        for m in mappings:
-            idx = source_indices.get(m["source"])
-            val = raw[idx] if idx is not None and idx < len(raw) else None
-            tgt = sanitize_identifier(m["target"])
-            src_type = column_types.get(m["source"], "VARCHAR")
-            tgt_type = m.get("target_type") or column_types.get(m["target"])
-            transform = resolve_transform(
-                m,
-                column_types=column_types,
-                dest_types=column_types,
-            )
+        for source_idx, target_idx, transform, src_name, tgt_name in mapping_infos:
+            val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
             converted, err = apply_transform(val, transform)
-            if err and len(errors) < 10:
-                errors.append(f"row {row_number} {m['source']}→{m['target']}: {err}")
             if err:
                 row_has_error = True
+                if len(errors) < 10:
+                    errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
                 if policy == "coerce_null":
                     converted = None
-            row_map[tgt] = converted
+                else:
+                    continue
+            if target_idx >= 0:
+                out[target_idx] = converted
         if row_has_error and policy in {"fail", "quarantine"}:
             continue
-        mapped.append(tuple(row_map.get(sanitize_identifier(c)) for c in target_cols))
+        mapped.append(tuple(out))
 
     return mapped, errors
 
 
-def resolve_target_columns(mappings: list[dict], column_types: dict[str, str]) -> tuple[list[str], list[str]]:
+def resolve_target_columns(
+    mappings: list[dict],
+    column_types: dict[str, str],
+    preserve_case: bool = False,
+) -> tuple[list[str], list[str]]:
     target_cols: list[str] = []
     source_types: list[str] = []
     for m in mappings:
-        tgt = sanitize_identifier(m["target"])
+        tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
             source_types.append(column_types.get(m["source"], "VARCHAR"))

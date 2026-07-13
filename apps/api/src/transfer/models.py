@@ -22,6 +22,10 @@ class EndpointConfig:
     warehouse: str = ""
     # False => sslmode "prefer": negotiate TLS when available, fall back for local DBs
     ssl: bool = False
+    auth_mode: str = ""
+    auth_role: str = ""
+    api_key: str = ""
+    service_account: str = ""
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -34,7 +38,7 @@ class EndpointConfig:
             host=d.get("host", "localhost"),
             port=int(d.get("port", 0) or 0),
             database=d.get("database", ""),
-            schema=d.get("schema", "public"),
+            schema=d.get("schema", ""),
             table=d.get("table", d.get("table_name", "")),
             collection=d.get("collection", d.get("collection_name", "")),
             username=d.get("username", ""),
@@ -42,11 +46,15 @@ class EndpointConfig:
             connection_string=d.get("connection_string", ""),
             warehouse=d.get("warehouse", ""),
             ssl=d.get("ssl", False),
+            auth_mode=d.get("auth_mode", ""),
+            auth_role=d.get("auth_role", ""),
+            api_key=d.get("api_key", ""),
+            service_account=d.get("service_account", ""),
             extra={k: v for k, v in d.items() if k not in {
                 "format", "type", "db_type", "connector_id", "host", "port",
                 "database", "schema", "table", "table_name", "collection",
                 "collection_name", "username", "password", "connection_string",
-                "warehouse", "ssl",
+                "warehouse", "ssl", "auth_mode", "auth_role", "api_key", "service_account",
             }},
         )
 
@@ -96,6 +104,10 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "connection_string": ep.connection_string,
         "warehouse": ep.warehouse,
         "ssl": ep.ssl,
+        "auth_mode": ep.auth_mode,
+        "auth_role": ep.auth_role,
+        "api_key": ep.api_key,
+        "service_account": ep.service_account,
     }
 
 
@@ -145,8 +157,11 @@ class TransferResult:
     destination_summary: dict = field(default_factory=dict)
     ddl_executed: list[str] = field(default_factory=list)
     error: str = ""
+    error_details: dict = field(default_factory=dict)
     columns: list[str] = field(default_factory=list)
     reconciliation: dict = field(default_factory=dict)
+    validation_plan: dict = field(default_factory=dict)
+    payload_shape: dict = field(default_factory=dict)
 
 
 @dataclass

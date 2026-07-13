@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+_api_root = Path(__file__).resolve().parents[1]
+if str(_api_root) not in sys.path:
+    sys.path.insert(0, str(_api_root))
+
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -30,11 +37,7 @@ def _client(cfg: dict[str, Any]):
 
 
 def _cell(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str)
-    return str(value)
+    return cell_to_string(value)
 
 
 def read_index_batch(
@@ -57,9 +60,9 @@ def read_index_batch(
             total = int(count_resp.get("count", 0))
 
         body: dict[str, Any] = {
-            "size": limit,
+            "size": min(limit, 10000),
             "query": {"match_all": {}},
-            "sort": [{"_shard_doc": "asc"}],
+            "sort": ["_doc"],
         }
         if search_after:
             body["search_after"] = search_after

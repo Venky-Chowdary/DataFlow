@@ -70,6 +70,7 @@ class ColumnMapping:
 @dataclass
 class SourceConfig:
     kind: str  # file | database | api
+    db_type: str = ""  # connector format, e.g. mongodb, postgresql
     connected: bool = False
     parseable: bool = False
     encoding: str = "utf-8"
@@ -81,6 +82,7 @@ class SourceConfig:
 @dataclass
 class DestinationConfig:
     kind: str
+    db_type: str = ""  # connector format, e.g. mongodb, postgresql
     connected: bool = False
     can_create_table: bool = False
     can_write: bool = False

@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ColumnReviewPanel } from "../../components/ColumnReviewPanel";
-import { MappingAccuracyBar } from "../../components/transfer/MappingAccuracyBar";
 import { MappingIntelligencePanel } from "../../components/MappingIntelligencePanel";
-import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, filterMappings } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
@@ -24,6 +22,7 @@ interface TransferMapStepProps {
   mappingReviewCount: number;
   confidenceThreshold: number;
   rowCount?: number;
+  sampleRows?: Record<string, unknown>[];
   sourceColumnCount?: number;
   llmUsed?: boolean;
   onChangeMappings: (mappings: EditableMapping[]) => void;
@@ -52,6 +51,7 @@ export function TransferMapStep({
   mappingReviewCount,
   confidenceThreshold,
   rowCount,
+  sampleRows,
   llmUsed,
   onChangeMappings,
   onBack,
@@ -122,39 +122,27 @@ export function TransferMapStep({
     <div className="df2-transfer-step-panel df2-map-step-panel">
       <div className="df2-card-head df2-map-step-head">
         <h3 className="df2-card-title">Map columns</h3>
-        <MappingAccuracyBar
-          mappings={columnMappings}
-          confidenceThreshold={confidenceThreshold}
-          llmUsed={llmUsed}
-        />
       </div>
 
       <div className="df2-card-body df2-map-step-body">
         <div className="df2-map-step-workspace">
-          <section className="df2-map-editor-pane" aria-label="Column mappings editor">
-            <header className="df2-map-pane-label">
-              <DtIcon name="database" size={14} />
-              Column mappings
-            </header>
-            <div className="df2-map-editor-scroll-host">
-              <ColumnReviewPanel
-                mappings={columnMappings}
-                rowCount={rowCount}
-                confidenceThreshold={confidenceThreshold}
-                onChange={onChangeMappings}
-                destinationFields={destColumns}
-                destinationLabel={destRouteLabel}
-                compact
-                hideTitle
-                search={search}
-                onSearchChange={setSearch}
-                filter={filter}
-                onFilterChange={setFilter}
-                focusSource={focusSource}
-                onFocusHandled={() => setFocusSource(null)}
-              />
-            </div>
-          </section>
+          <ColumnReviewPanel
+            mappings={columnMappings}
+            rowCount={rowCount}
+            sampleRows={sampleRows}
+            confidenceThreshold={confidenceThreshold}
+            onChange={onChangeMappings}
+            destinationFields={destColumns}
+            destinationLabel={destRouteLabel}
+            compact
+            hideTitle
+            search={search}
+            onSearchChange={setSearch}
+            filter={filter}
+            onFilterChange={setFilter}
+            focusSource={focusSource}
+            onFocusHandled={() => setFocusSource(null)}
+          />
 
           <MappingIntelligencePanel
             allMappings={columnMappings}

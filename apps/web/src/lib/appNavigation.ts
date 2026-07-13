@@ -9,6 +9,7 @@ const SCREENS: Screen[] = [
   "jobs",
   "mcp",
   "settings",
+  "docs",
 ];
 
 export function screenFromHash(hash: string): Screen | null {
