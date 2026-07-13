@@ -59,7 +59,7 @@ def run_reconciliation(
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
     sample_compare = None
-    if records and table_name and db_type in {"postgresql", "mysql"}:
+    if records and table_name and db_type in {"postgresql", "mysql", "duckdb"}:
         mapped_targets = list(dict.fromkeys(
             str(m.get("target") or m.get("source") or "")
             for m in mapping_dicts if m.get("target") or m.get("source")

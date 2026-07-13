@@ -825,6 +825,21 @@ def read_target_sample(
                 rows = cur.fetchall()
             conn.close()
             return [dict(zip(names, row)) for row in rows]
+
+        if db_type == "duckdb":
+            import duckdb
+
+            path = dest.get("connection_string") or dest.get("database", "")
+            if not path:
+                return []
+            conn = duckdb.connect(str(path))
+            duckdb_col_sql = ", ".join(f'"{c}"' for c in cols) if cols != ["*"] else "*"
+            rows = conn.execute(
+                f'SELECT {duckdb_col_sql} FROM "{table_name}" ORDER BY 1 LIMIT {int(limit)}'
+            ).fetchall()
+            names = [d[0] for d in conn.description]
+            conn.close()
+            return [dict(zip(names, row)) for row in rows]
     except Exception:
         return []
     return []

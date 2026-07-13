@@ -503,7 +503,7 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
-        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
+        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto", "duckdb"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
@@ -545,7 +545,7 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
 
         if isinstance(parsed, (dict, list)):
             if _is_string_type(sa_type):
-                return json.dumps(parsed, ensure_ascii=False, default=str)
+                return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=str)
             return parsed
         if isinstance(value, str):
             return value
