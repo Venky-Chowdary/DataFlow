@@ -443,7 +443,6 @@ function AppShell({
                   <TransferPage
                     connectors={connectors}
                     onOpenSchedules={() => setScreen("schedules")}
-                    onOpenJobs={() => setScreen("jobs")}
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
