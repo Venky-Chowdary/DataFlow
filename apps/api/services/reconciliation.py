@@ -274,6 +274,59 @@ def verify_bigquery_table(
         return -1, ""
 
 
+def verify_sqlite_table(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+) -> tuple[int, str]:
+    """Reconcile a SQLite target by reading the local file."""
+    try:
+        import sqlite3
+
+        path = connection_string or database
+        if not path:
+            return -1, ""
+        conn = sqlite3.connect(str(path))
+        cur = conn.cursor()
+        cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+        count = cur.fetchone()[0]
+        cur.execute(f'SELECT * FROM "{table_name}" LIMIT 5000')
+        rows = cur.fetchall()
+        conn.close()
+        h = hashlib.sha256()
+        for row in rows:
+            h.update("|".join("" if v is None else str(v) for v in row).encode())
+        return int(count), h.hexdigest()[:16]
+    except Exception:
+        return -1, ""
+
+
+def verify_duckdb_table(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+) -> tuple[int, str]:
+    """Reconcile a DuckDB target by reading the local file."""
+    try:
+        import duckdb
+
+        path = connection_string or database
+        if not path:
+            return -1, ""
+        conn = duckdb.connect(str(path))
+        count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        rows = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 5000').fetchall()
+        conn.close()
+        h = hashlib.sha256()
+        for row in rows:
+            h.update("|".join("" if v is None else str(v) for v in row).encode())
+        return int(count), h.hexdigest()[:16]
+    except Exception:
+        return -1, ""
+
+
 def verify_target(
     db_type: str,
     dest: dict[str, Any],
@@ -283,7 +336,19 @@ def verify_target(
     fallback_rows: int,
     fallback_checksum: str,
 ) -> tuple[int, str]:
-    if db_type == "postgresql":
+    if db_type == "sqlite":
+        count, chk = verify_sqlite_table(
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", ""),
+            table_name=table_name,
+        )
+    elif db_type == "duckdb":
+        count, chk = verify_duckdb_table(
+            connection_string=dest.get("connection_string", ""),
+            database=dest.get("database", ""),
+            table_name=table_name,
+        )
+    elif db_type == "postgresql":
         count, chk = verify_postgres_table(
             host=dest.get("host", ""),
             port=dest.get("port", 5432),
