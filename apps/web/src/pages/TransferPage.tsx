@@ -1520,6 +1520,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
   const canRunPreflight =
     canConfigureDest &&
+    !destSchemaLoading &&
     (destKindMode === "file_export" || Boolean(targetDb && targetCollection));
 
   const needsDbPreflight = destKindMode === "database";
