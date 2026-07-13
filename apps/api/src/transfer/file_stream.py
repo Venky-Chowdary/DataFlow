@@ -204,6 +204,8 @@ def stream_file_to_database(
     schema: dict[str, str],
     on_checkpoint: Callable[..., None] | None = None,
     *,
+    sync_mode: str = "full_refresh_overwrite",
+    stream_contracts: list[dict] | None = None,
     job_id: str | None = None,
     checkpoint: Checkpoint | None = None,
     checkpoint_service: CheckpointService | None = None,
@@ -283,10 +285,23 @@ def stream_file_to_database(
 
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
 
+    try:
+        from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+    except ImportError:
+        from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+    contract = resolve_sync_contract(stream_contracts)
+    effective_sync = contract.sync_mode if contract else sync_mode
+    pk_target_cols: list[str] = []
+    if contract and contract.primary_key:
+        pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
+    write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+
     checkpoint_service = checkpoint_service or CheckpointService()
     checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
     checkpoint.source_type = "file"
     checkpoint.dest_type = dest_type
+    checkpoint.write_mode = write_mode
+    checkpoint.conflict_columns = pk_target_cols or []
     checkpoint.chunk_total = chunks
     retry = retry_budget or RetryBudget()
 
@@ -322,6 +337,8 @@ def stream_file_to_database(
             chunk_idx=chunk_idx,
             total_chunks=chunks,
             rows_so_far=written,
+            write_mode=write_mode,
+            conflict_columns=pk_target_cols,
             backfill_new_fields=backfill_new_fields,
         )
         batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)

@@ -23,7 +23,7 @@ _catalog = _load_catalog_service()
 def test_catalog_summary():
     data = _catalog.catalog_summary()
     assert data["total"] >= 600
-    assert data["live"] > 0
+    assert data["live"] >= 100
     assert data["categories"] >= 8
 
 

@@ -1077,6 +1077,8 @@ class UniversalTransferEngine:
                 mappings,
                 schema,
                 on_checkpoint=throttled_checkpoint,
+                sync_mode=request.sync_mode,
+                stream_contracts=request.stream_contracts,
                 job_id=job_id,
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
