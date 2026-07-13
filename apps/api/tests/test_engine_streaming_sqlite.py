@@ -148,3 +148,37 @@ def test_engine_stream_sqlite_to_sqlite_resume_from_checkpoint():
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
         conn.close()
         assert count == 500
+
+
+def test_engine_stream_sqlite_resume_no_checkpoint_drops_partial_destination():
+    """If a resume has no checkpoint, the destination must be dropped so no partial
+    data from a previous failed run is duplicated.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = tmp_path / "src.db"
+        dst = tmp_path / "dst.db"
+        _make_source(500, src)
+        _populate_destination(300, dst)
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        request = TransferRequest(
+            source=source,
+            destination=destination,
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=True,
+        )
+
+        engine = UniversalTransferEngine()
+        result = engine.execute_tracked(request, "000000000000000000000000", resume=True)
+        assert result.success is True
+
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        conn.close()
+        assert count == 500
