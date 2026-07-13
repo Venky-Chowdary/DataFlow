@@ -252,7 +252,12 @@ class UniversalTransferEngine:
             return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
 
         if supports_streaming(request.source, request.destination):
-            return self._execute_streaming(request, job_id, mongo, src_fmt)
+            return self._execute_streaming(
+                request, job_id, mongo, src_fmt,
+                resume=resume,
+                checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service,
+            )
 
         if (
             request.source.kind == "file"
@@ -264,7 +269,12 @@ class UniversalTransferEngine:
                 request.destination,
             )
         ):
-            return self._execute_file_streaming(request, job_id, mongo, src_fmt)
+            return self._execute_file_streaming(
+                request, job_id, mongo, src_fmt,
+                resume=resume,
+                checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service,
+            )
 
         pf = None
         try:
@@ -419,12 +429,13 @@ class UniversalTransferEngine:
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
             if request.destination.kind == "database":
-                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite") and not resume:
                     _drop_destination_table(request.destination)
                 rows_written, ddl_log, dest_summary = write_destination_database(
                     request.destination, records, columns, schema, mappings,
                     on_checkpoint=throttled_checkpoint,
                     validation_mode=request.validation_mode,
+                    backfill_new_fields=request.backfill_new_fields,
                 )
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
@@ -566,6 +577,9 @@ class UniversalTransferEngine:
         job_id: str,
         mongo,
         src_fmt: str,
+        resume: bool = False,
+        checkpoint: Any = None,
+        checkpoint_service: Any = None,
     ) -> TransferResult:
         """Batched DB→DB path — never loads full table into memory."""
         dst_fmt = request.destination.format or "mongodb"
@@ -717,7 +731,7 @@ class UniversalTransferEngine:
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
 
-            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite") and not resume:
                 _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
@@ -840,6 +854,9 @@ class UniversalTransferEngine:
         job_id: str,
         mongo,
         src_fmt: str,
+        resume: bool = False,
+        checkpoint: Any = None,
+        checkpoint_service: Any = None,
     ) -> TransferResult:
         """Batched file → database path for large CSV/TSV/JSONL uploads."""
         dst_fmt = request.destination.format or "mongodb"
@@ -994,7 +1011,7 @@ class UniversalTransferEngine:
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
 
-            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite") and not resume:
                 _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_file_to_database(

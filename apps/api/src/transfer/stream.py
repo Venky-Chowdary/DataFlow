@@ -891,7 +891,7 @@ def stream_database_transfer(
                 redis_scan_state = extra
             return batch
 
-    batch = probe if chunk_idx == 0 else _fetch_next_batch(None)
+    batch = _fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe
     while True:
         if not batch or not getattr(batch, "rows", None):
             break
