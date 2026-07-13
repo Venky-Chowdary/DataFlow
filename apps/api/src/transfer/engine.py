@@ -56,6 +56,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from connectors.writer_common import CHUNK_SIZE
 from services.batch_progress import ThrottledCheckpoint
+from services.checkpoint_service import Checkpoint, CheckpointService, resume_or_create_checkpoint
 
 logger = logging.getLogger("dataflow.transfer")
 
@@ -228,15 +229,15 @@ class UniversalTransferEngine:
 
     def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         mongo = get_mongodb_service()
-        checkpoint_service = None
+        checkpoint_service = CheckpointService(mongo)
         checkpoint = None
         if resume:
             try:
-                from services.checkpoint_service import CheckpointService, resume_or_create_checkpoint
-                checkpoint_service = CheckpointService(mongo)
                 checkpoint = resume_or_create_checkpoint(job_id, checkpoint_service)
             except Exception:
                 pass
+        if not resume:
+            checkpoint = Checkpoint(job_id=job_id)
         lineage.emit_run_started(
             run_id=job_id,
             job_id=job_id,
