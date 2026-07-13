@@ -19,6 +19,8 @@ from typing import Any, Callable
 
 from services.value_serializer import cell_to_string
 
+from connectors.schema_drift import add_missing_columns
+
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect, text
@@ -1129,11 +1131,12 @@ def write_mapped_rows(
     data_rows: list[list[str]],
     mappings: list[dict],
     column_types: dict[str, str],
-    on_checkpoint: Callable[[int, int, int], None] | None = None,
+    on_checkpoint: Callable[..., None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
     type: str = "",
 ) -> WriteResult:
     """Write mapped rows to any SQLAlchemy-supported destination."""
@@ -1217,6 +1220,17 @@ def write_mapped_rows(
                 else:
                     conn.execute(sa.schema.CreateTable(table_obj))
                 conn.commit()
+
+            if table_exists and backfill_new_fields:
+                add_missing_columns(
+                    engine,
+                    table_name,
+                    schema_name,
+                    target_cols,
+                    sa_col_types,
+                    backfill=True,
+                    connection=conn,
+                )
 
             total = len(converted_rows)
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)

@@ -100,6 +100,7 @@ def write_mapped_rows(
     create_table: bool = True,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
 ) -> WriteResult:
     del port, ssl
     try:
@@ -215,6 +216,17 @@ def write_mapped_rows(
             if create_table:
                 col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))
                 cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({col_defs})')
+
+            if backfill_new_fields:
+                cur.execute(
+                    """SELECT COLUMN_NAME FROM information_schema.columns
+                       WHERE table_schema = %s AND table_name = %s""",
+                    (schema, table_name),
+                )
+                existing = {row[0] for row in cur.fetchall()}
+                for col, typ in zip(target_cols, target_types):
+                    if col not in existing:
+                        cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
 
             total = len(mapped_rows)
             use_copy = total >= COPY_THRESHOLD and write_mode != "upsert"

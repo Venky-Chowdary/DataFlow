@@ -82,8 +82,9 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     create_table: bool = True,
     error_policy: str | None = None,
+    backfill_new_fields: bool = False,
 ) -> WriteResult:
-    del schema, ssl, error_policy
+    del schema, ssl, error_policy, backfill_new_fields
     table = table_name or database
     cfg = {
         "host": host,

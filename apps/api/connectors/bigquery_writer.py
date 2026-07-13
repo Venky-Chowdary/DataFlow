@@ -54,6 +54,7 @@ def write_mapped_rows(
     column_types: dict[str, str],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     error_policy: str | None = None,
+    backfill_new_fields: bool = False,
 ) -> WriteResult:
     del username, password, ssl, warehouse
     project_id = database or host
@@ -117,6 +118,14 @@ def write_mapped_rows(
         ]
         table = bigquery.Table(table_id, schema=schema_fields)
         client.create_table(table, exists_ok=True)
+
+        if backfill_new_fields:
+            table = client.get_table(table_id)
+            existing = {f.name for f in table.schema}
+            new_fields = [bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types) if col not in existing]
+            if new_fields:
+                table.schema = list(table.schema) + new_fields
+                client.update_table(table, ["schema"])
 
         mapped_rows, transform_errors = build_mapped_rows(
             headers=headers,

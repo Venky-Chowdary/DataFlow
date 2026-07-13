@@ -525,6 +525,7 @@ def write_destination_database(
     mappings: list[dict],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     validation_mode: str = "strict",
+    backfill_new_fields: bool = False,
 ) -> tuple[int, list[str], dict]:
     from .connector_capabilities import resolve_driver_type
     db_type = resolve_driver_type(endpoint.format)
@@ -562,6 +563,7 @@ def write_destination_database(
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
         "error_policy": error_policy,
+        "backfill_new_fields": backfill_new_fields,
     }
 
     if db_type == "snowflake":

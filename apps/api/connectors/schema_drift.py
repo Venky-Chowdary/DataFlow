@@ -1,0 +1,70 @@
+"""Schema-drift handling — add missing columns to existing destination tables.
+
+Used by SQLAlchemy-based writers and by native SQL writers to safely evolve
+a destination schema when the source introduces new columns (backfill mode).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def add_missing_columns(
+    engine: Any,
+    table_name: str,
+    schema: str | None,
+    target_cols: list[str],
+    sa_col_types: dict[str, Any],
+    *,
+    backfill: bool = False,
+    connection: Any | None = None,
+) -> list[str]:
+    """Return DDL statements for any columns that need to be added.
+
+    If ``backfill`` is False no changes are made.  When True, existing tables
+    are inspected and ``ALTER TABLE ADD COLUMN`` statements are issued for each
+    missing column.  Returns the list of DDL statements executed.
+    """
+    if not backfill:
+        return []
+
+    import sqlalchemy as sa
+
+    inspector = sa.inspect(engine)
+    if not inspector.has_table(table_name, schema=schema):
+        return []
+
+    existing = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+    missing = [c for c in target_cols if c not in existing]
+    if not missing:
+        return []
+
+    dialect = engine.dialect
+    dialect_name = getattr(dialect, "name", "")
+    keyword = "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
+    log: list[str] = []
+    quoted_schema = f'"{schema}"' if schema else None
+
+    def _run(conn: Any) -> None:
+        for col in missing:
+            sa_type = sa_col_types.get(col)
+            if sa_type is None:
+                continue
+            col_ddl = str(
+                sa.schema.CreateColumn(sa.Column(col, sa_type, quote=True)).compile(dialect=dialect)
+            )
+            if quoted_schema:
+                qualified = f"{quoted_schema}.\"{table_name}\""
+            else:
+                qualified = f'"{table_name}"'
+            alter = f"ALTER TABLE {qualified} {keyword} {col_ddl}"
+            conn.execute(sa.text(alter))
+            conn.commit()
+            log.append(alter)
+
+    if connection is None:
+        with engine.connect() as conn:
+            _run(conn)
+    else:
+        _run(connection)
+    return log

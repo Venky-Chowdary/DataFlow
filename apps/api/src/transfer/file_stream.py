@@ -206,6 +206,7 @@ def stream_file_to_database(
     checkpoint: Checkpoint | None = None,
     checkpoint_service: CheckpointService | None = None,
     retry_budget: RetryBudget | None = None,
+    backfill_new_fields: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -314,6 +315,7 @@ def stream_file_to_database(
             chunk_idx=chunk_idx,
             total_chunks=chunks,
             rows_so_far=written,
+            backfill_new_fields=backfill_new_fields,
         )
         batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
         written += batch_written

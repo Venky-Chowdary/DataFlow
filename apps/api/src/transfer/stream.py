@@ -335,13 +335,14 @@ def _write_batch(
     mappings: list[dict],
     column_types: dict[str, str],
     create_table: bool,
-    on_checkpoint: Callable[[int, int, int], None] | None,
+    on_checkpoint: Callable[..., None] | None,
     chunk_idx: int,
     total_chunks: int,
     rows_so_far: int,
     *,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
 ) -> tuple[int, str, dict]:
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
@@ -364,6 +365,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -398,6 +400,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -464,6 +467,7 @@ def _write_batch(
             mappings=mappings,
             column_types=column_types,
             create_table=create_table,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -499,6 +503,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -525,6 +530,7 @@ def _write_batch(
             data_rows=data_rows,
             mappings=mappings,
             column_types=column_types,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -587,6 +593,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -611,6 +618,7 @@ def stream_database_transfer(
     checkpoint: Checkpoint | None = None,
     checkpoint_service: CheckpointService | None = None,
     retry_budget: RetryBudget | None = None,
+    backfill_new_fields: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -885,6 +893,7 @@ def stream_database_transfer(
             rows_so_far=written,
             write_mode=write_mode,
             conflict_columns=pk_target_cols or None,
+            backfill_new_fields=backfill_new_fields,
         )
         batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
         written += batch_written

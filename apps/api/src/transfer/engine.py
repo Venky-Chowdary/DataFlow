@@ -731,6 +731,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
+                backfill_new_fields=request.backfill_new_fields,
             )
 
             mongo.update_job_status(
@@ -1006,6 +1007,7 @@ class UniversalTransferEngine:
                 job_id=job_id,
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
+                backfill_new_fields=request.backfill_new_fields,
             )
 
             mongo.update_job_status(

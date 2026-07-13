@@ -97,6 +97,7 @@ def write_mapped_rows(
     error_policy: str | None = None,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
 ) -> WriteResult:
     """Write records to a SQLite database file."""
     del port, username, password, ssl, write_mode, conflict_columns
@@ -125,6 +126,15 @@ def write_mapped_rows(
             if create_table:
                 col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))
                 cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({col_defs})')
+
+            if backfill_new_fields:
+                existing = {row[1] for row in cur.execute(f'PRAGMA table_info("{table_name}")')}
+                for col, typ in zip(target_cols, target_types):
+                    if col not in existing:
+                        try:
+                            cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
+                        except sqlite3.OperationalError:
+                            pass
 
             mapped_rows, transform_errors = build_mapped_rows(
                 headers=headers,

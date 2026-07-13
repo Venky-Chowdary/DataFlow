@@ -61,7 +61,9 @@ def write_mapped_rows(
     error_policy: str | None = None,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    backfill_new_fields: bool = False,
 ) -> WriteResult:
+    del backfill_new_fields
     try:
         from pymongo import MongoClient
     except ImportError:
