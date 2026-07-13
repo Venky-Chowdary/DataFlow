@@ -3,8 +3,10 @@
 from unittest.mock import MagicMock, patch
 
 from services.llm_mapping import (
+    _build_prompt,
     _extract_json,
     _normalize_llm_mapping,
+    _sanitize_samples,
     llm_provider_available,
     refine_mappings_with_llm,
 )
@@ -81,3 +83,34 @@ def test_refine_with_mock_llm(_mock_avail):
 def test_llm_provider_available_does_not_crash():
     # Smoke test — returns bool without raising
     assert isinstance(llm_provider_available(), bool)
+
+
+def test_sanitize_samples_masks_pii():
+    samples = {
+        "email": ["alice@example.com", "bob@example.com"],
+        "ssn": ["123-45-6789"],
+        "phone": ["555-123-4567"],
+        "amount": ["$1,000.00"],
+        "url": ["https://example.com/private"],
+    }
+    sanitized = _sanitize_samples(samples)
+    assert sanitized["email"] == ["<redacted>", "<redacted>"]
+    assert sanitized["ssn"] == ["<redacted>"]
+    assert sanitized["phone"] == ["<redacted>"]
+    assert sanitized["amount"] == ["$1,000.00"]
+    assert sanitized["url"] == ["<redacted>"]
+
+
+def test_build_prompt_redacts_pii_in_context():
+    prompt = _build_prompt(
+        ["email", "amount"],
+        ["email", "amount"],
+        {
+            "email": ["alice@example.com"],
+            "amount": ["$1,000.00"],
+        },
+        [],
+    )
+    assert "alice@example.com" not in prompt
+    assert "<redacted>" in prompt
+    assert "$1,000.00" in prompt

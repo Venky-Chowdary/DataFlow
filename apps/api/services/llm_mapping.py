@@ -6,6 +6,41 @@ import json
 import re
 from typing import Any
 
+
+# PII patterns we never want to send to a third-party LLM in sample data.
+_PII_RE = re.compile(
+    r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"  # email
+    r"|(\b\d{3}-\d{2}-\d{4}\b)"  # SSN
+    r"|(\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b)"  # credit card
+    r"|(\b\d{3}-\d{3}-\d{4}\b)"  # phone
+    r"|((?:\d{1,3}\.){3}\d{1,3})"  # IPv4
+    r"|(https?://[^\s]+)",  # URL
+    re.IGNORECASE,
+)
+
+
+def _sanitize_sample_value(value: str) -> str:
+    """Replace PII-like sample values with placeholders before sending to an LLM."""
+    if not isinstance(value, str):
+        value = str(value)
+    if not value:
+        return value
+    if _PII_RE.search(value):
+        return "<redacted>"
+    return value
+
+
+def _sanitize_samples(
+    samples: dict[str, list[str]] | None,
+) -> dict[str, list[str]]:
+    """Mask PII in the sample values used for LLM prompts."""
+    if not samples:
+        return {}
+    return {
+        col: [_sanitize_sample_value(v) for v in vals]
+        for col, vals in samples.items()
+    }
+
 _LLM_SYSTEM = (
     "You are a data engineering expert. Map source columns to destination columns. "
     "Respond with valid JSON only. Never invent destination columns not in the target list."
@@ -40,6 +75,8 @@ def _build_prompt(
 ) -> str:
     from src.ai.llm.prompts import COLUMN_MAPPING_PROMPT
 
+    sanitized_samples = _sanitize_samples(source_samples)
+
     context_lines = []
     if baseline:
         context_lines.append("Deterministic baseline (use as hints, improve if wrong):")
@@ -48,16 +85,16 @@ def _build_prompt(
                 f"  {m.get('source')} -> {m.get('target')} "
                 f"(conf={m.get('confidence', 0):.2f}, review={m.get('requires_review', False)})"
             )
-    if source_samples:
+    if sanitized_samples:
         for col in source_columns[:12]:
-            samples = source_samples.get(col, [])[:3]
+            samples = sanitized_samples.get(col, [])[:3]
             if samples:
                 context_lines.append(f"  samples[{col}]: {samples}")
 
     return COLUMN_MAPPING_PROMPT.format(
         source_columns=source_columns,
         target_columns=target_columns,
-        source_samples=source_samples or {},
+        source_samples=sanitized_samples,
         context="\n".join(context_lines) if context_lines else "None",
     )
 
