@@ -298,8 +298,9 @@
 }
 
 .df2-column-review-data-preview .df2-structure-table {
-  table-layout: fixed;
-  width: 100%;
+  table-layout: auto;
+  min-width: 100%;
+  width: auto;
 }
 
 .df2-column-review-data-preview .df2-structure-table th,
@@ -307,7 +308,8 @@
   padding: 5px 7px;
   font-size: 11px;
   max-width: none;
-  width: calc(100% / var(--cols, 10));
+  min-width: 120px;
+  white-space: nowrap;
 }
 
 .df2-column-review-data-preview .df2-structure-table th {
@@ -1168,4 +1170,26 @@
 
   .df2-mapping-pair-arrow { display: none; }
   .df2-mapping-pair-target { grid-column: 1 / -1; }
+}
+
+.df2-column-review-preview-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 0;
+  font-size: 11px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.df2-column-review-preview-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-column-review-preview-pager .df2-btn-sm {
+  padding: 3px 8px;
+  font-size: 11px;
 }

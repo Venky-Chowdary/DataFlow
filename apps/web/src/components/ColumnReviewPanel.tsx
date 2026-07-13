@@ -79,6 +79,8 @@ export function ColumnReviewPanel({
   const [sort, setSort] = useState<ColumnSort>("confidence-asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [previewPageSize, setPreviewPageSize] = useState(12);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const search = searchProp ?? internalSearch;
@@ -116,6 +118,10 @@ export function ColumnReviewPanel({
   useEffect(() => {
     setPage(1);
   }, [search, filter, sort, pageSize, mappings.length]);
+
+  useEffect(() => {
+    setPreviewPage(1);
+  }, [sampleRows, previewPageSize]);
 
   useEffect(() => {
     if (page > pages) setPage(pages);
@@ -169,6 +175,19 @@ export function ColumnReviewPanel({
 
   const pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
   const pageEnd = Math.min(page * pageSize, filtered.length);
+
+  const previewRows = useMemo(() => {
+    if (!sampleRows || sampleRows.length === 0) return [];
+    const start = (previewPage - 1) * previewPageSize;
+    return sampleRows.slice(start, start + previewPageSize);
+  }, [sampleRows, previewPage, previewPageSize]);
+  const previewTotal = sampleRows?.length || 0;
+  const previewPages = Math.max(1, Math.ceil(previewTotal / previewPageSize));
+  const previewStart = previewTotal === 0 ? 0 : (previewPage - 1) * previewPageSize + 1;
+  const previewEnd = Math.min(previewPage * previewPageSize, previewTotal);
+  const previewSubtitle = previewTotal
+    ? `Rows ${previewStart.toLocaleString()}–${previewEnd.toLocaleString()} of ${previewTotal.toLocaleString()} sample rows`
+    : "Source data preview";
 
   const tableControls = (
     <div className="df2-column-workbench-table-controls">
@@ -244,15 +263,53 @@ export function ColumnReviewPanel({
           <StructurePreview
             columns={mappings.map((m) => m.source)}
             schema={Object.fromEntries(mappings.map((m) => [m.source, m.inferredType || "string"]))}
-            rows={sampleRows}
+            rows={previewRows}
             rowCount={rowCount}
             title="Source data preview"
-            subtitle={`First ${Math.min(sampleRows.length, 12).toLocaleString()} rows`}
+            subtitle={previewSubtitle}
             showFieldStrip={false}
             showBadge={false}
-            maxRows={12}
-            maxCols={12}
+            maxRows={previewPageSize}
+            maxCols={mappings.length}
           />
+          <div className="df2-column-review-preview-controls">
+            <span className="df2-column-review-preview-pager">
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={previewPage <= 1}
+                onClick={() => setPreviewPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous preview rows"
+              >
+                ← Prev
+              </button>
+              <span>
+                Page {previewPage.toLocaleString()} of {previewPages.toLocaleString()}
+              </span>
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={previewPage >= previewPages}
+                onClick={() => setPreviewPage((p) => Math.min(previewPages, p + 1))}
+                aria-label="Next preview rows"
+              >
+                Next →
+              </button>
+            </span>
+            <label className="df2-column-workbench-sort-label">
+              Rows per page
+              <select
+                className="df2-input df2-select df2-column-workbench-pagesize"
+                value={previewPageSize}
+                onChange={(e) => setPreviewPageSize(Number(e.target.value))}
+                aria-label="Preview rows per page"
+              >
+                {[12, 25, 50, 100].map((size) => (
+                  <option key={size} value={size}>{size}</option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
       )}
 
