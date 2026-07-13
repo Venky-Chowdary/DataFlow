@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/EmptyState";
@@ -8,6 +8,8 @@ import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTil
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
+import { PageInsightStrip } from "../components/ui/PageInsightStrip";
+import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
@@ -19,7 +21,6 @@ import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
 import { ProofDashboard } from "../components/transfer/ProofDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
-import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { useActiveData } from "../lib/DataContext";
 import {
   analyzeDbTransfer,
@@ -41,7 +42,7 @@ import {
   updateTransferPlan,
   uploadFile,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults, GENERIC_SQL_DRIVERS, getGenericSqlPlaceholder } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults } from "../lib/connectorTypes";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -58,13 +59,11 @@ import {
   TransferResult,
   JobProgress,
 } from "../lib/types";
-import { readJobEventLog } from "../lib/jobEventLog";
 
 interface TransferPageProps {
   connectors: Connector[];
   onTransferComplete: () => void;
   onOpenSchedules?: () => void;
-  onOpenJobs?: () => void;
 }
 
 const STEP_SOURCE = 1;
@@ -81,17 +80,18 @@ const STEPS = [
   { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
 ];
 
+const RUN_LAUNCH_STAGES = [
+  "Submitting governed job request",
+  "Locking approved mapping revision",
+  "Provisioning destination writer",
+  "Opening live telemetry stream",
+] as const;
+
 const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_blob", "adls"]);
 
-const FALLBACK_DEST_TYPES = [
-  "mongodb", "postgresql", "mysql", "snowflake", "bigquery", "redshift",
-  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite", "generic_sql",
-] as const;
-const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl", "tsv", "parquet", "excel", "ndjson"] as const;
-const FALLBACK_SOURCE_DBS = [
-  "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
-  "dynamodb", "s3", "gcs", "redis", "elasticsearch", "sqlite", "generic_sql",
-] as const;
+const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
+const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl"] as const;
+const FALLBACK_SOURCE_DBS = ["mongodb", "postgresql", "snowflake", "mysql", "bigquery"] as const;
 
 const ACCEPTED_UPLOAD_EXTENSIONS = new Set(["csv", "json", "jsonl", "tsv", "parquet"]);
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
@@ -163,7 +163,7 @@ function analysisFromPipeline(
   };
 }
 
-export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, onOpenJobs }: TransferPageProps) {
+export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
@@ -174,16 +174,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
-  const [sourceManualEnabled, setSourceManualEnabled] = useState(false);
-  const [sourceManualType, setSourceManualType] = useState("postgresql");
-  const [sourceManualHost, setSourceManualHost] = useState("localhost");
-  const [sourceManualPort, setSourceManualPort] = useState(5432);
-  const [sourceManualUsername, setSourceManualUsername] = useState("");
-  const [sourceManualPassword, setSourceManualPassword] = useState("");
-  const [sourceManualDatabase, setSourceManualDatabase] = useState("");
-  const [sourceManualSchema, setSourceManualSchema] = useState("public");
-  const [sourceManualConnectionString, setSourceManualConnectionString] = useState("");
-  const [sourceGenericSqlDriver, setSourceGenericSqlDriver] = useState("postgresql");
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -214,7 +204,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   const [destUsername, setDestUsername] = useState("");
   const [destPassword, setDestPassword] = useState("");
   const [destConnectionString, setDestConnectionString] = useState("");
-  const [destGenericSqlDriver, setDestGenericSqlDriver] = useState("postgresql");
   const [destWarehouse, setDestWarehouse] = useState("");
   const [transferring, setTransferring] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -240,6 +229,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   const [liveRouteCount, setLiveRouteCount] = useState<number | null>(null);
   const [transferLaunch, setTransferLaunch] = useState<{ jobId: string; rows: number } | null>(null);
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
+  const [runStartupProgress, setRunStartupProgress] = useState(0);
+  const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
   const mappingReviewCount = columnMappings.filter(
@@ -334,7 +325,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   const currentSourceSchema = sourceKind === "file"
     ? parsed?.schema ?? {}
     : transferPlan?.source_schema ?? {};
-  const samplePreviewRows = (parsed?.data?.length ? parsed.data : parsed?.sample_data) ?? [];
+  const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
   const cursorCandidate = findColumn(currentSourceColumns, [
     /^updated_at$/i,
@@ -380,25 +371,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         kind: "file",
         format: parsed?.file_type ?? file?.name.split(".").pop() ?? "csv",
         filename: file?.name,
-      };
-    }
-    if (sourceManualEnabled && sourceKind === "database") {
-      const isMongo = sourceManualType === "mongodb";
-      const isDynamo = sourceManualType === "dynamodb";
-      const tableOrPath = isMongo ? (sourceCollection || sourceTable) : (isDynamo ? (sourceTable || sourceManualDatabase || "") : sourceTable);
-      return {
-        kind: "database",
-        format: sourceManualType,
-        connector_id: "",
-        host: sourceManualHost,
-        port: sourceManualPort,
-        username: sourceManualUsername || undefined,
-        password: sourceManualPassword || undefined,
-        database: isDynamo ? tableOrPath : sourceManualDatabase,
-        schema: sourceManualSchema,
-        table: isMongo ? undefined : tableOrPath || undefined,
-        collection: isMongo ? tableOrPath : undefined,
-        connection_string: sourceManualConnectionString || undefined,
       };
     }
     if (!sourceConnector) return { kind: "database", format: "json" };
@@ -471,16 +443,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
     targetCollection,
   ]);
 
-  const ensurePersistedPlan = useCallback(async (overrides?: Partial<{
-    target_columns: string[];
-    target_schema: Record<string, string>;
-  }>): Promise<string | null> => {
+  const ensurePersistedPlan = useCallback(async (): Promise<string | null> => {
     if (!currentSourceColumns.length) return null;
     const payload = buildPlanPayload();
-    if (overrides) {
-      if (overrides.target_columns !== undefined) payload.target_columns = overrides.target_columns;
-      if (overrides.target_schema !== undefined) payload.target_schema = overrides.target_schema;
-    }
     try {
       if (persistedPlanId) {
         await updateTransferPlan(persistedPlanId, payload);
@@ -535,11 +500,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         [];
       if (!sourceCols.length) return;
       const threshold = confidenceThresholdForMode(validationMode);
-      const planId = await ensurePersistedPlan(
-        targetCols?.length
-          ? { target_columns: targetCols, target_schema: targetSchema ?? {} }
-          : undefined,
-      );
+      const planId = await ensurePersistedPlan();
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
       try {
@@ -870,7 +831,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         samples,
         schema: data.schema,
       });
-      setTargetCollection((prev) => prev || selected.name.replace(/\.[^/.]+$/, ""));
+      if (!targetCollection) {
+        setTargetCollection(selected.name.replace(/\.[^/.]+$/, ""));
+      }
       toast({
         title: "Source profiled",
         message: `${data.row_count.toLocaleString()} rows and ${data.columns.length} columns detected.${
@@ -910,7 +873,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
       setStep(STEP_SOURCE);
       return true;
     }
-    if (isConnectorSource && !sourceConnectorId && !sourceManualEnabled) {
+    if (isConnectorSource && !sourceConnectorId) {
       toast({
         title: "Source connector required",
         message: sourceKind === "cloud"
@@ -959,8 +922,22 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   };
 
   const introspectConnectorSource = async (): Promise<boolean> => {
-    const sourceEndpoint = buildSourceEndpoint();
-    if (sourceEndpoint.kind !== "database") return false;
+    if (!sourceConnector) return false;
+    const isMongo = sourceConnector.type === "mongodb";
+    const tableOrPath = sourceKind === "cloud"
+      ? cloudPath.trim()
+      : (isMongo ? (sourceCollection || sourceTable) : sourceTable);
+    const sourceEndpoint: Record<string, unknown> = {
+      kind: "database",
+      format: sourceConnector.type,
+      connector_id: sourceConnectorId,
+      database: sourceConnector.database,
+    };
+    if (isMongo) {
+      sourceEndpoint.collection = tableOrPath;
+    } else {
+      sourceEndpoint.table = tableOrPath;
+    }
     const { source: intro } = await introspectTransferEndpoints({
       source: sourceEndpoint,
       destination: { kind: "file_export", format: "json" },
@@ -991,7 +968,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
       source_schema: intro.schema ?? {},
     }));
     setActiveData({
-      name: sourceTable || sourceCollection || sourceConnector?.name || sourceManualType || "source_stream",
+      name: tableOrPath || sourceConnector.name,
       columns: intro.columns,
       row_count: intro.row_estimate ?? 0,
       samples: columnSamples,
@@ -1056,17 +1033,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
       toast({ title: "Mapping setup failed", message, tone: "error" });
       console.error(e);
     } finally {
-      setMappingProgress(100);
-      setMappingPhase("Done — opening the editable mapping editor…");
-      window.setTimeout(() => setAnalyzing(false), 450);
+      setAnalyzing(false);
     }
   };
 
   const goToPreflight = () => {
     if (explainDestinationGap()) return;
-    setResult(null);
-    setActiveJobId(null);
-    setTransferLaunch(null);
     const threshold = confidenceThreshold;
     const pendingReview = columnMappings.filter(
       (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
@@ -1162,32 +1134,25 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
           activeMappings.length ? activeMappings : columnMappings,
         );
       } else {
-        if (!sourceConnector && !sourceManualEnabled) {
+        if (!sourceConnector) {
           toast({
             title: "Source required",
             message: sourceKind === "cloud"
               ? "Select a cloud connector and object path."
-              : "Select a source connector and table, or enable manual connection.",
+              : "Select a source connector and table.",
             tone: "warning",
           });
           setStep(STEP_SOURCE);
           return;
         }
-        const isManual = sourceManualEnabled && sourceKind === "database";
         const routePlan = await analyzeDbTransfer({
-          sourceConnectorId: isManual ? "" : sourceConnectorId,
-          sourceFormat: isManual ? sourceManualType : sourceConnector?.type ?? "",
-          sourceDatabase: isManual ? sourceManualDatabase : sourceConnector?.database,
+          sourceConnectorId: sourceConnectorId,
+          sourceFormat: sourceConnector.type,
+          sourceDatabase: sourceConnector.database,
           sourceTable: sourceKind === "cloud" ? cloudPath || undefined : sourceTable || undefined,
           sourceCollection: sourceKind === "cloud"
             ? cloudPath || undefined
             : sourceCollection || undefined,
-          sourceHost: isManual ? sourceManualHost : undefined,
-          sourcePort: isManual ? sourceManualPort : undefined,
-          sourceUsername: isManual ? sourceManualUsername : undefined,
-          sourcePassword: isManual ? sourceManualPassword : undefined,
-          sourceSchema: isManual ? sourceManualSchema : undefined,
-          sourceConnectionString: isManual ? sourceManualConnectionString : undefined,
           destFormat: destType,
           destDatabase: targetDb,
           destTable: destType !== "mongodb" ? targetCollection : undefined,
@@ -1214,15 +1179,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         setTransferPlan(routePlan);
       }
 
-      const planId = await ensurePersistedPlan(
-        destKindMode === "database" && destColumns.length
-          ? { target_columns: destColumns, target_schema: destSchemaMap }
-          : undefined,
-      );
+      const planId = await ensurePersistedPlan();
       if (planId) {
         await syncTransferPlanMappings(planId, mappings);
         const pf = await preflightTransferPlan(planId);
-        const proofDecision = pf.proof_bundle?.transfer_decision?.decision;
         if (pf.passed) {
           await approveTransferPlan(planId);
         }
@@ -1232,12 +1192,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
             title: "Validation incomplete",
             message: pf.blockers?.[0]?.message ?? `${pf.blockers?.length ?? 0} check(s) failed — use the fix actions below.`,
             tone: "warning",
-          });
-        } else if (proofDecision === "review") {
-          toast({
-            title: "Validation passed with review items",
-            message: "You can execute the transfer; review the warnings in the proof panel first.",
-            tone: "info",
           });
         } else {
           setStep(STEP_RUN);
@@ -1267,7 +1221,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
         dest_schema: destKindMode === "database" && !connectorId && destType === "snowflake" ? destSchema || "PUBLIC" : undefined,
         dest_warehouse: destKindMode === "database" && !connectorId && destType === "snowflake" ? destWarehouse || undefined : undefined,
-        destination_column_types: destKindMode === "database" ? destSchemaMap : undefined,
         sample_rows: sampleRows,
         estimated_bytes: estimatedBytes,
         sync_mode: syncMode,
@@ -1277,18 +1230,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         stream_contracts: streamContracts,
       });
       setPreflight(pf);
-      const proofDecision = pf.proof_bundle?.transfer_decision?.decision;
       if (!pf.passed) {
         toast({
           title: "Validation incomplete",
           message: pf.blockers[0]?.message ?? `${pf.blockers.length} check(s) failed — use the fix actions below.`,
           tone: "warning",
-        });
-      } else if (proofDecision === "review") {
-        toast({
-          title: "Validation passed with review items",
-          message: "You can execute the transfer; review the warnings in the proof panel first.",
-          tone: "info",
         });
       } else {
         setStep(STEP_RUN);
@@ -1347,6 +1293,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
     const enforcePreflight = destKindMode === "database";
 
     setTransferring(true);
+    setStep(STEP_RUN);
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
@@ -1356,29 +1303,18 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
-      const isManualSource = sourceManualEnabled && sourceKind === "database";
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
         sourceKind: sourceKind === "cloud" ? "database" : sourceKind,
-        sourceFormat: isManualSource ? sourceManualType : sourceConnector?.type,
-        sourceConnectorId: isConnectorSource && !isManualSource ? sourceConnectorId || undefined : undefined,
-        sourceHost: isManualSource ? sourceManualHost : undefined,
-        sourcePort: isManualSource ? sourceManualPort : undefined,
-        sourceUsername: isManualSource ? sourceManualUsername : undefined,
-        sourcePassword: isManualSource ? sourceManualPassword : undefined,
-        sourceDatabase: isManualSource ? sourceManualDatabase : sourceConnector?.database,
-        sourceSchema: isManualSource ? sourceManualSchema : undefined,
+        sourceFormat: sourceConnector?.type,
+        sourceConnectorId: isConnectorSource ? sourceConnectorId || undefined : undefined,
+        sourceDatabase: sourceConnector?.database,
         sourceTable: sourceKind === "cloud"
           ? cloudPath || undefined
-          : isManualSource
-            ? (sourceManualType !== "mongodb" ? sourceTable || sourceCollection : undefined)
-            : sourceConnector?.type !== "mongodb" ? sourceTable || sourceCollection : undefined,
+          : sourceConnector?.type !== "mongodb" ? sourceTable || sourceCollection : undefined,
         sourceCollection: sourceKind === "cloud"
           ? cloudPath || undefined
-          : isManualSource
-            ? (sourceManualType === "mongodb" ? sourceCollection || sourceTable : undefined)
-            : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
-        sourceConnectionString: isManualSource ? sourceManualConnectionString : undefined,
+          : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
@@ -1402,13 +1338,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         planId: persistedPlanId ?? undefined,
       });
       if (data.job_id && (data as { async?: boolean }).async) {
-        setTransferLaunch(null);
         setActiveJobId(data.job_id);
-        setStep(STEP_RUN);
         setTransferring(false);
         toast({
           title: "Transfer started",
-          message: "Live progress is streaming in the Run step.",
+          message: "Live theater is now tracking throughput, phases, and reconciliation in real time.",
           tone: "success",
         });
         return;
@@ -1430,24 +1364,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
     setStep(STEP_RUN);
   };
 
-  const handleJobComplete = (job: JobProgress, eventLog: string[] = []) => {
-    const persisted = eventLog.length ? eventLog : readJobEventLog(job._id);
+  const handleJobComplete = (job: JobProgress) => {
     setActiveJobId(null);
-    setTransferLaunch(null);
     setResult({
       success: job.status === "completed",
       records_transferred: job.records_processed,
       error: job.error,
-      operation: job.operation,
       destination: {
         database: job.destination_database,
         collection: job.destination_collection,
       },
-      destination_summary: job.destination_summary as TransferResult["destination_summary"],
-      job_id: job._id,
-      event_log: persisted,
     });
-    setStep(STEP_RUN);
     if (job.status === "completed") onTransferComplete();
   };
 
@@ -1501,14 +1428,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   const sourceInputsReady =
     sourceKind === "file"
       ? Boolean(parsed)
-      : sourceKind === "cloud"
-        ? Boolean(sourceConnectorId && cloudPath.trim())
-        : Boolean(
-            (sourceManualEnabled
-              ? sourceManualType && (sourceManualHost || sourceManualConnectionString) && (sourceManualDatabase || sourceManualConnectionString) && (sourceTable || sourceCollection)
-              : sourceConnectorId)
-            && (sourceTable || sourceCollection),
-          );
+      : Boolean(
+          sourceConnectorId
+          && (sourceKind === "cloud" ? cloudPath.trim() : (sourceTable || sourceCollection)),
+        );
 
   const canConfigureDest =
     sourceKind === "file"
@@ -1520,7 +1443,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
   const canRunPreflight =
     canConfigureDest &&
-    !destSchemaLoading &&
     (destKindMode === "file_export" || Boolean(targetDb && targetCollection));
 
   const needsDbPreflight = destKindMode === "database";
@@ -1574,45 +1496,118 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   useEffect(() => {
     if (!(step === STEP_MAP && analyzing)) {
       setMappingProgress(0);
-      setMappingPhase("Step 1/5 · Reading source schema and column names…");
+      setMappingPhase("Preparing schema context…");
       return;
     }
 
     const phaseForProgress = (value: number) => {
-      if (value >= 100) return "Done — opening the editable mapping editor…";
-      if (value < 25) return "Step 1/5 · Reading source schema and column names…";
-      if (value < 55) return "Step 2/5 · Sampling values and profiling data types…";
-      if (value < 80) return "Step 3/5 · Matching source fields to destination fields…";
-      if (value < 95) return "Step 4/5 · Scoring confidence and flagging policy issues…";
-      return "Step 5/5 · Building the editable mapping editor…";
+      if (value < 25) return "Preparing schema context…";
+      if (value < 55) return "Profiling semantic intent…";
+      if (value < 80) return "Matching source to destination fields…";
+      if (value < 95) return "Scoring confidence and policy checks…";
+      return "Finalizing mapping editor…";
     };
 
     setMappingProgress(10);
     setMappingPhase(phaseForProgress(10));
 
-    let timer = window.setInterval(() => {
+    const timer = window.setInterval(() => {
       setMappingProgress((prev) => {
-        if (prev >= 99) return prev;
-        const step = prev >= 90 ? 1 : prev >= 75 ? Math.max(1, Math.round(Math.random() * 3)) : Math.max(2, Math.round(Math.random() * 8));
-        const next = Math.min(prev + step, 99);
+        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 8)), 96);
         setMappingPhase(phaseForProgress(next));
         return next;
       });
-    }, 220);
+    }, 260);
 
     return () => window.clearInterval(timer);
   }, [step, analyzing]);
 
+  useEffect(() => {
+    const isLaunching = step === STEP_RUN && transferring && !activeJobId && !result;
+    if (!isLaunching) {
+      setRunStartupProgress(0);
+      setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
+      return;
+    }
+
+    const phaseForProgress = (value: number) => {
+      if (value < 25) return RUN_LAUNCH_STAGES[0];
+      if (value < 50) return RUN_LAUNCH_STAGES[1];
+      if (value < 75) return RUN_LAUNCH_STAGES[2];
+      return RUN_LAUNCH_STAGES[3];
+    };
+
+    setRunStartupProgress(12);
+    setRunStartupPhase(phaseForProgress(12));
+
+    const timer = window.setInterval(() => {
+      setRunStartupProgress((prev) => {
+        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 6)), 94);
+        setRunStartupPhase(phaseForProgress(next));
+        return next;
+      });
+    }, 280);
+
+    return () => window.clearInterval(timer);
+  }, [step, transferring, activeJobId, result]);
+
+  const transferInsightTone =
+    transferring || activeJobId
+      ? "live"
+      : preflight && !preflight.passed
+        ? "warn"
+        : preflight?.passed
+          ? "ok"
+          : "info";
+  const transferInsightPill = transferring ? "Running" : STEPS[step - 1]?.label ?? `Step ${step}`;
+  const transferInsightMessage =
+    transferring || activeJobId
+      ? "Migration in progress — batch throughput and reconciliation stream to Job Theater."
+      : step === STEP_SOURCE
+        ? "Connect a file, database, or cloud object store as your source."
+        : step === STEP_DESTINATION
+          ? "Choose destination engine, connector, and sync policy before mapping."
+          : step === STEP_MAP
+          ? `${columnMappings.length || analysis?.columns.length || 0} columns mapped — review semantic matches against destination schema.`
+          : step === STEP_VALIDATE
+              ? preflight?.passed
+                ? "All preflight gates passed — ready to execute."
+                : preflight
+                  ? "Preflight reported issues — resolve before running."
+                  : "Run eight preflight gates before writing data."
+              : canExecute
+                ? "Execute the governed transfer with checksum proof."
+                : "Complete prior steps to unlock execution.";
+
   return (
     <PageShell
       wide
-      fit
       showHeader={false}
       className="df2-page-transfer-studio"
       title="Transfer Studio"
       description="Source → Destination → Map → Validate → Run"
     >
-      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`}>
+      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
+      <PageInsightStrip
+        tone={transferInsightTone}
+        pill={transferInsightPill}
+        message={transferInsightMessage}
+      />
+      <PageMetricsRow
+        compact
+        columns={4}
+        metrics={[
+          { label: "Step", value: `${step}/5`, icon: "transfer" },
+          { label: "Columns", value: columnMappings.length || analysis?.columns.length || "—", icon: "sparkle" },
+          {
+            label: "Preflight",
+            value: preflight?.passed ? "Passed" : preflight ? "Issues" : "Pending",
+            tone: preflight?.passed ? "green" : preflight ? "red" : undefined,
+            icon: "gate",
+          },
+          { label: "Source rows", value: parsed?.row_count != null ? parsed.row_count.toLocaleString() : "—", icon: "trend" },
+        ]}
+      />
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
@@ -1660,7 +1655,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
           mappingReviewCount={mappingReviewCount}
           confidenceThreshold={confidenceThreshold}
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-          sampleRows={samplePreviewRows}
           sourceColumnCount={mapSourceColumnCount}
           llmUsed={llmMappingUsed}
           onChangeMappings={setColumnMappings}
@@ -1701,7 +1695,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 <span>{mappingPhase}</span>
               </div>
               <div className="df2-mapping-progress-track">
-                <span className={`df2-mapping-progress-fill ${mappingProgress >= 85 ? "is-finishing" : ""} ${analyzing ? "is-animating" : ""}`} style={{ width: `${mappingProgress}%` }} />
+                <span className="df2-mapping-progress-fill" style={{ width: `${mappingProgress}%` }} />
               </div>
             </div>
           </div>
@@ -1766,11 +1760,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 <div className="df2-upload-formats">
                   {UPLOAD_FORMATS.map((fmt) => (
                     <span key={fmt} className="df2-upload-format-chip">{fmt}</span>
-                  )).reduce((acc: ReactNode[], chip, i) => {
-                    acc.push(chip);
-                    if (i < UPLOAD_FORMATS.length - 1) acc.push(" ");
-                    return acc;
-                  }, [])}
+                  ))}
                 </div>
               </div>
               {file && parsed && (
@@ -1841,203 +1831,47 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 </p>
               </>
             )
+          ) : dbSourceConnectors.length === 0 ? (
+            <EmptyState
+              icon="connectors"
+              title="No database connectors"
+              description="Add a PostgreSQL, MySQL, MongoDB, or warehouse connector first."
+              compact
+            />
           ) : (
-            <div className="df2-source-connection">
-              {dbSourceConnectors.length > 0 && (
-                <div className="df2-form-row df2-connection-source-toggle">
-                  <label className="df2-label">Connection source</label>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-ghost df2-btn-sm"
-                    onClick={() => {
-                      setSourceManualEnabled((v) => !v);
-                      setSourceConnectorId("");
-                    }}
-                  >
-                    {sourceManualEnabled ? "Use a saved connector" : "Connect manually"}
-                  </button>
-                </div>
-              )}
-              {sourceManualEnabled || dbSourceConnectors.length === 0 ? (
-                <div className="df2-form-rows df2-connection-form">
-                  <div className="df2-form-row">
-                    <div className="df2-field df2-field-sm">
-                      <label className="df2-label">Engine</label>
-                      <select
-                        className="df2-select"
-                        value={sourceManualType}
-                        onChange={(e) => setSourceManualType(e.target.value)}
-                      >
-                        {(liveSourceDbs.length ? liveSourceDbs : FALLBACK_SOURCE_DBS).map((t) => (
-                          <option key={t} value={t}>
-                            {getConnectorDefaults(t).label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    {sourceManualType === "generic_sql" ? (
-                      <>
-                        <div className="df2-field df2-field-sm">
-                          <label className="df2-label">SQL engine</label>
-                          <select
-                            className="df2-select"
-                            value={sourceGenericSqlDriver}
-                            onChange={(e) => setSourceGenericSqlDriver(e.target.value)}
-                          >
-                            {GENERIC_SQL_DRIVERS.map((d) => (
-                              <option key={d.id} value={d.id}>{d.label}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="df2-field df2-field-flex">
-                          <label className="df2-label">Connection string</label>
-                          <input
-                            className="df2-input"
-                            value={sourceManualConnectionString}
-                            onChange={(e) => setSourceManualConnectionString(e.target.value)}
-                            placeholder={getGenericSqlPlaceholder(sourceGenericSqlDriver)}
-                          />
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="df2-field df2-field-flex">
-                          <label className="df2-label">Host / endpoint</label>
-                          <input
-                            className="df2-input"
-                            value={sourceManualHost}
-                            onChange={(e) => setSourceManualHost(e.target.value)}
-                            placeholder={sourceManualType === "dynamodb" ? "us-east-1" : "localhost"}
-                          />
-                        </div>
-                        <div className="df2-field df2-field-xs">
-                          <label className="df2-label">Port</label>
-                          <input
-                            className="df2-input"
-                            type="number"
-                            value={sourceManualPort}
-                            onChange={(e) => setSourceManualPort(parseInt(e.target.value || "0", 10))}
-                            placeholder={String(getConnectorDefaults(sourceManualType).port)}
-                          />
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  {sourceManualType !== "generic_sql" && (
-                  <div className="df2-form-row">
-                    <div className="df2-field df2-field-md">
-                      <label className="df2-label">Database</label>
-                      <input
-                        className="df2-input"
-                        value={sourceManualDatabase}
-                        onChange={(e) => setSourceManualDatabase(e.target.value)}
-                        placeholder={sourceManualType === "dynamodb" ? "table-name" : "dataflow"}
-                      />
-                    </div>
-                    {["postgresql", "snowflake", "redshift"].includes(sourceManualType) && (
-                      <div className="df2-field df2-field-md">
-                        <label className="df2-label">Schema</label>
-                        <input
-                          className="df2-input"
-                          value={sourceManualSchema}
-                          onChange={(e) => setSourceManualSchema(e.target.value)}
-                          placeholder="public"
-                        />
-                      </div>
-                    )}
-                    <div className="df2-field df2-field-md">
-                      <label className="df2-label">Username</label>
-                      <input
-                        className="df2-input"
-                        value={sourceManualUsername}
-                        onChange={(e) => setSourceManualUsername(e.target.value)}
-                        placeholder="dataflow"
-                      />
-                    </div>
-                    <div className="df2-field df2-field-md">
-                      <label className="df2-label">Password</label>
-                      <input
-                        className="df2-input"
-                        type="password"
-                        value={sourceManualPassword}
-                        onChange={(e) => setSourceManualPassword(e.target.value)}
-                        placeholder="••••••••"
-                      />
-                    </div>
-                  </div>
-                  )}
-                  {sourceManualType !== "generic_sql" && (
-                  <div className="df2-form-row">
-                    <div className="df2-field df2-field-flex">
-                      <label className="df2-label">Connection string (optional — overrides host fields)</label>
-                      <input
-                        className="df2-input"
-                        value={sourceManualConnectionString}
-                        onChange={(e) => setSourceManualConnectionString(e.target.value)}
-                        placeholder="postgres://user:pass@host:5432/db or /path/to/db.sqlite"
-                      />
-                    </div>
-                  </div>
-                  )}
-                  <div className="df2-form-row">
-                    <div className="df2-field df2-field-md">
-                      <label className="df2-label">
-                        {sourceManualType === "mongodb" ? "Collection" : sourceManualType === "dynamodb" ? "Table" : "Table"}
-                      </label>
-                      <input
-                        className="df2-input"
-                        value={sourceManualType === "mongodb" ? sourceCollection : sourceTable}
-                        onChange={(e) => {
-                          if (sourceManualType === "mongodb") setSourceCollection(e.target.value);
-                          else setSourceTable(e.target.value);
-                        }}
-                        placeholder={
-                          sourceManualType === "mongodb"
-                            ? "orders"
-                            : sourceManualType === "dynamodb"
-                              ? sourceManualDatabase || "orders"
-                              : "public.orders"
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="df2-form-row">
-                  <ConnectorSelect
-                    id="source-connector"
-                    label="Source Connector"
-                    value={sourceConnectorId}
-                    onChange={setSourceConnectorId}
-                    connectors={dbSourceConnectors}
-                    placeholder="Select connector…"
-                  />
-                  <div className="df2-field df2-field-md">
-                    <label className="df2-label">
-                      {sourceConnector?.type === "mongodb"
-                        ? "Collection"
-                        : sourceConnector?.type === "dynamodb"
-                          ? "Table"
-                          : "Table"}
-                    </label>
-                    <input
-                      className="df2-input"
-                      value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
-                      onChange={(e) => {
-                        if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
-                        else setSourceTable(e.target.value);
-                      }}
-                      placeholder={
-                        sourceConnector?.type === "mongodb"
-                          ? "orders"
-                          : sourceConnector?.type === "dynamodb"
-                            ? sourceConnector.database || "orders"
-                            : "public.orders"
-                      }
-                    />
-                  </div>
-                </div>
-              )}
+            <div className="df2-form-row">
+              <ConnectorSelect
+                id="source-connector"
+                label="Source Connector"
+                value={sourceConnectorId}
+                onChange={setSourceConnectorId}
+                connectors={dbSourceConnectors}
+                placeholder="Select connector…"
+              />
+              <div className="df2-field df2-field-md">
+                <label className="df2-label">
+                  {sourceConnector?.type === "mongodb"
+                    ? "Collection"
+                    : sourceConnector?.type === "dynamodb"
+                      ? "Table"
+                      : "Table"}
+                </label>
+                <input
+                  className="df2-input"
+                  value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
+                  onChange={(e) => {
+                    if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
+                    else setSourceTable(e.target.value);
+                  }}
+                  placeholder={
+                    sourceConnector?.type === "mongodb"
+                      ? "orders"
+                      : sourceConnector?.type === "dynamodb"
+                        ? sourceConnector.database || "orders"
+                        : "public.orders"
+                  }
+                />
+              </div>
             </div>
           )}
 
@@ -2055,8 +1889,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 dbConnectors={dbSourceConnectors}
                 cloudConnectors={cloudSourceConnectors}
                 uploading={uploading}
-                sourceManual={sourceManualEnabled}
-                sourceManualType={sourceManualType}
               />
             </div>
           </div>
@@ -2151,12 +1983,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
           />
 
           {!connectorId && destType !== "bigquery" && (
-          <div className="df2-dest-section df2-dest-manual-fields df2-connection-form">
-            <label className="df2-label">Database connection</label>
+          <div className="df2-dest-section df2-dest-manual-fields">
+            <label className="df2-label">Connection</label>
             <div className="df2-form-row">
               {destType === "mongodb" ? (
                 <div className="df2-field df2-field-flex">
-                  <label className="df2-label">Connection string (optional)</label>
+                  <label className="df2-label">Connection String (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
@@ -2165,41 +1997,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                   />
                 </div>
               ) : null}
-              {destType === "generic_sql" ? (
+              <div className="df2-field df2-field-md">
+                <label className="df2-label">Host</label>
+                <input className="df2-input" value={destHost} onChange={(e) => setDestHost(e.target.value)} />
+              </div>
+              <div className="df2-field df2-field-sm">
+                <label className="df2-label">Port</label>
+                <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
+              </div>
+              {destType !== "mongodb" && (
                 <>
-                  <div className="df2-field df2-field-sm">
-                    <label className="df2-label">SQL engine</label>
-                    <select
-                      className="df2-select"
-                      value={destGenericSqlDriver}
-                      onChange={(e) => setDestGenericSqlDriver(e.target.value)}
-                    >
-                      {GENERIC_SQL_DRIVERS.map((d) => (
-                        <option key={d.id} value={d.id}>{d.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="df2-field df2-field-flex">
-                    <label className="df2-label">Connection string</label>
-                    <input
-                      className="df2-input"
-                      value={destConnectionString}
-                      onChange={(e) => setDestConnectionString(e.target.value)}
-                      placeholder={getGenericSqlPlaceholder(destGenericSqlDriver)}
-                    />
-                  </div>
-                </>
-              ) : null}
-              {destType !== "generic_sql" && destType !== "mongodb" && (
-                <>
-                  <div className="df2-field df2-field-md">
-                    <label className="df2-label">Host</label>
-                    <input className="df2-input" value={destHost} onChange={(e) => setDestHost(e.target.value)} />
-                  </div>
-                  <div className="df2-field df2-field-sm">
-                    <label className="df2-label">Port</label>
-                    <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
-                  </div>
                   <div className="df2-field df2-field-140">
                     <label className="df2-label">Username</label>
                     <input className="df2-input" value={destUsername} onChange={(e) => setDestUsername(e.target.value)} />
@@ -2556,31 +2363,29 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
       {step === STEP_VALIDATE && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split">
-          <div className="df2-validate-scroll">
-            <div className="df2-proof-dashboard-wrap">
-              <ProofDashboard preflight={preflight} running={preflighting} />
-            </div>
-            <PreflightTimeline
-              result={preflight ?? {
-                passed: false,
-                passed_count: 0,
-                total_gates: 11,
-                readiness_score: 0,
-                gates: [],
-                blockers: [],
-              }}
-              running={preflighting}
-              confidenceThreshold={confidenceThreshold}
-              compact
-              hideActions
-            />
+          <div className="df2-proof-dashboard-wrap">
+            <ProofDashboard preflight={preflight} running={preflighting} />
           </div>
+          <PreflightTimeline
+            result={preflight ?? {
+              passed: false,
+              passed_count: 0,
+              total_gates: 11,
+              readiness_score: 0,
+              gates: [],
+              blockers: [],
+            }}
+            running={preflighting}
+            confidenceThreshold={confidenceThreshold}
+            compact
+            hideActions
+          />
         </div>
       )}
 
       {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body df2-run-center df2-run-ready">
+          <div className="df2-card-body df2-run-center">
             <div className="df2-run-readiness" aria-label="Run readiness summary">
               <div className="df2-run-readiness-head">
                 <span className="df2-badge df2-badge-live">
@@ -2595,49 +2400,69 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 <DtIcon name="transfer" size={14} />
                 <strong>{mapDestRouteLabel}</strong>
               </div>
+              <p>
+                Execute now to start governed transfer with live theater progress and reconciliation evidence.
+              </p>
             </div>
-            <div className="df2-run-ready-body">
-              <ProofDashboard preflight={preflight} running={false} />
-              <PreflightTimeline
-                result={preflight ?? {
-                  passed: false,
-                  passed_count: 0,
-                  total_gates: 11,
-                  readiness_score: 0,
-                  gates: [],
-                  blockers: [],
-                }}
-                running={false}
-                confidenceThreshold={confidenceThreshold}
-                compact
-                hideActions
-              />
-            </div>
-            <div className="df2-run-ready-actions">
-              <button type="button" className="df2-btn" onClick={() => setStep(STEP_VALIDATE)}>
-                <DtIcon name="chevron-left" size={16} />Back
-              </button>
-              <button type="button" className="df2-btn df2-btn-primary" onClick={() => void executeTransfer()}>
-                <DtIcon name="arrow-right" size={16} />Execute transfer
-              </button>
-            </div>
+            <EmptyState
+              icon="transfer"
+              title="Ready to transfer"
+              description="Preflight passed — execute the transfer to move your data."
+              action={
+                <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={() => void executeTransfer()}>
+                  <DtIcon name="transfer" size={18} /> Execute Transfer
+                </button>
+              }
+            />
           </div>
         </div>
       )}
 
       {step === STEP_RUN && transferring && !activeJobId && !result && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body df2-run-center df2-analyzing df2-run-starting">
-            <div className="df2-validate-stage-glow" aria-hidden />
-            <ButtonLoader label="Starting transfer…" />
-            <p className="df2-run-starting-hint">Opening live job theater…</p>
+          <div className="df2-card-body df2-run-launch">
+            <span className="df2-run-launch-kicker">Live control plane</span>
+            <h3>Transfer engine is preparing execution</h3>
+            <p>{runStartupPhase}</p>
+
+            <div className="df2-run-launch-route" aria-label="Transfer route">
+              <strong title={sourceLabel}>{sourceLabel}</strong>
+              <DtIcon name="transfer" size={14} />
+              <strong title={mapDestRouteLabel}>{mapDestRouteLabel}</strong>
+            </div>
+
+            <div className="df2-run-launch-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runStartupProgress}>
+              <div className="df2-run-launch-progress-meta">
+                <span>Initializing transfer job</span>
+                <strong>{runStartupProgress}%</strong>
+              </div>
+              <div className="df2-run-launch-progress-track">
+                <span className="df2-run-launch-progress-fill" style={{ width: `${runStartupProgress}%` }} />
+              </div>
+            </div>
+
+            <div className="df2-run-launch-stages" aria-label="Launch stages">
+              {RUN_LAUNCH_STAGES.map((stage, idx) => {
+                const state = runStartupProgress >= (idx + 1) * 25 ? "done" : runStartupProgress >= idx * 25 ? "active" : "pending";
+                return (
+                  <span key={stage} className={`df2-run-launch-stage ${state}`}>
+                    {stage}
+                  </span>
+                );
+              })}
+            </div>
+
+            <div className="df2-run-launch-foot">
+              <Spinner size="sm" />
+              <span>Establishing telemetry stream and destination writer...</span>
+            </div>
           </div>
         </div>
       )}
 
       {step === STEP_RUN && activeJobId && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body df2-run-theater-host">
+          <div className="df2-card-body">
             <JobTheater
               jobId={activeJobId}
               sourceLabel={file?.name || sourceConnector?.name}
@@ -2653,16 +2478,34 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
       {step === STEP_RUN && result && !activeJobId && (
         <div className={`df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-banner df2-transfer-panel ${result.success ? "success" : "error"}`}>
-          <TransferResultDashboard
-            result={result}
-            sourceLabel={sourceLabel}
-            sourceType={mapSourceType}
-            destLabel={mapDestRouteLabel}
-            destType={destKindMode === "file_export" ? exportFormat : destType}
-            onNewTransfer={() => setStep(STEP_SOURCE)}
-            onViewJobs={onOpenJobs}
-            onSchedule={() => void handleScheduleRoute()}
-          />
+          {result.success ? (
+            <div>
+              <span className="df2-badge df2-badge-live df2-result-badge"><DtIcon name="check" size={14} /> Transfer Complete</span>
+              <p className="df2-result-stat">{result.records_transferred?.toLocaleString()} records transferred</p>
+              {result.destination?.path && (
+                <p className="df2-result-meta">Exported to {result.destination.path}</p>
+              )}
+              {result.ddl_executed && result.ddl_executed.length > 0 && (
+                <ul className="df2-result-ddl">
+                  {result.ddl_executed.map((d) => <li key={d}>{d}</li>)}
+                </ul>
+              )}
+              <div className="df2-result-actions">
+                <button type="button" className="df2-btn df2-btn-primary" onClick={() => setStep(STEP_SOURCE)}>
+                  <DtIcon name="plus" size={14} /> New transfer
+                </button>
+                <button
+                  type="button"
+                  className="df2-btn"
+                  onClick={() => void handleScheduleRoute()}
+                >
+                  <DtIcon name="activity" size={14} /> Schedule this route
+                </button>
+              </div>
+            </div>
+          ) : (
+            <span className="df2-badge df2-badge-error"><DtIcon name="x" size={14} /> {result.error || "Transfer failed"}</span>
+          )}
         </div>
       )}
       </main>

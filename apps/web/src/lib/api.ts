@@ -532,7 +532,30 @@ export function streamJobProgress(
     destination_summary: raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined,
+    phases: Array.isArray(raw.phases)
+      ? raw.phases
+          .map((p) => {
+            if (!p || typeof p !== "object") return null;
+            const phase = p as Record<string, unknown>;
+            const name = String(phase.name ?? "").trim();
+            const rawStatus = String(phase.status ?? "pending").toLowerCase();
+            const status: "pending" | "active" | "done" | "failed" | "skipped" =
+              rawStatus === "active" || rawStatus === "done" || rawStatus === "failed" || rawStatus === "skipped"
+                ? rawStatus
+                : "pending";
+            if (!name) return null;
+            return {
+              name,
+              status,
+              message: phase.message ? String(phase.message) : undefined,
+            };
+          })
+          .filter((p): p is NonNullable<typeof p> => Boolean(p))
+      : undefined,
     created_at: String(raw.created_at ?? new Date().toISOString()),
+    updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
+    started_at: raw.started_at ? String(raw.started_at) : undefined,
+    completed_at: raw.completed_at ? String(raw.completed_at) : undefined,
   });
 
   const startPolling = () => {
