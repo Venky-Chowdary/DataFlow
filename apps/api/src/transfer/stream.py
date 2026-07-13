@@ -636,6 +636,7 @@ def stream_database_transfer(
 
     from services.sync_cursor import (
         build_cursor_key,
+        compare_cursor_values,
         get_watermark,
         map_source_to_target,
         max_cursor_value,
@@ -932,7 +933,7 @@ def stream_database_transfer(
         written += batch_written
         if incremental and cursor_source_col:
             batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
-            if batch_max and (running_cursor is None or batch_max > running_cursor):
+            if batch_max and (running_cursor is None or compare_cursor_values(batch_max, running_cursor) > 0):
                 running_cursor = batch_max
         rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
         warning_samples.extend(dest_summary.get("warnings", []) or [])

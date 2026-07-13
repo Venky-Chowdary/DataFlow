@@ -140,6 +140,24 @@ def max_cursor_value(rows: list[list[str]], headers: list[str], cursor_column: s
     return max_watermark(str_values, wm_type)
 
 
+def compare_cursor_values(a: str | None, b: str | None) -> int:
+    """Compare two cursor values using the same typed watermark logic.
+
+    Returns -1 if a < b, 0 if equal, 1 if a > b.  None is treated as less
+    than any value.
+    """
+    if a is None and b is None:
+        return 0
+    if a is None:
+        return -1
+    if b is None:
+        return 1
+    from services.cdc_engine import compare_watermarks, infer_watermark_type
+
+    wm_type = infer_watermark_type([str(a), str(b)])
+    return compare_watermarks(str(a), str(b), wm_type)
+
+
 def requires_incremental(sync_mode: str) -> bool:
     return (sync_mode or "").lower() in INCREMENTAL_MODES
 

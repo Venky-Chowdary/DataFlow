@@ -211,6 +211,66 @@ def test_engine_stream_sqlite_to_sqlite_incremental_deduped():
         assert new_id == (501,)
 
 
+def test_engine_stream_sqlite_to_sqlite_incremental_cursor_rollover():
+    """Incremental cursor must advance numerically, not lexicographically."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = tmp_path / "src.db"
+        dst = tmp_path / "dst.db"
+
+        conn = sqlite3.connect(src)
+        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, amount TEXT)")
+        for i in range(1, 6):
+            conn.execute("INSERT INTO orders VALUES (?, ?)", (i, str(i * 1.5)))
+        conn.execute("INSERT INTO orders VALUES (?, ?)", (1000, "1500.0"))
+        conn.commit()
+        conn.close()
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        request = TransferRequest(
+            source=source,
+            destination=destination,
+            sync_mode="incremental_deduped",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "sync_mode": "incremental_deduped",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                }
+            ],
+            skip_preflight=True,
+        )
+
+        engine = UniversalTransferEngine()
+        result = engine.execute_tracked(request, "000000000000000000000000")
+        assert result.success is True
+
+        conn = sqlite3.connect(src)
+        conn.execute("INSERT INTO orders (id, amount) VALUES (?, ?)", (2000, "3000.0"))
+        conn.execute("UPDATE orders SET amount = '9999.0' WHERE id = 1")
+        conn.commit()
+        conn.close()
+
+        result = engine.execute_tracked(request, "000000000000000000000000")
+        assert result.success is True
+
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        updated = conn.execute("SELECT amount FROM orders_out WHERE id = 1").fetchone()[0]
+        new_id = conn.execute("SELECT id FROM orders_out WHERE id = 2000").fetchone()
+        conn.close()
+        assert count == 7
+        assert updated == 9999.0
+        assert new_id == (2000,)
+
+
 def test_engine_stream_sqlite_resume_no_checkpoint_drops_partial_destination():
     """If a resume has no checkpoint, the destination must be dropped so no partial
     data from a previous failed run is duplicated.
