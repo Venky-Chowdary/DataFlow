@@ -178,6 +178,8 @@ export interface TransferResult {
     target_checksum?: string;
   };
   job_id?: string;
+  /** Full client-captured event log from live theater (persisted for result dashboard) */
+  event_log?: string[];
 }
 
 export interface TransferPlan {
