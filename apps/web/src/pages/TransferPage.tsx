@@ -58,6 +58,7 @@ import {
   TransferResult,
   JobProgress,
 } from "../lib/types";
+import { readJobEventLog } from "../lib/jobEventLog";
 
 interface TransferPageProps {
   connectors: Connector[];
@@ -1429,7 +1430,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
     setStep(STEP_RUN);
   };
 
-  const handleJobComplete = (job: JobProgress) => {
+  const handleJobComplete = (job: JobProgress, eventLog: string[] = []) => {
+    const persisted = eventLog.length ? eventLog : readJobEventLog(job._id);
     setActiveJobId(null);
     setTransferLaunch(null);
     setResult({
@@ -1443,6 +1445,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
       },
       destination_summary: job.destination_summary as TransferResult["destination_summary"],
       job_id: job._id,
+      event_log: persisted,
     });
     setStep(STEP_RUN);
     if (job.status === "completed") onTransferComplete();
@@ -2593,7 +2596,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
               </div>
             </div>
             <div className="df2-run-ready-body">
-              <ProofDashboard preflight={preflight} running={false} defaultOpen={false} />
+              <ProofDashboard preflight={preflight} running={false} />
               <PreflightTimeline
                 result={preflight ?? {
                   passed: false,

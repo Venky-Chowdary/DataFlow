@@ -76,57 +76,51 @@ export function ValidateActionsRail({
             </p>
 
             {(preflight.proof_bundle || preflight.blockers.length > 0) && (
-              <details className="df2-disclosure df2-validate-rail-details">
-                <summary>
-                  <span>Proof details</span>
-                  <span className="df2-disclosure-chevron" aria-hidden />
-                </summary>
-                <div className="df2-validate-rail-details-body">
-                  {preflight.proof_bundle && (
-                    <div className="df2-validate-rail-metrics">
-                      <span className="df2-validate-rail-metric">
-                        <small>Confidence</small>
-                        <strong>{confidenceBand}</strong>
-                      </span>
-                      <span className="df2-validate-rail-metric">
-                        <small>Quality</small>
-                        <strong>{qualityGrade}</strong>
-                      </span>
-                      <span className="df2-validate-rail-metric">
-                        <small>Semantic</small>
-                        <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
-                      </span>
-                      <span className="df2-validate-rail-metric">
-                        <small>Compliance</small>
-                        <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
-                      </span>
-                    </div>
-                  )}
-                  {preflight.blockers.length > 0 && (
-                    <ul className="df2-validate-rail-blockers">
-                      {preflight.blockers.slice(0, 4).map((b) => (
-                        <li key={b.id}>
-                          {b.message}
-                          {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
-                    <div className="df2-validate-rail-review">
-                      <strong><DtIcon name="shield" size={14} /> Review required</strong>
-                      <p>{proofReason}</p>
-                      {proofWarnings.length > 0 && (
-                        <ul>
-                          {proofWarnings.map((w, i) => (
-                            <li key={i}>{w}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </details>
+              <div className="df2-validate-rail-details-body">
+                {preflight.proof_bundle && (
+                  <div className="df2-validate-rail-metrics">
+                    <span className="df2-validate-rail-metric">
+                      <small>Confidence</small>
+                      <strong>{confidenceBand}</strong>
+                    </span>
+                    <span className="df2-validate-rail-metric">
+                      <small>Quality</small>
+                      <strong>{qualityGrade}</strong>
+                    </span>
+                    <span className="df2-validate-rail-metric">
+                      <small>Semantic</small>
+                      <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
+                    </span>
+                    <span className="df2-validate-rail-metric">
+                      <small>Compliance</small>
+                      <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
+                    </span>
+                  </div>
+                )}
+                {preflight.blockers.length > 0 && (
+                  <ul className="df2-validate-rail-blockers">
+                    {preflight.blockers.slice(0, 4).map((b) => (
+                      <li key={b.id}>
+                        {b.message}
+                        {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
+                  <div className="df2-validate-rail-review">
+                    <strong><DtIcon name="shield" size={14} /> Review required</strong>
+                    <p>{proofReason}</p>
+                    {proofWarnings.length > 0 && (
+                      <ul>
+                        {proofWarnings.map((w, i) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         )}

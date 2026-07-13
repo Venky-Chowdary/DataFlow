@@ -2141,70 +2141,46 @@
   overflow: visible !important;
 }
 
-/* Compact proof strip (collapsed by default) */
-.df2-proof-dashboard.df2-disclosure {
-  padding: 0 !important;
-  gap: 0 !important;
-  overflow: hidden;
-}
-
-.df2-proof-dashboard-summary-bar {
-  display: flex !important;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px !important;
-  min-height: 44px;
-}
-
-.df2-proof-dashboard-summary-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex: 1;
-  flex-wrap: wrap;
-}
-
-.df2-proof-dashboard-summary-main strong {
-  font-size: 13px;
-  color: #0f172a;
-}
-
-.df2-proof-dashboard-summary-meta {
-  font-size: 12px;
-  color: #64748b;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.df2-proof-dashboard-body {
+/* Compact always-open proof dashboard (no disclosure) */
+.df2-proof-dashboard.df2-proof-dashboard-open {
+  padding: 12px 14px !important;
+  gap: 10px !important;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 0 12px 12px;
-  border-top: 1px solid #e2e8f0;
 }
 
-.df2-proof-dashboard .df2-proof-dashboard-grid {
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-head {
+  display: block !important;
+}
+
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-kicker {
+  display: block !important;
+  margin: 0 0 2px !important;
+}
+
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-title {
+  font-size: 14px !important;
+}
+
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
   gap: 8px !important;
-  padding-top: 10px;
 }
 
-.df2-proof-dashboard .df2-proof-dashboard-stat {
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-stat {
   padding: 8px 10px !important;
 }
 
-.df2-proof-dashboard .df2-proof-dashboard-stat strong {
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-stat strong {
   font-size: 15px !important;
 }
 
-.df2-proof-dashboard .df2-proof-dashboard-head,
-.df2-proof-dashboard .df2-proof-dashboard-trust,
-.df2-proof-dashboard .df2-proof-dashboard-kicker {
-  display: none !important;
+.df2-proof-dashboard.df2-proof-dashboard-open .df2-proof-dashboard-summary {
+  margin: 0 !important;
+  font-size: 12px !important;
 }
+
+/* Legacy disclosure styles no longer used for proof */
 
 /* Compact validating stage */
 .df2-validate-stage {
@@ -2561,7 +2537,7 @@
   color: #64748b;
 }
 
-/* Live job theater */
+/* Live job theater — compact top + persistent bottom log */
 .df2-run-step > .df2-card-body.df2-run-theater-host {
   flex: 1 1 0 !important;
   min-height: 0 !important;
@@ -2579,59 +2555,72 @@
   width: 100%;
   display: flex !important;
   flex-direction: column !important;
-  gap: 12px;
-  padding: 14px 16px !important;
-  overflow-y: auto !important;
+  gap: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
   background: #fff;
   border: none;
   border-radius: 0;
   box-sizing: border-box;
 }
 
-.df2-theater-v3-loading {
+.df2-theater-v3-top {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 46%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 10px;
+}
+
+.df2-theater-v3-loading .df2-theater-v3-top {
+  flex: 0 0 auto;
+  max-height: none;
   align-items: center;
   justify-content: center;
   text-align: center;
   color: #64748b;
-  gap: 10px;
+  padding: 24px 14px;
 }
 
 .df2-theater-v3-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
 .df2-theater-v3-route {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .df2-theater-v3-endpoint {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .df2-theater-v3-endpoint span {
   display: block;
-  font-size: 11px;
+  font-size: 10px;
   color: #64748b;
 }
 
 .df2-theater-v3-endpoint strong {
   display: block;
-  font-size: 13px;
+  font-size: 12.5px;
   color: #0f172a;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 200px;
+  max-width: 180px;
 }
 
 .df2-theater-v3-arrow {
@@ -2646,7 +2635,7 @@
 }
 
 .df2-theater-v3-job-id {
-  font-size: 12px;
+  font-size: 11px;
   color: #64748b;
   font-family: var(--df-font-mono, ui-monospace, monospace);
 }
@@ -2654,23 +2643,23 @@
 .df2-theater-v3-progress-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: 8px;
+  padding: 10px 12px;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 10px;
   background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
 }
 
 .df2-theater-v3-progress-top {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
 }
 
 .df2-theater-v3-ring {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 48px;
+  height: 48px;
   flex-shrink: 0;
 }
 
@@ -2697,45 +2686,38 @@
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  line-height: 1.1;
 }
 
 .df2-theater-v3-ring-label strong {
-  font-size: 12px;
+  font-size: 11px;
   color: #0f172a;
-}
-
-.df2-theater-v3-ring-label small {
-  font-size: 9px;
-  color: #94a3b8;
 }
 
 .df2-theater-v3-progress-copy h3 {
   margin: 0 0 2px;
-  font-size: 15px;
+  font-size: 14px;
   color: #0f172a;
 }
 
 .df2-theater-v3-progress-copy p {
-  margin: 0 0 4px;
-  font-size: 12.5px;
+  margin: 0 0 2px;
+  font-size: 12px;
   color: #64748b;
 }
 
 .df2-theater-v3-count,
 .df2-theater-v3-chunk {
   display: inline-block;
-  margin-right: 10px;
-  font-size: 12px;
+  margin-right: 8px;
+  font-size: 11.5px;
   font-weight: 650;
   color: #334155;
 }
 
 .df2-theater-v3-bar {
-  height: 7px;
+  height: 6px;
   border-radius: 999px;
   background: #e2e8f0;
   overflow: hidden;
@@ -2749,48 +2731,54 @@
 }
 
 .df2-theater-v3-metrics {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 8px;
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)) !important;
+  gap: 6px !important;
 }
 
 .df2-theater-v3-metric {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px;
+  display: flex !important;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px !important;
+  padding: 6px 8px !important;
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fff;
+  min-width: 0;
 }
 
 .df2-theater-v3-metric strong {
   display: block;
-  font-size: 14px;
+  font-size: 13px !important;
   color: #0f172a;
+  line-height: 1.2;
 }
 
 .df2-theater-v3-metric span {
-  font-size: 11px;
+  font-size: 10px !important;
   color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .df2-theater-v3-phases {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
 }
 
 .df2-theater-v3-phase {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 10px;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
   border-radius: 999px;
   background: #f1f5f9;
   color: #64748b;
-  font-size: 11.5px;
+  font-size: 10.5px;
   font-weight: 600;
 }
 
@@ -2802,7 +2790,6 @@
 .df2-theater-v3-phase.active {
   background: #ccfbf1;
   color: #0f766e;
-  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.2);
 }
 
 .df2-theater-v3-phase.failed {
@@ -2811,8 +2798,8 @@
 }
 
 .df2-theater-v3-phase-dot {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2821,9 +2808,9 @@
 .df2-theater-v3-alert {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
   border: 1px solid #e2e8f0;
 }
 
@@ -2839,47 +2826,118 @@
   color: #b91c1c;
 }
 
-.df2-theater-v3-alert.warn {
-  background: #fffbeb;
-  border-color: #fde68a;
-  color: #a16207;
-}
-
 .df2-theater-v3-alert p {
   margin: 2px 0 0;
+  font-size: 12px;
+}
+
+/* Persistent job log panel — always present, fills remaining height */
+.df2-job-log-panel {
+  flex: 1 1 0;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #e2e8f0;
+  background: #0b1220;
+  overflow: hidden;
+}
+
+.df2-job-log-panel.is-result {
+  margin: 0 12px;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  min-height: 240px;
+}
+
+.df2-job-log-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #111827;
+  border-bottom: 1px solid #1f2937;
+}
+
+.df2-job-log-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #e2e8f0;
   font-size: 12.5px;
 }
 
-.df2-theater-v3-log-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.df2-job-log-panel-title strong {
+  color: #f8fafc;
+}
+
+.df2-job-log-count {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.df2-job-log-live {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.df2-job-log-panel-actions .df2-btn {
+  height: 28px !important;
+  min-height: 28px !important;
+  padding: 0 10px !important;
+  font-size: 11.5px !important;
+  border-radius: 7px !important;
+  background: #1f2937 !important;
+  border-color: #374151 !important;
+  color: #e5e7eb !important;
+}
+
+.df2-job-log-panel-body {
+  flex: 1 1 0;
+  min-height: 140px;
+  overflow-y: auto;
+  padding: 10px 12px 14px;
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  color: #d1d5db;
+}
+
+.df2-job-log-line {
+  padding: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.df2-job-log-empty {
+  color: #94a3b8;
+  font-style: italic;
+  padding: 12px 0;
+}
+
+.df2-job-log-panel:not(.is-open) {
+  flex: 0 0 auto;
   min-height: 0;
 }
 
-.df2-theater-v3-log-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 650;
-  color: #475569;
+.df2-job-log-panel:not(.is-open) .df2-job-log-panel-body {
+  display: none;
 }
 
-.df2-theater-v3-log {
-  max-height: 140px;
-  overflow-y: auto;
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #0f172a;
-  color: #e2e8f0;
-  font-family: var(--df-font-mono, ui-monospace, monospace);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-/* Result dashboard — scroll content, pin actions */
+/* Result dashboard — compact stats + dominant job log */
 .df2-run-step.df2-result-banner {
   display: flex !important;
   flex-direction: column !important;
@@ -2901,58 +2959,79 @@
   overflow: hidden !important;
 }
 
-.df2-result-scroll {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
+.df2-result-top {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px 16px;
+  gap: 8px;
+  padding: 12px 14px 10px;
 }
 
-.df2-result-hero {
-  gap: 4px !important;
-  margin-bottom: 0 !important;
+.df2-result-hero-compact {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 12px !important;
+  text-align: left !important;
+  margin: 0 !important;
+}
+
+.df2-result-hero-copy {
+  min-width: 0;
 }
 
 .df2-result-title {
-  font-size: 20px !important;
+  font-size: 16px !important;
+  margin: 0 !important;
 }
 
 .df2-result-subtitle {
-  font-size: 13px !important;
+  font-size: 12px !important;
+  margin: 2px 0 0 !important;
 }
 
-.df2-result-route-card {
-  gap: 16px !important;
-  padding: 12px !important;
+.df2-result-route-compact {
+  gap: 12px !important;
+  padding: 8px 10px !important;
 }
 
-.df2-result-explain {
-  padding: 10px 12px !important;
-  font-size: 12.5px !important;
+.df2-result-stats-compact {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)) !important;
+  gap: 6px !important;
 }
 
-.df2-result-explain-wrap {
-  border: 1px solid #b7ebe2;
-  border-radius: 10px;
-  background: #f0fdfa;
-  overflow: hidden;
+.df2-result-stats-compact .df2-result-stat-card {
+  padding: 8px 10px !important;
+  gap: 2px !important;
+  min-height: 0 !important;
 }
 
-.df2-result-explain-wrap > summary.df2-result-explain {
-  margin: 0;
-  border: 0;
-  background: transparent;
+.df2-result-stats-compact .df2-result-stat-card strong {
+  font-size: 14px !important;
+}
+
+.df2-result-stats-compact .df2-result-stat-card span {
+  font-size: 10px !important;
+}
+
+.df2-result-more-inline {
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .df2-result-explain-body {
   margin: 0;
-  padding: 0 12px 10px 36px;
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.45;
   color: #0f5c56;
+}
+
+.df2-result-dashboard > .df2-job-log-panel {
+  flex: 1 1 0;
+  min-height: 220px;
 }
 
 .df2-result-actions {
@@ -2963,7 +3042,7 @@
   flex-wrap: wrap;
   gap: 8px;
   margin: 0 !important;
-  padding: 10px 16px !important;
+  padding: 10px 14px !important;
   border-top: 1px solid #e2e8f0;
   background: rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(8px);
@@ -2975,23 +3054,4 @@
   min-height: 36px !important;
   padding: 0 12px !important;
   border-radius: 9px !important;
-}
-
-.df2-result-live-log.df2-disclosure {
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: #fff;
-  overflow: hidden;
-}
-
-.df2-result-live-log.df2-disclosure > summary {
-  padding: 10px 12px;
-  font-size: 13px;
-  color: #334155;
-}
-
-.df2-result-live-log .df2-theater-v3 {
-  border-top: 1px solid #e2e8f0;
-  max-height: 320px;
-  overflow-y: auto;
 }
