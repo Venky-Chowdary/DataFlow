@@ -18,9 +18,11 @@ from .type_mapper import ddl_type, normalize_inferred
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
+    from services.resilience import adaptive_chunk_size
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
+    from src.services.resilience import adaptive_chunk_size
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -214,12 +216,17 @@ def stream_file_to_database(
         from src.services.file_parser import FileParser
 
     file_type = FileParser.detect_file_type(filename)
-    columns, probe_schema, total_rows, _ = peek_file_source(content, filename)
+    columns, probe_schema, total_rows, sample_rows = peek_file_source(content, filename)
     if not schema:
         schema = probe_schema
 
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+
+    avg_row_size = 100
+    if sample_rows:
+        avg_row_size = max(1, int(sum(len(json.dumps(row, default=str)) for row in sample_rows) / len(sample_rows)))
+    batch_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE)
 
     try:
         from .connector_capabilities import resolve_driver_type
@@ -227,7 +234,7 @@ def stream_file_to_database(
         from transfer.connector_capabilities import resolve_driver_type
     dest_type = resolve_driver_type(destination.format)
     dest_cfg = resolve_connector_config(destination)
-    chunks = max(1, (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE)
+    chunks = max(1, (total_rows + batch_size - 1) // batch_size)
     dest_table = resolve_dest_table(dest_type, destination, "import")
 
     ddl_log: list[str] = [
@@ -237,9 +244,9 @@ def stream_file_to_database(
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
     if file_type in ("csv", "tsv"):
-        batch_iter = _iter_csv_batches(content, CHUNK_SIZE)
+        batch_iter = _iter_csv_batches(content, batch_size)
     elif file_type == "json":
-        batch_iter = _iter_json_array_batches(content, CHUNK_SIZE)
+        batch_iter = _iter_json_array_batches(content, batch_size)
     elif file_type == "excel":
         import sys
         from pathlib import Path
@@ -249,7 +256,7 @@ def stream_file_to_database(
             sys.path.insert(0, str(root))
         from services.excel_parser import iter_excel_batches
 
-        batch_iter = iter_excel_batches(content, CHUNK_SIZE)
+        batch_iter = iter_excel_batches(content, batch_size)
     elif file_type == "parquet":
         import io
 
@@ -264,7 +271,7 @@ def stream_file_to_database(
                 for _, row in chunk.iterrows():
                     rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk.columns}
                     batch.append(rec)
-                    if len(batch) >= CHUNK_SIZE:
+                    if len(batch) >= batch_size:
                         yield batch
                         batch = []
             if batch:
@@ -272,7 +279,7 @@ def stream_file_to_database(
 
         batch_iter = _parquet_batches()
     else:
-        batch_iter = _iter_jsonl_batches(content, CHUNK_SIZE)
+        batch_iter = _iter_jsonl_batches(content, batch_size)
 
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
 

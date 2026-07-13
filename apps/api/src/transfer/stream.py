@@ -23,9 +23,11 @@ from .connector_capabilities import resolve_driver_type
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
+    from services.resilience import adaptive_chunk_size
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
+    from src.services.resilience import adaptive_chunk_size
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -688,9 +690,24 @@ def stream_database_transfer(
 
         clear_object_cache()
 
+    # Memory-safe chunk sizing: sample a few rows, then size batches to keep
+    # per-batch memory within ~8 MB while respecting the configured CHUNK_SIZE.
+    sample_probe, _ = _unwrap_read(
+        _read_batch(
+            src_type, src_cfg, table, None, 0, 100, database=src_db,
+            cursor_column=cursor_source_col if incremental else "",
+            cursor_after=watermark if incremental else None,
+        )
+    )
+    sample_rows = sample_probe.rows or []
+    avg_row_size = 100
+    if sample_rows:
+        avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
+    chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE)
+
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
-            src_type, src_cfg, table, None, 0, CHUNK_SIZE, database=src_db,
+            src_type, src_cfg, table, None, 0, chunk_size, database=src_db,
             cursor_column=cursor_source_col if incremental else "",
             cursor_after=watermark if incremental else None,
         )
@@ -719,7 +736,11 @@ def stream_database_transfer(
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
     total_rows = probe.total_rows
-    chunks = max(1, (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE) if total_rows else 1
+    remaining_rows = max(0, (total_rows or 0) - len(probe.rows))
+    remaining_chunks = (remaining_rows + chunk_size - 1) // chunk_size if remaining_rows else 0
+    if not total_rows and ddb_cursor:
+        remaining_chunks = max(remaining_chunks, 1)
+    chunks = max(1, 1 + remaining_chunks)
     dest_table = resolve_dest_table(dest_type, destination, table)
 
     ddl_log: list[str] = [
@@ -758,7 +779,7 @@ def stream_database_transfer(
 
     def _fetch_next_batch(last_batch):
         nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, running_cursor
-        if last_batch is not None and len(last_batch.rows) < CHUNK_SIZE:
+        if last_batch is not None and len(last_batch.rows) < chunk_size:
             if (
                 src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
                 and (incremental or use_keyset)
@@ -774,7 +795,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     offset,
-                    CHUNK_SIZE,
+                    chunk_size,
                     database=src_db,
                     dynamodb_cursor=ddb_cursor,
                     dynamodb_total=ddb_total,
@@ -789,7 +810,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     offset,
-                    CHUNK_SIZE,
+                    chunk_size,
                     database=src_db,
                     cursor_column=cursor_source_col,
                     cursor_after=running_cursor,
@@ -807,7 +828,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     offset,
-                    CHUNK_SIZE,
+                    chunk_size,
                     database=src_db,
                     cursor_column=keyset_col,
                     cursor_after=keyset_after,
@@ -827,7 +848,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     offset,
-                    CHUNK_SIZE,
+                    chunk_size,
                     database=src_db,
                     known_total_rows=total_rows,
                     es_search_after=es_search_after,
@@ -842,7 +863,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     offset,
-                    CHUNK_SIZE,
+                    chunk_size,
                     database=src_db,
                     known_total_rows=total_rows,
                     redis_scan_state=redis_scan_state,
@@ -859,7 +880,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     offset,
-                    CHUNK_SIZE,
+                    chunk_size,
                     database=src_db,
                     known_total_rows=total_rows,
                 )
