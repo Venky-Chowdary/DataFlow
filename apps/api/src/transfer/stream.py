@@ -736,11 +736,29 @@ def stream_database_transfer(
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
     total_rows = probe.total_rows
-    remaining_rows = max(0, (total_rows or 0) - len(probe.rows))
+
+    checkpoint_service = checkpoint_service or CheckpointService()
+    checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
+    checkpoint.source_type = src_type
+    checkpoint.dest_type = dest_type
+    checkpoint.write_mode = write_mode
+    checkpoint.conflict_columns = pk_target_cols or []
+
+    # Account for resume state when calculating progress so the UI doesn't see
+    # a chunk index greater than the total chunk estimate.
+    resume_offset = checkpoint.offset or 0
+    chunk_idx = checkpoint.chunk_index or 0
+    if chunk_idx == 0 and resume_offset == 0:
+        rows_accounted_for = len(probe.rows)
+        completed_chunks = 0
+    else:
+        rows_accounted_for = resume_offset
+        completed_chunks = chunk_idx
+    remaining_rows = max(0, (total_rows or 0) - rows_accounted_for)
     remaining_chunks = (remaining_rows + chunk_size - 1) // chunk_size if remaining_rows else 0
     if not total_rows and ddb_cursor:
         remaining_chunks = max(remaining_chunks, 1)
-    chunks = max(1, 1 + remaining_chunks)
+    chunks = max(1, completed_chunks + (1 if chunk_idx == 0 and resume_offset == 0 else 0) + remaining_chunks)
     dest_table = resolve_dest_table(dest_type, destination, table)
 
     ddl_log: list[str] = [
@@ -752,16 +770,8 @@ def stream_database_transfer(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
-    checkpoint_service = checkpoint_service or CheckpointService()
-    checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
-    checkpoint.source_type = src_type
-    checkpoint.dest_type = dest_type
-    checkpoint.write_mode = write_mode
-    checkpoint.conflict_columns = pk_target_cols or []
-
     written = checkpoint.rows_processed or 0
     offset = checkpoint.offset or 0
-    chunk_idx = checkpoint.chunk_index or 0
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
