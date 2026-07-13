@@ -180,6 +180,24 @@ def write_mapped_rows(
                             )
                         )
 
+            # Upsert requires a unique constraint/index on the conflict columns.
+            if write_mode == "upsert" and conflict_columns:
+                conflict_cols = [c for c in conflict_columns if c in target_cols]
+                if conflict_cols:
+                    index_name = sanitize_identifier(
+                        f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+                    )
+                    cur.execute(
+                        sql.SQL(
+                            "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}.{} ({})"
+                        ).format(
+                            sql.Identifier(index_name),
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                            sql.SQL(", ").join(sql.Identifier(c) for c in conflict_cols),
+                        )
+                    )
+
             mapped_rows, transform_errors = build_mapped_rows(
                 headers=headers,
                 data_rows=data_rows,

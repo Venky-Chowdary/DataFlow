@@ -136,6 +136,14 @@ def write_mapped_rows(
         with conn.cursor() as cur:
             if create_table:
                 col_defs = ", ".join(f"`{c}` {t}" for c, t in zip(target_cols, target_types))
+                if write_mode == "upsert" and conflict_columns:
+                    conflict_cols = [c for c in conflict_columns if c in target_cols]
+                    if conflict_cols:
+                        index_name = sanitize_identifier(
+                            f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+                        )
+                        cols = ", ".join(f"`{c}`" for c in conflict_cols)
+                        col_defs += f", UNIQUE KEY `{index_name}` ({cols})"
                 cur.execute(f"CREATE TABLE IF NOT EXISTS `{table_name}` ({col_defs})")
 
             if backfill_new_fields:
