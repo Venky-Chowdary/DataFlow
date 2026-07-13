@@ -474,19 +474,6 @@
   color: #334155;
 }
 
-/* Global honesty strip — sits above page content */
-.df2-global-honesty {
-  flex-shrink: 0;
-  padding: 8px var(--df-page-gutter, 20px) 0;
-  border-bottom: 1px solid #f1f5f9;
-  background: #fafafa;
-}
-
-.df2-global-honesty .df2-honesty-banner {
-  max-width: var(--df-content-max, 1280px);
-  margin: 0 auto 8px;
-}
-
 /* Settings nav active state */
 .df2-app .df2-settings-nav button {
   transition: background 160ms ease, color 160ms ease;

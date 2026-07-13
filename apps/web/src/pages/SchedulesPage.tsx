@@ -173,7 +173,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
         </button>
       }
     >
-      <PageFrame className="df2-pipeline-page" showHonesty={false}>
+      <PageFrame className="df2-pipeline-page">
       {schedules.length > 0 && !loading && (
         <div className="df2-page-controls">
           <FilterTabs

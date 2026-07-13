@@ -154,7 +154,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
   return (
     <PageShell
-      wide
+      fit
       className="df2-page-jobs"
       kicker="Runtime"
       title="Job Theater"
@@ -169,7 +169,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
         </>
       }
     >
-      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3" showHonesty={false}>
+      <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
         {jobs.length === 0 ? (
           <EmptyState
             icon="jobs"

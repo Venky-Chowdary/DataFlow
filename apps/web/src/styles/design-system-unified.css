@@ -22,12 +22,6 @@
   gap: var(--df-workspace-gap-lg);
 }
 
-/* Honesty banner inside page flow */
-.df2-page-workspace > .df2-honesty-banner,
-.df2-page-head-enterprise + .df2-honesty-banner {
-  margin-bottom: 0;
-}
-
 /* ── Insight strip (Dashboard, Jobs, Connectors) ── */
 .df2-page-insight {
   display: flex;

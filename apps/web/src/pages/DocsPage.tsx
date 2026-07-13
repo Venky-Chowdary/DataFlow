@@ -297,7 +297,7 @@ export function DocsPage() {
 
         <RevealSection>
           <div className="df2-docs-stats">
-            <StatCard label="Connector catalog" value={total.toLocaleString()} sub={statsError ? "Catalog offline" : `${transferLive.toLocaleString()} transfer-ready`} icon="database" tone="blue" />
+            <StatCard label="Connector catalog" value={total.toLocaleString()} sub={statsError ? "Catalog offline" : "Source and destination connectors"} icon="database" tone="blue" />
             <StatCard label="Live routes" value="10,000+" sub="Any source to any destination" icon="transfer" tone="teal" />
             <StatCard label="Preflight gates" value="6" sub="Hard and soft validation gates" icon="shield" tone="green" />
             <StatCard label="Test coverage" value="753" sub="API tests + preflight suite" icon="check" tone="default" />

@@ -160,9 +160,7 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
               <span className="lp-gradient-text"> every data route</span>
             </h1>
             <p className="lp-lead">
-              {stats
-                ? `${stats.transfer_live} transfer-ready connectors · ${stats.total}+ in catalog · Hybrid mapping, eight preflight gates, and checksum reconciliation.`
-                : "Transfer-ready connectors with semantic mapping, preflight validation, and reconciliation across databases, warehouses, and files."}
+              Universal data movement with semantic mapping, preflight validation, and reconciliation across databases, warehouses, and files.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="df2-btn df2-btn-primary df2-btn-lg lp-btn-glow" onClick={onStartTransfer}>

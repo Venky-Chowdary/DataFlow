@@ -1,6 +1,7 @@
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
+import { useEffect, useState } from "react";
 
 const GATE_LABELS: Record<string, string> = {
   g1_source: "Source readable",
@@ -16,6 +17,8 @@ const GATE_LABELS: Record<string, string> = {
   g10_schema_policy: "Schema change policy",
   g11_validation_posture: "Validation posture",
 };
+
+const GATE_ORDER = Object.keys(GATE_LABELS);
 
 function gateLabel(id: string): string {
   const entry = Object.entries(GATE_LABELS).find(([key]) => id.includes(key));
@@ -43,13 +46,41 @@ export function PreflightTimeline({
   onRerun,
   onUseBalanced,
 }: PreflightTimelineProps) {
+  const [preflightProgress, setPreflightProgress] = useState(0);
+  const totalGates = result.total_gates || GATE_ORDER.length;
+  const currentGateIndex = Math.min(totalGates - 1, Math.max(0, Math.floor((preflightProgress / 100) * totalGates)));
+  const currentGateId = GATE_ORDER[currentGateIndex] || GATE_ORDER[0];
+  const currentGateLabel = gateLabel(currentGateId);
+  const currentGateNumber = currentGateIndex + 1;
+  const phaseLabel = running
+    ? preflightProgress >= 100
+      ? "Done — finishing validation…"
+      : `Step ${currentGateNumber}/${totalGates} · ${currentGateLabel}`
+    : `${currentGateLabel}`;
+
+  useEffect(() => {
+    if (!running) {
+      setPreflightProgress(0);
+      return;
+    }
+    setPreflightProgress(10);
+    const timer = window.setInterval(() => {
+      setPreflightProgress((prev) => {
+        if (prev >= 99) return prev;
+        const step = prev >= 90 ? 1 : prev >= 75 ? Math.max(1, Math.round(Math.random() * 3)) : Math.max(2, Math.round(Math.random() * 8));
+        const next = Math.min(prev + step, 99);
+        return next;
+      });
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [running]);
   const gates = result.gates.length > 0
     ? result.gates
     : running
       ? [{
-          id: "preflight_running",
+          id: currentGateId,
           status: "running" as const,
-          message: "Running validation…",
+          message: `Running ${currentGateLabel.toLowerCase()}…`,
           duration_ms: 0,
         }]
       : [];
@@ -109,8 +140,10 @@ export function PreflightTimeline({
             {running ? "Running validation…" : result.passed ? "Ready to transfer" : "Validation — action needed"}
           </h3>
           <p className="df2-preflight-sub">
-            {result.passed_count}/{result.total_gates} checks passed
-            {result.passed ? " · you can execute the transfer" : " · fix items below, then re-run"}
+            {running
+              ? phaseLabel
+              : `${passCount} passed · ${blockCount} blocked · ${skipCount} skipped · ${result.total_gates} total`}
+            {result.passed ? " · you can execute the transfer" : !running ? " · fix items below, then re-run" : ""}
           </p>
           {proof && (
             <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
@@ -193,7 +226,7 @@ export function PreflightTimeline({
               {running ? (
                 <>
                   <Spinner size="sm" label="" />
-                  Running checks…
+                  <span>Validating…</span>
                 </>
               ) : result.passed ? "All checks passed" : "Checks need attention"}
             </h3>
@@ -231,6 +264,18 @@ export function PreflightTimeline({
                 <DtIcon name="gate" size={14} /> Re-run validation
               </button>
             )}
+          </div>
+        </div>
+      )}
+
+      {running && (
+        <div className="df2-preflight-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={preflightProgress}>
+          <div className="df2-mapping-progress-meta">
+            <strong>{preflightProgress}%</strong>
+            <span title={phaseLabel}>{phaseLabel}</span>
+          </div>
+          <div className="df2-mapping-progress-track">
+            <span className={`df2-mapping-progress-fill ${preflightProgress >= 80 ? "is-finishing" : ""} ${running ? "is-animating" : ""}`} style={{ width: `${preflightProgress}%` }} />
           </div>
         </div>
       )}

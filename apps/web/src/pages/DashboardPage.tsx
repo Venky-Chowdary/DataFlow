@@ -94,7 +94,7 @@ export function DashboardPage({
         </div>
       }
     >
-      <PageFrame className="df2-overview-page df2-overview-enterprise" showHonesty={false}>
+      <PageFrame className="df2-overview-page df2-overview-enterprise">
         <PageInsightStrip
           tone={healthTone}
           pill={
@@ -320,7 +320,7 @@ export function DashboardPage({
                   </ul>
                 )}
                 <p className="df2-overview-rail-meta">
-                  {catalogStats?.transfer_live ?? catalogStats?.live ?? "120+"} transfer-ready · {enabledPipelines} enabled
+                  {enabledPipelines} pipeline{enabledPipelines === 1 ? "" : "s"} enabled
                 </p>
               </div>
             </article>

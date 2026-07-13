@@ -333,7 +333,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   const currentSourceSchema = sourceKind === "file"
     ? parsed?.schema ?? {}
     : transferPlan?.source_schema ?? {};
-  const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
+  const samplePreviewRows = (parsed?.data?.length ? parsed.data : parsed?.sample_data) ?? [];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
   const cursorCandidate = findColumn(currentSourceColumns, [
     /^updated_at$/i,
@@ -869,9 +869,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         samples,
         schema: data.schema,
       });
-      if (!targetCollection) {
-        setTargetCollection(selected.name.replace(/\.[^/.]+$/, ""));
-      }
+      setTargetCollection((prev) => prev || selected.name.replace(/\.[^/.]+$/, ""));
       toast({
         title: "Source profiled",
         message: `${data.row_count.toLocaleString()} rows and ${data.columns.length} columns detected.${
@@ -1057,12 +1055,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
       toast({ title: "Mapping setup failed", message, tone: "error" });
       console.error(e);
     } finally {
-      setAnalyzing(false);
+      setMappingProgress(100);
+      setMappingPhase("Done — opening the editable mapping editor…");
+      window.setTimeout(() => setAnalyzing(false), 450);
     }
   };
 
   const goToPreflight = () => {
     if (explainDestinationGap()) return;
+    setResult(null);
+    setActiveJobId(null);
+    setTransferLaunch(null);
     const threshold = confidenceThreshold;
     const pendingReview = columnMappings.filter(
       (m) => !m.approved && (m.requiresReview || m.confidence < threshold),
@@ -1439,6 +1442,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
         collection: job.destination_collection,
       },
       destination_summary: job.destination_summary as TransferResult["destination_summary"],
+      job_id: job._id,
     });
     setStep(STEP_RUN);
     if (job.status === "completed") onTransferComplete();
@@ -1566,16 +1570,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   useEffect(() => {
     if (!(step === STEP_MAP && analyzing)) {
       setMappingProgress(0);
-      setMappingPhase("Preparing schema context…");
+      setMappingPhase("Step 1/5 · Reading source schema and column names…");
       return;
     }
 
     const phaseForProgress = (value: number) => {
-      if (value < 25) return "Preparing schema context…";
-      if (value < 55) return "Profiling semantic intent…";
-      if (value < 80) return "Matching source to destination fields…";
-      if (value < 95) return "Scoring confidence and policy checks…";
-      return "Finalizing mapping editor…";
+      if (value >= 100) return "Done — opening the editable mapping editor…";
+      if (value < 25) return "Step 1/5 · Reading source schema and column names…";
+      if (value < 55) return "Step 2/5 · Sampling values and profiling data types…";
+      if (value < 80) return "Step 3/5 · Matching source fields to destination fields…";
+      if (value < 95) return "Step 4/5 · Scoring confidence and flagging policy issues…";
+      return "Step 5/5 · Building the editable mapping editor…";
     };
 
     setMappingProgress(10);
@@ -1583,15 +1588,13 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
     let timer = window.setInterval(() => {
       setMappingProgress((prev) => {
-        const step = prev >= 95 ? Math.max(1, Math.round(Math.random() * 2)) : Math.max(2, Math.round(Math.random() * 8));
+        if (prev >= 99) return prev;
+        const step = prev >= 90 ? 1 : prev >= 75 ? Math.max(1, Math.round(Math.random() * 3)) : Math.max(2, Math.round(Math.random() * 8));
         const next = Math.min(prev + step, 99);
         setMappingPhase(phaseForProgress(next));
-        if (next >= 99) {
-          window.clearInterval(timer);
-        }
         return next;
       });
-    }, 260);
+    }, 220);
 
     return () => window.clearInterval(timer);
   }, [step, analyzing]);
@@ -1599,6 +1602,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
   return (
     <PageShell
       wide
+      fit
+      showHeader={false}
       className="df2-page-transfer-studio"
       title="Transfer Studio"
       description="Source → Destination → Map → Validate → Run"
@@ -1692,7 +1697,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 <span>{mappingPhase}</span>
               </div>
               <div className="df2-mapping-progress-track">
-                <span className={`df2-mapping-progress-fill ${mappingProgress >= 95 ? "is-finishing" : ""}`} style={{ width: `${mappingProgress}%` }} />
+                <span className={`df2-mapping-progress-fill ${mappingProgress >= 85 ? "is-finishing" : ""} ${analyzing ? "is-animating" : ""}`} style={{ width: `${mappingProgress}%` }} />
               </div>
             </div>
           </div>
@@ -2588,16 +2593,31 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 Execute now to start governed transfer with live theater progress and reconciliation evidence.
               </p>
             </div>
-            <EmptyState
-              icon="transfer"
-              title="Ready to transfer"
-              description="Preflight passed — execute the transfer to move your data."
-              action={
-                <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={() => void executeTransfer()}>
-                  <DtIcon name="transfer" size={18} /> Execute Transfer
+            <div className="df2-run-ready-body">
+              <ProofDashboard preflight={preflight} running={false} />
+              <PreflightTimeline
+                result={preflight ?? {
+                  passed: false,
+                  passed_count: 0,
+                  total_gates: 11,
+                  readiness_score: 0,
+                  gates: [],
+                  blockers: [],
+                }}
+                running={false}
+                confidenceThreshold={confidenceThreshold}
+                compact
+                hideActions
+              />
+              <div className="df2-run-ready-actions">
+                <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setStep(STEP_VALIDATE)}>
+                  <DtIcon name="chevron-left" size={16} />Back to validation
                 </button>
-              }
-            />
+                <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={() => void executeTransfer()}>
+                  <DtIcon name="arrow-right" size={18} />Execute transfer
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

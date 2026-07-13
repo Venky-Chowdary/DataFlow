@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorCatalogPanel } from "../components/ConnectorCatalogPanel";
+import { ConnectionWorkbench, CONNECTION_TABS } from "../components/ConnectionWorkbench";
 import { EmptyState } from "../components/EmptyState";
 import { PipelineTopology } from "../components/PipelineTopology";
 import { DtIcon } from "../components/DtIcon";
@@ -12,8 +13,7 @@ import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { buildConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
-import { connectorHealthLabel, jobStatusBadgeClass } from "../lib/uiUtils";
+import { buildConnectionWorkbenchContext } from "../lib/connectionWorkbench";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
 interface ConnectorsPageProps {
@@ -31,8 +31,6 @@ interface ConnectorsPageProps {
 function catalogType(id: string) {
   return resolveCatalogIdToType(id);
 }
-
-const CONNECTION_TABS = ["Status", "Streams", "Schema", "Mappings", "Sync History", "Settings"] as const;
 
 export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, onEdit, onDelete, onRefresh, showConnectionsTab, highlightConnectorId }: ConnectorsPageProps) {
   const { toast } = useToast();
@@ -181,293 +179,126 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
         </>
       }
     >
-      <PageFrame className="df2-connectors-page" showHonesty={false}>
-      <FilterTabs
-        ariaLabel="Connector views"
-        value={tab}
-        onChange={setTab}
-        items={[
-          { id: "connections" as const, label: "My connections", count: connectors.length },
-          { id: "catalog" as const, label: "Add connector" },
-        ]}
-      />
+      <PageFrame className="df2-connectors-page">
+        <FilterTabs
+          ariaLabel="Connector views"
+          value={tab}
+          onChange={setTab}
+          items={[
+            { id: "connections" as const, label: "My connections", count: connectors.length },
+            { id: "catalog" as const, label: "Add connector" },
+          ]}
+        />
 
-      <div className="df2-connectors-workspace">
-      <div className="df2-connectors-pane">
-      {tab === "connections" ? (
-        <div className="df2-stack">
-          <div className="df2-card df2-card-elevated df2-topology-card">
-            <div className="df2-card-head">
-              <div>
-                <h2 className="df2-card-title">Topology</h2>
-                <p className="df2-card-sub">Live view of your data plane</p>
-              </div>
-              <span className="df2-badge df2-badge-live">
-                {connectors.filter((c) => c.status !== "error").length} healthy
-              </span>
-            </div>
-            <div className="df2-card-body df2-topology-card-body">
-              <PipelineTopology
-                nodes={topology.nodes}
-                edges={topology.edges}
-                emptyHint="Add a connector from the catalog tab, then run a transfer to see live routes."
-              />
-            </div>
-          </div>
-
-          <section className="df2-connection-workbench" aria-label="Connection operations workbench">
-            <div className="df2-connection-workbench-head">
-              <div>
-                <span className="df2-rail-kicker">Connection workbench</span>
-                <h2>{selectedConnection?.name ?? "Connection workbench preview"}</h2>
-                <p>
-                  {selectedConnection
-                    ? `${selectedConnection.type} · ${selectedConnection.host || "managed endpoint"}${selectedConnection.port ? `:${selectedConnection.port}` : ""}`
-                    : "Preview the production controls every saved connection receives: streams, schema drift, mappings, sync history, and policy settings."}
-                </p>
-              </div>
-              <div className="df2-connection-picker">
-                <label className="df2-label" htmlFor="connection-workbench-picker">Connection</label>
-                <select
-                  id="connection-workbench-picker"
-                  className="df2-input df2-select"
-                  value={selectedConnection?.id ?? ""}
-                  onChange={(e) => setSelectedConnectionId(e.target.value)}
-                  disabled={connectors.length === 0}
-                >
-                  {connectors.length === 0 ? (
-                    <option value="">No saved connections</option>
-                  ) : connectors.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name} · {c.type}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <FilterTabs
-              ariaLabel="Connection sections"
-              className="df2-filter-tabs--wrap"
-              value={connectionTab}
-              onChange={setConnectionTab}
-              items={CONNECTION_TABS.map((item) => ({ id: item, label: item }))}
-            />
-
-            <div className="df2-connection-panel">
-              {connectionTab === "Status" && (
-                <div className="df2-connection-status-grid">
-                  <div>
-                    <span>Health</span>
-                    <strong>
-                      {selectedConnection
-                        ? connectorHealthLabel(selectedConnection.status, selectedConnection.last_test_ok)
-                        : "Not configured"}
-                    </strong>
+        <div className="df2-connectors-workspace">
+          {tab === "connections" ? (
+            <div className="df2-connectors-layout">
+              <aside className="df2-connectors-list">
+                <div className="df2-connectors-list-controls">
+                  <FilterTabs
+                    ariaLabel="Filter connection status"
+                    value={statusFilter}
+                    onChange={setStatusFilter}
+                    items={[
+                      { id: "all", label: "All", count: connectors.length },
+                      { id: "ready", label: "Healthy", count: healthyCount },
+                      { id: "error", label: "Errors", count: errorCount },
+                    ]}
+                  />
+                  <PageToolbar
+                    searchValue={query}
+                    onSearchChange={setQuery}
+                    searchPlaceholder="Search saved connections…"
+                  />
+                </div>
+                {connectors.length === 0 ? (
+                  <EmptyState
+                    icon="connectors"
+                    title="No connections yet"
+                    description="Browse the catalog, enter credentials once, and reuse connections across every transfer."
+                    action={
+                      <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
+                        Browse catalog
+                      </button>
+                    }
+                  />
+                ) : (
+                  <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
+                    {filteredConnectors.map((c) => (
+                      <ConnectorCard
+                        key={c.id}
+                        connector={c}
+                        index={connectors.findIndex((x) => x.id === c.id)}
+                        selected={selectedConnectionId === c.id}
+                        highlighted={highlightConnectorId === c.id}
+                        testing={testingId === c.id}
+                        onSelect={() => setSelectedConnectionId(c.id)}
+                        onTest={() => void handleTest(c.id)}
+                        onEdit={() => onEdit(c)}
+                        onDelete={() => onDelete(c.id)}
+                      />
+                    ))}
+                    {filteredConnectors.length === 0 && (
+                      <EmptyState
+                        compact
+                        icon="search"
+                        title="No matches"
+                        description="No saved connections match the current search or filters."
+                      />
+                    )}
                   </div>
-                  <div>
-                    <span>Last sync</span>
-                    <strong>
-                      {workbench?.lastJob
-                        ? `${workbench.lastJob.status} · ${formatRelativeTime(workbench.lastJob.created_at)}`
-                        : "No runs yet"}
-                    </strong>
+                )}
+              </aside>
+              <section className="df2-connectors-detail">
+                <div className="df2-card df2-card-elevated df2-topology-card">
+                  <div className="df2-card-head">
+                    <div>
+                      <h2 className="df2-card-title">Topology</h2>
+                      <p className="df2-card-sub">Live view of your data plane</p>
+                    </div>
+                    <span className="df2-badge df2-badge-live">
+                      {connectors.filter((c) => c.status !== "error").length} healthy
+                    </span>
                   </div>
-                  <div>
-                    <span>Schedule</span>
-                    <strong>{workbench?.scheduleLabel ?? "Manual"}</strong>
-                  </div>
-                  <div>
-                    <span>Activity</span>
-                    <strong>
-                      {workbench
-                        ? `${workbench.completedCount} done · ${workbench.runningCount} live · ${workbench.failedCount} failed`
-                        : "—"}
-                    </strong>
+                  <div className="df2-card-body df2-topology-card-body">
+                    <PipelineTopology
+                      nodes={topology.nodes}
+                      edges={topology.edges}
+                      emptyHint="Add a connector from the catalog tab, then run a transfer to see live routes."
+                    />
                   </div>
                 </div>
-              )}
-              {connectionTab === "Streams" && (
-                selectedConnection ? (
-                  workbench && workbench.streams.length > 0 ? (
-                    <div className="df2-stream-list">
-                      {workbench.streams.map((stream) => (
-                        <div key={stream.name} className="df2-stream-row">
-                          <strong>{stream.name}</strong>
-                          <span className="df2-badge df2-badge-muted">
-                            {stream.source === "schedule" ? "Scheduled pipeline" : "Transfer job"}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <EmptyState compact icon="activity" title="No streams yet" description={`Streams appear when you run a transfer or enable a pipeline from ${selectedConnection.name}.`} />
-                  )
-                ) : (
-                  <EmptyState compact icon="connectors" title="Select a connection" description="Choose a saved connection above to view streams." />
-                )
-              )}
-              {connectionTab === "Schema" && (
-                selectedConnection ? (
-                  <div className="df2-policy-console df2-policy-console-flush">
-                    <div className="df2-policy-head">
-                      <div>
-                        <span className="df2-rail-kicker">Schema contract</span>
-                        <h4>{selectedConnection.name}</h4>
-                      </div>
-                      <span className={`df2-badge ${workbench?.lastJob?.status === "failed" ? "df2-badge-error" : "df2-badge-live"}`}>
-                        {workbench?.relatedJobs.length ? "Observed from jobs" : "Awaiting first run"}
-                      </span>
-                    </div>
-                    <div className="df2-schema-review-grid">
-                      <div><span>Connector</span><strong>{selectedConnection.type}</strong><p>{selectedConnection.database || selectedConnection.host}</p></div>
-                      <div><span>Preflight</span><strong>8-gate validation</strong><p>Schema contract enforced in Transfer Studio before write.</p></div>
-                      <div><span>Jobs</span><strong>{workbench?.relatedJobs.length ?? 0}</strong><p>Historical migrations involving this connection.</p></div>
-                      <div className="block"><span>Last success</span><strong>{formatRelativeTime(workbench?.lastSuccessAt ?? null)}</strong><p>From completed transfer jobs.</p></div>
-                    </div>
-                  </div>
-                ) : (
-                  <EmptyState compact icon="connectors" title="Select a connection" description="Choose a saved connection above to review schema status." />
-                )
-              )}
-              {connectionTab === "Mappings" && (
-                selectedConnection ? (
-                  <div className="df2-mapping-policy-grid">
-                    <div><strong>Recent routes</strong><span>{workbench?.relatedJobs.length ?? 0} job(s) reference this connector.</span></div>
-                    <div><strong>Pipelines</strong><span>{workbench?.relatedSchedules.length ?? 0} schedule(s) · {workbench?.enabledScheduleCount ?? 0} enabled.</span></div>
-                    <div><strong>Role</strong><span>{selectedConnection.role ?? "source or destination"} · inferred from usage.</span></div>
-                    <div><strong>Review</strong><span>Open Transfer Studio to edit column mappings with live type intelligence.</span></div>
-                  </div>
-                ) : (
-                  <EmptyState compact icon="sparkle" title="Select a connection" description="Choose a saved connection above to view mapping activity." />
-                )
-              )}
-              {connectionTab === "Sync History" && (
-                selectedConnection ? (
-                  workbench && workbench.relatedJobs.length > 0 ? (
-                    <div className="df2-table-wrap df2-card-body-flush">
-                      <table className="df2-table" aria-label="Sync history">
-                        <thead>
-                          <tr>
-                            <th>Route</th>
-                            <th>Status</th>
-                            <th>Rows</th>
-                            <th>When</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {workbench.relatedJobs.slice(0, 8).map((job) => (
-                            <tr key={job._id}>
-                              <td>
-                                <div className="df2-cell-title">{job.source_name}</div>
-                                <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
-                              </td>
-                              <td><span className={jobStatusBadgeClass(job.status)}>{job.status}</span></td>
-                              <td>{job.records_processed?.toLocaleString() ?? "—"}</td>
-                              <td className="df2-cell-meta">{formatRelativeTime(job.created_at)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <EmptyState compact icon="jobs" title="No sync history" description={`Run a transfer or enable a pipeline to populate history for ${selectedConnection.name}.`} />
-                  )
-                ) : (
-                  <EmptyState compact icon="connectors" title="Select a connection" description="Choose a saved connection above to view sync history." />
-                )
-              )}
-              {connectionTab === "Settings" && (
-                selectedConnection ? (
-                  <div className="df2-settings-mini-grid">
-                    <div><span>Sync frequency</span><strong>{workbench?.scheduleLabel ?? "Manual"}</strong></div>
-                    <div><span>Database / bucket</span><strong>{selectedConnection.database || "—"}</strong></div>
-                    <div><span>Endpoint</span><strong>{selectedConnection.host || "managed"}{selectedConnection.port ? `:${selectedConnection.port}` : ""}</strong></div>
-                    <div><span>Pipelines</span><strong>{workbench?.relatedSchedules.length ?? 0} configured</strong></div>
-                  </div>
-                ) : (
-                  <EmptyState compact icon="settings" title="Select a connection" description="Choose a saved connection above to view settings." />
-                )
-              )}
-            </div>
-          </section>
 
-          {connectors.length === 0 ? (
-            <EmptyState
-              icon="connectors"
-              title="No connections yet"
-              description="Browse the catalog, enter credentials once, and reuse connections across every transfer."
-              action={
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
-                  Browse catalog
-                </button>
-              }
-            />
+                <ConnectionWorkbench
+                  selectedConnection={selectedConnection}
+                  workbench={workbench}
+                  connectionTab={connectionTab}
+                  setConnectionTab={setConnectionTab}
+                  connectors={connectors}
+                  onSelectConnection={setSelectedConnectionId}
+                />
+              </section>
+            </div>
           ) : (
-            <>
-            <div className="df2-page-controls">
+            <div className="df2-connectors-pane">
               <FilterTabs
-                ariaLabel="Filter connection status"
-                value={statusFilter}
-                onChange={setStatusFilter}
+                ariaLabel="Filter catalog by role"
+                value={role}
+                onChange={setRole}
                 items={[
-                  { id: "all", label: "All", count: connectors.length },
-                  { id: "ready", label: "Healthy", count: healthyCount },
-                  { id: "error", label: "Errors", count: errorCount },
+                  { id: "all", label: "All" },
+                  { id: "source", label: "Sources" },
+                  { id: "destination", label: "Destinations" },
                 ]}
               />
-              <PageToolbar
-                searchValue={query}
-                onSearchChange={setQuery}
-                searchPlaceholder="Search saved connections…"
-              />
+              <div className="df2-card">
+                <div className="df2-card-body">
+                  <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="" requireAvailable={false} />
+                </div>
+              </div>
             </div>
-            <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
-              {filteredConnectors.map((c) => (
-                <ConnectorCard
-                  key={c.id}
-                  connector={c}
-                  index={connectors.findIndex((x) => x.id === c.id)}
-                  selected={selectedConnectionId === c.id}
-                  highlighted={highlightConnectorId === c.id}
-                  testing={testingId === c.id}
-                  onSelect={() => setSelectedConnectionId(c.id)}
-                  onTest={() => void handleTest(c.id)}
-                  onEdit={() => onEdit(c)}
-                  onDelete={() => onDelete(c.id)}
-                />
-              ))}
-            </div>
-            {filteredConnectors.length === 0 && (
-              <EmptyState
-                compact
-                icon="search"
-                title="No matches"
-                description="No saved connections match the current search or filters."
-              />
-            )}
-            </>
           )}
         </div>
-      ) : (
-        <div className="df2-stack">
-          <FilterTabs
-            ariaLabel="Filter catalog by role"
-            value={role}
-            onChange={setRole}
-            items={[
-              { id: "all", label: "All" },
-              { id: "source", label: "Sources" },
-              { id: "destination", label: "Destinations" },
-            ]}
-          />
-          <div className="df2-card">
-            <div className="df2-card-body">
-              <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="" requireAvailable={false} />
-            </div>
-          </div>
-        </div>
-      )}
-      </div>
-      </div>
       </PageFrame>
     </PageShell>
   );

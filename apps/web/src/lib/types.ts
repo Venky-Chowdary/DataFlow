@@ -177,6 +177,7 @@ export interface TransferResult {
     source_checksum?: string;
     target_checksum?: string;
   };
+  job_id?: string;
 }
 
 export interface TransferPlan {

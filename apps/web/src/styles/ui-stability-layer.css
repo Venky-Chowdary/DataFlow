@@ -438,7 +438,7 @@
 .df2-page-connectors .df2-connection-panel,
 .df2-page-pipelines .df2-pipeline-workspace,
 .df2-page-pipelines .df2-pipeline-scroll {
-  overflow: visible !important;
+  overflow: hidden;
 }
 
 .df2-page-pipelines .df2-pipeline-card-route {
@@ -500,6 +500,17 @@
 .df2-page-pipelines .df2-pipeline-card-actions button {
   width: 100%;
   justify-content: center;
+}
+
+/* Topology / overview flow status pills */
+.df2-flow-meta-connected {
+  color: #0f766e;
+  font-weight: 600;
+}
+
+.df2-flow-meta-disconnected {
+  color: #dc2626;
+  font-weight: 600;
 }
 
 .df2-page-settings .df2-settings-layout,
@@ -736,12 +747,12 @@
   }
 }
 
-/* Consistent filter + search toolbar across all pages */
+/* Consistent filter + search toolbar across all pages — aligned left */
 .df2-page-controls {
   display: flex;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   padding: 12px 0 16px;
   flex-shrink: 0;
@@ -750,7 +761,7 @@
 
 .df2-page-controls .df2-filter-tabs,
 .df2-page-controls .df2-tabs {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   justify-content: flex-start;
 }

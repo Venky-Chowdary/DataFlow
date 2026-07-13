@@ -458,6 +458,8 @@
   font-size: 13px;
   color: #64748b;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .df2-docs-rules {

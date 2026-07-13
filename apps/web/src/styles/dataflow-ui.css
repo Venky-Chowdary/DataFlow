@@ -33,6 +33,11 @@ body {
   line-height: 1;
 }
 
+.dt-nav-icon svg {
+  display: block;
+  flex-shrink: 0;
+}
+
 .dt-spinner {
   display: inline-block;
   width: 18px;

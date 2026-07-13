@@ -267,6 +267,18 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         </button>
 
         <div className="df2-pilot-aside-scroll">
+          <div className="df2-pilot-section-label">Categories</div>
+          <FilterTabs
+            ariaLabel="Automation ideas by category"
+            className="df2-pilot-categories"
+            value={category}
+            onChange={setCategory}
+            items={[
+              { id: "all", label: "All" },
+              ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
+            ]}
+          />
+
           <div className="df2-pilot-section-label">Sessions</div>
           {sessions.map((s) => (
             <button
@@ -326,40 +338,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       <div className="df2-pilot-main">
         {!started ? (
           <div className="df2-pilot-main-inner">
-            <div className="df2-model-mini-strip" aria-label="Model provider routing">
-              {modelsLoading ? (
-                <>
-                  {[1, 2, 3].map((i) => (
-                    <div key={i} className="df2-pilot-skeleton-card">
-                      <span className="df2-pilot-skeleton df2-pilot-skeleton--wide" style={{ display: "block", marginBottom: 8 }} />
-                      <span className="df2-pilot-skeleton df2-pilot-skeleton--wide" style={{ display: "block", maxWidth: 100 }} />
-                    </div>
-                  ))}
-                </>
-              ) : (modelCapabilities?.providers ?? []).length === 0 ? (
-                <EmptyState compact icon="sparkle" title="Local engine only" description="No cloud providers configured — add API keys in Settings." />
-              ) : (
-                modelCapabilities!.providers.map((provider) => (
-                  <div key={provider.provider} className={provider.available ? "ready" : ""}>
-                    <span>{provider.label}</span>
-                    <strong>{provider.default_model}</strong>
-                    <small>{provider.available ? "ready" : provider.status}</small>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <FilterTabs
-              ariaLabel="Automation ideas by category"
-              className="df2-filter-tabs--center"
-              value={category}
-              onChange={setCategory}
-              items={[
-                { id: "all", label: "All" },
-                ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
-              ]}
-            />
-
             <div className="df2-pilot-hero">
               <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
               <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, govern, or repair data.</h1>

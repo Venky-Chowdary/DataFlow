@@ -52,7 +52,7 @@ export function ValidateActionsRail({
             Job queued — {transferLaunch.rows.toLocaleString()} rows heading to destination.
           </p>
           <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenJobTheater}>
-            <DtIcon name="activity" size={16} /> Open live progress
+            <DtIcon name="activity" size={16} />Open live progress
           </button>
         </div>
       ) : null}
@@ -122,24 +122,24 @@ export function ValidateActionsRail({
 
       <div className="df2-validate-rail-actions">
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
-          <DtIcon name="chevron-left" size={16} /> Back to mapping
+          <DtIcon name="chevron-left" size={16} />Back to mapping
         </button>
 
         {!preflight && !preflighting && (
           <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={onRunPreflight}>
-            <DtIcon name="gate" size={16} /> Run preflight
+            <DtIcon name="gate" size={16} />Run preflight
           </button>
         )}
 
         {blocked && (
           <button type="button" className="df2-btn df2-btn-lg" onClick={onRunPreflight} disabled={preflighting}>
-            <DtIcon name="gate" size={16} /> Re-run
+            <DtIcon name="gate" size={16} />Re-run
           </button>
         )}
 
         {blocked && mappingBlocked && mappingReviewCount > 0 && (
           <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={onApproveMappings}>
-            <DtIcon name="check" size={16} /> Approve all mappings
+            <DtIcon name="check" size={16} />Approve all mappings
           </button>
         )}
 
@@ -155,10 +155,12 @@ export function ValidateActionsRail({
               <ButtonLoader label="Starting…" />
             ) : (
               <>
-                <DtIcon name="transfer" size={18} />
-                {passed
-                  ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
-                  : "Execute transfer (blocked)"}
+                <DtIcon name="arrow-right" size={18} />
+                <span>
+                  {passed
+                    ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
+                    : "Execute transfer (blocked)"}
+                </span>
               </>
             )}
           </button>

@@ -19,11 +19,17 @@
   min-width: 0;
 }
 
+/* Fix the app root to the viewport so fit pages can fill without expanding the whole page */
+.df2-app {
+  height: 100vh;
+  height: 100dvh;
+}
+
 /* ─── 2. Design token extensions ─── */
 
 :root {
   --ef-card-bg: #ffffff;
-  --ef-card-border: #e5e9f0;
+  --ef-card-border: #cbd5e1;
   --ef-card-radius: 14px;
   --ef-card-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 4px 16px rgba(15, 23, 42, 0.04);
   --ef-card-shadow-hover: 0 2px 6px rgba(15, 23, 42, 0.08), 0 8px 24px rgba(15, 23, 42, 0.06);
@@ -227,6 +233,25 @@
   padding: 0 12px;
   font-size: 13px;
   border-radius: 8px;
+}
+
+.df2-btn-lg {
+  height: 44px;
+  padding: 0 20px;
+  font-size: 15px;
+  border-radius: 10px;
+}
+
+.df2-btn-danger {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.df2-btn-danger:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
 }
 
 .df2-btn-ghost {
@@ -801,11 +826,16 @@ select.df2-select:focus {
 
 .df2-pipeline-card-actions {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid var(--ef-card-head-border);
+}
+
+.df2-pipeline-card-actions > .df2-btn {
+  width: 100%;
+  justify-content: center;
 }
 
 /* ─── 18. Settings layout ─── */
@@ -1282,6 +1312,30 @@ select.df2-select:focus {
   width: min(760px, 100%);
   border-style: solid;
   background: #ffffff;
+}
+
+.df2-run-ready-body {
+  width: min(760px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0 auto;
+}
+
+.df2-run-ready-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.df2-run-ready-actions > .df2-btn-primary {
+  margin-left: auto;
 }
 
 .df2-run-step .df2-empty .df2-empty-action .df2-btn {

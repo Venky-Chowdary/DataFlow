@@ -29,7 +29,9 @@
 
 .df2-connectors-list-controls {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   padding: 16px;
   border-bottom: 1px solid #e2e8f0;
@@ -38,6 +40,12 @@
 
 .df2-connectors-list-controls .df2-filter-tabs {
   flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+
+.df2-connectors-list-controls .df2-page-toolbar {
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .df2-connectors-list .df2-connector-card-grid {
@@ -63,9 +71,18 @@
   flex-shrink: 0;
 }
 
-.df2-connectors-detail .df2-connection-workbench {
+.df2-page-connectors .df2-connection-workbench {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-page-connectors .df2-connection-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Compact connection cards */

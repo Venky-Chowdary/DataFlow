@@ -257,9 +257,9 @@
 }
 
 .df2-column-review-data-preview {
-  flex: 0 0 40%;
+  flex: 0 0 calc(50% - 4px);
   min-height: 220px;
-  max-height: 45%;
+  max-height: calc(50% - 4px);
   overflow: hidden;
   margin-bottom: 8px;
 }
@@ -672,7 +672,7 @@
   margin: 0;
 }
 
-@media (max-width: 1280px) {
+@media (max-width: 900px) {
   .df2-map-step-workspace {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) minmax(0, min(42vh, 380px));
@@ -692,7 +692,8 @@
   }
 
   .df2-map-step-workspace {
-    grid-template-rows: minmax(0, 1fr) minmax(0, min(38vh, 320px));
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, min(36vh, 260px));
   }
 
   .df2-map-step-head .df2-card-sub {

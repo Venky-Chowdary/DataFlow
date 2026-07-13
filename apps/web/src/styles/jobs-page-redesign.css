@@ -1,10 +1,20 @@
 /* Jobs page — list + detail cards with independent scroll and compact stats */
 
+.df2-page-jobs {
+  max-width: 100% !important;
+}
+
+.df2-page-fit.df2-page-jobs .df2-page-body {
+  overflow: hidden;
+  min-height: 0;
+}
+
 .df2-jobs-workspace.df2-jobs-workspace-v3 {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .df2-jobs-workspace-v3 > .df2-empty {
@@ -29,7 +39,7 @@
   flex: 0 0 auto;
 }
 
-.df2-jobs-v3-layout {
+.df2-page-jobs .df2-jobs-v3-layout {
   flex: 1;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -37,6 +47,7 @@
   gap: 16px;
   min-height: 0;
   overflow: hidden;
+  align-items: stretch;
 }
 
 .df2-jobs-v3-list {
@@ -49,6 +60,7 @@
   padding: 12px;
   overflow-y: auto;
   min-height: 0;
+  height: 100%;
 }
 
 .df2-jobs-v3-item {
@@ -178,8 +190,11 @@
   padding: 16px;
   overflow: hidden;
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
+  position: relative;
+  top: 0;
 }
 
 .df2-jobs-v3-detail .df2-empty {
@@ -360,7 +375,7 @@
 }
 
 @media (max-width: 900px) {
-  .df2-jobs-v3-layout {
+  .df2-page-jobs .df2-jobs-v3-layout {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) auto;
     overflow: visible;

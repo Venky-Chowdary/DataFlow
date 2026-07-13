@@ -1,4 +1,5 @@
 import { DtIcon } from "../DtIcon";
+import { JobTheater } from "../JobTheater";
 import { ConnectorIcon } from "../../app/brand-icons";
 import type { TransferResult } from "../../lib/types";
 
@@ -37,20 +38,21 @@ export function TransferResultDashboard({
 
   const destinationLine =
     ds?.table ? `${ds.schema || ds.database || "default"}.${ds.table}` :
-    ds?.collection ? ds.collection :
+    ds?.collection ? [ds.database, ds.collection].filter(Boolean).join(".") :
     ds?.database ? ds.database :
     ds?.dataset ? ds.dataset :
     ds?.filename ? ds.filename :
     result.destination?.filename ? result.destination.filename :
     result.destination?.path ? result.destination.path :
-    result.destination?.database || "Destination";
+    result.destination?.database || result.destination?.collection || "Destination";
 
   const destinationPath =
     ds?.table ? `${ds.type || destType} · ${ds.database}${ds.schema ? ` · ${ds.schema}` : ""}` :
-    ds?.collection ? `${ds.type || destType} · ${ds.database}` :
+    ds?.collection ? `${ds.type || destType} · ${[ds.database, ds.collection].filter(Boolean).join(".")}` :
     ds?.filename ? `${result.destination?.format || destType} · ${ds.filename}` :
     result.destination?.path ? `${result.destination?.format || destType} · ${result.destination.path}` :
     result.destination?.filename ? `${result.destination?.format || destType} · ${result.destination.filename}` :
+    result.destination?.database ? `${destType} · ${result.destination.database}` :
     destType;
 
   return (
@@ -72,7 +74,7 @@ export function TransferResultDashboard({
         <div className="df2-result-endpoint">
           <ConnectorIcon id={sourceType} size={24} />
           <div>
-            <span>Source</span>
+            <span>{sourceType ? sourceType.toUpperCase() : "Source"}</span>
             <strong title={sourceLabel}>{sourceLabel}</strong>
           </div>
         </div>
@@ -87,6 +89,13 @@ export function TransferResultDashboard({
             <strong title={destLabel}>{destinationLine}</strong>
           </div>
         </div>
+      </div>
+
+      <div className="df2-result-explain">
+        <DtIcon name="shield" size={16} />
+        <span>
+          <strong>What you can trust here:</strong> checksums are computed over the source and destination rows and compared. If the reconciliation check passed, the transfer is complete and unchanged. The checksum is stored in this job record for audit and replay.
+        </span>
       </div>
 
       <div className="df2-result-stats">
@@ -194,6 +203,19 @@ export function TransferResultDashboard({
         <div className="df2-result-section error">
           <h4><DtIcon name="x" size={14} /> Error</h4>
           <p className="df2-result-error-detail">{result.error}</p>
+        </div>
+      )}
+
+      {result.job_id && (
+        <div className="df2-result-section df2-result-live-log">
+          <h4><DtIcon name="activity" size={14} /> Job log</h4>
+          <JobTheater
+            jobId={result.job_id}
+            sourceLabel={sourceLabel}
+            destLabel={destLabel}
+            sourceType={sourceType}
+            destType={destType}
+          />
         </div>
       )}
 
