@@ -493,6 +493,17 @@ def normalize_cell(value: Any) -> str:
             return "false"
         return canonical
     if isinstance(value, (bytes, bytearray, memoryview)):
+        # Bytes may be raw payload or a base64-encoded string stored as bytes
+        # (common in emulators). When the bytes are a valid base64 string,
+        # decode and re-encode so the canonical checksum matches the original
+        # encoded text; otherwise base64-encode the raw bytes.
+        try:
+            decoded = base64.b64decode(value, validate=True)
+            re_encoded = base64.b64encode(decoded)
+            if re_encoded == value:
+                return re_encoded.decode("ascii")
+        except Exception:
+            pass
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, sort_keys=True, default=str)
