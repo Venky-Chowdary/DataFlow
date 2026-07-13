@@ -583,6 +583,7 @@ class UniversalTransferEngine:
     ) -> TransferResult:
         """Batched DB→DB path — never loads full table into memory."""
         dst_fmt = request.destination.format or "mongodb"
+        pf: dict | None = None
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -860,6 +861,7 @@ class UniversalTransferEngine:
     ) -> TransferResult:
         """Batched file → database path for large CSV/TSV/JSONL uploads."""
         dst_fmt = request.destination.format or "mongodb"
+        pf: dict | None = None
         try:
             content = request.source_content or b""
             filename = request.source_filename or "upload.csv"
