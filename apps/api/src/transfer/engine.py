@@ -97,6 +97,17 @@ def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") 
         return {}
 
 
+def _checkpoint_has_progress(checkpoint: Any) -> bool:
+    """True when the checkpoint has committed rows from a previous run."""
+    if not checkpoint:
+        return False
+    return bool(
+        getattr(checkpoint, "chunk_index", 0)
+        or getattr(checkpoint, "offset", 0)
+        or getattr(checkpoint, "rows_processed", 0)
+    )
+
+
 def _drop_destination_table(destination: EndpointConfig) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes."""
     if destination.kind != "database":
@@ -440,8 +451,10 @@ class UniversalTransferEngine:
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
             if request.destination.kind == "database":
-                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite") and not resume:
-                    _drop_destination_table(request.destination)
+                is_streaming = False
+                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                    if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                        _drop_destination_table(request.destination)
                 rows_written, ddl_log, dest_summary = write_destination_database(
                     request.destination, records, columns, schema, mappings,
                     on_checkpoint=throttled_checkpoint,
@@ -756,8 +769,10 @@ class UniversalTransferEngine:
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
 
-            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite") and not resume:
-                _drop_destination_table(request.destination)
+            is_streaming = True
+            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                    _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
                 request.source,
@@ -1050,8 +1065,10 @@ class UniversalTransferEngine:
                 message=f"Streaming {total_rows:,} rows in batches…",
             )
 
-            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite") and not resume:
-                _drop_destination_table(request.destination)
+            is_streaming = True
+            if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
+                if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                    _drop_destination_table(request.destination)
 
             rows_written, ddl_log, dest_summary, _ = stream_file_to_database(
                 content,

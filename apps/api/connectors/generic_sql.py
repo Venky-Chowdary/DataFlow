@@ -1116,6 +1116,37 @@ def read_table_cursor_batch(
         engine.dispose()
 
 
+def _upsert_batch(
+    conn: Any,
+    table_obj: sa.Table,
+    batch: list[dict[str, Any]],
+    conflict_columns: list[str],
+    target_cols: list[str],
+) -> None:
+    """Delete rows matching the batch conflict keys, then re-insert.
+
+    This works across any SQLAlchemy dialect that supports `WHERE (a,b) IN (...)`
+    and `INSERT`/`DELETE` in the same transaction.  Rows are deduplicated on the
+    conflict key so the final insert never contains duplicates.
+    """
+    conflict_cols = [c for c in conflict_columns if c in target_cols]
+    if not conflict_cols:
+        conn.execute(table_obj.insert(), batch)
+        return
+
+    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in batch:
+        key = tuple(row[c] for c in conflict_cols)
+        deduped[key] = row
+    rows = list(deduped.values())
+    keys = list(deduped.keys())
+
+    conflict_expr = sa.tuple_(*[table_obj.c[c] for c in conflict_cols])
+    delete_stmt = sa.delete(table_obj).where(conflict_expr.in_(keys))
+    conn.execute(delete_stmt)
+    conn.execute(table_obj.insert(), rows)
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -1239,7 +1270,11 @@ def write_mapped_rows(
                 batch = converted_rows[chunk_idx * CHUNK_SIZE : (chunk_idx + 1) * CHUNK_SIZE]
                 if not batch:
                     break
-                conn.execute(table_obj.insert(), batch)
+
+                if write_mode == "upsert" and conflict_columns:
+                    _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols)
+                else:
+                    conn.execute(table_obj.insert(), batch)
                 conn.commit()
                 written += len(batch)
                 if on_checkpoint:

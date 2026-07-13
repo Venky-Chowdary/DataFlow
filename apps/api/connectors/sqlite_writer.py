@@ -77,6 +77,34 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
     return value
 
 
+def _sqlite_upsert_batch(
+    cur: Any,
+    table_name: str,
+    target_cols: list[str],
+    batch: list[tuple],
+    conflict_cols: list[str],
+) -> None:
+    """Delete rows matching conflict keys, then insert the deduplicated batch.
+
+    Keeps the last occurrence of each conflict key so the final insert is unique.
+    """
+    indices = [target_cols.index(c) for c in conflict_cols]
+    deduped: dict[tuple, tuple] = {}
+    for row in batch:
+        key = tuple(row[i] for i in indices)
+        deduped[key] = row
+    rows = list(deduped.values())
+
+    col_sql = ", ".join(f"\"{c}\"" for c in conflict_cols)
+    placeholders = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped)
+    delete_sql = f'DELETE FROM "{table_name}" WHERE ({col_sql}) IN ({placeholders})'
+    delete_params = [v for key in deduped.keys() for v in key]
+    cur.execute(delete_sql, delete_params)
+
+    insert_sql = f'INSERT INTO "{table_name}" ({", ".join(f"\"{c}\"" for c in target_cols)}) VALUES ({", ".join("?" for _ in target_cols)})'
+    cur.executemany(insert_sql, rows)
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -100,7 +128,7 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
 ) -> WriteResult:
     """Write records to a SQLite database file."""
-    del port, username, password, ssl, write_mode, conflict_columns
+    del port, username, password, ssl
     path = connection_string or database or host
     if not path:
         return WriteResult(
@@ -170,12 +198,17 @@ def write_mapped_rows(
             written = 0
             placeholders = ", ".join("?" for _ in target_cols)
             insert = f'INSERT INTO "{table_name}" ({", ".join(f"\"{c}\"" for c in target_cols)}) VALUES ({placeholders})'
+            conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE
                 batch = converted_rows[start : start + CHUNK_SIZE]
                 if not batch:
                     break
-                cur.executemany(insert, batch)
+
+                if write_mode == "upsert" and conflict_cols:
+                    _sqlite_upsert_batch(cur, table_name, target_cols, batch, conflict_cols)
+                else:
+                    cur.executemany(insert, batch)
                 written += len(batch)
                 if on_checkpoint:
                     on_checkpoint(chunk_idx + 1, chunks, written)
