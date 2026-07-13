@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Sequence
 
 from services.transform_engine import _parse_date, _parse_datetime
 
@@ -26,10 +26,20 @@ class ReconciliationReport:
         return asdict(self)
 
 
-def checksum_rows(rows: list[list[str]]) -> str:
-    h = hashlib.sha256()
+def checksum_rows(rows: list[Sequence[Any]]) -> str:
+    """Canonical, order-independent checksum over a matrix of typed values."""
+    if not rows:
+        return hashlib.sha256(b"").hexdigest()[:16]
+    fingerprints: list[str] = []
     for row in rows:
-        h.update("|".join(row).encode())
+        # Sort the normalized cells so rows with the same values in different
+        # column order produce the same fingerprint.
+        cells = sorted(normalize_cell(v) for v in row)
+        fingerprints.append("|".join(cells))
+    fingerprints.sort()
+    h = hashlib.sha256()
+    for fp in fingerprints:
+        h.update(fp.encode("utf-8"))
     return h.hexdigest()[:16]
 
 
@@ -171,10 +181,7 @@ def verify_postgres_table(
             cur.execute(f'SELECT * FROM "{schema}"."{table_name}" ORDER BY 1 LIMIT 5000')
             rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return count, h.hexdigest()[:16]
+        return count, checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -210,10 +217,7 @@ def verify_snowflake_table(
             cur.execute(f'SELECT * FROM "{table_name}" ORDER BY 1 LIMIT 5000')
             rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return count, h.hexdigest()[:16]
+        return count, checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -243,10 +247,7 @@ def verify_mysql_table(
             cur.execute(f"SELECT * FROM `{table_name}` ORDER BY 1 LIMIT 5000")
             rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return count, h.hexdigest()[:16]
+        return count, checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -266,10 +267,7 @@ def verify_bigquery_table(
         table = client.get_table(table_id)
         count = table.num_rows or 0
         rows = list(client.list_rows(table_id, max_results=5000))
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row.values()).encode())
-        return int(count), h.hexdigest()[:16]
+        return int(count), checksum_rows([list(row.values()) for row in rows])
     except Exception:
         return -1, ""
 
@@ -294,10 +292,7 @@ def verify_sqlite_table(
         cur.execute(f'SELECT * FROM "{table_name}" LIMIT 5000')
         rows = cur.fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return int(count), h.hexdigest()[:16]
+        return int(count), checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -319,10 +314,7 @@ def verify_duckdb_table(
         count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
         rows = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 5000').fetchall()
         conn.close()
-        h = hashlib.sha256()
-        for row in rows:
-            h.update("|".join("" if v is None else str(v) for v in row).encode())
-        return int(count), h.hexdigest()[:16]
+        return int(count), checksum_rows(rows)
     except Exception:
         return -1, ""
 
@@ -346,17 +338,7 @@ def verify_mongodb_collection(
         count = coll.count_documents({})
         rows = list(coll.find({}, {"_id": 0}).limit(5000))
         client.close()
-        h = hashlib.sha256()
-        for doc in rows:
-            h.update(
-                "|".join(
-                    normalize_cell(
-                        v.to_decimal() if isinstance(v, Decimal128) else v
-                    )
-                    for v in doc.values()
-                ).encode()
-            )
-        return int(count), h.hexdigest()[:16]
+        return int(count), checksum_rows([list(doc.values()) for doc in rows])
     except Exception:
         return -1, ""
 
@@ -393,17 +375,7 @@ def verify_dynamodb_table(
             for item in page.get("Items", []):
                 rows.append({k: deserializer.deserialize(v) for k, v in item.items()})
 
-        h = hashlib.sha256()
-        for row in rows:
-            h.update(
-                "|".join(
-                    normalize_cell(
-                        sorted(v) if isinstance(v, set) else v
-                    )
-                    for v in row.values()
-                ).encode()
-            )
-        return int(count), h.hexdigest()[:16]
+        return int(count), checksum_rows([list(row.values()) for row in rows])
     except Exception:
         return -1, ""
 
@@ -501,11 +473,25 @@ def normalize_cell(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
-        return _canonicalize_number(str(value))
+        canonical = _canonicalize_number(str(value))
+        if canonical == "1":
+            return "true"
+        if canonical == "0":
+            return "false"
+        return canonical
     if isinstance(value, int):
+        if value == 1:
+            return "true"
+        if value == 0:
+            return "false"
         return str(value)
     if isinstance(value, Decimal):
-        return _canonicalize_number(value)
+        canonical = _canonicalize_number(value)
+        if canonical == "1":
+            return "true"
+        if canonical == "0":
+            return "false"
+        return canonical
     if isinstance(value, (bytes, bytearray, memoryview)):
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple)):

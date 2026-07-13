@@ -7,6 +7,7 @@ import os
 import re
 from typing import Any, Callable
 
+from services.reconciliation import checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 
@@ -26,10 +27,7 @@ def sanitize_identifier(name: str, preserve_case: bool = False) -> str:
 
 
 def row_checksum(rows: list[tuple]) -> str:
-    h = hashlib.sha256()
-    for row in rows:
-        h.update("|".join("" if v is None else str(v) for v in row).encode())
-    return h.hexdigest()[:16]
+    return checksum_rows(rows)
 
 
 def dedupe_rows(
