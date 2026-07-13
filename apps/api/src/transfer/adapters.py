@@ -526,6 +526,8 @@ def write_destination_database(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     validation_mode: str = "strict",
     backfill_new_fields: bool = False,
+    write_mode: str = "insert",
+    conflict_columns: list[str] | None = None,
 ) -> tuple[int, list[str], dict]:
     from .connector_capabilities import resolve_driver_type
     db_type = resolve_driver_type(endpoint.format)
@@ -572,7 +574,7 @@ def write_destination_database(
         common["warehouse"] = cfg.get("warehouse", "")
         for col in columns:
             ddl_log.append(f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise RuntimeError(result.error or "Snowflake write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
@@ -589,7 +591,7 @@ def write_destination_database(
             common["port"] = cfg["port"] or 5439
         for col in columns:
             ddl_log.append(f"PG COLUMN {col} {ddl_type('postgresql', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise RuntimeError(result.error or f"{db_type} write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")
@@ -603,7 +605,7 @@ def write_destination_database(
         from connectors.mysql_writer import write_mapped_rows
         for col in columns:
             ddl_log.append(f"MYSQL COLUMN {col} {ddl_type('mysql', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise RuntimeError(result.error or "MySQL write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
@@ -633,7 +635,7 @@ def write_destination_database(
         common["schema"] = cfg.get("schema", "db")
         for col in columns:
             ddl_log.append(f"MONGODB FIELD {col} string")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise RuntimeError(result.error or "MongoDB write failed")
         ddl_log.insert(0, f"CREATE COLLECTION IF NOT EXISTS {result.target_schema}.{result.table_name}")
@@ -731,7 +733,7 @@ def write_destination_database(
         from connectors.sqlite_writer import write_mapped_rows
         for col in columns:
             ddl_log.append(f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise RuntimeError(result.error or "SQLite write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
@@ -746,7 +748,7 @@ def write_destination_database(
         for col in columns:
             ddl_log.append(f"GENERIC_SQL COLUMN {col} {ddl_type('generic_sql', schema.get(col, 'string'))}")
         common["type"] = cfg.get("type", "")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise RuntimeError(result.error or "Generic SQL write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")

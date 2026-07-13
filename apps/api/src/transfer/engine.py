@@ -25,6 +25,7 @@ try:
     )
     from services import lineage_telemetry as lineage
     from services.error_handling import classify_error, TransferCancelled
+    from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     )
     from src.services import lineage_telemetry as lineage
     from src.services.error_handling import classify_error, TransferCancelled
+    from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -309,6 +311,16 @@ class UniversalTransferEngine:
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
+            # Resolve upsert mode for non-streaming database writes.
+            contract = resolve_sync_contract(request.stream_contracts)
+            effective_sync = contract.sync_mode if contract else request.sync_mode
+            write_mode = "insert"
+            conflict_columns: list[str] = []
+            if contract and contract.primary_key:
+                conflict_columns = [map_source_to_target(contract.primary_key, mappings)]
+            if requires_upsert(effective_sync) and conflict_columns:
+                write_mode = "upsert"
+
             mongo.update_job_status(
                 job_id, "running", phase="preflight", progress_pct=15,
                 message="Validating mapping and schema…",
@@ -461,6 +473,8 @@ class UniversalTransferEngine:
                     on_checkpoint=throttled_checkpoint,
                     validation_mode=request.validation_mode,
                     backfill_new_fields=request.backfill_new_fields,
+                    write_mode=write_mode,
+                    conflict_columns=conflict_columns,
                 )
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)

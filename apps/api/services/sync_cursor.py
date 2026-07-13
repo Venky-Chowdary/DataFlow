@@ -163,7 +163,7 @@ def requires_incremental(sync_mode: str) -> bool:
 
 
 def requires_upsert(sync_mode: str) -> bool:
-    return (sync_mode or "").lower() in {"incremental_deduped", "cdc"}
+    return (sync_mode or "").lower() in {"upsert", "incremental_deduped", "cdc"}
 
 
 def map_source_to_target(column: str, mappings: list[dict[str, Any]]) -> str:
