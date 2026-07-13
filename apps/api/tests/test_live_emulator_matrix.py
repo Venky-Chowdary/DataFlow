@@ -300,6 +300,33 @@ CASES = [
         ),
         id="snowflake-fakesnow",
     ),
+    pytest.param(
+        EndpointConfig(
+            kind="database",
+            format="postgresql",
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            table="payments_postgresql",
+        ),
+        id="postgresql",
+    ),
+    pytest.param(
+        EndpointConfig(
+            kind="database",
+            format="mysql",
+            host="localhost",
+            port=3306,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            table="payments_mysql",
+        ),
+        id="mysql",
+    ),
 ]
 
 
