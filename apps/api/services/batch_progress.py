@@ -11,7 +11,7 @@ class ThrottledCheckpoint:
 
     def __init__(
         self,
-        callback: Callable[[int, int, int], None],
+        callback: Callable[..., None],
         *,
         min_interval_sec: float = 2.0,
     ) -> None:
@@ -19,8 +19,8 @@ class ThrottledCheckpoint:
         self._min_interval = min_interval_sec
         self._last_at = 0.0
 
-    def __call__(self, chunk: int, chunks: int, rows: int) -> None:
+    def __call__(self, chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
         now = time.time()
         if chunk <= 1 or chunk >= chunks or now - self._last_at >= self._min_interval:
             self._last_at = now
-            self._callback(chunk, chunks, rows)
+            self._callback(chunk, chunks, rows, checkpoint=checkpoint)

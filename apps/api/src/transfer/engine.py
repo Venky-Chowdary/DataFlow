@@ -215,8 +215,17 @@ class UniversalTransferEngine:
         job_id = self._create_pending_job(request)
         return self.execute_tracked(request, job_id)
 
-    def execute_tracked(self, request: TransferRequest, job_id: str) -> TransferResult:
+    def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         mongo = get_mongodb_service()
+        checkpoint_service = None
+        checkpoint = None
+        if resume:
+            try:
+                from services.checkpoint_service import CheckpointService, resume_or_create_checkpoint
+                checkpoint_service = CheckpointService(mongo)
+                checkpoint = resume_or_create_checkpoint(job_id, checkpoint_service)
+            except Exception:
+                pass
         lineage.emit_run_started(
             run_id=job_id,
             job_id=job_id,
@@ -394,16 +403,18 @@ class UniversalTransferEngine:
                 message=f"Writing {total_rows:,} rows…",
             )
 
-            def on_checkpoint(chunk: int, chunks: int, rows: int) -> None:
+            def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
                 pct = 25 + int((chunk / max(chunks, 1)) * 65)
-                mongo.update_job_status(
-                    job_id, "running",
+                update = dict(
                     records_processed=rows,
                     progress_pct=min(pct, 90),
                     chunk_current=chunk,
                     chunk_total=chunks,
                     message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
                 )
+                if checkpoint:
+                    update["checkpoint"] = checkpoint
+                mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
@@ -686,16 +697,18 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            def on_checkpoint(chunk: int, chunks: int, rows: int) -> None:
+            def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
                 pct = 25 + int((chunk / max(chunks, 1)) * 65)
-                mongo.update_job_status(
-                    job_id, "running",
+                update = dict(
                     records_processed=rows,
                     progress_pct=min(pct, 90),
                     chunk_current=chunk,
                     chunk_total=chunks,
                     message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
                 )
+                if checkpoint:
+                    update["checkpoint"] = checkpoint
+                mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
@@ -716,6 +729,8 @@ class UniversalTransferEngine:
                 sync_mode=request.sync_mode,
                 stream_contracts=request.stream_contracts,
                 job_id=job_id,
+                checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service,
             )
 
             mongo.update_job_status(
@@ -958,16 +973,18 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            def on_checkpoint(chunk: int, chunks: int, rows: int) -> None:
+            def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
                 pct = 25 + int((chunk / max(chunks, 1)) * 65)
-                mongo.update_job_status(
-                    job_id, "running",
+                update = dict(
                     records_processed=rows,
                     progress_pct=min(pct, 90),
                     chunk_current=chunk,
                     chunk_total=chunks,
                     message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
                 )
+                if checkpoint:
+                    update["checkpoint"] = checkpoint
+                mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
@@ -986,6 +1003,9 @@ class UniversalTransferEngine:
                 mappings,
                 schema,
                 on_checkpoint=throttled_checkpoint,
+                job_id=job_id,
+                checkpoint=checkpoint,
+                checkpoint_service=checkpoint_service,
             )
 
             mongo.update_job_status(

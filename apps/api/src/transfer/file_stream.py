@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
 from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
+
+try:
+    from services.checkpoint_service import Checkpoint, CheckpointService
+    from services.error_handling import RetryBudget, with_retry
+except ImportError:  # pragma: no cover - tests with api root on path
+    from src.services.checkpoint_service import Checkpoint, CheckpointService
+    from src.services.error_handling import RetryBudget, with_retry
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -191,7 +200,12 @@ def stream_file_to_database(
     destination: EndpointConfig,
     mappings: list[dict],
     schema: dict[str, str],
-    on_checkpoint: Callable[[int, int, int], None] | None = None,
+    on_checkpoint: Callable[..., None] | None = None,
+    *,
+    job_id: str | None = None,
+    checkpoint: Checkpoint | None = None,
+    checkpoint_service: CheckpointService | None = None,
+    retry_budget: RetryBudget | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -260,20 +274,33 @@ def stream_file_to_database(
         batch_iter = _iter_jsonl_batches(content, CHUNK_SIZE)
 
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
-    written = 0
-    chunk_idx = 0
+
+    checkpoint_service = checkpoint_service or CheckpointService()
+    checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
+    checkpoint.source_type = "file"
+    checkpoint.dest_type = dest_type
+    checkpoint.chunk_total = chunks
+    retry = retry_budget or RetryBudget()
+
+    written = checkpoint.rows_processed or 0
+    chunk_idx = checkpoint.chunk_index or 0
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
     warning_samples: list[str] = []
     rejected_details: list[dict] = []
 
+    # Resume: skip chunks that were already committed
+    if chunk_idx > 0:
+        batch_iter = itertools.islice(batch_iter, chunk_idx, None)
+
     for batch in batch_iter:
         if not batch:
             continue
         chunk_idx += 1
         headers, data_rows = records_to_matrix(batch, columns)
-        batch_written, last_checksum, dest_summary = _write_batch(
+        write_op = partial(
+            _write_batch,
             dest_type,
             destination,
             dest_cfg,
@@ -288,12 +315,20 @@ def stream_file_to_database(
             total_chunks=chunks,
             rows_so_far=written,
         )
+        batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
         written += batch_written
         rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
         warning_samples.extend(dest_summary.get("warnings", []) or [])
         rejected_details.extend(dest_summary.get("rejected_details", []) or [])
+
+        checkpoint.chunk_index = chunk_idx
+        checkpoint.rows_processed = written
+        checkpoint.checksum = last_checksum
+        checkpoint.phase = "writing"
+        checkpoint.status = "running"
+        checkpoint_service.save(checkpoint)
         if on_checkpoint:
-            on_checkpoint(chunk_idx, chunks, written)
+            on_checkpoint(chunk_idx, chunks, written, checkpoint.to_dict())
 
     if written == 0:
         raise ValueError("No records found in file")

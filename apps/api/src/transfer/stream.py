@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +19,13 @@ from connectors.writer_common import CHUNK_SIZE  # noqa: E402
 
 from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
 from .connector_capabilities import resolve_driver_type
+
+try:
+    from services.checkpoint_service import Checkpoint, CheckpointService
+    from services.error_handling import RetryBudget, with_retry
+except ImportError:  # pragma: no cover - tests with api root on path
+    from src.services.checkpoint_service import Checkpoint, CheckpointService
+    from src.services.error_handling import RetryBudget, with_retry
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -595,11 +603,14 @@ def stream_database_transfer(
     destination: EndpointConfig,
     mappings: list[dict],
     schema: dict[str, str],
-    on_checkpoint: Callable[[int, int, int], None] | None = None,
+    on_checkpoint: Callable[..., None] | None = None,
     *,
     sync_mode: str = "full_refresh_overwrite",
     stream_contracts: list[dict] | None = None,
     job_id: str | None = None,
+    checkpoint: Checkpoint | None = None,
+    checkpoint_service: CheckpointService | None = None,
+    retry_budget: RetryBudget | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -712,58 +723,42 @@ def stream_database_transfer(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
-    written = 0
-    offset = 0
-    chunk_idx = 0
+    checkpoint_service = checkpoint_service or CheckpointService()
+    checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
+    checkpoint.source_type = src_type
+    checkpoint.dest_type = dest_type
+    checkpoint.write_mode = write_mode
+    checkpoint.conflict_columns = pk_target_cols or []
+
+    written = checkpoint.rows_processed or 0
+    offset = checkpoint.offset or 0
+    chunk_idx = checkpoint.chunk_index or 0
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
     warning_samples: list[str] = []
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
-    batch = probe
-    running_cursor = watermark
-    es_search_after: list | None = None
-    redis_scan_state = None
-    keyset_col = columns[0] if columns and not incremental else ""
-    keyset_after: str | None = None
+    running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
+    es_search_after = checkpoint.es_search_after
+    redis_scan_state = checkpoint.redis_scan_state
+    keyset_col = checkpoint.cursor_column or (columns[0] if columns and not incremental else "")
+    keyset_after = checkpoint.cursor_value
     use_keyset = bool(keyset_col) and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+    ddb_cursor = checkpoint.dynamodb_cursor
 
-    while True:
-        if not batch.rows:
-            break
+    retry = retry_budget or RetryBudget()
 
-        chunk_idx += 1
-        batch_written, last_checksum, dest_summary = _write_batch(
-            dest_type,
-            destination,
-            dest_cfg,
-            dest_table,
-            batch.headers,
-            batch.rows,
-            mappings,
-            column_types,
-            create_table=(chunk_idx == 1),
-            on_checkpoint=on_checkpoint,
-            chunk_idx=chunk_idx,
-            total_chunks=chunks,
-            rows_so_far=written,
-            write_mode=write_mode,
-            conflict_columns=pk_target_cols or None,
-        )
-        written += batch_written
-        if incremental and cursor_source_col:
-            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
-            if batch_max and (running_cursor is None or batch_max > running_cursor):
-                running_cursor = batch_max
-        rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
-        warning_samples.extend(dest_summary.get("warnings", []) or [])
-        if on_checkpoint:
-            on_checkpoint(chunk_idx, chunks, written)
-        offset += len(batch.rows)
-
+    def _fetch_next_batch(last_batch):
+        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, running_cursor
+        if last_batch is not None and len(last_batch.rows) < CHUNK_SIZE:
+            if (
+                src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+                and (incremental or use_keyset)
+            ) or src_type in ("elasticsearch", "redis"):
+                return None
         if src_type == "dynamodb":
             if not ddb_cursor:
-                break
+                return None
             batch, ddb_cursor = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -777,9 +772,8 @@ def stream_database_transfer(
                     dynamodb_total=ddb_total,
                 )
             )
+            return batch
         elif incremental and cursor_source_col and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb"):
-            if len(batch.rows) < CHUNK_SIZE:
-                break
             batch, _ = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -794,11 +788,10 @@ def stream_database_transfer(
                     known_total_rows=total_rows,
                 )
             )
+            return batch
         elif use_keyset:
-            if len(batch.rows) < CHUNK_SIZE:
-                break
-            if keyset_col in batch.headers and batch.rows:
-                keyset_after = batch.rows[-1][batch.headers.index(keyset_col)]
+            if keyset_col in columns and last_batch is not None and last_batch.rows:
+                keyset_after = last_batch.rows[-1][last_batch.headers.index(keyset_col)]
             batch, extra = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -817,9 +810,8 @@ def stream_database_transfer(
                 es_search_after = extra
             elif src_type == "redis":
                 redis_scan_state = extra
+            return batch
         elif src_type == "elasticsearch":
-            if len(batch.rows) < CHUNK_SIZE:
-                break
             batch, es_search_after = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -833,9 +825,8 @@ def stream_database_transfer(
                     es_search_after=es_search_after,
                 )
             )
+            return batch
         elif src_type == "redis":
-            if len(batch.rows) < CHUNK_SIZE:
-                break
             batch, redis_scan_state = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -849,8 +840,9 @@ def stream_database_transfer(
                     redis_scan_state=redis_scan_state,
                 )
             )
+            return batch
         elif offset >= total_rows:
-            break
+            return None
         else:
             batch, extra = _unwrap_read(
                 _read_batch(
@@ -868,6 +860,61 @@ def stream_database_transfer(
                 es_search_after = extra
             elif src_type == "redis":
                 redis_scan_state = extra
+            return batch
+
+    batch = probe if chunk_idx == 0 else _fetch_next_batch(None)
+    while True:
+        if not batch or not getattr(batch, "rows", None):
+            break
+
+        chunk_idx += 1
+        write_op = partial(
+            _write_batch,
+            dest_type,
+            destination,
+            dest_cfg,
+            dest_table,
+            batch.headers,
+            batch.rows,
+            mappings,
+            column_types,
+            create_table=(chunk_idx == 1),
+            on_checkpoint=on_checkpoint,
+            chunk_idx=chunk_idx,
+            total_chunks=chunks,
+            rows_so_far=written,
+            write_mode=write_mode,
+            conflict_columns=pk_target_cols or None,
+        )
+        batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
+        written += batch_written
+        if incremental and cursor_source_col:
+            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+            if batch_max and (running_cursor is None or batch_max > running_cursor):
+                running_cursor = batch_max
+        rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
+        warning_samples.extend(dest_summary.get("warnings", []) or [])
+
+        offset += len(batch.rows)
+
+        # Persist durable checkpoint after the batch is committed
+        checkpoint.chunk_index = chunk_idx
+        checkpoint.offset = offset
+        checkpoint.rows_processed = written
+        checkpoint.cursor_value = running_cursor or keyset_after
+        checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
+        checkpoint.es_search_after = es_search_after
+        checkpoint.redis_scan_state = redis_scan_state
+        checkpoint.dynamodb_cursor = ddb_cursor
+        checkpoint.checksum = last_checksum
+        checkpoint.phase = "writing"
+        checkpoint.chunk_total = chunks
+        checkpoint.status = "running"
+        checkpoint_service.save(checkpoint)
+        if on_checkpoint:
+            on_checkpoint(chunk_idx, chunks, written, checkpoint.to_dict())
+
+        batch = _fetch_next_batch(batch)
 
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")

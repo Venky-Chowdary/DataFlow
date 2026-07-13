@@ -346,7 +346,7 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
         new_job_id = engine._create_pending_job(request)
         mongo.update_job_status(new_job_id, "pending", retry_of=job_id, message=f"Retry of job {job_id}")
 
-        background_tasks.add_task(run_transfer_async, new_job_id, request)
+        background_tasks.add_task(run_transfer_async, new_job_id, request, resume=True, resume_from_job_id=job_id)
         return {
             "success": True,
             "async": True,
@@ -354,6 +354,46 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
             "retry_of": job_id,
             "status": "running",
             "message": "Retry started — stream progress on the new job.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks):
+    """Resume a failed or paused transfer from its last durable checkpoint."""
+    try:
+        from ..transfer.background import run_transfer_async
+        from ..transfer.models import transfer_request_from_dict
+
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        payload = job.get("transfer_request")
+        if not payload:
+            raise HTTPException(
+                status_code=400,
+                detail="This job has no saved configuration — re-run from Transfer Studio.",
+            )
+        if payload.get("requires_file_reupload"):
+            raise HTTPException(
+                status_code=400,
+                detail="File uploads must be re-submitted from Transfer Studio.",
+            )
+
+        request = transfer_request_from_dict(payload)
+        mongo.update_job_status(job_id, "pending", message=f"Resume requested for job {job_id}")
+        background_tasks.add_task(run_transfer_async, job_id, request, resume=True)
+        return {
+            "success": True,
+            "async": True,
+            "job_id": job_id,
+            "status": "running",
+            "message": "Resume started — stream progress on the job.",
         }
     except HTTPException:
         raise
