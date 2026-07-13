@@ -17,6 +17,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from services.checkpoint_service import Checkpoint  # noqa: E402
+from services import sync_cursor as sync_cursor_mod  # noqa: E402
 import src.transfer.engine as engine_mod  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
@@ -148,6 +149,66 @@ def test_engine_stream_sqlite_to_sqlite_resume_from_checkpoint():
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
         conn.close()
         assert count == 500
+
+
+def test_engine_stream_sqlite_to_sqlite_incremental_deduped():
+    """Incremental-deduped transfers should update existing keys and insert new ones."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        sync_cursor_mod.STORE_PATH = tmp_path / "sync_cursors.json"
+        if sync_cursor_mod.STORE_PATH.exists():
+            sync_cursor_mod.STORE_PATH.unlink()
+
+        src = tmp_path / "src.db"
+        dst = tmp_path / "dst.db"
+        _make_source(500, src)
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        request = TransferRequest(
+            source=source,
+            destination=destination,
+            sync_mode="incremental_deduped",
+            stream_contracts=[
+                {
+                    "selected": True,
+                    "sync_mode": "incremental_deduped",
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                }
+            ],
+            skip_preflight=True,
+        )
+
+        engine = UniversalTransferEngine()
+        result = engine.execute_tracked(request, "000000000000000000000000")
+        assert result.success is True
+
+        conn = sqlite3.connect(src)
+        conn.execute("UPDATE orders SET amount = 999999.99 WHERE id = 1")
+        conn.execute("INSERT INTO orders (id, amount) VALUES (501, 123.45)")
+        conn.commit()
+        conn.close()
+
+        result = engine.execute_tracked(request, "000000000000000000000000")
+        assert result.success is True
+
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        updated = conn.execute(
+            "SELECT amount FROM orders_out WHERE id = 1"
+        ).fetchone()[0]
+        new_id = conn.execute(
+            "SELECT id FROM orders_out WHERE id = 501"
+        ).fetchone()
+        conn.close()
+        assert count == 501
+        assert updated == 999999.99
+        assert new_id == (501,)
 
 
 def test_engine_stream_sqlite_resume_no_checkpoint_drops_partial_destination():

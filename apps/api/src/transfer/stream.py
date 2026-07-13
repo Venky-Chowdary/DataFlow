@@ -469,6 +469,8 @@ def _write_batch(
             mappings=mappings,
             column_types=column_types,
             create_table=create_table,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
