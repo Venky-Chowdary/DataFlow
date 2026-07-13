@@ -32,6 +32,8 @@ export function ConnectorCard({
     ? createdAt.toLocaleDateString()
     : "Unknown";
 
+  const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "";
+
   return (
     <article
       id={`connector-card-${c.id}`}
@@ -46,10 +48,11 @@ export function ConnectorCard({
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
     >
+      <div className="df2-connector-card-icon" aria-hidden>
+        <ConnectorIcon id={c.type} size={22} />
+      </div>
+
       <div className="df2-connector-card-head">
-        <div className="df2-connector-card-icon">
-          <ConnectorIcon id={c.type} size={28} />
-        </div>
         <div className="df2-connector-card-badges">
           <span className={`df2-badge ${healthy ? "df2-badge-live" : "df2-badge-error"}`}>
             {c.status || "ready"}
@@ -59,16 +62,16 @@ export function ConnectorCard({
       </div>
 
       <h3 className="df2-connector-card-title" title={c.name}>{c.name}</h3>
-      <p className="df2-connector-card-meta" title={c.type}>
+      <p
+        className="df2-connector-card-meta"
+        title={[c.type.replace(/_/g, " "), c.database, endpoint].filter(Boolean).join(" · ")}
+      >
         {c.type.replace(/_/g, " ")}
         {c.database ? ` · ${c.database}` : ""}
       </p>
-      {(c.host || c.port) && (
-        <p className="df2-connector-card-endpoint" title={`${c.host}${c.port ? `:${c.port}` : ""}`}>
-          {c.host}{c.port ? `:${c.port}` : ""}
-        </p>
+      {endpoint && (
+        <p className="df2-connector-card-endpoint" title={endpoint}>{endpoint}</p>
       )}
-
       <p className="df2-connector-card-created" title={c.created_at || ""}>
         Added {createdLabel}
       </p>

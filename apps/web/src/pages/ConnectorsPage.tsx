@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { ConnectorCatalogPanel } from "../components/ConnectorCatalogPanel";
 import { ConnectionWorkbench, CONNECTION_TABS } from "../components/ConnectionWorkbench";
 import { EmptyState } from "../components/EmptyState";
-import { PipelineTopology } from "../components/PipelineTopology";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
 import { FilterTabs } from "../components/ui/FilterTabs";
@@ -14,7 +13,6 @@ import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { buildConnectionWorkbenchContext } from "../lib/connectionWorkbench";
-import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
 interface ConnectorsPageProps {
   connectors: Connector[];
@@ -69,11 +67,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
       setSelectedConnectionId(connectors[0]?.id ?? "");
     }
   }, [connectors, selectedConnectionId]);
-
-  const topology = useMemo(
-    () => buildDataPlaneTopology(connectors, jobs, schedules),
-    [connectors, jobs, schedules],
-  );
 
   const filteredConnectors = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -154,63 +147,74 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   };
 
   return (
-    <PageShell
-      wide
-      className="df2-page-connectors"
-      kicker="Integration hub"
-      title="Connectors"
-      description="Manage saved connections and browse the connector catalog."
-      actions={
-        <>
-          {connectors.length > 0 && (
-            <button
-              type="button"
-              className="df2-btn"
-              disabled={testingAll}
-              onClick={() => void handleTestAll()}
-            >
-              <DtIcon name="activity" size={16} />
-              {testingAll ? "Testing…" : "Test all"}
-            </button>
-          )}
-          <button type="button" className="df2-btn df2-btn-primary" onClick={() => onAdd()}>
-            <DtIcon name="plus" size={16} /> New connection
-          </button>
-        </>
-      }
-    >
+    <PageShell wide className="df2-page-connectors" title="Connectors">
       <PageFrame className="df2-connectors-page">
-        <FilterTabs
-          ariaLabel="Connector views"
-          value={tab}
-          onChange={setTab}
-          items={[
-            { id: "connections" as const, label: "My connections", count: connectors.length },
-            { id: "catalog" as const, label: "Add connector" },
-          ]}
+        <PageToolbar
+          searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
+          onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
+          searchPlaceholder="Search saved connections…"
+          filters={
+            <>
+              <FilterTabs
+                ariaLabel="Connector views"
+                value={tab}
+                onChange={setTab}
+                items={[
+                  { id: "connections" as const, label: "Connections", count: connectors.length },
+                  { id: "catalog" as const, label: "Catalog" },
+                ]}
+              />
+              {tab === "connections" && connectors.length > 0 && (
+                <FilterTabs
+                  ariaLabel="Filter connection status"
+                  value={statusFilter}
+                  onChange={setStatusFilter}
+                  items={[
+                    { id: "all", label: "All", count: connectors.length },
+                    { id: "ready", label: "Healthy", count: healthyCount },
+                    { id: "error", label: "Errors", count: errorCount },
+                  ]}
+                />
+              )}
+              {tab === "catalog" && (
+                <FilterTabs
+                  ariaLabel="Filter catalog by role"
+                  value={role}
+                  onChange={setRole}
+                  items={[
+                    { id: "all", label: "All" },
+                    { id: "source", label: "Sources" },
+                    { id: "destination", label: "Destinations" },
+                  ]}
+                />
+              )}
+            </>
+          }
+          actions={
+            <>
+              {connectors.length > 0 && tab === "connections" && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm"
+                  disabled={testingAll}
+                  onClick={() => void handleTestAll()}
+                >
+                  <DtIcon name="activity" size={14} />
+                  {testingAll ? "Testing…" : "Test all"}
+                </button>
+              )}
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => onAdd()}>
+                <DtIcon name="plus" size={14} /> New connection
+              </button>
+            </>
+          }
         />
 
         <div className="df2-connectors-workspace">
           {tab === "connections" ? (
+            <>
             <div className="df2-connectors-layout">
               <aside className="df2-connectors-list">
-                <div className="df2-connectors-list-controls">
-                  <FilterTabs
-                    ariaLabel="Filter connection status"
-                    value={statusFilter}
-                    onChange={setStatusFilter}
-                    items={[
-                      { id: "all", label: "All", count: connectors.length },
-                      { id: "ready", label: "Healthy", count: healthyCount },
-                      { id: "error", label: "Errors", count: errorCount },
-                    ]}
-                  />
-                  <PageToolbar
-                    searchValue={query}
-                    onSearchChange={setQuery}
-                    searchPlaceholder="Search saved connections…"
-                  />
-                </div>
                 {connectors.length === 0 ? (
                   <EmptyState
                     icon="connectors"
@@ -250,25 +254,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 )}
               </aside>
               <section className="df2-connectors-detail">
-                <div className="df2-card df2-card-elevated df2-topology-card">
-                  <div className="df2-card-head">
-                    <div>
-                      <h2 className="df2-card-title">Topology</h2>
-                      <p className="df2-card-sub">Live view of your data plane</p>
-                    </div>
-                    <span className="df2-badge df2-badge-live">
-                      {connectors.filter((c) => c.status !== "error").length} healthy
-                    </span>
-                  </div>
-                  <div className="df2-card-body df2-topology-card-body">
-                    <PipelineTopology
-                      nodes={topology.nodes}
-                      edges={topology.edges}
-                      emptyHint="Add a connector from the catalog tab, then run a transfer to see live routes."
-                    />
-                  </div>
-                </div>
-
                 <ConnectionWorkbench
                   selectedConnection={selectedConnection}
                   workbench={workbench}
@@ -279,18 +264,9 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 />
               </section>
             </div>
+            </>
           ) : (
             <div className="df2-connectors-pane">
-              <FilterTabs
-                ariaLabel="Filter catalog by role"
-                value={role}
-                onChange={setRole}
-                items={[
-                  { id: "all", label: "All" },
-                  { id: "source", label: "Sources" },
-                  { id: "destination", label: "Destinations" },
-                ]}
-              />
               <div className="df2-card">
                 <div className="df2-card-body">
                   <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="" requireAvailable={false} />

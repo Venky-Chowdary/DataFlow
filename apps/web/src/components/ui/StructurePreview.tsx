@@ -12,6 +12,9 @@ interface StructurePreviewProps {
   maxCols?: number;
   showFieldStrip?: boolean;
   showBadge?: boolean;
+  className?: string;
+  /** When true, show more sample rows so the fill-height card stays useful on large screens */
+  fill?: boolean;
 }
 
 export function StructurePreview({
@@ -21,17 +24,20 @@ export function StructurePreview({
   rowCount,
   title = "Structure preview",
   subtitle,
-  maxRows = 10,
-  maxCols = 10,
+  maxRows,
+  maxCols = 12,
   showFieldStrip = true,
   showBadge = false,
+  className = "",
+  fill = false,
 }: StructurePreviewProps) {
+  const resolvedMaxRows = maxRows ?? (fill ? 40 : 10);
   const previewCols = columns.slice(0, maxCols);
-  const previewRows = rows.slice(0, maxRows);
+  const previewRows = rows.slice(0, resolvedMaxRows);
 
   if (!columns.length) {
     return (
-      <div className="df2-structure-preview is-empty">
+      <div className={`df2-structure-preview is-empty ${className}`.trim()}>
         <DtIcon name="database" size={20} />
         <p>Connect a source to preview columns and sample values.</p>
       </div>
@@ -39,7 +45,7 @@ export function StructurePreview({
   }
 
   return (
-    <div className="df2-structure-preview">
+    <div className={`df2-structure-preview ${fill ? "df2-structure-preview--fill" : ""} ${className}`.trim()}>
       <div className="df2-structure-preview-head">
         <div>
           <h4>{title}</h4>
@@ -98,6 +104,11 @@ export function StructurePreview({
               ))}
             </tbody>
           </table>
+          {rows.length > resolvedMaxRows && (
+            <p className="df2-structure-more-hint">
+              Showing {resolvedMaxRows} of {rows.length.toLocaleString()} sample rows
+            </p>
+          )}
         </div>
       ) : (
         <p className="df2-structure-empty-rows">

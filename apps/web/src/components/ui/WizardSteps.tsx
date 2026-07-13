@@ -51,9 +51,6 @@ export function WizardSteps({ steps, current, onStepClick, canGoTo, variant = "d
                   {done ? <DtIcon name="check" size={14} /> : <DtIcon name={s.icon} size={16} />}
                 </span>
                 <span className="df2-wizard-label">{s.label}</span>
-                {s.shortLabel && (
-                  <span className="df2-wizard-label-short" aria-hidden>{s.shortLabel}</span>
-                )}
               </button>
               {!isLast && <div className={`df2-wizard-line ${done ? "done" : ""}`} aria-hidden />}
             </div>

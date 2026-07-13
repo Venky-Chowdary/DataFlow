@@ -281,13 +281,7 @@ export function DocsPage() {
   const planned = stats?.planned ?? 600;
 
   return (
-    <PageShell
-      title="Docs"
-      description="How DataFlow moves, maps, and validates any data."
-      kicker="Documentation"
-      fit={false}
-      className="df2-page-docs"
-    >
+    <PageShell title="Docs" fit={false} className="df2-page-docs">
       <div className="df2-docs dt-stagger">
         <RevealSection>
           <PageSection title="Architecture" subtitle="One canonical pipeline for every source and destination" asCard>

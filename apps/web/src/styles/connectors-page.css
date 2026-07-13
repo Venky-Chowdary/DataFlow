@@ -28,14 +28,7 @@
 }
 
 .df2-connectors-list-controls {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 16px;
-  border-bottom: 1px solid #e2e8f0;
-  flex-shrink: 0;
+  display: none; /* controls moved to shared .df2-page-controls */
 }
 
 .df2-connectors-list-controls .df2-filter-tabs {

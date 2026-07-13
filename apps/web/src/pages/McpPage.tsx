@@ -4,7 +4,6 @@ import { EmptyState } from "../components/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
@@ -118,39 +117,53 @@ export function McpPage() {
   const errCount = logs.filter((l) => l.status === "error").length;
 
   return (
-    <PageShell
-      wide
-      className="df2-page-mcp"
-      kicker="Agent integrations"
-      title="MCP Server"
-      description="Connect Cursor, Claude, VS Code, and custom GPTs — same tools as Data Pilot."
-    >
+    <PageShell wide className="df2-page-mcp" title="MCP Server">
       {loading ? (
         <PageFrame className="df2-mcp-workspace">
           <SectionLoader title="Loading MCP server" hint="Fetching manifest and status…" />
         </PageFrame>
       ) : (
         <PageFrame className="df2-mcp-workspace df2-stack">
-          <PageInsightStrip
-            tone={online ? "live" : "warn"}
-            pill={online ? "Server healthy" : "Unreachable"}
-            message={
-              online
-                ? `${tools.length} tools exposed for agent-driven transfers, connector tests, preflight, and job monitoring. Authenticate with your workspace API key.`
-                : "MCP endpoint is not responding — confirm the API is running and reachable from this browser."
-            }
-            actions={
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => copyText(toolUrl, "Tool endpoint URL")}>
-                {copied === "Tool endpoint URL" ? "Copied" : "Copy endpoint"}
+          <section className="df2-mcp-endpoint-card" aria-label="MCP endpoint">
+            <div className="df2-mcp-endpoint-copy">
+              <div className="df2-mcp-endpoint-head">
+                <span className="df2-mcp-endpoint-label">MCP server URL</span>
+                <span className={`df2-mcp-status-pill ${online ? "is-online" : "is-offline"}`}>
+                  {online ? "Online" : "Offline"}
+                </span>
+              </div>
+              <code className="df2-mcp-endpoint-url" title={mcpBase}>{mcpBase}</code>
+              <span className="df2-mcp-endpoint-meta">
+                {online
+                  ? `${tools.length} tools · invoke at `
+                  : "Endpoint not responding · invoke at "}
+                <code>{toolUrl}</code>
+              </span>
+            </div>
+            <div className="df2-mcp-endpoint-actions">
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary"
+                onClick={() => copyText(mcpBase, "MCP server URL")}
+              >
+                <DtIcon name="check" size={14} />
+                {copied === "MCP server URL" ? "Copied MCP URL" : "Copy MCP URL"}
               </button>
-            }
-          />
+              <button
+                type="button"
+                className="df2-btn"
+                onClick={() => copyText(toolUrl, "Tool invoke URL")}
+              >
+                {copied === "Tool invoke URL" ? "Copied tool URL" : "Copy tool invoke URL"}
+              </button>
+            </div>
+          </section>
 
           <PageMetricsRow
             compact
             columns={4}
             metrics={[
-              { label: "Tools exposed", value: tools.length, tone: "blue", icon: "zap" },
+              { label: "Tools available", value: tools.length, tone: "blue", icon: "zap", sub: "transfers · connectors · preflight · jobs" },
               { label: "Agent mode", value: String(status?.agent_mode ?? "local"), icon: "sparkle" },
               { label: "Connectors", value: String(status?.connectors ?? 0), icon: "connectors" },
               { label: "Jobs tracked", value: String(status?.jobs ?? 0), icon: "jobs" },

@@ -146,6 +146,8 @@ export function SourceStepAside({
         rowCount={parsed.row_count}
         title="Detected structure"
         subtitle={`${parsed.columns.length} fields · ${parsed.row_count.toLocaleString()} rows`}
+        fill
+        showBadge
       />
     );
   }

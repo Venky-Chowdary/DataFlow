@@ -7,9 +7,7 @@ import {
   fetchCopilotPrompts,
   fetchCopilotStatus,
   fetchModelCapabilities,
-  fetchPilotTools,
   ModelCapabilities,
-  PilotToolRegistry,
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
@@ -19,7 +17,6 @@ import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageShell } from "../components/ui/PageShell";
-import { EmptyState } from "../components/EmptyState";
 
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
@@ -69,58 +66,24 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const [loading, setLoading] = useState(false);
   const [pilotOnline, setPilotOnline] = useState<boolean | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
-  const [trainingInfo, setTrainingInfo] = useState<{ docs: number; ready: boolean }>({ docs: 0, ready: false });
-  const [toolRegistry, setToolRegistry] = useState<PilotToolRegistry | null>(null);
-  const [toolsLoading, setToolsLoading] = useState(true);
-  const [modelsLoading, setModelsLoading] = useState(true);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
-  const metaReady = !toolsLoading && !modelsLoading;
 
   const session = sessions.find((s) => s.id === activeId) ?? sessions[0];
   const started = session.messages.length > 0;
   const cloudProviders = (modelCapabilities?.providers ?? []).filter((p) => p.tier === "cloud");
   const anyCloudReady = cloudProviders.some((p) => p.available);
-  const activeProvider = modelCapabilities?.active_provider ?? "local";
-  const emptyRegistry: PilotToolRegistry = {
-    tool_count: 0,
-    generated_action_count: 0,
-    total_routable_actions: 0,
-    families: [],
-    tools: [],
-  };
-  const displayRegistry = toolRegistry ?? emptyRegistry;
 
   useEffect(() => {
-    setToolsLoading(true);
     fetchCopilotPrompts().then(setPrompts).catch(() => {});
-    fetchPilotTools()
-      .then(setToolRegistry)
-      .catch(() => setToolRegistry(null))
-      .finally(() => setToolsLoading(false));
     fetchModelCapabilities()
       .then(setModelCapabilities)
-      .catch(() => setModelCapabilities(null))
-      .finally(() => setModelsLoading(false));
+      .catch(() => setModelCapabilities(null));
     fetchCopilotStatus().then((s) => {
       setPilotOnline(true);
-      const rag = s.rag as { document_count?: number } | undefined;
-      const agent = s.training_agent as {
-        last_run?: { metrics?: { copilot_evaluation?: { ready?: boolean } } };
-      } | undefined;
-      // Only fill metadata from /copilot/status if the dedicated endpoints
-      // have not already returned. Use updater functions so the latest state
-      // is checked, avoiding a stale-closure override when /copilot/status
-      // arrives after tools/models.
-      const registry = s.tool_registry as PilotToolRegistry | undefined;
       const models = s.model_capabilities as ModelCapabilities | undefined;
-      if (registry?.tool_count) setToolRegistry((current) => current ?? registry);
       if (models?.active_provider) setModelCapabilities((current) => current ?? models);
-      setTrainingInfo({
-        docs: rag?.document_count ?? 0,
-        ready: agent?.last_run?.metrics?.copilot_evaluation?.ready ?? false,
-      });
     }).catch(() => {
       setPilotOnline(false);
     });
@@ -210,12 +173,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
   const pilotInsightPill =
     pilotOnline === false ? "Offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "Local engine" : pilotOnline ? "Online" : "Connecting…";
-  const pilotInsightMessage =
-    pilotOnline === false
-      ? "Start the API server to enable tool-backed chat and agent actions."
-      : pilotOnline && modelCapabilities && !anyCloudReady
-        ? "Cloud models are not configured — Pilot uses local tools and RAG. Add API keys in Settings → AI Models for richer responses."
-        : "Natural language data ops — schema introspection, mapping, and job triage.";
+
+  const pilotStatusClass =
+    pilotOnline === false ? "is-offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "is-local" : "";
 
   return (
     <PageShell
@@ -227,32 +187,23 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     >
       <PageFrame className="df2-pilot-workspace df2-pilot-v2">
         <div className="df2-pilot-status-bar" role="status">
-          <div>
+          <div className="df2-pilot-status-brand">
             <strong>Data Pilot</strong>
-            <span> · {pilotInsightPill}</span>
-            <span className="df2-pilot-status-message"> — {pilotInsightMessage}</span>
-          </div>
-          <div className="df2-pilot-status-metrics">
-            {!metaReady ? (
-              <>
-                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>model</span>
-                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>tools</span>
-                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>actions</span>
-                <span className="df2-pilot-skeleton df2-pilot-skeleton--short" aria-hidden>docs</span>
-              </>
-            ) : (
-              <>
-                <span><strong>{modelCapabilities?.active_provider ?? "local"}</strong> model</span>
-                <span><strong>{displayRegistry.tool_count}</strong> tools</span>
-                <span><strong>{displayRegistry.total_routable_actions.toLocaleString()}</strong> actions</span>
-                <span><strong>{trainingInfo.docs.toLocaleString()}</strong> docs</span>
-              </>
-            )}
+            <span className={`df2-pilot-status-pill ${pilotStatusClass}`.trim()}>
+              <span className="df2-pilot-status-dot" aria-hidden />
+              {pilotInsightPill}
+            </span>
           </div>
           <div className="df2-page-actions-group">
             {pilotOnline && modelCapabilities && !anyCloudReady && (
-              <button type="button" className="df2-btn df2-btn-sm" onClick={() => onNavigate("settings")}>
-                Configure models
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm"
+                onClick={() => onNavigate("settings")}
+                title="Add cloud model API keys"
+              >
+                <DtIcon name="settings" size={14} />
+                Models
               </button>
             )}
             <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={startNewChat}>
@@ -291,133 +242,54 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             </button>
           ))}
 
-          <div className="df2-pilot-section-label">Tool calls</div>
-          {session.toolLog.length === 0 ? (
-            <EmptyState compact icon="zap" title="No tool calls yet" description="Tools run live as Data Pilot works." />
-          ) : (
-            session.toolLog.map((t, i) => (
-              <div key={i} className={`df2-pilot-tool-log ${t.success ? "ok" : "err"}`}>
-                <code>{t.name}</code>
-                <span>{t.summary}</span>
-                <time className="df2-pilot-muted">{t.at}</time>
-              </div>
-            ))
+          {session.toolLog.length > 0 && (
+            <>
+              <div className="df2-pilot-section-label">Recent tools</div>
+              {session.toolLog.slice(0, 8).map((t, i) => (
+                <div key={i} className={`df2-pilot-tool-log ${t.success ? "ok" : "err"}`}>
+                  <code>{t.name}</code>
+                  <span>{t.summary}</span>
+                </div>
+              ))}
+            </>
           )}
-
-          <details className="df2-pilot-tool-registry-details">
-            <summary>Tool registry ({displayRegistry.families.length})</summary>
-            <div className="df2-pilot-tool-families">
-              {toolsLoading ? (
-                <p className="df2-cell-meta" aria-live="polite">Loading tool registry…</p>
-              ) : displayRegistry.families.length === 0 ? (
-                <EmptyState compact icon="zap" title="No tools loaded" description="Start the API on port 8001." />
-              ) : (
-                displayRegistry.families.map((family) => (
-                  <div key={family.id} className="df2-pilot-tool-family">
-                    <div>
-                      <strong>{family.label}</strong>
-                      <span>{family.tool_count} tools · {family.generated_actions.toLocaleString()} actions</span>
-                    </div>
-                    <span className="df2-pilot-family-count">{family.tools.length}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </details>
         </div>
-
-        {trainingInfo && (
-          <div className="df2-pilot-training">
-            <DtIcon name="sparkle" size={14} />
-            <span>{trainingInfo.docs.toLocaleString()} trained docs</span>
-            {trainingInfo.ready && <span className="df2-badge df2-badge-live">Ready</span>}
-          </div>
-        )}
       </aside>
 
       <div className="df2-pilot-main">
-        {!started ? (
-          <div className="df2-pilot-main-inner">
-            <div className="df2-pilot-hero">
-              <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
-              <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, govern, or repair data.</h1>
-              <p className="df2-pilot-subtitle">
-                Tool-backed agent execution with schema evidence, connector actions, transfer planning, quality gates, and mapping assurance.
-              </p>
-            </div>
+        <div className="df2-pilot-main-scroll">
+          {!started ? (
+            <div className="df2-pilot-main-inner">
+              <div className="df2-pilot-hero">
+                <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
+                <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, or govern data.</h1>
+                <p className="df2-pilot-subtitle">
+                  Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
+                </p>
+              </div>
 
-            {prompts.length > 0 && (
-              <>
-                <p className="df2-section-label">Suggested prompts</p>
-                <div className="df2-pilot-quick">
-                  {prompts.slice(0, 4).map((p) => (
-                    <button key={p} type="button" onClick={() => send(p)}>{p}</button>
-                  ))}
-                </div>
-              </>
-            )}
-
-            <div className="df2-pilot-capability-grid">
-              {!metaReady ? (
+              {prompts.length > 0 && (
                 <>
-                  {Array.from({ length: 4 }).map((_, i) => (
-                    <div key={i} className="df2-pilot-capability-skeleton" aria-hidden>
-                      <span className="df2-pilot-skeleton df2-pilot-skeleton--wide" />
-                      <span className="df2-pilot-skeleton df2-pilot-skeleton--medium" />
-                      <span className="df2-pilot-skeleton df2-pilot-skeleton--wide" />
-                    </div>
-                  ))}
+                  <p className="df2-section-label">Suggested prompts</p>
+                  <div className="df2-pilot-quick">
+                    {prompts.slice(0, 4).map((p) => (
+                      <button key={p} type="button" onClick={() => send(p)}>{p}</button>
+                    ))}
+                  </div>
                 </>
-              ) : displayRegistry.families.length === 0 ? (
-                <EmptyState compact icon="zap" title="No tool families" description="Tool families appear when the API is online." />
-              ) : (
-                displayRegistry.families.slice(0, 4).map((family) => (
-                  <button
-                    key={family.id}
-                    type="button"
-                    className="df2-pilot-capability"
-                    onClick={() => send(`Use ${family.label} tools for my current data and explain what you can do.`)}
-                    disabled={pilotOnline === false}
-                  >
-                    <span>{family.label}</span>
-                    <strong>{family.generated_actions.toLocaleString()} actions</strong>
-                    <small>{family.tools.slice(0, 3).join(" · ")}</small>
-                  </button>
-                ))
               )}
-            </div>
 
-            <div className="df2-pilot-ideas">
-              {ideas.slice(0, 6).map((idea) => (
-                <button key={idea.id} type="button" className="df2-pilot-idea" onClick={() => send(idea.prompt)}>
-                  <span className="df2-pilot-idea-cat">{idea.category.replace("_", " ")}</span>
-                  <span className="df2-pilot-idea-title">{idea.title}</span>
-                  <span className="df2-pilot-idea-desc">{idea.description}</span>
-                </button>
-              ))}
+              <div className="df2-pilot-ideas">
+                {ideas.slice(0, 6).map((idea) => (
+                  <button key={idea.id} type="button" className="df2-pilot-idea" onClick={() => send(idea.prompt)}>
+                    <span className="df2-pilot-idea-cat">{idea.category.replace("_", " ")}</span>
+                    <span className="df2-pilot-idea-title">{idea.title}</span>
+                    <span className="df2-pilot-idea-desc">{idea.description}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-
-            <div className="df2-pilot-composer-bar">
-              <textarea
-                rows={3}
-                placeholder="Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-              />
-              <button
-                type="button"
-                className="df2-pilot-send"
-                onClick={() => send()}
-                disabled={!input.trim()}
-                aria-label="Send"
-              >
-                <DtIcon name="send" size={18} />
-              </button>
-            </div>
-          </div>
-        ) : (
-          <>
+          ) : (
             <div className="df2-pilot-thread" ref={threadRef}>
               {session.messages.map((msg, i) => (
                 <div key={i} className={`df2-pilot-msg ${msg.role}`}>
@@ -426,7 +298,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                     <div className="df2-pilot-tool-badges">
                       {msg.tools_used.map((t) => (
                         <span key={t.name} className={`df2-badge ${t.success ? "df2-badge-live" : "df2-badge-error"}`}>
-                          {t.name}: {t.summary}
+                          {t.name}
                         </span>
                       ))}
                     </div>
@@ -449,29 +321,29 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               )}
               <div ref={endRef} />
             </div>
+          )}
+        </div>
 
-            <div className="df2-pilot-composer-sticky">
-              <div className="df2-pilot-composer-bar">
-                <textarea
-                  rows={2}
-                  placeholder="Follow up…"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                />
-                <button
-                  type="button"
-                  className="df2-pilot-send"
-                  onClick={() => send()}
-                  disabled={loading || !input.trim()}
-                  aria-label="Send"
-                >
-                  <DtIcon name="send" size={18} />
-                </button>
-              </div>
-            </div>
-          </>
-        )}
+        <div className="df2-pilot-composer-sticky">
+          <div className="df2-pilot-composer-bar">
+            <textarea
+              rows={started ? 2 : 3}
+              placeholder={started ? "Follow up…" : "Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            />
+            <button
+              type="button"
+              className="df2-pilot-send"
+              onClick={() => send()}
+              disabled={loading || !input.trim()}
+              aria-label="Send"
+            >
+              <DtIcon name="send" size={18} />
+            </button>
+          </div>
+        </div>
       </div>
       </div>
       </PageFrame>

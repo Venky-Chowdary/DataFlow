@@ -34,8 +34,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const toast = useCallback(
     ({ title, message, tone = "info" }: { title: string; message?: string; tone?: ToastTone }) => {
       const id = crypto.randomUUID();
-      setItems((prev) => [...prev.slice(-4), { id, title, message, tone }]);
-      window.setTimeout(() => dismiss(id), tone === "error" ? 8000 : 5000);
+      setItems((prev) => [...prev.slice(-3), { id, title, message, tone }]);
+      window.setTimeout(() => dismiss(id), tone === "error" ? 7000 : 4200);
     },
     [dismiss]
   );
@@ -58,6 +58,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <button type="button" className="dt-toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss">
               <DtIcon name="x" size={16} />
             </button>
+            <span className={`dt-toast-timer dt-toast-timer--${t.tone}`} aria-hidden />
           </div>
         ))}
       </div>

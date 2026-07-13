@@ -2,18 +2,50 @@
    Enterprise pages — natural scroll, no viewport traps
    ═══════════════════════════════════════════════════════════ */
 
-/* All fit pages scroll via .df2-content — no overflow:hidden traps */
+/* All fit pages scroll via .df2-content — no overflow:hidden traps.
+   Job Theater and Transfer Studio keep a fixed viewport split, so they are excluded. */
 .df2-page-fit:is(
   .df2-page-connectors,
-  .df2-page-jobs,
   .df2-page-pipelines,
   .df2-page-mcp,
-  .df2-page-settings,
-  .df2-page-transfer-studio
+  .df2-page-settings
 ) .df2-page-body {
   overflow: visible;
   min-height: min-content;
   gap: var(--df-page-section-gap, 16px);
+}
+
+/* Job Theater: bounded height so list/detail fill the viewport */
+.df2-page-fit.df2-page-jobs .df2-page-body {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.df2-page-fit.df2-page-jobs .df2-jobs-workspace {
+  flex: 1 1 0;
+  min-height: 0;
+  gap: 12px;
+  overflow: hidden;
+}
+
+/* Transfer Studio: fill viewport so step panels can stretch on large monitors */
+.df2-page-fit.df2-page-transfer-studio .df2-page-body {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.df2-page-fit.df2-page-transfer-studio .df2-page-workspace {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .df2-connectors-chrome,

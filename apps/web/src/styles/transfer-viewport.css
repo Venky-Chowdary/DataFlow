@@ -113,16 +113,71 @@
 
 /* Step 1 — source split with internal scroll on preview */
 .df2-source-step .df2-transfer-step-split {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
+  height: 100%;
   align-items: stretch;
 }
 
-.df2-source-step .df2-transfer-step-primary,
-.df2-source-step .df2-transfer-step-secondary {
+.df2-source-step .df2-transfer-step-primary {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.df2-source-step .df2-transfer-step-secondary {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  overscroll-behavior: contain;
+}
+
+/* Detected structure card fills remaining height on large screens */
+.df2-source-step .df2-transfer-step-secondary > .df2-structure-preview {
+  flex: 1 1 0;
+  min-height: 0;
+  height: 100%;
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-source-step .df2-structure-preview-head,
+.df2-source-step .df2-structure-field-strip {
+  flex-shrink: 0;
+}
+
+.df2-source-step .df2-structure-table-wrap {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none !important;
+  overflow: auto;
+}
+
+.df2-source-step .df2-structure-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+}
+
+.df2-structure-more-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-source-step.df2-transfer-step-viewport > .df2-card-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-source-step .df2-transfer-step-split {
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .df2-source-step .df2-upload.df2-upload-studio {

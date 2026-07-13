@@ -127,7 +127,8 @@
   }
 
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-collapse-label,
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env small {
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env small,
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env strong {
     display: none;
   }
 

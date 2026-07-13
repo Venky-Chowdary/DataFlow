@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { DtIcon } from "./DtIcon";
 import type { Screen } from "../lib/types";
 
@@ -18,7 +19,9 @@ export function StatusPopover({
   onNavigate,
 }: StatusPopoverProps) {
   const [open, setOpen] = useState(false);
+  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const hasAttentionItems = !apiOnline || failedJobsCount > 0 || unhealthyConnectorsCount > 0;
   const systemTone: "ok" | "live" | "warn" = hasAttentionItems ? "warn" : runningJobsCount > 0 ? "live" : "ok";
@@ -42,16 +45,42 @@ export function StatusPopover({
   }
   const systemMessage = parts.join(" ");
 
+  const updatePosition = () => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setCoords({
+      top: rect.bottom + 10,
+      right: Math.max(12, window.innerWidth - rect.right),
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const onClick = (e: MouseEvent) => {
       const target = e.target as Node;
-      if (anchorRef.current && !anchorRef.current.contains(target)) {
-        setOpen(false);
-      }
+      if (anchorRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    const onReposition = () => updatePosition();
     document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
   }, [open]);
 
   const navigate = (screen: Screen) => {
@@ -67,6 +96,7 @@ export function StatusPopover({
         onClick={() => setOpen((o) => !o)}
         aria-label="System status"
         title="System status"
+        aria-expanded={open}
       >
         <DtIcon name={systemTone === "ok" ? "check" : systemTone === "warn" ? "alert" : "activity"} size={16} />
         <span className="df2-topbar-btn-text">Status</span>
@@ -77,9 +107,14 @@ export function StatusPopover({
         )}
       </button>
 
-      {open && (
-        <div className={`df2-status-popover ${systemTone}`} role="dialog" aria-label="System status">
-          <div className="df2-status-popover-arrow" aria-hidden="true" />
+      {open && coords && createPortal(
+        <div
+          ref={panelRef}
+          className={`df2-status-popover ${systemTone}`}
+          role="dialog"
+          aria-label="System status"
+          style={{ top: coords.top, right: coords.right }}
+        >
           <div className="df2-status-popover-head">
             <span className={`df2-status-popover-icon ${systemTone}`} aria-hidden>
               <DtIcon
@@ -122,7 +157,8 @@ export function StatusPopover({
               )}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

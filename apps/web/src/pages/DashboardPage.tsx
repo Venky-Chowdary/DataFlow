@@ -13,7 +13,6 @@ import { EmptyState } from "../components/EmptyState";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
 import { StatusDonut, ThroughputChart } from "../components/overview/OverviewCharts";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { ProgressCell } from "../components/ui/ProgressCell";
@@ -36,7 +35,6 @@ export function DashboardPage({
   jobs,
   schedules = [],
   onNewTransfer,
-  onOpenPilot,
   onOpenConnectors,
   onOpenJobs,
 }: DashboardPageProps) {
@@ -49,71 +47,27 @@ export function DashboardPage({
   }, []);
 
   const completed = jobs.filter((j) => j.status === "completed");
-  const failed = jobs.filter((j) => j.status === "failed");
-  const running = jobs.filter((j) => j.status === "running" || j.status === "pending");
   const totalRecords = completed.reduce((sum, j) => sum + (j.records_processed || 0), 0);
   const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
   const healthyConnectors = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
-  const alertCount = failed.length + connectors.filter((c) => c.status === "error").length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
 
   const throughputSeries = useMemo(() => buildThroughputSeries(jobs), [jobs]);
   const statusSlices = useMemo(() => buildStatusDistribution(jobs), [jobs]);
-
-  const insight = !connectors.length
-    ? "Connect your first source or destination to activate the data plane."
-    : failed.length
-      ? `${failed.length} migration${failed.length > 1 ? "s" : ""} need attention — open Job Theater for logs.`
-      : running.length
-        ? `${running.length} live migration${running.length > 1 ? "s" : ""} streaming to Job Theater.`
-        : jobs.length === 0
-          ? "Run your first governed transfer to populate topology and analytics."
-          : "Data plane healthy — throughput and routes updating from live jobs.";
 
   const topology = useMemo(
     () => buildDataPlaneTopology(connectors, jobs, schedules),
     [connectors, jobs, schedules],
   );
   const routeCount = topology.edges.length;
-  const healthTone = alertCount > 0 ? "warn" : running.length > 0 ? "live" : "ok";
 
   return (
     <PageShell
       wide
       className="df2-page-overview-enterprise"
-      kicker="Control plane"
       title="Overview"
-      description="Enterprise data plane — live analytics, pipelines, and migration health."
-      actions={
-        <div className="df2-overview-toolbar-actions">
-          {onOpenPilot && (
-            <button type="button" className="df2-btn df2-btn-ghost" onClick={onOpenPilot} title="Open Data Pilot">
-              <DtIcon name="sparkle" size={16} /> Data Pilot
-            </button>
-          )}
-        </div>
-      }
     >
       <PageFrame className="df2-overview-page df2-overview-enterprise">
-        <PageInsightStrip
-          tone={healthTone}
-          pill={
-            healthTone === "warn"
-              ? `${alertCount} alert${alertCount > 1 ? "s" : ""}`
-              : healthTone === "live"
-                ? `${running.length} live`
-                : "Operational"
-          }
-          message={insight}
-          actions={
-            failed.length > 0 && onOpenJobs ? (
-              <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenJobs}>
-                <DtIcon name="alert" size={14} /> Open Job Theater
-              </button>
-            ) : undefined
-          }
-        />
-
         <PageMetricsRow
           metrics={[
             { label: "Rows moved", value: totalRecords.toLocaleString(), tone: "teal", icon: "trend", sub: "7-day total" },

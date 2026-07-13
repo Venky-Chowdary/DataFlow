@@ -1,4 +1,4 @@
-/** Consolidated app styles — single entry for Vite (replaces 17 separate imports). */
+/** Consolidated app styles — single entry for Vite. */
 @import "./tokens.css";
 @import "./dataflow-ui.css";
 @import "./jarvis-ui.css";
@@ -17,22 +17,16 @@
 @import "./responsive-fixes.css";
 @import "./pipeline-topology.css";
 @import "./transfer-studio-v2.css";
-@import "./platform-ui-audit.css";
-@import "./design-system-unified.css";
-@import "./ux-polish.css";
-@import "./production-polish.css";
 @import "./responsive-shell-fixes.css";
 @import "./column-workbench.css";
 @import "./transfer-viewport.css";
 @import "./transfer-studio-polish.css";
-@import "./page-redesign-v3.css";
-@import "./ui-stability-layer.css";
-@import "./enterprise-final.css";
 @import "./connectors-page.css";
-@import "./ui-density.css";
 @import "./pilot-chat.css";
-@import "./jobs-page-redesign.css";
 @import "./docs-page.css";
+/* Canonical final layer — replaces page-redesign-v3, enterprise-final,
+   ui-density, ui-stability, enterprise-ui-v4, jobs-page-redesign, polish overlays */
+@import "./enterprise-ui.css";
 
 .df2-map-step-body {
   display: flex;
