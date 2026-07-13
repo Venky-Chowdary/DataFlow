@@ -22,10 +22,17 @@ interface ConnectorModalProps {
   onSaved: () => void;
 }
 
-type AuthMode = "user_pass" | "connection_string" | "service_account" | "aws_keys" | "api_key";
+type AuthMode = "user_pass" | "connection_string" | "service_account" | "aws_keys" | "api_key" | "file_path";
+
+const FILE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"];
+
+function isFileFormat(type: string): boolean {
+  return FILE_FORMATS.includes(type);
+}
 
 function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMode {
   if (conn?.auth_mode) return conn.auth_mode as AuthMode;
+  if (isFileFormat(type)) return "file_path";
   if (conn?.api_key) return "api_key";
   if (conn?.service_account) return "service_account";
   if (conn?.connection_string) return "connection_string";
@@ -38,6 +45,12 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
 }
 
 function authModeOptions(type: string): { value: AuthMode; label: string }[] {
+  if (isFileFormat(type)) {
+    return [
+      { value: "file_path", label: "Local / mounted file path" },
+      { value: "connection_string", label: "URL or object-store URI" },
+    ];
+  }
   const sqlish = ["postgresql", "mysql", "redshift", "mariadb", "sqlite", "generic_sql"].includes(type);
   const mongo = type === "mongodb";
   const snowflake = type === "snowflake";
@@ -162,9 +175,9 @@ export function ConnectorModal({
       setFieldError("Connection name is required.");
       return false;
     }
-    if (authMode === "connection_string") {
+    if (authMode === "connection_string" || authMode === "file_path") {
       if (!connectionString.trim()) {
-        setFieldError("Connection string is required.");
+        setFieldError(authMode === "file_path" ? "File path or URL is required." : "Connection string is required.");
         return false;
       }
     } else if (authMode === "service_account") {
@@ -241,7 +254,7 @@ export function ConnectorModal({
       payload.username = username || undefined;
       payload.password = password || undefined;
     }
-    if (authMode === "connection_string") {
+    if (authMode === "connection_string" || authMode === "file_path") {
       payload.connection_string = connectionString || undefined;
     }
     if (authMode === "service_account") {
@@ -278,7 +291,7 @@ export function ConnectorModal({
         schema: isBigQuery || isSnowflake ? schema : undefined,
         username: authMode === "user_pass" || authMode === "aws_keys" ? username : undefined,
         password: authMode === "user_pass" || authMode === "aws_keys" ? password : undefined,
-        connection_string: authMode === "connection_string" ? connectionString : undefined,
+        connection_string: authMode === "connection_string" || authMode === "file_path" ? connectionString : undefined,
         service_account: authMode === "service_account" ? serviceAccount : undefined,
         api_key: authMode === "api_key" ? apiKey : undefined,
         warehouse: isSnowflake ? warehouse : undefined,
@@ -322,6 +335,7 @@ export function ConnectorModal({
 
   const showUserPass = authMode === "user_pass";
   const showConnectionString = authMode === "connection_string";
+  const showFilePath = authMode === "file_path";
   const showServiceAccount = authMode === "service_account";
   const showApiKey = authMode === "api_key";
   const showAwsKeys = authMode === "aws_keys";
@@ -335,6 +349,7 @@ export function ConnectorModal({
   }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic]);
 
   const databaseLabel = useMemo(() => {
+    if (isFileFormat(type)) return "Filename / pattern";
     if (isS3) return "Bucket name";
     if (isDynamo) return "Table name";
     if (isBigQuery) return "GCP project ID";
@@ -342,7 +357,7 @@ export function ConnectorModal({
     if (isAzure) return "Container / filesystem";
     if (isElastic) return "Index (optional)";
     return "Database";
-  }, [isS3, isDynamo, isBigQuery, isGcp, isAzure, isElastic]);
+  }, [isS3, isDynamo, isBigQuery, isGcp, isAzure, isElastic, type]);
 
   const schemaLabel = useMemo(() => {
     if (isBigQuery) return "Dataset";
@@ -439,6 +454,21 @@ export function ConnectorModal({
                 </div>
               )}
 
+              {showFilePath && (
+                <div className="df2-field" style={{ marginTop: 8 }}>
+                  <label className="df2-label">File path or URL</label>
+                  <input
+                    className="df2-input"
+                    placeholder="/mnt/data/files, s3://bucket/path, or https://host/file.csv"
+                    value={connectionString}
+                    onChange={(e) => setConnectionString(e.target.value)}
+                  />
+                  <p className="df2-field-note df2-label-hint">
+                    Local path, mounted NAS share, or object-store URI. Filename can be entered below.
+                  </p>
+                </div>
+              )}
+
               {showServiceAccount && (
                 <div className="df2-field" style={{ marginTop: 8 }}>
                   <label className="df2-label">Service account JSON or file path</label>
@@ -471,7 +501,7 @@ export function ConnectorModal({
                 </div>
               )}
 
-              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount || showConnectionString) && (
+              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount || showConnectionString) && !isFileFormat(type) && (
                 <div className="df2-form-row" style={{ marginTop: 8 }}>
                   <div className="df2-field">
                     <label className="df2-label">{hostLabel}</label>
@@ -496,13 +526,13 @@ export function ConnectorModal({
                 </div>
               )}
 
-              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount || showConnectionString) && (
+              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount || showConnectionString || showFilePath) && (
                 <div className="df2-form-row">
                   <div className="df2-field">
                     <label className="df2-label">{databaseLabel}</label>
                     <input
                       className="df2-input"
-                      placeholder={isS3 ? "my-data-bucket" : isBigQuery ? "dataflow-project" : "dataflow"}
+                      placeholder={isS3 ? "my-data-bucket" : isBigQuery ? "dataflow-project" : isFileFormat(type) ? "sample.csv" : "dataflow"}
                       value={database}
                       onChange={(e) => setDatabase(e.target.value)}
                     />

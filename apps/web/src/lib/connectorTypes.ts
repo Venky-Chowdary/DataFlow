@@ -128,6 +128,9 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   if (type === "elasticsearch") return { host: "localhost", port: 9200, label: "Elasticsearch" };
   if (type === "sqlite") return { host: "", port: 0, label: "SQLite" };
   if (type === "generic_sql") return { host: "", port: 0, label: "Generic SQL (any SQLAlchemy engine)" };
+  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(type)) {
+    return { host: "", port: 0, label: item?.label ?? type };
+  }
   return {
     host: "localhost",
     port: item?.port ?? 5432,

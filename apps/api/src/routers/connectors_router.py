@@ -5,6 +5,7 @@ Manage connector configurations and data transfers
 
 import asyncio
 import json
+import os
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -158,9 +159,23 @@ async def test_connection(request: TestConnectionRequest):
             return {"success": ok, "message": msg, "driver": driver}
 
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
+            path = (request.connection_string or request.host or "").strip()
+            if path:
+                if "://" in path:
+                    return {
+                        "success": True,
+                        "message": f"{request.type.upper()} file source configured — data will be read from the provided URL or object-store URI.",
+                        "details": {"format": request.type, "mode": "file_source", "path": path},
+                    }
+                if not os.path.exists(path):
+                    return {
+                        "success": False,
+                        "message": f"Path not found: {path}. Create the directory or mount the volume before running.",
+                        "details": {"format": request.type, "mode": "file_source", "path": path},
+                    }
             return {
                 "success": True,
-                "message": f"{request.type.upper()} file format supported — upload a sample file to validate parsing",
+                "message": f"{request.type.upper()} file format supported — upload a sample file or provide a file path to validate parsing",
                 "details": {"format": request.type, "mode": "file_source"},
             }
 
