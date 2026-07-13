@@ -361,6 +361,53 @@ def verify_mongodb_collection(
         return -1, ""
 
 
+def verify_dynamodb_table(
+    *,
+    connection_string: str,
+    database: str,
+    table_name: str,
+    username: str = "local",
+    password: str = "local",
+) -> tuple[int, str]:
+    """Reconcile a DynamoDB target by Scan count and item fingerprint."""
+    try:
+        import boto3
+        from boto3.dynamodb.types import TypeDeserializer
+
+        endpoint = connection_string or "http://localhost:8000"
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url=endpoint,
+            aws_access_key_id=username.strip() or "local",
+            aws_secret_access_key=password.strip() or "local",
+            region_name="us-east-1",
+        )
+        paginator = client.get_paginator("scan")
+        count = sum(page["Count"] for page in paginator.paginate(
+            TableName=table_name, Select="COUNT"
+        ))
+
+        deserializer = TypeDeserializer()
+        rows = []
+        for page in paginator.paginate(TableName=table_name, Limit=5000):
+            for item in page.get("Items", []):
+                rows.append({k: deserializer.deserialize(v) for k, v in item.items()})
+
+        h = hashlib.sha256()
+        for row in rows:
+            h.update(
+                "|".join(
+                    normalize_cell(
+                        sorted(v) if isinstance(v, set) else v
+                    )
+                    for v in row.values()
+                ).encode()
+            )
+        return int(count), h.hexdigest()[:16]
+    except Exception:
+        return -1, ""
+
+
 def verify_target(
     db_type: str,
     dest: dict[str, Any],
@@ -375,6 +422,17 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
             table_name=table_name,
+        )
+    elif db_type == "dynamodb":
+        from connectors.aws_common import resolve_endpoint_url
+
+        conn_str = resolve_endpoint_url(dest) or "http://localhost:8000"
+        count, chk = verify_dynamodb_table(
+            connection_string=conn_str,
+            database=dest.get("database", ""),
+            table_name=table_name,
+            username=dest.get("username", "local"),
+            password=dest.get("password", "local"),
         )
     elif db_type == "sqlite":
         count, chk = verify_sqlite_table(
