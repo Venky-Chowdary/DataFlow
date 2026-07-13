@@ -1416,6 +1416,19 @@
   color: var(--df-text-muted, #64748b);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
   box-sizing: border-box;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  cursor: text;
+}
+
+.df2-toolbar-search:hover {
+  border-color: #cbd5e1;
+  background: #fff;
+}
+
+.df2-toolbar-search:focus-within {
+  border-color: var(--df-brand, #0f766e) !important;
+  background: #fff !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
 }
 
 .df2-toolbar-search input {
@@ -1423,11 +1436,22 @@
   min-width: 0;
   width: 100%;
   height: 100%;
-  border: 0;
-  outline: 0;
-  background: transparent;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
   font-size: 13px;
   color: var(--df-text-primary, #111827);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.df2-toolbar-search input:focus,
+.df2-toolbar-search input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border: 0 !important;
 }
 
 .df2-toolbar-search input::placeholder {
@@ -1451,6 +1475,11 @@
 .df2-toolbar-clear:hover {
   background: #e2e8f0;
   color: #0f172a;
+}
+
+.df2-toolbar-clear:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.25);
 }
 
 /* One shared filter cluster — no double borders / trailing separators */
@@ -1528,11 +1557,28 @@
   box-shadow: none !important;
 }
 
+.df2-toolbar .df2-tab:hover:not(.active):not([aria-selected="true"]) {
+  color: #0f172a !important;
+  background: rgba(255, 255, 255, 0.55) !important;
+}
+
 .df2-toolbar .df2-tab.active,
 .df2-toolbar .df2-tab[aria-selected="true"] {
   background: #fff !important;
   color: #0f172a !important;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.df2-toolbar .df2-tab:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28) !important;
+}
+
+.df2-toolbar .df2-btn:focus-visible,
+.df2-toolbar .df2-btn.df2-btn-sm:focus-visible {
+  outline: none !important;
+  border-color: var(--df-brand, #0f766e) !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
 }
 
 /* Same filter density for panel-scoped tabs (e.g. MCP request log) */
@@ -1876,4 +1922,117 @@
   flex-wrap: wrap;
   gap: 8px;
   flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   FOCUS / HOVER POLISH — rounded rings, no square outlines
+   ═══════════════════════════════════════════════════════════ */
+.df2-app .df2-input,
+.df2-app .df2-select,
+.df2-app select.df2-input,
+.df2-app select.df2-select,
+.df2-app textarea.df2-input {
+  border-radius: 9px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.df2-app .df2-input:hover:not(:disabled):not(:focus),
+.df2-app .df2-select:hover:not(:disabled):not(:focus),
+.df2-app select.df2-input:hover:not(:disabled):not(:focus),
+.df2-app select.df2-select:hover:not(:disabled):not(:focus),
+.df2-app textarea.df2-input:hover:not(:disabled):not(:focus) {
+  border-color: #cbd5e1;
+}
+
+.df2-app .df2-input:focus,
+.df2-app .df2-input:focus-visible,
+.df2-app .df2-select:focus,
+.df2-app .df2-select:focus-visible,
+.df2-app select.df2-input:focus,
+.df2-app select.df2-input:focus-visible,
+.df2-app select.df2-select:focus,
+.df2-app select.df2-select:focus-visible,
+.df2-app textarea.df2-input:focus,
+.df2-app textarea.df2-input:focus-visible {
+  outline: none !important;
+  border-color: var(--df-brand, #0f766e) !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+}
+
+.df2-app .df2-command-search,
+.df2-app .df2-workspace-search {
+  border-radius: 9px !important;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.df2-app .df2-command-search:hover,
+.df2-app .df2-workspace-search:hover {
+  border-color: #cbd5e1 !important;
+}
+
+.df2-app .df2-command-search:focus-within,
+.df2-app .df2-workspace-search:focus-within {
+  background: #fff !important;
+  border-color: var(--df-brand, #0f766e) !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+}
+
+.df2-app .df2-command-search input,
+.df2-app .df2-workspace-search input {
+  outline: none !important;
+  box-shadow: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+
+.df2-app .df2-command-search input:focus,
+.df2-app .df2-command-search input:focus-visible,
+.df2-app .df2-workspace-search input:focus,
+.df2-app .df2-workspace-search input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.df2-app .df2-btn:focus-visible {
+  outline: none !important;
+  border-color: var(--df-brand, #0f766e) !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+}
+
+.df2-app .df2-tab:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.28);
+}
+
+/* Modals / dialogs — consistent radius + field focus */
+.df2-app .dt-modal,
+.dt-modal {
+  border-radius: 16px !important;
+  overflow: hidden;
+}
+
+.df2-app .dt-modal-body .df2-input,
+.df2-app .dt-modal-body .df2-select,
+.dt-modal-body .df2-input,
+.dt-modal-body .df2-select {
+  border-radius: 9px !important;
+}
+
+.df2-app .dt-modal-body .df2-input:focus,
+.df2-app .dt-modal-body .df2-input:focus-visible,
+.df2-app .dt-modal-body .df2-select:focus,
+.df2-app .dt-modal-body .df2-select:focus-visible,
+.dt-modal-body .df2-input:focus,
+.dt-modal-body .df2-input:focus-visible,
+.dt-modal-body .df2-select:focus,
+.dt-modal-body .df2-select:focus-visible {
+  outline: none !important;
+  border-color: var(--df-brand, #0f766e) !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+}
+
+.df2-app .dt-modal-actions .df2-btn:focus-visible,
+.dt-modal-actions .df2-btn:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
 }
