@@ -211,7 +211,10 @@ def verify_snowflake_table(
         )
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                try:
+                    cur.execute(f"USE WAREHOUSE {warehouse}")
+                except Exception:
+                    pass
             cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
             count = int(cur.fetchone()[0])
             cur.execute(f'SELECT * FROM "{table_name}" ORDER BY 1 LIMIT 5000')

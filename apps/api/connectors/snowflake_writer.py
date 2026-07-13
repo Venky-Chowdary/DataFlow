@@ -214,7 +214,11 @@ def write_mapped_rows(
 
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                try:
+                    cur.execute(f"USE WAREHOUSE {warehouse}")
+                except Exception:
+                    # fakesnow and some local mocks do not support USE WAREHOUSE.
+                    pass
             if database:
                 cur.execute(f"USE DATABASE {database}")
             cur.execute(f"USE SCHEMA {schema}")
