@@ -7,6 +7,7 @@ has the containers) exercises the live connector surface.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import sys
 from pathlib import Path
@@ -285,20 +286,40 @@ CASES = [
         ),
         id="cockroachdb",
     ),
+    pytest.param(
+        EndpointConfig(
+            kind="database",
+            format="snowflake",
+            host="localhost",
+            port=443,
+            database="dataflow",
+            username="test",
+            password="test",
+            schema="public",
+            table="payments_snowflake",
+        ),
+        id="snowflake-fakesnow",
+    ),
 ]
 
 
 @pytest.mark.parametrize("endpoint", CASES)
 def test_write_destination_database_local_emulator(endpoint: EndpointConfig):
-    if not _is_reachable(endpoint.host, endpoint.port):
-        pytest.skip(f"{endpoint.format} emulator not reachable on {endpoint.host}:{endpoint.port}")
+    if endpoint.format == "snowflake":
+        fakesnow = pytest.importorskip("fakesnow")
+        ctx = fakesnow.patch()
+    else:
+        if not _is_reachable(endpoint.host, endpoint.port):
+            pytest.skip(f"{endpoint.format} emulator not reachable on {endpoint.host}:{endpoint.port}")
+        ctx = contextlib.nullcontext()
 
-    rows, ddl_log, summary = write_destination_database(
-        endpoint,
-        RECORDS,
-        COLUMNS,
-        SCHEMA,
-        MAPPINGS,
-    )
+    with ctx:
+        rows, ddl_log, summary = write_destination_database(
+            endpoint,
+            RECORDS,
+            COLUMNS,
+            SCHEMA,
+            MAPPINGS,
+        )
     assert rows == 2, f"{endpoint.format}: expected 2 rows, got {rows} (summary={summary})"
     assert summary.get("error") is None, f"{endpoint.format}: {summary.get('error')}"
