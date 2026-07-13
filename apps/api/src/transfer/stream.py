@@ -78,6 +78,7 @@ def _read_batch(
     *,
     cursor_column: str = "",
     cursor_after: str | None = None,
+    cursor_type: str | None = None,
     known_total_rows: int | None = None,
     es_search_after: list | None = None,
     redis_scan_state=None,
@@ -161,6 +162,7 @@ def _read_batch(
                 collection=table,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
+                cursor_type=cursor_type,
                 columns=columns,
                 limit=limit,
             )
@@ -700,6 +702,7 @@ def stream_database_transfer(
             src_type, src_cfg, table, None, 0, 100, database=src_db,
             cursor_column=cursor_source_col if incremental else "",
             cursor_after=watermark if incremental else None,
+            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
     )
     sample_rows = sample_probe.rows or []
@@ -713,6 +716,7 @@ def stream_database_transfer(
             src_type, src_cfg, table, None, 0, chunk_size, database=src_db,
             cursor_column=cursor_source_col if incremental else "",
             cursor_after=watermark if incremental else None,
+            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
         )
     )
     columns = probe.headers
@@ -827,6 +831,7 @@ def stream_database_transfer(
                     database=src_db,
                     cursor_column=cursor_source_col,
                     cursor_after=running_cursor,
+                    cursor_type=column_types.get(cursor_source_col, "VARCHAR"),
                     known_total_rows=total_rows,
                 )
             )
@@ -845,6 +850,7 @@ def stream_database_transfer(
                     database=src_db,
                     cursor_column=keyset_col,
                     cursor_after=keyset_after,
+                    cursor_type=column_types.get(keyset_col, "VARCHAR"),
                     known_total_rows=total_rows,
                 )
             )
