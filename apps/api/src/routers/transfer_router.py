@@ -29,6 +29,11 @@ class EndpointDTO(BaseModel):
     password: str = ""
     connection_string: str = ""
     warehouse: str = ""
+    ssl: bool = False
+    auth_mode: str = ""
+    auth_role: str = ""
+    api_key: str = ""
+    service_account: str = ""
 
 
 class AnalyzeRequest(BaseModel):

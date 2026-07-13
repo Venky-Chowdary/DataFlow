@@ -187,6 +187,11 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
             "warehouse": conn_dict.get("warehouse") or cfg["warehouse"],
             "ssl": conn_dict.get("ssl", cfg["ssl"]),
             "type": conn_dict.get("type") or endpoint.format,
+            "auth_mode": conn_dict.get("auth_mode") or cfg["auth_mode"],
+            "auth_role": conn_dict.get("auth_role") or cfg["auth_role"],
+            "api_key": conn_dict.get("api_key") or cfg["api_key"],
+            "service_account": conn_dict.get("service_account") or cfg["service_account"],
+            "role": conn_dict.get("role") or cfg["role"],
         })
     return cfg
 
