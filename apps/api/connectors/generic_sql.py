@@ -51,6 +51,7 @@ except Exception:  # pragma: no cover
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
+    quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -817,8 +818,9 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
 
 
 def _sample_raw_table(conn: Any, table: str, schema: str | None) -> tuple[list[str], list[Any]]:
-    q = "\""
-    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    table_quoted = quote_sql_identifier(table)
+    schema_quoted = quote_sql_identifier(schema) if schema else None
+    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
     result = conn.execute(sa.text(f"SELECT * FROM {qualified} LIMIT 200"))
     headers = list(result.keys())
     rows = result.fetchall()
@@ -937,8 +939,9 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
-        q = "\""
-        qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+        table_quoted = quote_sql_identifier(table)
+        schema_quoted = quote_sql_identifier(schema) if schema else None
+        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
         with engine.connect() as conn:
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
             conn.commit()
@@ -962,8 +965,9 @@ def _read_table_raw(
     limit: int,
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
-    q = "\""
-    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    table_quoted = quote_sql_identifier(table)
+    schema_quoted = quote_sql_identifier(schema) if schema else None
+    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
     sql = f"SELECT * FROM {qualified}"
     if offset > 0:
         sql += f" LIMIT {limit} OFFSET {offset}"
@@ -980,8 +984,9 @@ def _count_table_raw(
     table: str,
     schema: str | None,
 ) -> int:
-    q = "\""
-    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    table_quoted = quote_sql_identifier(table)
+    schema_quoted = quote_sql_identifier(schema) if schema else None
+    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
     try:
         return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar() or 0
     except Exception:

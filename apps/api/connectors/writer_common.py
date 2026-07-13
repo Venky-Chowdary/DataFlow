@@ -26,6 +26,12 @@ def sanitize_identifier(name: str, preserve_case: bool = False) -> str:
     return s[:63]
 
 
+def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
+    """Quote a SQL identifier and escape embedded quote characters."""
+    escaped = name.replace(quote_char, quote_char + quote_char)
+    return f"{quote_char}{escaped}{quote_char}"
+
+
 def row_checksum(rows: list[tuple]) -> str:
     return checksum_rows(rows)
 

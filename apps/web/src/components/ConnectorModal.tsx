@@ -379,10 +379,10 @@ export function ConnectorModal({
             <ConnectorCatalogPanel
               role="all"
               onSelect={handleCatalogPick}
-              limit={120}
+              limit={200}
               compact
               requireAvailable={false}
-              initialStatus=""
+              initialStatus="live"
             />
           ) : (
             <>

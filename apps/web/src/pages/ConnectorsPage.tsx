@@ -269,7 +269,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
             <div className="df2-connectors-pane">
               <div className="df2-card">
                 <div className="df2-card-body">
-                  <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="" requireAvailable={false} />
+                  <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
                 </div>
               </div>
             </div>

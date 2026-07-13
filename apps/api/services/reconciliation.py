@@ -591,25 +591,11 @@ def normalize_cell(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
-        canonical = _canonicalize_number(str(value))
-        if canonical == "1":
-            return "true"
-        if canonical == "0":
-            return "false"
-        return canonical
+        return _canonicalize_number(str(value)) or "nan"
     if isinstance(value, int):
-        if value == 1:
-            return "true"
-        if value == 0:
-            return "false"
         return str(value)
     if isinstance(value, Decimal):
-        canonical = _canonicalize_number(value)
-        if canonical == "1":
-            return "true"
-        if canonical == "0":
-            return "false"
-        return canonical
+        return _canonicalize_number(value) or "nan"
     if isinstance(value, (bytes, bytearray, memoryview)):
         # Bytes may be raw payload or a base64-encoded string stored as bytes
         # (common in emulators). When the bytes are a valid base64 string,

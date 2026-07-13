@@ -67,15 +67,13 @@ def encrypt_secret(plain: str) -> str:
     if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0):
         return plain
 
-    try:
-        if _cryptography_available():
-            token = _get_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
-            return f"{_PREFIX_V1}{token}"
-    except Exception:
-        _warn_once()
-
-    _warn_once()
-    return f"{_PREFIX_V0}{base64.urlsafe_b64encode(plain.encode('utf-8')).decode('ascii')}"
+    if not _cryptography_available():
+        raise RuntimeError(
+            "cryptography is not installed. Connector secrets cannot be encrypted safely. "
+            "Install requirements with `pip install -r requirements.txt` before saving credentials."
+        )
+    token = _get_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
+    return f"{_PREFIX_V1}{token}"
 
 
 def decrypt_secret(stored: str) -> str:

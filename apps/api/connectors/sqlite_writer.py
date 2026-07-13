@@ -13,6 +13,7 @@ from typing import Any, Callable
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
+    quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -95,13 +96,14 @@ def _sqlite_upsert_batch(
         deduped[key] = row
     rows = list(deduped.values())
 
-    col_sql = ", ".join(f"\"{c}\"" for c in conflict_cols)
+    table_quoted = quote_sql_identifier(table_name)
+    col_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
     placeholders = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped)
-    delete_sql = f'DELETE FROM "{table_name}" WHERE ({col_sql}) IN ({placeholders})'
+    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({placeholders})"
     delete_params = [v for key in deduped.keys() for v in key]
     cur.execute(delete_sql, delete_params)
 
-    insert_sql = f'INSERT INTO "{table_name}" ({", ".join(f"\"{c}\"" for c in target_cols)}) VALUES ({", ".join("?" for _ in target_cols)})'
+    insert_sql = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({', '.join('?' for _ in target_cols)})"
     cur.executemany(insert_sql, rows)
 
 
@@ -145,6 +147,7 @@ def write_mapped_rows(
         )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
+    table_quoted = quote_sql_identifier(table_name)
     target_types = [sqlite_type(t) for t in source_types]
     policy = transform_error_policy(error_policy)
 
@@ -153,15 +156,15 @@ def write_mapped_rows(
         with conn:
             cur = conn.cursor()
             if create_table:
-                col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))
-                cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({col_defs})')
+                col_defs = ", ".join(f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types))
+                cur.execute(f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})")
 
             if backfill_new_fields:
-                existing = {row[1] for row in cur.execute(f'PRAGMA table_info("{table_name}")')}
+                existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table_quoted})")}
                 for col, typ in zip(target_cols, target_types):
                     if col not in existing:
                         try:
-                            cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
+                            cur.execute(f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}")
                         except sqlite3.OperationalError:
                             pass
 
@@ -198,7 +201,7 @@ def write_mapped_rows(
             chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
             written = 0
             placeholders = ", ".join("?" for _ in target_cols)
-            insert = f'INSERT INTO "{table_name}" ({", ".join(f"\"{c}\"" for c in target_cols)}) VALUES ({placeholders})'
+            insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"
             conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE

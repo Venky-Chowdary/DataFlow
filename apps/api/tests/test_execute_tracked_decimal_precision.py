@@ -1,4 +1,4 @@
-"""CSV → BigQuery end-to-end with JSON, BINARY, and TIMESTAMP edge types."""
+"""Data-integrity: long decimals and scientific notation survive transfer to PostgreSQL."""
 
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
 
-def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
+def _csv_bytes(rows: list[dict]) -> bytes:
+    fieldnames = ["id", "amount"]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
     writer.writeheader()
@@ -27,37 +28,40 @@ def _csv_bytes(rows: list[dict], fieldnames: list[str]) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
-def test_csv_to_bigquery_edge_types():
+def test_csv_to_postgresql_preserves_decimal_precision():
     try:
-        with socket.create_connection(("localhost", 9050), timeout=1):
+        with socket.create_connection(("localhost", 5432), timeout=1):
             pass
     except OSError:
-        pytest.skip("BigQuery emulator not reachable on localhost:9050")
+        pytest.skip("PostgreSQL emulator not reachable on localhost:5432")
 
-    table_name = "bq_edge_types_" + uuid.uuid4().hex[:8]
-    fieldnames = ["id", "json_col", "binary_col", "timestamp_col"]
+    table_name = "decimal_precision_" + uuid.uuid4().hex[:8]
     rows = [
-        {"id": "1", "json_col": '{"key":"value"}', "binary_col": "hello", "timestamp_col": "2024-01-15T10:30:00Z"},
-        {"id": "2", "json_col": '[1,2,3]', "binary_col": "world", "timestamp_col": "2024-06-01 14:00:00+00:00"},
+        {"id": "1", "amount": "12345678901234567890.1234567890"},
+        {"id": "2", "amount": "0.00000000000000000001"},
+        {"id": "3", "amount": "-999999999999999999.999999"},
+        {"id": "4", "amount": "1.23E-10"},
+        {"id": "5", "amount": "9.87E+20"},
     ]
 
     request = TransferRequest(
         source=EndpointConfig(kind="file", format="csv"),
-        source_filename="edge_types.csv",
-        source_content=_csv_bytes(rows, fieldnames),
+        source_filename="decimals.csv",
+        source_content=_csv_bytes(rows),
         destination=EndpointConfig(
             kind="database",
-            format="bigquery",
+            format="postgresql",
             host="localhost",
-            port=9050,
-            connection_string="http://localhost:9050",
-            database="dataflow-test",
-            schema="dataflow",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
             table=table_name,
         ),
         sync_mode="full_refresh_overwrite",
         stream_contracts=[{
-            "name": "edge_types",
+            "name": "decimals",
             "sync_mode": "full_refresh_overwrite",
             "primary_key": "id",
             "selected": True,
@@ -66,8 +70,12 @@ def test_csv_to_bigquery_edge_types():
     )
 
     engine = UniversalTransferEngine()
-    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
-    assert result.success is True, result.error
+    result = engine.execute_tracked(request, _new_job_id())
+    assert result.success, result.error
     assert result.records_transferred == len(rows)
     assert result.reconciliation.get("passed") is True
     assert result.reconciliation.get("source_checksum") == result.reconciliation.get("target_checksum")
+
+
+def _new_job_id() -> str:
+    return uuid.uuid4().hex[:24]
