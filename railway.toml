@@ -1,0 +1,15 @@
+# Railway — default configuration for the Web service.
+# If the service does not have its own config file path set, this file is used.
+# The API service should set its own config path: deploy/railway/api.toml
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.railway.web"
+watchPatterns = ["apps/web/**", "packages/design-system/**", "Dockerfile.railway.web"]
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+numReplicas = 1
