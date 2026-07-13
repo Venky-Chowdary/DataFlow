@@ -116,6 +116,10 @@ def write_mapped_rows(
         schema_fields = [
             bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types)
         ]
+        dataset_ref = f"{project_id}.{dataset_id}"
+        existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
+        if dataset_id not in existing_datasets:
+            client.create_dataset(bigquery.Dataset(dataset_ref))
         table = bigquery.Table(table_id, schema=schema_fields)
         client.create_table(table, exists_ok=True)
 
