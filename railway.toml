@@ -8,6 +8,7 @@ dockerfilePath = "Dockerfile.railway.web"
 watchPatterns = ["apps/web/**", "packages/design-system/**", "Dockerfile.railway.web"]
 
 [deploy]
+startCommand = "nginx -g 'daemon off;'"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
