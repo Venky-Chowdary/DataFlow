@@ -184,7 +184,7 @@ def adaptive_chunk_size(
     avg_row_size_bytes: int | None,
     *,
     max_size: int = 10000,
-    min_size: int = 100,
+    min_size: int = 1,
     target_memory_bytes: int = 8 * 1024 * 1024,  # 8 MB
 ) -> int:
     """Return a safe chunk size for the current row payload.

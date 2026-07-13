@@ -74,20 +74,29 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
         return headers, schema, total, sample
 
     if file_type in ("jsonl", "ndjson"):
-        text = _decode(content)
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
-            raise ValueError("JSONL file is empty")
+        enc = detect_encoding(content)
         sample_objs: list[dict] = []
         columns: set[str] = set()
-        for line in lines[:100]:
-            obj = json.loads(line)
-            if isinstance(obj, dict):
-                sample_objs.append(obj)
-                columns.update(obj.keys())
+        total = 0
+        reader_file = io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
+        try:
+            for line in reader_file:
+                line = line.strip()
+                if not line:
+                    continue
+                total += 1
+                if len(sample_objs) < 100:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        sample_objs.append(obj)
+                        columns.update(obj.keys())
+        finally:
+            reader_file.close()
+        if total == 0:
+            raise ValueError("JSONL file is empty")
         headers = sorted(columns)
         schema = FileParser.infer_schema(sample_objs)
-        return headers, schema, len(lines), sample_objs[:100]
+        return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
         import sys
@@ -111,18 +120,22 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
 
         import pyarrow.parquet as pq
 
-        table = pq.read_table(io.BytesIO(content))
-        df = table.to_pandas()
-        total = len(df)
-        sample_df = df.head(100)
-        headers = [str(c) for c in sample_df.columns.tolist()]
-        sample = sample_df.to_dict(orient="records")
-        for rec in sample:
-            for k, v in list(rec.items()):
-                if hasattr(v, "item"):
-                    rec[k] = v.item()
-                elif v != v:
-                    rec[k] = None
+        pf = pq.ParquetFile(io.BytesIO(content))
+        try:
+            total = pf.metadata.num_rows
+            headers = [str(c) for c in pf.schema_arrow.names]
+            sample: list[dict] = []
+            for batch in pf.iter_batches(batch_size=100):
+                batch_df = batch.to_pandas()
+                for _, row in batch_df.iterrows():
+                    rec = {str(k): (row[k].item() if hasattr(row[k], "item") else (None if row[k] != row[k] else row[k])) for k in batch_df.columns}
+                    sample.append(rec)
+                    if len(sample) >= 100:
+                        break
+                if len(sample) >= 100:
+                    break
+        finally:
+            pf.close()
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
 
@@ -150,35 +163,44 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
 
 
 def _iter_csv_batches(content: bytes, chunk_size: int):
-    text = _decode(content)
-    delim = detect_delimiter(text[:8192])
-    reader = csv.DictReader(io.StringIO(text), delimiter=delim)
-    batch: list[dict] = []
-    for row in reader:
-        batch.append(dict(row))
-        if len(batch) >= chunk_size:
+    enc = detect_encoding(content)
+    sample = content[:8192].decode(enc, errors="replace")
+    delim = detect_delimiter(sample)
+    reader_file = io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
+    try:
+        reader = csv.DictReader(reader_file, delimiter=delim)
+        batch: list[dict] = []
+        for row in reader:
+            batch.append(dict(row))
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
             yield batch
-            batch = []
-    if batch:
-        yield batch
+    finally:
+        reader_file.close()
 
 
 def _iter_jsonl_batches(content: bytes, chunk_size: int):
-    text = _decode(content)
-    batch: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        obj = json.loads(line)
-        if not isinstance(obj, dict):
-            continue
-        batch.append(obj)
-        if len(batch) >= chunk_size:
+    enc = detect_encoding(content)
+    reader_file = io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
+    try:
+        batch: list[dict] = []
+        for line in reader_file:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if not isinstance(obj, dict):
+                continue
+            batch.append(obj)
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
             yield batch
-            batch = []
-    if batch:
-        yield batch
+    finally:
+        reader_file.close()
 
 
 def _iter_json_array_batches(content: bytes, chunk_size: int):
@@ -268,16 +290,19 @@ def stream_file_to_database(
 
         def _parquet_batches():
             batch: list[dict] = []
-            for rg in range(pf.num_row_groups):
-                chunk = pf.read_row_group(rg).to_pandas()
-                for _, row in chunk.iterrows():
-                    rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk.columns}
-                    batch.append(rec)
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-            if batch:
-                yield batch
+            try:
+                for record_batch in pf.iter_batches(batch_size=batch_size):
+                    chunk_df = record_batch.to_pandas()
+                    for _, row in chunk_df.iterrows():
+                        rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk_df.columns}
+                        batch.append(rec)
+                        if len(batch) >= batch_size:
+                            yield batch
+                            batch = []
+                if batch:
+                    yield batch
+            finally:
+                pf.close()
 
         batch_iter = _parquet_batches()
     else:
