@@ -43,7 +43,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "s3", "gcs", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
+    "s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
 })
 
 
@@ -59,6 +59,8 @@ def _source_name(source: EndpointConfig) -> str:
     if fmt == "s3":
         return source.table or source.collection or source.schema or ""
     if fmt == "gcs":
+        return source.table or source.collection or source.schema or ""
+    if fmt == "adls":
         return source.table or source.collection or source.schema or ""
     if fmt == "redis":
         return source.table or source.collection or source.schema or "*"
@@ -234,6 +236,10 @@ def _read_batch(
         return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
     if src_type == "s3":
         from connectors.s3_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "adls":
+        from connectors.adls_reader import read_object
 
         return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
     if src_type == "dynamodb":
@@ -545,10 +551,11 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    if dest_type in ("s3", "gcs", "dynamodb", "elasticsearch", "redis"):
+    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis"):
         writers = {
             "s3": "connectors.s3_writer",
             "gcs": "connectors.gcs_writer",
+            "adls": "connectors.adls_writer",
             "dynamodb": "connectors.dynamodb_writer",
             "elasticsearch": "connectors.elasticsearch_writer",
             "redis": "connectors.redis_writer",
@@ -724,7 +731,7 @@ def stream_database_transfer(
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 
     if not schema:
-        if src_type in ("s3", "gcs"):
+        if src_type in ("s3", "gcs", "adls"):
             try:
                 from services.object_store_introspect import profile_object_batch
                 profiled = profile_object_batch(columns, probe.rows)
@@ -1006,7 +1013,7 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
     if not columns and probe.total_rows == 0:
         raise ValueError(f"Source `{table}` has no columns or is empty")
 
-    if src_type in ("s3", "gcs"):
+    if src_type in ("s3", "gcs", "adls"):
         try:
             from services.object_store_introspect import profile_object_batch
             profiled = profile_object_batch(columns, probe.rows)

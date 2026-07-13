@@ -79,8 +79,9 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    create_table: bool = True,
 ) -> WriteResult:
-    del warehouse, backfill_new_fields
+    del warehouse, backfill_new_fields, create_table
     container = database
     if not container:
         return WriteResult(
