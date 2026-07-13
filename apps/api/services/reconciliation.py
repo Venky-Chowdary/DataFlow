@@ -275,6 +275,102 @@ def verify_bigquery_table(
         return -1, ""
 
 
+def _rows_from_object_bytes(body: bytes, key: str) -> list[Sequence[Any]]:
+    """Parse S3/GCS object payload (JSON, JSONL, CSV) into a row matrix."""
+    import csv
+    import io
+
+    text = body.decode("utf-8", errors="replace")
+    lower_key = (key or "").lower()
+
+    if lower_key.endswith(".csv"):
+        reader = csv.DictReader(io.StringIO(text))
+        return [list(row.values()) for row in reader]
+
+    if lower_key.endswith(".jsonl"):
+        rows = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                rows.append(list(parsed.values()))
+            else:
+                rows.append([parsed])
+        return rows
+
+    # Default: JSON array or newline-delimited JSON.
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = []
+    if isinstance(data, list):
+        return [list(record.values()) for record in data if isinstance(record, dict)]
+    if isinstance(data, dict):
+        return [list(data.values())]
+    return []
+
+
+def verify_s3_object(
+    *,
+    bucket: str,
+    key: str,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    connection_string: str,
+    ssl: bool,
+) -> tuple[int, str]:
+    """Reconcile an S3 object by downloading and parsing its contents."""
+    try:
+        from connectors.aws_common import boto3_client
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "ssl": ssl,
+            "database": bucket,
+        }
+        client = boto3_client("s3", cfg)
+        obj = client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"].read()
+        rows = _rows_from_object_bytes(body, key)
+        return len(rows), checksum_rows(rows)
+    except Exception:
+        return -1, ""
+
+
+def verify_gcs_blob(
+    *,
+    bucket: str,
+    key: str,
+    host: str,
+    port: int,
+    connection_string: str,
+) -> tuple[int, str]:
+    """Reconcile a GCS blob by downloading and parsing its contents."""
+    try:
+        from connectors.gcs_common import gcs_client
+
+        cfg = {
+            "host": host,
+            "port": port,
+            "connection_string": connection_string,
+        }
+        client = gcs_client(cfg)
+        blob = client.bucket(bucket).blob(key)
+        body = blob.download_as_bytes()
+        rows = _rows_from_object_bytes(body, key)
+        return len(rows), checksum_rows(rows)
+    except Exception:
+        return -1, ""
+
+
 def verify_sqlite_table(
     *,
     connection_string: str,
@@ -461,6 +557,25 @@ def verify_target(
             dataset_id=schema,
             connection_string=dest.get("connection_string", ""),
             table_name=table_name,
+        )
+    elif db_type == "s3":
+        count, chk = verify_s3_object(
+            bucket=dest.get("database", ""),
+            key=table_name,
+            host=dest.get("host", ""),
+            port=int(dest.get("port", 0)),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+        )
+    elif db_type == "gcs":
+        count, chk = verify_gcs_blob(
+            bucket=dest.get("database", ""),
+            key=table_name,
+            host=dest.get("host", ""),
+            port=int(dest.get("port", 0)),
+            connection_string=dest.get("connection_string", ""),
         )
     else:
         count, chk = -1, ""
