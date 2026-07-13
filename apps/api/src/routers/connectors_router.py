@@ -401,6 +401,29 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_transfer_job(job_id: str):
+    """Request cancellation of a running/pending transfer job."""
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.get("status") in ("completed", "failed", "cancelled"):
+            return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
+        mongo.update_job_status(
+            job_id, "cancelled",
+            phase="cancelled",
+            message="Transfer cancelled by user",
+            progress_pct=job.get("progress_pct", 0),
+        )
+        return {"success": True, "job_id": job_id, "status": "cancelled", "message": "Cancellation requested"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/jobs/{job_id}/stream")
 async def stream_transfer_job(job_id: str):
     """Server-sent events for live transfer job progress."""

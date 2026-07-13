@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
+class TransferCancelled(Exception):
+    """Raised when a user cancels a running transfer job."""
+
+
 # Retriable exceptions are transient: network, rate limit, lock, timeout, etc.
 RETRIABLE_EXCEPTIONS: set[str] = {
     "connectionerror",

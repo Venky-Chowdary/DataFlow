@@ -24,7 +24,7 @@ try:
         run_transfer_policy_gates,
     )
     from services import lineage_telemetry as lineage
-    from services.error_handling import classify_error
+    from services.error_handling import classify_error, TransferCancelled
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
         run_transfer_policy_gates,
     )
     from src.services import lineage_telemetry as lineage
-    from src.services.error_handling import classify_error
+    from src.services.error_handling import classify_error, TransferCancelled
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -413,7 +413,18 @@ class UniversalTransferEngine:
                 message=f"Writing {total_rows:,} rows…",
             )
 
+            def _check_cancelled() -> None:
+                try:
+                    job = mongo.get_job(job_id)
+                    if job and job.get("status") == "cancelled":
+                        raise TransferCancelled("Transfer cancelled by user")
+                except TransferCancelled:
+                    raise
+                except Exception:
+                    pass
+
             def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
+                _check_cancelled()
                 pct = 25 + int((chunk / max(chunks, 1)) * 65)
                 update = dict(
                     records_processed=rows,
@@ -553,9 +564,11 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             error_classification = classify_error(e)
+            cancelled = isinstance(e, TransferCancelled)
+            status = "cancelled" if cancelled else "failed"
             mongo.update_job_status(
-                job_id, "failed",
-                error=str(e), phase="failed", progress_pct=0, message=str(e),
+                job_id, status,
+                error=str(e), phase=status, progress_pct=0, message=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
             )
             lineage.emit_run_failed(
@@ -712,7 +725,18 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            def _check_cancelled() -> None:
+                try:
+                    job = mongo.get_job(job_id)
+                    if job and job.get("status") == "cancelled":
+                        raise TransferCancelled("Transfer cancelled by user")
+                except TransferCancelled:
+                    raise
+                except Exception:
+                    pass
+
             def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
+                _check_cancelled()
                 pct = 25 + int((chunk / max(chunks, 1)) * 65)
                 update = dict(
                     records_processed=rows,
@@ -831,9 +855,11 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             error_classification = classify_error(e)
+            cancelled = isinstance(e, TransferCancelled)
+            status = "cancelled" if cancelled else "failed"
             mongo.update_job_status(
-                job_id, "failed",
-                error=str(e), phase="failed", progress_pct=0, message=str(e),
+                job_id, status,
+                error=str(e), phase=status, progress_pct=0, message=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
             )
             lineage.emit_run_failed(
@@ -993,7 +1019,18 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            def _check_cancelled() -> None:
+                try:
+                    job = mongo.get_job(job_id)
+                    if job and job.get("status") == "cancelled":
+                        raise TransferCancelled("Transfer cancelled by user")
+                except TransferCancelled:
+                    raise
+                except Exception:
+                    pass
+
             def on_checkpoint(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:
+                _check_cancelled()
                 pct = 25 + int((chunk / max(chunks, 1)) * 65)
                 update = dict(
                     records_processed=rows,
@@ -1111,9 +1148,11 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             error_classification = classify_error(e)
+            cancelled = isinstance(e, TransferCancelled)
+            status = "cancelled" if cancelled else "failed"
             mongo.update_job_status(
-                job_id, "failed",
-                error=str(e), phase="failed", progress_pct=0, message=str(e),
+                job_id, status,
+                error=str(e), phase=status, progress_pct=0, message=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
             )
             lineage.emit_run_failed(
