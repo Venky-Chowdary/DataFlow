@@ -42,7 +42,7 @@ export function ProofDashboard({ preflight, running = false, defaultOpen }: Proo
     <details
       key={`proof-${running ? "live" : preflight?.passed ? "ok" : "warn"}-${preflight?.passed_count ?? 0}`}
       className={`df2-proof-dashboard df2-disclosure ${statusTone}`}
-      defaultOpen={!running && openByDefault}
+      open={!running && openByDefault}
       aria-label="Proof dashboard"
     >
       <summary className="df2-proof-dashboard-summary-bar">
