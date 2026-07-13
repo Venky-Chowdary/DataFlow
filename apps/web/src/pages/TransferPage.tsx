@@ -2552,29 +2552,31 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
       {step === STEP_VALIDATE && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split">
-          <div className="df2-proof-dashboard-wrap">
-            <ProofDashboard preflight={preflight} running={preflighting} />
+          <div className="df2-validate-scroll">
+            <div className="df2-proof-dashboard-wrap">
+              <ProofDashboard preflight={preflight} running={preflighting} />
+            </div>
+            <PreflightTimeline
+              result={preflight ?? {
+                passed: false,
+                passed_count: 0,
+                total_gates: 11,
+                readiness_score: 0,
+                gates: [],
+                blockers: [],
+              }}
+              running={preflighting}
+              confidenceThreshold={confidenceThreshold}
+              compact
+              hideActions
+            />
           </div>
-          <PreflightTimeline
-            result={preflight ?? {
-              passed: false,
-              passed_count: 0,
-              total_gates: 11,
-              readiness_score: 0,
-              gates: [],
-              blockers: [],
-            }}
-            running={preflighting}
-            confidenceThreshold={confidenceThreshold}
-            compact
-            hideActions
-          />
         </div>
       )}
 
       {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body df2-run-center">
+          <div className="df2-card-body df2-run-center df2-run-ready">
             <div className="df2-run-readiness" aria-label="Run readiness summary">
               <div className="df2-run-readiness-head">
                 <span className="df2-badge df2-badge-live">
@@ -2589,12 +2591,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 <DtIcon name="transfer" size={14} />
                 <strong>{mapDestRouteLabel}</strong>
               </div>
-              <p>
-                Execute now to start governed transfer with live theater progress and reconciliation evidence.
-              </p>
             </div>
             <div className="df2-run-ready-body">
-              <ProofDashboard preflight={preflight} running={false} />
+              <ProofDashboard preflight={preflight} running={false} defaultOpen={false} />
               <PreflightTimeline
                 result={preflight ?? {
                   passed: false,
@@ -2609,14 +2608,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
                 compact
                 hideActions
               />
-              <div className="df2-run-ready-actions">
-                <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setStep(STEP_VALIDATE)}>
-                  <DtIcon name="chevron-left" size={16} />Back to validation
-                </button>
-                <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={() => void executeTransfer()}>
-                  <DtIcon name="arrow-right" size={18} />Execute transfer
-                </button>
-              </div>
+            </div>
+            <div className="df2-run-ready-actions">
+              <button type="button" className="df2-btn" onClick={() => setStep(STEP_VALIDATE)}>
+                <DtIcon name="chevron-left" size={16} />Back
+              </button>
+              <button type="button" className="df2-btn df2-btn-primary" onClick={() => void executeTransfer()}>
+                <DtIcon name="arrow-right" size={16} />Execute transfer
+              </button>
             </div>
           </div>
         </div>
@@ -2624,15 +2623,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules, 
 
       {step === STEP_RUN && transferring && !activeJobId && !result && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body df2-run-center df2-analyzing">
+          <div className="df2-card-body df2-run-center df2-analyzing df2-run-starting">
+            <div className="df2-validate-stage-glow" aria-hidden />
             <ButtonLoader label="Starting transfer…" />
+            <p className="df2-run-starting-hint">Opening live job theater…</p>
           </div>
         </div>
       )}
 
       {step === STEP_RUN && activeJobId && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body">
+          <div className="df2-card-body df2-run-theater-host">
             <JobTheater
               jobId={activeJobId}
               sourceLabel={file?.name || sourceConnector?.name}

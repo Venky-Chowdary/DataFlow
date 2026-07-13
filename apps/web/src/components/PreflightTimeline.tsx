@@ -115,7 +115,7 @@ export function PreflightTimeline({
   };
 
   return (
-    <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}`}>
+    <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}${running ? " is-validating" : ""}`}>
       {!compact && (
       <div className="df2-preflight-head">
         <div className="df2-preflight-score">
@@ -219,16 +219,11 @@ export function PreflightTimeline({
       </div>
       )}
 
-      {compact && (
+      {compact && !running && (
         <div className="df2-preflight-compact-head">
           <div>
             <h3 className="df2-preflight-title">
-              {running ? (
-                <>
-                  <Spinner size="sm" label="" />
-                  <span>Validating…</span>
-                </>
-              ) : result.passed ? "All checks passed" : "Checks need attention"}
+              {result.passed ? "All checks passed" : "Checks need attention"}
             </h3>
             <div className="df2-preflight-compact-summary">
               <span className="ok">{passCount} passed</span>
@@ -269,27 +264,49 @@ export function PreflightTimeline({
       )}
 
       {running && (
-        <div className="df2-preflight-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={preflightProgress}>
-          <div className="df2-mapping-progress-meta">
-            <strong>{preflightProgress}%</strong>
-            <span title={phaseLabel}>{phaseLabel}</span>
-          </div>
-          <div className="df2-mapping-progress-track">
-            <span className={`df2-mapping-progress-fill ${preflightProgress >= 80 ? "is-finishing" : ""} ${running ? "is-animating" : ""}`} style={{ width: `${preflightProgress}%` }} />
+        <div className="df2-validate-stage" role="status" aria-live="polite">
+          <div className="df2-validate-stage-glow" aria-hidden />
+          <div className="df2-validate-stage-core">
+            <Spinner size="sm" label="" />
+            <h3>Validating route</h3>
+            <p title={phaseLabel}>{phaseLabel}</p>
+            <div
+              className="df2-preflight-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={preflightProgress}
+            >
+              <div className="df2-mapping-progress-meta">
+                <strong>{preflightProgress}%</strong>
+                <span>Safety gates</span>
+              </div>
+              <div className="df2-mapping-progress-track">
+                <span
+                  className={`df2-mapping-progress-fill ${preflightProgress >= 80 ? "is-finishing" : ""} is-animating`}
+                  style={{ width: `${preflightProgress}%` }}
+                />
+              </div>
+            </div>
           </div>
         </div>
       )}
 
       <div className="df2-preflight-track">
         {gates.map((gate, i) => (
-          <div key={gate.id} className={`df2-preflight-step ${gate.status}`} style={{ animationDelay: `${i * 80}ms` }}>
+          <div
+            key={gate.id}
+            className={`df2-preflight-step ${gate.status}`}
+            style={{ animationDelay: `${i * 40}ms` }}
+            title={gate.message}
+          >
             <div className="df2-preflight-marker">
-              {gate.status === "pass" && <DtIcon name="check" size={14} />}
-              {gate.status === "block" && <DtIcon name="x" size={14} />}
+              {gate.status === "pass" && <DtIcon name="check" size={12} />}
+              {gate.status === "block" && <DtIcon name="x" size={12} />}
               {gate.status === "running" && <Spinner size="sm" label="" />}
               {gate.status === "skip" && <span>—</span>}
             </div>
-            <div>
+            <div className="df2-preflight-step-copy">
               <div className="df2-preflight-step-title">{gateLabel(gate.id)}</div>
               <div className="df2-preflight-step-msg">{gate.message}</div>
             </div>
@@ -297,13 +314,14 @@ export function PreflightTimeline({
         ))}
       </div>
 
-      {result.blockers.length > 0 && (
-        <div className="df2-preflight-diagnostics">
-          <div className="df2-preflight-diagnostics-head">
+      {result.blockers.length > 0 && !running && (
+        <details className="df2-disclosure df2-preflight-diagnostics" open>
+          <summary className="df2-preflight-diagnostics-head">
             <DtIcon name="alert" size={14} />
             <strong>Blockers</strong>
             <span className="df2-preflight-diagnostics-count">{result.blockers.length}</span>
-          </div>
+            <span className="df2-disclosure-chevron" aria-hidden />
+          </summary>
           <ul className="df2-preflight-diagnostics-list">
             {result.blockers.map((b) => (
               <li key={b.id}>
@@ -335,7 +353,7 @@ export function PreflightTimeline({
               </li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
     </div>
   );

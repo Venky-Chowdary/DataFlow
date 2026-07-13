@@ -57,12 +57,13 @@ export function TransferResultDashboard({
 
   return (
     <div className={`df2-result-dashboard ${result.success ? "success" : "error"}`}>
+      <div className="df2-result-scroll">
       <div className="df2-result-hero">
         <span className={`df2-result-badge ${result.success ? "df2-badge-live" : "df2-badge-error"}`}>
-          <DtIcon name={result.success ? "check" : "x"} size={16} />
+          <DtIcon name={result.success ? "check" : "x"} size={14} />
           {result.success ? "Transfer complete" : result.error || "Transfer failed"}
         </span>
-        <h2 className="df2-result-title">{result.success ? "Your data has been transferred" : "Transfer could not complete"}</h2>
+        <h2 className="df2-result-title">{result.success ? "Data transferred" : "Transfer could not complete"}</h2>
         <p className="df2-result-subtitle">
           {result.success
             ? `${rec.toLocaleString()} records moved and reconciled`
@@ -72,18 +73,17 @@ export function TransferResultDashboard({
 
       <div className="df2-result-route-card">
         <div className="df2-result-endpoint">
-          <ConnectorIcon id={sourceType} size={24} />
+          <ConnectorIcon id={sourceType} size={22} />
           <div>
             <span>{sourceType ? sourceType.toUpperCase() : "Source"}</span>
             <strong title={sourceLabel}>{sourceLabel}</strong>
           </div>
         </div>
         <div className="df2-result-arrow" aria-hidden>
-          <DtIcon name="arrow-right" size={20} />
-          <small>to</small>
+          <DtIcon name="arrow-right" size={18} />
         </div>
         <div className="df2-result-endpoint">
-          <ConnectorIcon id={destType} size={24} />
+          <ConnectorIcon id={destType} size={22} />
           <div>
             <span>{destinationPath}</span>
             <strong title={destLabel}>{destinationLine}</strong>
@@ -91,12 +91,16 @@ export function TransferResultDashboard({
         </div>
       </div>
 
-      <div className="df2-result-explain">
-        <DtIcon name="shield" size={16} />
-        <span>
-          <strong>What you can trust here:</strong> checksums are computed over the source and destination rows and compared. If the reconciliation check passed, the transfer is complete and unchanged. The checksum is stored in this job record for audit and replay.
-        </span>
-      </div>
+      <details className="df2-disclosure df2-result-explain-wrap">
+        <summary className="df2-result-explain">
+          <DtIcon name="shield" size={16} />
+          <span><strong>Trust & reconciliation</strong> — checksum verification details</span>
+          <span className="df2-disclosure-chevron" aria-hidden />
+        </summary>
+        <p className="df2-result-explain-body">
+          Checksums are computed over the source and destination rows and compared. If reconciliation passed, the transfer is complete and unchanged. The checksum is stored on this job for audit and replay.
+        </p>
+      </details>
 
       <div className="df2-result-stats">
         <div className="df2-result-stat-card">
@@ -207,8 +211,12 @@ export function TransferResultDashboard({
       )}
 
       {result.job_id && (
-        <div className="df2-result-section df2-result-live-log">
-          <h4><DtIcon name="activity" size={14} /> Job log</h4>
+        <details className="df2-disclosure df2-result-section df2-result-live-log">
+          <summary>
+            <DtIcon name="activity" size={14} />
+            <strong>Job log</strong>
+            <span className="df2-disclosure-chevron" aria-hidden />
+          </summary>
           <JobTheater
             jobId={result.job_id}
             sourceLabel={sourceLabel}
@@ -216,8 +224,9 @@ export function TransferResultDashboard({
             sourceType={sourceType}
             destType={destType}
           />
-        </div>
+        </details>
       )}
+      </div>
 
       <div className="df2-result-actions">
         <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>

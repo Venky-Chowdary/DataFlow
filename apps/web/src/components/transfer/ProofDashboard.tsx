@@ -4,9 +4,11 @@ import type { PreflightResult } from "../../lib/types";
 interface ProofDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
+  /** Start expanded — default collapsed for density */
+  defaultOpen?: boolean;
 }
 
-export function ProofDashboard({ preflight, running = false }: ProofDashboardProps) {
+export function ProofDashboard({ preflight, running = false, defaultOpen }: ProofDashboardProps) {
   const proof = preflight?.proof_bundle;
   const decision = proof?.transfer_decision?.decision ?? (preflight?.passed ? "approve" : "review");
   const confidenceBand = (proof?.confidence_band ?? "medium").toUpperCase();
@@ -34,61 +36,72 @@ export function ProofDashboard({ preflight, running = false }: ProofDashboardPro
     { label: "Compliance risk", value: complianceRisk.toFixed(2) },
   ];
 
+  const openByDefault = defaultOpen ?? (!running && Boolean(preflight && !preflight.passed));
+
   return (
-    <section className={`df2-proof-dashboard ${statusTone}`} aria-label="Proof dashboard">
-      <div className="df2-proof-dashboard-head">
-        <div>
-          <p className="df2-proof-dashboard-kicker">Enterprise proof command center</p>
-          <h3 className="df2-proof-dashboard-title">
-            {running ? (
-              <>
-                <Spinner size="sm" label="" />
-                <span>Running validation…</span>
-              </>
-            ) : (
-              <span>Route intelligence and trust posture</span>
-            )}
-          </h3>
+    <details
+      key={`proof-${running ? "live" : preflight?.passed ? "ok" : "warn"}-${preflight?.passed_count ?? 0}`}
+      className={`df2-proof-dashboard df2-disclosure ${statusTone}`}
+      defaultOpen={!running && openByDefault}
+      aria-label="Proof dashboard"
+    >
+      <summary className="df2-proof-dashboard-summary-bar">
+        <div className="df2-proof-dashboard-summary-main">
+          {running ? (
+            <>
+              <Spinner size="sm" label="" />
+              <strong>Validating…</strong>
+              <span className="df2-proof-dashboard-summary-meta">Safety gates in progress</span>
+            </>
+          ) : (
+            <>
+              <strong>{preflight ? `${readiness.toFixed(0)}% ready` : "Proof summary"}</strong>
+              <span className="df2-proof-dashboard-summary-meta">
+                {preflight
+                  ? `${decision.toUpperCase()} · ${preflight.passed_count}/${preflight.total_gates} gates · ${confidenceBand}`
+                  : "Run preflight to surface evidence"}
+              </span>
+            </>
+          )}
         </div>
-        <div className="df2-proof-dashboard-trust">
-          <span className="df2-status-chip">Deterministic safety gates</span>
-          <span className="df2-status-chip">Operator review ready</span>
-        </div>
-      </div>
+        <span className="df2-disclosure-chevron" aria-hidden>Details</span>
+      </summary>
 
-      <div className="df2-proof-dashboard-grid">
-        <div className="df2-proof-dashboard-stat">
-          <span>Readiness</span>
-          <strong>{running ? "—" : `${readiness.toFixed(0)}%`}</strong>
+      <div className="df2-proof-dashboard-body">
+        <div className="df2-proof-dashboard-grid">
+          <div className="df2-proof-dashboard-stat">
+            <span>Readiness</span>
+            <strong>{running ? "—" : `${readiness.toFixed(0)}%`}</strong>
+          </div>
+          <div className="df2-proof-dashboard-stat">
+            <span>Semantic</span>
+            <strong>{running ? "—" : semanticScore.toFixed(2)}</strong>
+          </div>
+          <div className="df2-proof-dashboard-stat">
+            <span>Quality</span>
+            <strong>{running ? "—" : qualityScore.toFixed(2)}</strong>
+          </div>
+          <div className="df2-proof-dashboard-stat">
+            <span>Gates</span>
+            <strong>{preflight ? `${preflight.passed_count}/${preflight.total_gates}` : "—"}</strong>
+          </div>
         </div>
-        <div className="df2-proof-dashboard-stat">
-          <span>Semantic confidence</span>
-          <strong>{running ? "—" : semanticScore.toFixed(2)}</strong>
-        </div>
-        <div className="df2-proof-dashboard-stat">
-          <span>Sample quality</span>
-          <strong>{running ? "—" : qualityScore.toFixed(2)}</strong>
-        </div>
-        <div className="df2-proof-dashboard-stat">
-          <span>Gate score</span>
-          <strong>{preflight ? `${preflight.passed_count}/${preflight.total_gates}` : "—"}</strong>
-        </div>
-      </div>
 
-      <div className="df2-proof-dashboard-chips">
-        {chips.map((chip) => (
-          <span key={chip.label} className="df2-proof-chip">
-            <small>{chip.label}</small>
-            <strong>{running ? "—" : chip.value}</strong>
-          </span>
-        ))}
-      </div>
+        <div className="df2-proof-dashboard-chips">
+          {chips.map((chip) => (
+            <span key={chip.label} className="df2-proof-chip">
+              <small>{chip.label}</small>
+              <strong>{running ? "—" : chip.value}</strong>
+            </span>
+          ))}
+        </div>
 
-      <p className="df2-proof-dashboard-summary">
-        {running
-          ? "Executing schema, mapping, transform, and data-integrity gates against the source and destination."
-          : (proof?.evidence_summary ?? "No proof bundle available yet — run preflight to surface deterministic transfer evidence.")}
-      </p>
-    </section>
+        <p className="df2-proof-dashboard-summary">
+          {running
+            ? "Executing schema, mapping, transform, and data-integrity gates against the source and destination."
+            : (proof?.evidence_summary ?? "No proof bundle available yet — run preflight to surface deterministic transfer evidence.")}
+        </p>
+      </div>
+    </details>
   );
 }

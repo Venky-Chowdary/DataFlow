@@ -36,7 +36,6 @@ export function ValidateActionsRail({
   const proofReason = preflight?.proof_bundle?.transfer_decision?.reason || "No blocking issues detected";
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
-  const evidenceSummary = preflight?.proof_bundle?.evidence_summary || "Deterministic proof signals ready for operator review.";
   const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
   const firstBlocker = preflight?.blockers?.[0];
   const firstBlockerMessage = firstBlocker?.message;
@@ -44,109 +43,122 @@ export function ValidateActionsRail({
 
   return (
     <aside className="df2-validate-rail" aria-label="Validation actions">
-      {transferLaunch ? (
-        <div className="df2-validate-rail-panel df2-validate-launch">
-          <DtIcon name="transfer" size={20} />
-          <strong>Transfer started</strong>
-          <p>
-            Job queued — {transferLaunch.rows.toLocaleString()} rows heading to destination.
-          </p>
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenJobTheater}>
-            <DtIcon name="activity" size={16} />Open live progress
-          </button>
-        </div>
-      ) : null}
-
-      {preflight && !preflighting && (
-        <div className={`df2-validate-rail-panel df2-validate-status${passed ? " passed" : " blocked"}`}>
-          <div className="df2-validate-rail-score">
-            <strong>{preflight.readiness_score}%</strong>
-            <span>readiness</span>
+      <div className="df2-validate-rail-scroll">
+        {transferLaunch ? (
+          <div className="df2-validate-rail-panel df2-validate-launch">
+            <DtIcon name="transfer" size={18} />
+            <strong>Transfer started</strong>
+            <p>Job queued — {transferLaunch.rows.toLocaleString()} rows.</p>
+            <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenJobTheater}>
+              <DtIcon name="activity" size={14} />Open live progress
+            </button>
           </div>
-          <p>
-            <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks passed
-          </p>
-          {preflight.proof_bundle && (
-            <div className="df2-validate-rail-metrics">
-              <span className="df2-validate-rail-metric">
-                <small>Proof decision</small>
-                <strong>{proofDecision.toUpperCase()}</strong>
-              </span>
-              <span className="df2-validate-rail-metric">
-                <small>Confidence</small>
-                <strong>{confidenceBand}</strong>
-              </span>
-              <span className="df2-validate-rail-metric">
-                <small>Quality grade</small>
-                <strong>{qualityGrade}</strong>
-              </span>
-              <span className="df2-validate-rail-metric">
-                <small>Semantic confidence</small>
-                <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
-              </span>
-              <span className="df2-validate-rail-metric">
-                <small>Sample quality</small>
-                <strong>{preflight.proof_bundle.quality_score.toFixed(2)}</strong>
-              </span>
-              <span className="df2-validate-rail-metric">
-                <small>Compliance risk</small>
-                <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
-              </span>
+        ) : null}
+
+        {preflighting && (
+          <div className="df2-validate-rail-panel df2-validate-status live">
+            <div className="df2-validate-rail-score">
+              <strong>…</strong>
+              <span>validating</span>
             </div>
-          )}
-          {preflight.blockers.length > 0 && (
-            <ul className="df2-validate-rail-blockers">
-              {preflight.blockers.slice(0, 4).map((b) => (
-                <li key={b.id}>
-                  {b.message}
-                  {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
-                </li>
-              ))}
-            </ul>
-          )}
-          {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
-            <div className="df2-validate-rail-review">
-              <strong><DtIcon name="shield" size={14} /> Review required</strong>
-              <p>{proofReason}</p>
-              {proofWarnings.length > 0 && (
-                <ul>
-                  {proofWarnings.map((w, i) => (
-                    <li key={i}>{w}</li>
-                  ))}
-                </ul>
-              )}
+            <p>Safety gates are running. Actions unlock when checks finish.</p>
+          </div>
+        )}
+
+        {preflight && !preflighting && (
+          <div className={`df2-validate-rail-panel df2-validate-status${passed ? " passed" : " blocked"}`}>
+            <div className="df2-validate-rail-score">
+              <strong>{preflight.readiness_score}%</strong>
+              <span>readiness</span>
             </div>
-          )}
-        </div>
-      )}
+            <p>
+              <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
+            </p>
+
+            {(preflight.proof_bundle || preflight.blockers.length > 0) && (
+              <details className="df2-disclosure df2-validate-rail-details">
+                <summary>
+                  <span>Proof details</span>
+                  <span className="df2-disclosure-chevron" aria-hidden />
+                </summary>
+                <div className="df2-validate-rail-details-body">
+                  {preflight.proof_bundle && (
+                    <div className="df2-validate-rail-metrics">
+                      <span className="df2-validate-rail-metric">
+                        <small>Confidence</small>
+                        <strong>{confidenceBand}</strong>
+                      </span>
+                      <span className="df2-validate-rail-metric">
+                        <small>Quality</small>
+                        <strong>{qualityGrade}</strong>
+                      </span>
+                      <span className="df2-validate-rail-metric">
+                        <small>Semantic</small>
+                        <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
+                      </span>
+                      <span className="df2-validate-rail-metric">
+                        <small>Compliance</small>
+                        <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
+                      </span>
+                    </div>
+                  )}
+                  {preflight.blockers.length > 0 && (
+                    <ul className="df2-validate-rail-blockers">
+                      {preflight.blockers.slice(0, 4).map((b) => (
+                        <li key={b.id}>
+                          {b.message}
+                          {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
+                    <div className="df2-validate-rail-review">
+                      <strong><DtIcon name="shield" size={14} /> Review required</strong>
+                      <p>{proofReason}</p>
+                      {proofWarnings.length > 0 && (
+                        <ul>
+                          {proofWarnings.map((w, i) => (
+                            <li key={i}>{w}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="df2-validate-rail-actions">
-        <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
-          <DtIcon name="chevron-left" size={16} />Back to mapping
+        <button type="button" className="df2-btn" onClick={onBack}>
+          <DtIcon name="chevron-left" size={16} />Back
         </button>
 
         {!preflight && !preflighting && (
-          <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={onRunPreflight}>
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onRunPreflight}>
             <DtIcon name="gate" size={16} />Run preflight
           </button>
         )}
 
         {blocked && (
-          <button type="button" className="df2-btn df2-btn-lg" onClick={onRunPreflight} disabled={preflighting}>
+          <button type="button" className="df2-btn" onClick={onRunPreflight} disabled={preflighting}>
             <DtIcon name="gate" size={16} />Re-run
           </button>
         )}
 
         {blocked && mappingBlocked && mappingReviewCount > 0 && (
-          <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={onApproveMappings}>
-            <DtIcon name="check" size={16} />Approve all mappings
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onApproveMappings}>
+            <DtIcon name="check" size={16} />Approve mappings
           </button>
         )}
 
         {preflight && !transferLaunch && (
           <button
             type="button"
-            className="df2-btn df2-btn-primary df2-btn-lg"
+            className="df2-btn df2-btn-primary"
             onClick={onExecute}
             disabled={transferring || !passed}
             title={!passed ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}` : undefined}
@@ -155,11 +167,11 @@ export function ValidateActionsRail({
               <ButtonLoader label="Starting…" />
             ) : (
               <>
-                <DtIcon name="arrow-right" size={18} />
+                <DtIcon name="arrow-right" size={16} />
                 <span>
                   {passed
-                    ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
-                    : "Execute transfer (blocked)"}
+                    ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
+                    : "Execute (blocked)"}
                 </span>
               </>
             )}
@@ -167,9 +179,8 @@ export function ValidateActionsRail({
         )}
 
         {blocked && firstBlockerMessage && (
-          <p className="df2-validate-rail-explain">
-            Run is blocked: {firstBlockerMessage}
-            {firstBlockerFix && <span className="df2-validate-rail-fix"> Fix: {firstBlockerFix}</span>}
+          <p className="df2-validate-rail-explain" title={firstBlockerMessage}>
+            Blocked: {firstBlockerMessage}
           </p>
         )}
       </div>
