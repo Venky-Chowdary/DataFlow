@@ -70,7 +70,7 @@ def write_mapped_rows(
     schema: str,
     connection_string: str,
     ssl: bool,
-    warehouse: str,
+    warehouse: str = "",
     table_name: str,
     headers: list[str],
     data_rows: list[list[str]],
@@ -78,8 +78,9 @@ def write_mapped_rows(
     column_types: dict[str, str],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     error_policy: str | None = None,
+    backfill_new_fields: bool = False,
 ) -> WriteResult:
-    del warehouse
+    del warehouse, backfill_new_fields
     container = database
     if not container:
         return WriteResult(
