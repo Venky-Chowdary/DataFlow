@@ -207,6 +207,11 @@ def _auto_map(
         )
         mappings = result.get("mappings")
         if mappings and isinstance(mappings, list) and any(m.get("source") for m in mappings):
+            mapped_sources = {str(m.get("source")) for m in mappings}
+            if request.backfill_new_fields:
+                for c in columns:
+                    if c not in mapped_sources:
+                        mappings.append({"source": c, "target": c, "confidence": 0.95})
             return mappings
     except Exception as exc:
         logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
