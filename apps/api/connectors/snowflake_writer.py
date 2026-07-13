@@ -138,7 +138,7 @@ def write_mapped_rows(
         )
 
     schema = (schema or "PUBLIC").upper()
-    table_name = sanitize_identifier(table_name).upper()
+    table_name = sanitize_identifier(table_name)
     target_types = [sf_type(t) for t in source_types]
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
@@ -227,11 +227,11 @@ def write_mapped_rows(
                 cur.execute(
                     """SELECT COLUMN_NAME FROM information_schema.columns
                        WHERE table_schema = %s AND table_name = %s""",
-                    (schema, table_name),
+                    (schema.upper(), table_name),
                 )
-                existing = {row[0] for row in cur.fetchall()}
+                existing = {row[0].upper() for row in cur.fetchall()}
                 for col, typ in zip(target_cols, target_types):
-                    if col not in existing:
+                    if col.upper() not in existing:
                         cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
 
             total = len(mapped_rows)
