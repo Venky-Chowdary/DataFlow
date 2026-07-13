@@ -17,6 +17,7 @@ def test_bigquery(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    service_account: str = "",
 ) -> ConnectResult:
     del username, password, ssl, warehouse
     project_id = database or host
@@ -40,6 +41,7 @@ def test_bigquery(
         client = get_client(
             project_id=project_id,
             credentials_path=connection_string,
+            service_account=service_account,
             host=host,
             port=port,
             connection_string=connection_string,

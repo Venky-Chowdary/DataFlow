@@ -126,6 +126,7 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
     """Write records to a SQLite database file."""
     del port, username, password, ssl

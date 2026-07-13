@@ -156,6 +156,10 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "ssl": cfg.get("ssl", False),
         "warehouse": cfg.get("warehouse", ""),
         "table": cfg.get("table", ""),
+        "auth_mode": cfg.get("auth_mode", ""),
+        "role": cfg.get("role", ""),
+        "api_key": cfg.get("api_key", ""),
+        "service_account": cfg.get("service_account", ""),
     }
 
     if resolved == "generic_sql":

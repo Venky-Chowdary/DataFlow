@@ -34,6 +34,7 @@ def get_connection(
     schema: str,
     warehouse: str,
     connection_string: str,
+    role: str = "",
 ) -> Any:
     try:
         import snowflake.connector
@@ -56,6 +57,8 @@ def get_connection(
         kwargs["schema"] = schema
     if warehouse:
         kwargs["warehouse"] = warehouse
+    if role:
+        kwargs["role"] = role
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.

@@ -164,7 +164,14 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         "warehouse": endpoint.warehouse,
         "ssl": endpoint.ssl,
         "type": endpoint.format,
+        "auth_mode": endpoint.auth_mode,
+        "auth_role": endpoint.auth_role,
+        "api_key": endpoint.api_key,
+        "service_account": endpoint.service_account,
     }
+    # Keep "role" as the canonical key used by Snowflake connector functions.
+    cfg["role"] = endpoint.auth_role or cfg.get("role", "")
+    cfg.update(endpoint.extra)
     if endpoint.connector_id:
         conn_dict = _lookup_saved_connector(endpoint.connector_id)
         if not conn_dict:
@@ -202,6 +209,11 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
                 "warehouse": conn.warehouse,
                 "ssl": conn.ssl,
                 "type": conn.type,
+                "auth_mode": getattr(conn, "auth_mode", ""),
+                "auth_role": getattr(conn, "auth_role", ""),
+                "api_key": getattr(conn, "api_key", ""),
+                "service_account": getattr(conn, "service_account", ""),
+                "role": getattr(conn, "auth_role", ""),
             }
     except Exception:
         pass

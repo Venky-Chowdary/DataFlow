@@ -54,6 +54,7 @@ def write_mapped_rows(
     create_table: bool = True,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
     del create_table, error_policy, backfill_new_fields
     bucket = database

@@ -63,6 +63,7 @@ def write_mapped_rows(
     create_table: bool = True,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
     del schema, error_policy, backfill_new_fields
     index = table_name or database

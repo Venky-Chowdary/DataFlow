@@ -11,6 +11,16 @@ export interface Connector {
   database: string;
   status: string;
   role?: string;
+  username?: string;
+  password?: string;
+  schema?: string;
+  connection_string?: string;
+  warehouse?: string;
+  ssl?: boolean;
+  auth_mode?: string;
+  auth_role?: string;
+  api_key?: string;
+  service_account?: string;
   created_at: string;
   last_test_ok?: boolean;
 }

@@ -23,6 +23,7 @@ def get_client(
     *,
     project_id: str,
     credentials_path: str = "",
+    service_account: str = "",
     location: str = "",
     host: str = "",
     port: int = 0,
@@ -31,7 +32,8 @@ def get_client(
     from google.cloud import bigquery
     from google.api_core.client_options import ClientOptions
 
-    is_local, endpoint_url = _is_local_endpoint(host, connection_string or credentials_path)
+    creds_ref = (service_account or connection_string or credentials_path or "").strip()
+    is_local, endpoint_url = _is_local_endpoint(host, creds_ref)
 
     if is_local:
         from google.auth.credentials import AnonymousCredentials
@@ -51,9 +53,15 @@ def get_client(
             client_options=client_options,
         )
 
-    if credentials_path.strip():
+    if creds_ref:
         from google.oauth2 import service_account
 
-        creds = service_account.Credentials.from_service_account_file(credentials_path.strip())
+        if creds_ref.startswith("{"):
+            import json
+
+            info = json.loads(creds_ref)
+            creds = service_account.Credentials.from_service_account_info(info)
+        else:
+            creds = service_account.Credentials.from_service_account_file(creds_ref)
         return bigquery.Client(project=project_id, credentials=creds, location=location or None)
     return bigquery.Client(project=project_id, location=location or None)

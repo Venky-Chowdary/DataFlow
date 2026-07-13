@@ -190,6 +190,7 @@ def _read_batch(
                 schema=cfg.get("schema", "PUBLIC"),
                 connection_string=cfg.get("connection_string", ""),
                 warehouse=cfg.get("warehouse", ""),
+                role=cfg.get("role", ""),
                 table=table,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
@@ -205,6 +206,7 @@ def _read_batch(
             schema=cfg.get("schema", "PUBLIC"),
             connection_string=cfg.get("connection_string", ""),
             warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
             table=table,
             columns=columns,
             offset=offset,
@@ -229,6 +231,7 @@ def _read_batch(
             offset=offset,
             limit=limit,
             known_total_rows=known_total_rows,
+            service_account=cfg.get("service_account", ""),
         )
     if src_type == "gcs":
         from connectors.gcs_reader import read_object
@@ -571,6 +574,11 @@ def _write_batch(
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
+            auth_mode=cfg.get("auth_mode", ""),
+            api_key=cfg.get("api_key", ""),
+            service_account=cfg.get("service_account", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,

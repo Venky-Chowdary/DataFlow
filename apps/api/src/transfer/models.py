@@ -22,6 +22,10 @@ class EndpointConfig:
     warehouse: str = ""
     # False => sslmode "prefer": negotiate TLS when available, fall back for local DBs
     ssl: bool = False
+    auth_mode: str = ""
+    auth_role: str = ""
+    api_key: str = ""
+    service_account: str = ""
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -42,11 +46,15 @@ class EndpointConfig:
             connection_string=d.get("connection_string", ""),
             warehouse=d.get("warehouse", ""),
             ssl=d.get("ssl", False),
+            auth_mode=d.get("auth_mode", ""),
+            auth_role=d.get("auth_role", ""),
+            api_key=d.get("api_key", ""),
+            service_account=d.get("service_account", ""),
             extra={k: v for k, v in d.items() if k not in {
                 "format", "type", "db_type", "connector_id", "host", "port",
                 "database", "schema", "table", "table_name", "collection",
                 "collection_name", "username", "password", "connection_string",
-                "warehouse", "ssl",
+                "warehouse", "ssl", "auth_mode", "auth_role", "api_key", "service_account",
             }},
         )
 
@@ -96,6 +104,10 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "connection_string": ep.connection_string,
         "warehouse": ep.warehouse,
         "ssl": ep.ssl,
+        "auth_mode": ep.auth_mode,
+        "auth_role": ep.auth_role,
+        "api_key": ep.api_key,
+        "service_account": ep.service_account,
     }
 
 

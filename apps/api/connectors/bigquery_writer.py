@@ -55,8 +55,10 @@ def write_mapped_rows(
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    service_account: str = "",
+    **_kwargs: Any,
 ) -> WriteResult:
-    del username, password, ssl, warehouse
+    del username, password, ssl, warehouse, _kwargs
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_name = sanitize_identifier(table_name)
@@ -107,6 +109,7 @@ def write_mapped_rows(
         client = get_client(
             project_id=project_id,
             credentials_path=connection_string,
+            service_account=service_account,
             host=host,
             port=port,
             connection_string=connection_string,

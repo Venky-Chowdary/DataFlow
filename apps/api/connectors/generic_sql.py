@@ -1169,6 +1169,7 @@ def write_mapped_rows(
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
     type: str = "",
+    **_kwargs: Any,
 ) -> WriteResult:
     """Write mapped rows to any SQLAlchemy-supported destination."""
     if not SQLALCHEMY_AVAILABLE:

@@ -34,7 +34,14 @@ class ConnectorConfig(BaseModel):
     username: Optional[str] = Field(default=None, description="Username")
     password: Optional[str] = Field(default=None, description="Password")
     connection_string: Optional[str] = Field(default=None, description="Full connection string")
+    warehouse: Optional[str] = Field(default=None, description="Snowflake warehouse")
+    ssl: bool = Field(default=False, description="Use SSL/TLS")
+    auth_mode: Optional[str] = Field(default=None, description="Authentication mode")
+    auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
+    api_key: Optional[str] = Field(default=None, description="API key")
+    service_account: Optional[str] = Field(default=None, description="Service account JSON")
     options: dict = Field(default_factory=dict, description="Additional options")
+    role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
 
 
 class ConnectorResponse(BaseModel):
@@ -59,6 +66,12 @@ class TestConnectionRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     connection_string: Optional[str] = None
+    warehouse: Optional[str] = ""
+    ssl: Optional[bool] = False
+    auth_mode: Optional[str] = ""
+    auth_role: Optional[str] = ""
+    api_key: Optional[str] = None
+    service_account: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
@@ -112,8 +125,13 @@ async def test_connection(request: TestConnectionRequest):
                 "password": request.password or "",
                 "schema": request.schema or "",
                 "connection_string": request.connection_string or "",
-                "ssl": False,
-                "warehouse": "",
+                "ssl": bool(request.ssl) if request.ssl is not None else False,
+                "warehouse": request.warehouse or "",
+                "auth_mode": request.auth_mode or "",
+                "auth_role": request.auth_role or "",
+                "role": request.auth_role or "",
+                "api_key": request.api_key or "",
+                "service_account": request.service_account or "",
             }
             ok, msg = run_probe(driver, cfg)
             return {"success": ok, "message": msg, "driver": driver}
@@ -127,9 +145,14 @@ async def test_connection(request: TestConnectionRequest):
                 "password": request.password or "",
                 "schema": request.schema or "",
                 "connection_string": request.connection_string or "",
-                "ssl": False,
-                "warehouse": "",
+                "ssl": bool(request.ssl) if request.ssl is not None else False,
+                "warehouse": request.warehouse or "",
                 "type": request.type,
+                "auth_mode": request.auth_mode or "",
+                "auth_role": request.auth_role or "",
+                "role": request.auth_role or "",
+                "api_key": request.api_key or "",
+                "service_account": request.service_account or "",
             }
             ok, msg = run_probe(driver, cfg)
             return {"success": ok, "message": msg, "driver": driver}
@@ -166,9 +189,14 @@ async def create_connector(config: ConnectorConfig):
         "username": config.username,
         "password": config.password,
         "connection_string": config.connection_string,
+        "warehouse": config.warehouse,
+        "ssl": config.ssl,
+        "auth_mode": config.auth_mode,
+        "auth_role": config.auth_role,
+        "role": config.role or "both",
+        "api_key": config.api_key,
+        "service_account": config.service_account,
         "options": config.options,
-        "role": "both",
-        "ssl": False,
         "status": "configured",
     }
 

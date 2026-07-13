@@ -37,6 +37,7 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 500,
     known_total_rows: int | None = None,
+    service_account: str = "",
 ) -> ReadBatch:
     del username, password, ssl, warehouse
     project_id = database or host
@@ -49,6 +50,7 @@ def read_table_batch(
         client = get_client(
             project_id=project_id,
             credentials_path=connection_string,
+            service_account=service_account,
             host=host,
             port=port,
             connection_string=connection_string,

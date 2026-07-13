@@ -102,8 +102,10 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    role: str = "",
+    **_kwargs: Any,
 ) -> WriteResult:
-    del port, ssl
+    del port, ssl, _kwargs
     try:
         import snowflake.connector  # noqa: F401
     except ImportError:
@@ -206,6 +208,7 @@ def write_mapped_rows(
             schema=schema,
             warehouse=warehouse,
             connection_string=connection_string,
+            role=role,
         )
 
         written = 0

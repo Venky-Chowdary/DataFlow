@@ -80,6 +80,7 @@ def write_mapped_rows(
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
     create_table: bool = True,
+    **_kwargs: Any,
 ) -> WriteResult:
     del warehouse, backfill_new_fields, create_table
     container = database

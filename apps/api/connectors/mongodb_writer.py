@@ -62,6 +62,7 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    **_kwargs: Any,
 ) -> WriteResult:
     del backfill_new_fields
     try:

@@ -34,6 +34,7 @@ def count_table_rows(
     connection_string: str,
     warehouse: str,
     table: str,
+    role: str = "",
 ) -> int:
     del port
     account = normalize_account(host)
@@ -45,6 +46,7 @@ def count_table_rows(
         schema=schema or "PUBLIC",
         warehouse=warehouse,
         connection_string=connection_string,
+        role=role,
     )
     try:
         with conn.cursor() as cur:
@@ -72,6 +74,7 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 100_000,
     known_total_rows: int | None = None,
+    role: str = "",
 ) -> ReadBatch:
     account = normalize_account(host)
     conn = get_connection(
@@ -82,6 +85,7 @@ def read_table_batch(
         schema=schema or "PUBLIC",
         warehouse=warehouse,
         connection_string=connection_string,
+        role=role,
     )
     try:
         with conn.cursor() as cur:
@@ -94,6 +98,7 @@ def read_table_batch(
                 total = count_table_rows(
                     host=host, port=port, database=database, username=username, password=password,
                     schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
+                    role=role,
                 )
             col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
             cur.execute(
@@ -121,6 +126,7 @@ def read_table_cursor_batch(
     cursor_after: str | None = None,
     columns: list[str] | None = None,
     limit: int = 500,
+    role: str = "",
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — incremental sync."""
     del port
@@ -133,6 +139,7 @@ def read_table_cursor_batch(
         schema=schema or "PUBLIC",
         warehouse=warehouse,
         connection_string=connection_string,
+        role=role,
     )
     try:
         with conn.cursor() as cur:
