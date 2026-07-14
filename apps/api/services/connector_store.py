@@ -34,6 +34,7 @@ class SavedConnector:
     auth_role: str = ""
     api_key: str = ""
     service_account: str = ""
+    auth_source: str = ""
     last_tested_at: str | None = None
     last_test_ok: bool = False
     created_at: str = field(default_factory=lambda: _now())
@@ -65,6 +66,7 @@ class SavedConnector:
             auth_role=data.get("auth_role", ""),
             api_key=data.get("api_key", ""),
             service_account=data.get("service_account", ""),
+            auth_source=data.get("auth_source", ""),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=bool(data.get("last_test_ok", False)),
             created_at=data.get("created_at", _now()),
@@ -173,6 +175,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         auth_role=data.get("auth_role", ""),
         api_key=data.get("api_key", ""),
         service_account=data.get("service_account", ""),
+        auth_source=data.get("auth_source", ""),
     )
     connectors.append(conn)
     _save_all(connectors)

@@ -42,6 +42,7 @@ class ConnectorConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="API key")
     service_account: Optional[str] = Field(default=None, description="Service account JSON")
     options: dict = Field(default_factory=dict, description="Additional options")
+    auth_source: Optional[str] = None
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
 
 
@@ -73,6 +74,7 @@ class TestConnectionRequest(BaseModel):
     auth_role: Optional[str] = ""
     api_key: Optional[str] = None
     service_account: Optional[str] = None
+    auth_source: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
@@ -132,6 +134,7 @@ async def test_connection(request: TestConnectionRequest):
             "role": request.auth_role or "",
             "api_key": request.api_key or "",
             "service_account": request.service_account or "",
+            "auth_source": request.auth_source or "",
         }
         ok, msg = run_probe(driver, cfg)
         return {"success": ok, "message": msg, "driver": driver}

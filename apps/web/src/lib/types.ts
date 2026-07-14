@@ -22,6 +22,7 @@ export interface Connector {
   ssl?: boolean;
   auth_mode?: string;
   auth_role?: string;
+  auth_source?: string;
   api_key?: string;
   service_account?: string;
   created_at: string;

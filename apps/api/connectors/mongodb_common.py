@@ -25,15 +25,16 @@ def normalize_mongodb_connection_string(
     username: str = "",
     password: str = "",
     ssl: bool = False,
+    auth_source: str = "",
 ) -> str:
     """Return a MongoDB URI that the driver can authenticate with.
 
     If a connection string is provided, it is used as the base.  When a database
     is supplied and the URI does not already include a database path, the
     database is appended as the default database.  authSource is left as-is if
-    present; otherwise it defaults to "admin" for pasted connection strings and
-    to the database name for host/port/user/pass mode so the user can override
-    it by adding ?authSource=<db> to the connection string.
+    present in the URL; otherwise it defaults to the database name (or the
+    explicit `auth_source` argument).  This lets a user connect to `trueresume`
+    while the user lives in the `admin` database by adding `?authSource=admin`.
     """
     uri = connection_string.strip()
     host = host or "localhost"
@@ -52,19 +53,25 @@ def normalize_mongodb_connection_string(
     if connection_string.strip() and _is_localhost(uri) and host and (username or password):
         return normalize_mongodb_connection_string(
             "", database=database, host=host, port=port, username=username, password=password,
+            auth_source=auth_source,
         )
 
     path = parsed.path
     if database:
         if not path or path == "/":
             path = f"/{database}"
-        if "authSource" not in qs and "authsource" not in qs:
-            # Default authSource: admin for pasted connection strings (most
-            # managed MongoDB defaults), database for host/port/user/pass mode.
-            if connection_string.strip():
-                qs["authSource"] = ["admin"]
-            else:
-                qs["authSource"] = [database]
+
+    # Determine authSource precedence:
+    # 1. explicit auth_source argument / form field
+    # 2. authSource query parameter already in the URL
+    # 3. the database name (most common when using Database field)
+    # 4. admin fallback when no database is provided
+    effective_auth_source = auth_source.strip()
+    if not effective_auth_source:
+        effective_auth_source = qs.get("authSource", qs.get("authsource", [""]))[0]
+    if not effective_auth_source:
+        effective_auth_source = database or "admin"
+    qs["authSource"] = [effective_auth_source]
 
     if ssl and "ssl" not in qs and "tls" not in qs:
         qs["ssl"] = ["true"]

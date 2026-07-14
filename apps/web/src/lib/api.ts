@@ -692,6 +692,7 @@ export async function testConnection(payload: {
   ssl?: boolean;
   auth_mode?: string;
   auth_role?: string;
+  auth_source?: string;
   api_key?: string;
   service_account?: string;
 }): Promise<{ success: boolean; message: string }> {
@@ -718,6 +719,7 @@ export async function saveConnector(payload: {
   ssl?: boolean;
   auth_mode?: string;
   auth_role?: string;
+  auth_source?: string;
   api_key?: string;
   service_account?: string;
 }): Promise<Connector> {

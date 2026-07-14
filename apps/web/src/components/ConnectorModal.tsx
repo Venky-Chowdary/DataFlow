@@ -111,6 +111,7 @@ export function ConnectorModal({
   const [schema, setSchema] = useState(editing?.schema ?? "");
   const [warehouse, setWarehouse] = useState(editing?.warehouse ?? "");
   const [authRole, setAuthRole] = useState(editing?.auth_role ?? "");
+  const [authSource, setAuthSource] = useState(editing?.auth_source ?? "");
   const [apiKey, setApiKey] = useState(editing?.api_key ?? "");
   const [serviceAccount, setServiceAccount] = useState(editing?.service_account ?? "");
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
@@ -130,6 +131,8 @@ export function ConnectorModal({
         if (db && !database) setDatabase(db);
         const params = url.searchParams;
         if (params.has("ssl") || params.has("tls")) setSsl(true);
+        const as = params.get("authSource") || params.get("authsource") || "";
+        if (as && !authSource) setAuthSource(as);
       } catch {
         // Fallback for browsers/environments that do not parse mongodb:// URLs.
         const match = connectionString.match(/^mongodb(?:\+srv)?:\/\/(?:([^:@]+)(?::([^@]+))?@)?([^\/?#:]+)(?::(\d+))?\/?([^?#]*)?/);
@@ -140,10 +143,12 @@ export function ConnectorModal({
           if (user) setUsername(user);
           if (pass) setPassword(pass);
           if (rawDb && !database) setDatabase(rawDb);
+          const authMatch = connectionString.match(/[?&](?:authSource|authsource)=([^&#]*)/);
+          if (authMatch && !authSource) setAuthSource(decodeURIComponent(authMatch[1]));
         }
       }
     }
-  }, [isMongo, authMode, connectionString, database]);
+  }, [isMongo, authMode, connectionString, database, authSource]);
 
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -181,6 +186,7 @@ export function ConnectorModal({
     setSchema("");
     setWarehouse("");
     setAuthRole("");
+    setAuthSource("");
     setApiKey("");
     setServiceAccount("");
     setSsl(false);
@@ -310,6 +316,7 @@ export function ConnectorModal({
       ssl,
       auth_mode: authMode,
       auth_role: isSnowflake ? authRole : undefined,
+      auth_source: isMongo ? authSource : undefined,
     };
 
     if (authMode === "user_pass") {
@@ -359,6 +366,7 @@ export function ConnectorModal({
         warehouse: isSnowflake ? warehouse : undefined,
         auth_role: isSnowflake ? authRole : undefined,
         auth_mode: authMode,
+        auth_source: isMongo ? authSource : undefined,
         ssl,
       });
       setTestResult(result);
@@ -643,6 +651,24 @@ export function ConnectorModal({
                       />
                     </div>
                   )}
+                </div>
+              )}
+
+              {isMongo && (showConnectionString || showUserPass) && (
+                <div className="df2-form-row" style={{ marginTop: 8 }}>
+                  <div className="df2-field">
+                    <label className="df2-label">Auth source</label>
+                    <input
+                      className="df2-input"
+                      placeholder="Leave empty to use Database; enter admin if user is in admin DB"
+                      value={authSource}
+                      onChange={(e) => setAuthSource(e.target.value)}
+                    />
+                    <p className="df2-field-note df2-label-hint">
+                      MongoDB authentication database. Leave blank to use the Database field above,
+                      or enter <code>admin</code> if your user is defined in the admin database.
+                    </p>
+                  </div>
                 </div>
               )}
 

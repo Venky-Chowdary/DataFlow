@@ -44,6 +44,7 @@ class ConnectorSaveDTO(BaseModel):
     auth_role: str = ""
     api_key: str = ""
     service_account: str = ""
+    auth_source: str = ""
 
 
 def _to_ui(c) -> dict[str, Any]:
