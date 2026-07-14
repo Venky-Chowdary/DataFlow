@@ -91,75 +91,9 @@ class TransferRequest(BaseModel):
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest):
     """Test a connector configuration before saving"""
+    from ..transfer.connector_registry import humanize_connection_error
+
     try:
-        if request.type == "mongodb":
-            from connectors.mongodb_common import normalize_mongodb_connection_string
-            from pymongo import MongoClient
-
-            conn_str = normalize_mongodb_connection_string(
-                request.connection_string or "",
-                database=request.database or "",
-                host=request.host or "",
-                port=request.port or 0,
-                username=request.username or "",
-                password=request.password or "",
-                ssl=bool(request.ssl) if request.ssl is not None else False,
-            )
-            client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
-            info = client.server_info()
-            client.close()
-
-            return {
-                "success": True,
-                "message": "Connection successful",
-                "details": {
-                    "version": info.get("version"),
-                    "host": request.host,
-                    "port": request.port,
-                }
-            }
-        driver = resolve_driver_type(request.type)
-        if driver in CONNECTOR_MODULES:
-            cfg = {
-                "host": request.host or "",
-                "port": request.port or 0,
-                "database": request.database or "",
-                "username": request.username or "",
-                "password": request.password or "",
-                "schema": request.schema or "",
-                "connection_string": request.connection_string or "",
-                "ssl": bool(request.ssl) if request.ssl is not None else False,
-                "warehouse": request.warehouse or "",
-                "auth_mode": request.auth_mode or "",
-                "auth_role": request.auth_role or "",
-                "role": request.auth_role or "",
-                "api_key": request.api_key or "",
-                "service_account": request.service_account or "",
-            }
-            ok, msg = run_probe(driver, cfg)
-            return {"success": ok, "message": msg, "driver": driver}
-
-        if driver == "generic_sql":
-            cfg = {
-                "host": request.host or "",
-                "port": request.port or 0,
-                "database": request.database or "",
-                "username": request.username or "",
-                "password": request.password or "",
-                "schema": request.schema or "",
-                "connection_string": request.connection_string or "",
-                "ssl": bool(request.ssl) if request.ssl is not None else False,
-                "warehouse": request.warehouse or "",
-                "type": request.type,
-                "auth_mode": request.auth_mode or "",
-                "auth_role": request.auth_role or "",
-                "role": request.auth_role or "",
-                "api_key": request.api_key or "",
-                "service_account": request.service_account or "",
-            }
-            ok, msg = run_probe(driver, cfg)
-            return {"success": ok, "message": msg, "driver": driver}
-
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             path = (request.connection_string or request.host or "").strip()
             if path:
@@ -181,15 +115,31 @@ async def test_connection(request: TestConnectionRequest):
                 "details": {"format": request.type, "mode": "file_source"},
             }
 
-        return {
-            "success": False,
-            "message": f"Connector type '{request.type}' not yet implemented",
+        driver = resolve_driver_type(request.type)
+        cfg = {
+            "host": request.host or "",
+            "port": request.port or 0,
+            "database": request.database or "",
+            "username": request.username or "",
+            "password": request.password or "",
+            "schema": request.schema or "",
+            "connection_string": request.connection_string or "",
+            "ssl": bool(request.ssl) if request.ssl is not None else False,
+            "warehouse": request.warehouse or "",
+            "type": request.type,
+            "auth_mode": request.auth_mode or "",
+            "auth_role": request.auth_role or "",
+            "role": request.auth_role or "",
+            "api_key": request.api_key or "",
+            "service_account": request.service_account or "",
         }
-            
+        ok, msg = run_probe(driver, cfg)
+        return {"success": ok, "message": msg, "driver": driver}
+
     except Exception as e:
         return {
             "success": False,
-            "message": f"Connection failed: {str(e)}",
+            "message": humanize_connection_error(resolve_driver_type(request.type or ""), e),
         }
 
 

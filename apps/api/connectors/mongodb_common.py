@@ -29,10 +29,11 @@ def normalize_mongodb_connection_string(
     """Return a MongoDB URI that the driver can authenticate with.
 
     If a connection string is provided, it is used as the base.  When a database
-    is supplied and the URI does not already include one or an authSource, the
-    database is appended as both the default database and the authSource.  This
-    lets the UI ask only for a Database while the connection string contains the
-    credentials.
+    is supplied and the URI does not already include a database path, the
+    database is appended as the default database.  authSource is left as-is if
+    present; otherwise it defaults to "admin" for pasted connection strings and
+    to the database name for host/port/user/pass mode so the user can override
+    it by adding ?authSource=<db> to the connection string.
     """
     uri = connection_string.strip()
     host = host or "localhost"
@@ -58,8 +59,12 @@ def normalize_mongodb_connection_string(
         if not path or path == "/":
             path = f"/{database}"
         if "authSource" not in qs and "authsource" not in qs:
-            # Keep the existing query order and only append the new option.
-            qs["authSource"] = [database]
+            # Default authSource: admin for pasted connection strings (most
+            # managed MongoDB defaults), database for host/port/user/pass mode.
+            if connection_string.strip():
+                qs["authSource"] = ["admin"]
+            else:
+                qs["authSource"] = [database]
 
     if ssl and "ssl" not in qs and "tls" not in qs:
         qs["ssl"] = ["true"]

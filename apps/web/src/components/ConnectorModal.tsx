@@ -107,6 +107,7 @@ export function ConnectorModal({
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState(editing?.password ?? "");
   const [connectionString, setConnectionString] = useState(editing?.connection_string ?? "");
+  const [showConnStr, setShowConnStr] = useState(false);
   const [schema, setSchema] = useState(editing?.schema ?? "");
   const [warehouse, setWarehouse] = useState(editing?.warehouse ?? "");
   const [authRole, setAuthRole] = useState(editing?.auth_role ?? "");
@@ -130,7 +131,16 @@ export function ConnectorModal({
         const params = url.searchParams;
         if (params.has("ssl") || params.has("tls")) setSsl(true);
       } catch {
-        // leave manual fields as-is while the user is typing
+        // Fallback for browsers/environments that do not parse mongodb:// URLs.
+        const match = connectionString.match(/^mongodb(?:\+srv)?:\/\/(?:([^:@]+)(?::([^@]+))?@)?([^\/?#:]+)(?::(\d+))?\/?([^?#]*)?/);
+        if (match) {
+          const [, user, pass, rawHost, rawPort, rawDb] = match;
+          if (rawHost) setHost(rawHost);
+          if (rawPort) setPort(parseInt(rawPort, 10));
+          if (user) setUsername(user);
+          if (pass) setPassword(pass);
+          if (rawDb && !database) setDatabase(rawDb);
+        }
       }
     }
   }, [isMongo, authMode, connectionString, database]);
@@ -243,6 +253,31 @@ export function ConnectorModal({
         }
       } else if (!isGcp && !isAwsKeyed && !isElastic && !host.trim()) {
         setFieldError("Host is required.");
+        return false;
+      }
+      if (
+        !isGcp &&
+        !isAwsKeyed &&
+        !isElastic &&
+        !isRedis &&
+        !isAzure &&
+        !["sqlite", "duckdb"].includes(type) &&
+        port <= 0
+      ) {
+        setFieldError("Port is required.");
+        return false;
+      }
+      if (
+        !isGcp &&
+        !isAwsKeyed &&
+        !isElastic &&
+        !isRedis &&
+        !isAzure &&
+        !isBigQuery &&
+        !["sqlite", "duckdb"].includes(type) &&
+        (!username.trim() || !password.trim())
+      ) {
+        setFieldError("Username and password are required.");
         return false;
       }
       if (["s3", "dynamodb"].includes(type)) {
@@ -484,10 +519,19 @@ export function ConnectorModal({
                   <label className="df2-label">Connection string</label>
                   <input
                     className="df2-input"
+                    type={showConnStr ? "text" : "password"}
+                    autoComplete="new-password"
                     placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : isGenericSql(type) || ["mysql", "postgresql", "redshift", "sqlite"].includes(resolveCatalogIdToType(type)) ? getGenericSqlPlaceholder(resolveCatalogIdToType(type)) : "driver://user:pass@host:port/db"}
                     value={connectionString}
                     onChange={(e) => setConnectionString(e.target.value)}
                   />
+                  <button
+                    type="button"
+                    style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12, color: "#6b7280" }}
+                    onClick={() => setShowConnStr((s) => !s)}
+                  >
+                    {showConnStr ? "Hide connection string" : "Show connection string"}
+                  </button>
                 </div>
               )}
 
@@ -538,7 +582,7 @@ export function ConnectorModal({
                 </div>
               )}
 
-              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount || showConnectionString) && !isFileFormat(type) && (
+              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount) && !isFileFormat(type) && (
                 <div className="df2-form-row" style={{ marginTop: 8 }}>
                   <div className="df2-field">
                     <label className="df2-label">{hostLabel}</label>
