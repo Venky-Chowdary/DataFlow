@@ -373,6 +373,10 @@ export function ConnectorModal({
         ssl,
       });
       setTestResult(result);
+      if (isMongo && result.success) {
+        const authMatch = result.message.match(/authSource=([^\s)]+)/);
+        if (authMatch && !authSource) setAuthSource(authMatch[1]);
+      }
       toast({
         title: result.success ? "Connection successful" : "Connection failed",
         message: result.message,

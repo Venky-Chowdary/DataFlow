@@ -126,16 +126,42 @@ def mongodb_connection_string(cfg: dict[str, Any]) -> str:
 
 
 def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
-    """Ping MongoDB using resolved connector or inline host/port credentials."""
-    try:
-        from pymongo import MongoClient
+    """Ping MongoDB and automatically resolve the correct authSource.
 
-        client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000)
-        client.admin.command("ping")
-        client.close()
-        return True, "MongoDB reachable"
-    except Exception as exc:
-        return False, str(exc)
+    When auth_source is not supplied, the connection string may still work with
+    the default database (path) or admin. We try the candidates in order and
+    return the first one that succeeds, which keeps the UI connection-string
+    flow simple for users who do not know the authentication database.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    from pymongo import MongoClient
+
+    connection_string = (cfg.get("connection_string") or "").strip()
+    qs = parse_qs(urlparse(connection_string).query, keep_blank_values=True)
+    url_auth_source = qs.get("authSource", qs.get("authsource", [""]))[0]
+    database = (cfg.get("database") or "").strip()
+
+    candidates: list[str] = []
+    if cfg.get("auth_source"):
+        candidates.append(str(cfg.get("auth_source")).strip())
+    if url_auth_source:
+        candidates.append(url_auth_source)
+    if database:
+        candidates.append(database)
+    candidates.append("admin")
+
+    last_error = ""
+    for auth_source in candidates:
+        try:
+            conn_str = mongodb_connection_string({**cfg, "auth_source": auth_source})
+            client = MongoClient(conn_str, serverSelectionTimeoutMS=2500)
+            client.admin.command("ping")
+            client.close()
+            return True, f"MongoDB reachable (authSource={auth_source})"
+        except Exception as exc:
+            last_error = str(exc)
+    return False, last_error
 
 
 def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:

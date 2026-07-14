@@ -226,7 +226,9 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         from .adapters import probe_mongodb
 
         ok, raw = probe_mongodb(cfg)
-        return ok, humanize_connection_error(db_type, raw)
+        if ok:
+            return True, raw
+        return False, humanize_connection_error(db_type, raw)
 
     schema_default = (
         "PUBLIC" if db_type == "snowflake"
