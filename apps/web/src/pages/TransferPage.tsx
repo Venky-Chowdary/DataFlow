@@ -1997,7 +1997,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
-              {destDriverType === "mongodb" || isGenericSql(destType) ? (
+              {destDriverType === "mongodb" || isGenericSql(destType) || ["mysql", "postgresql", "redshift", "sqlite"].includes(destDriverType) ? (
                 <div className="df2-field df2-field-flex">
                   <label className="df2-label">Connection String (optional)</label>
                   <input

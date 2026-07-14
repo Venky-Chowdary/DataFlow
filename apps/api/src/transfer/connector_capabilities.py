@@ -223,8 +223,10 @@ def resolve_driver_type(catalog_id: str) -> str:
         return "gcs"
     if "parquet" in cid:
         return "parquet"
-    if "s3" in cid or "aws_s3" in cid:
+    if "s3" in cid or "aws_s3" in cid or "object_storage" in cid:
         return "s3"
+    if "azure_blob_storage" in cid or "azure_data_lake" in cid or "adls" in cid:
+        return "adls"
     if cid.startswith("jsonl") or cid.endswith("jsonl"):
         return "jsonl"
     if "json" in cid and "jsonl" not in cid:

@@ -25,6 +25,10 @@ const CATALOG_ALIASES: Record<string, string> = {
   backblaze_b2: "s3",
   digitalocean_spaces: "s3",
   cloudflare_r2: "s3",
+  ibm_cloud_object_storage: "s3",
+  oracle_cloud_object_storage: "s3",
+  azure_blob_storage: "adls",
+  azure_data_lake: "adls",
   amazon_redshift: "redshift",
   google_bigquery: "bigquery",
   opensearch: "elasticsearch",
@@ -229,7 +233,10 @@ export function getGenericSqlGroup(type: string): string {
 }
 
 export function getGenericSqlPlaceholder(type: string): string {
-  const t = type.toLowerCase().trim();
+  const t = resolveCatalogIdToType(type).toLowerCase().trim();
+  if (t === "mysql" || t === "mariadb") return "mysql+pymysql://user:pass@host:3306/db";
+  if (t === "postgresql" || t === "redshift") return "postgresql+psycopg2://user:pass@host:5432/db";
+  if (t === "sqlite") return "sqlite:////path/to/db.sqlite";
   const info = GENERIC_SQL_INFO[t];
   if (!info) return "driver://user:pass@host:port/db";
   const { base, port } = info;

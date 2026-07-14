@@ -258,7 +258,10 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         # The catalog id (e.g. tidb, clickhouse) must reach the generic SQL engine
         # builder so it can pick the right SQLAlchemy drivername and port.
         engine_type = cfg.get("type") or catalog_id
-        return test_generic_sql(type=engine_type, **probe_kwargs)
+        ok, raw = test_generic_sql(type=engine_type, **probe_kwargs)
+        if ok:
+            return True, raw
+        return False, humanize_connection_error(engine_type, raw)
 
     if not spec:
         return False, f"No connectivity probe for {db_type}"
@@ -275,8 +278,12 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         probe_kwargs = {k: v for k, v in probe_kwargs.items() if k in sig.parameters}
     result = probe_fn(**probe_kwargs)
     if hasattr(result, "ok"):
-        msg = str(result.message if result.ok else (result.error or result.message))
-        return bool(result.ok), humanize_connection_error(db_type, msg)
+        if result.ok:
+            return True, str(result.message or "Connection successful")
+        return False, humanize_connection_error(db_type, str(result.error or result.message or "unknown error"))
     if isinstance(result, tuple) and len(result) >= 2:
-        return bool(result[0]), humanize_connection_error(db_type, result[1])
+        ok = bool(result[0])
+        if ok:
+            return True, str(result[1])
+        return False, humanize_connection_error(db_type, str(result[1]))
     return bool(result), "OK" if result else humanize_connection_error(db_type, "Probe failed")

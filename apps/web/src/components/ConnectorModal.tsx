@@ -34,17 +34,18 @@ function isFileFormat(type: string): boolean {
 }
 
 function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMode {
+  const resolved = resolveCatalogIdToType(type);
   if (conn?.auth_mode) return conn.auth_mode as AuthMode;
-  if (isFileFormat(type)) return "file_path";
+  if (isFileFormat(resolved)) return "file_path";
   if (conn?.api_key) return "api_key";
   if (conn?.service_account) return "service_account";
   if (conn?.connection_string) return "connection_string";
-  if (["s3", "dynamodb"].includes(type)) return "aws_keys";
-  if (["bigquery", "gcs", "google_cloud_storage"].includes(type)) return "service_account";
-  if (type === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
-  if (type === "adls") return "connection_string";
-  if (type === "databricks" || type === "athena") return "connection_string";
-  if (type === "mongodb" && conn?.username) return "user_pass";
+  if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
+  if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
+  if (resolved === "adls") return "connection_string";
+  if (resolved === "databricks" || resolved === "athena") return "connection_string";
+  if (resolved === "mongodb" && conn?.username) return "user_pass";
   return "user_pass";
 }
 
@@ -116,7 +117,8 @@ export function ConnectorModal({
   const [serviceAccount, setServiceAccount] = useState(editing?.service_account ?? "");
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
-  const isMongo = type === "mongodb";
+  const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
+  const isMongo = resolvedType === "mongodb";
 
   // Parse a pasted MongoDB URI into host/port/user/pass/database/ssl.
   useEffect(() => {
@@ -156,18 +158,18 @@ export function ConnectorModal({
   const [fieldError, setFieldError] = useState<string | null>(null);
 
   const catalogItem = CONNECTOR_CATALOG.find((c) => c.id === type);
-  const isBigQuery = type === "bigquery";
-  const isSnowflake = type === "snowflake";
-  const isDynamo = type === "dynamodb";
-  const isS3 = type === "s3";
+  const isBigQuery = resolvedType === "bigquery";
+  const isSnowflake = resolvedType === "snowflake";
+  const isDynamo = resolvedType === "dynamodb";
+  const isS3 = resolvedType === "s3";
   const isAwsKeyed = isS3 || isDynamo;
-  const isElastic = type === "elasticsearch";
-  const isGcp = isGcpConnector(type);
-  const isGcs = type === "gcs" || type === "google_cloud_storage";
-  const isAzure = type === "adls";
-  const isRedis = type === "redis";
+  const isElastic = resolvedType === "elasticsearch";
+  const isGcp = isGcpConnector(resolvedType);
+  const isGcs = resolvedType === "gcs";
+  const isAzure = resolvedType === "adls";
+  const isRedis = resolvedType === "redis";
 
-  const modeOptions = useMemo(() => authModeOptions(type), [type]);
+  const modeOptions = useMemo(() => authModeOptions(resolvedType), [resolvedType]);
 
   useEffect(() => {
     if (modeOptions.find((o) => o.value === authMode)) return;
@@ -247,8 +249,8 @@ export function ConnectorModal({
         return false;
       }
       const local = (host || connectionString).includes("localhost") || (host || connectionString).startsWith("http");
-      if (!local && (!username.trim() || !password.trim())) {
-        setFieldError("AWS Access Key ID and Secret Access Key are required for cloud endpoints.");
+      if ((isS3 || !local) && (!username.trim() || !password.trim())) {
+        setFieldError("AWS Access Key ID and Secret Access Key are required.");
         return false;
       }
     } else if (authMode === "user_pass") {
@@ -418,7 +420,7 @@ export function ConnectorModal({
   const showAwsKeys = authMode === "aws_keys";
 
   const hostLabel = useMemo(() => {
-    if (isAwsKeyed) return isS3 ? "AWS region" : "AWS region or local endpoint";
+    if (isAwsKeyed) return isS3 ? "AWS region or endpoint" : "AWS region or local endpoint";
     if (isGcp) return isBigQuery ? "GCP project (optional)" : "Project / endpoint";
     if (isAzure) return "Storage account";
     if (isElastic) return "Host";
@@ -603,7 +605,7 @@ export function ConnectorModal({
                     <label className="df2-label">{hostLabel}</label>
                     <input
                       className="df2-input"
-                      placeholder={isAwsKeyed ? "us-east-1" : isBigQuery ? "bigquery.googleapis.com" : isSnowflake ? "account.snowflakecomputing.com" : "localhost"}
+                      placeholder={isS3 ? "us-east-1 or localhost:9000" : isAwsKeyed ? "us-east-1" : isBigQuery ? "bigquery.googleapis.com" : isSnowflake ? "account.snowflakecomputing.com" : "localhost"}
                       value={host}
                       onChange={(e) => setHost(e.target.value)}
                     />
