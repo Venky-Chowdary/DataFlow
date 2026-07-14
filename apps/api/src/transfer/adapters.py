@@ -452,9 +452,9 @@ def read_source_database(
     if db_type == "dynamodb":
         from connectors.dynamodb_reader import read_all_paginated
 
-        table = endpoint.database or endpoint.table
+        table = endpoint.table or endpoint.collection or endpoint.database
         if not table:
-            raise ValueError("DynamoDB table name required (database field)")
+            raise ValueError("DynamoDB table name required (table field)")
         batch = read_all_paginated(cfg, table, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
