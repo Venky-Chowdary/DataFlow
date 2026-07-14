@@ -212,6 +212,8 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
     "apache_hive": 10000,
     "apache_impala": 21000,
     "sparksql": 10000,
+    "spark": 10000,
+    "apache_spark": 10000,
     "phoenix": 8765,
     "sap_hana": 30015,
     "hana": 30015,

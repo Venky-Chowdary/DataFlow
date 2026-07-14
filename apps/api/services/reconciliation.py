@@ -828,7 +828,7 @@ def read_target_sample(
                 connection_string=dest.get("connection_string", ""),
                 ssl=dest.get("ssl", True),
             )
-            order_sql = f'"{sort_key.replace('"', '""')}"' if sort_key else "1"
+            order_sql = f'"{sort_key.replace(chr(34), chr(34) + chr(34))}"' if sort_key else "1"
             with conn.cursor() as cur:
                 cur.execute(
                     f'SELECT {col_sql} FROM "{schema}"."{table_name}" ORDER BY {order_sql} LIMIT %s',

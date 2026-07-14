@@ -42,7 +42,7 @@ import {
   updateTransferPlan,
   uploadFile,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults, resolveDriverType } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, resolveDriverType } from "../lib/connectorTypes";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -310,7 +310,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     }
   }, [liveDestTypes, destType]);
 
-  const destConnectors = connectors.filter((c) => resolveDriverType(c.type) === destDriverType);
+  const destConnectors = connectors.filter((c) => getGenericSqlGroup(c.type) === getGenericSqlGroup(destType));
   const testedDestConnectors = destConnectors.filter((c) => c.last_test_ok !== false);
   const selectedDestConnector = destConnectors.find((c) => c.id === connectorId);
   const dbSourceConnectors = connectors.filter((c) => liveSourceDbs.includes(c.type));
@@ -606,19 +606,25 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (!id) return;
     const conn = connectors.find((c) => c.id === id);
     if (!conn) return;
-    const matched = liveDestTypes.find((d) => resolveDriverType(d.id) === resolveDriverType(conn.type));
+    const matched = liveDestTypes.find((d) => getGenericSqlGroup(d.id) === getGenericSqlGroup(conn.type));
     if (matched) {
       setDestType(matched.id);
     }
     if (conn.database) setTargetDb(conn.database);
-    if (conn.host) setDestHost(conn.host);
-    if (conn.port) setDestPort(conn.port);
+    if (conn.schema) setDestSchema(conn.schema);
+    setDestHost(conn.host || getConnectorDefaults(conn.type).host);
+    setDestPort(conn.port || defaultPortForType(conn.type));
   };
 
   useEffect(() => {
+    if (connectorId) return;
+    setDestHost(getConnectorDefaults(destType).host);
     setDestPort(defaultPortForType(destType));
+    const group = getGenericSqlGroup(destType);
+    if (group === "postgresql+psycopg2") setDestSchema("public");
+    if (group === "mssql+pyodbc") setDestSchema("dbo");
     autoSelectedConnector.current = false;
-  }, [destType]);
+  }, [connectorId, destType]);
 
   useEffect(() => {
     if (autoSelectedConnector.current || connectorId || destConnectors.length === 0) return;
@@ -1222,7 +1228,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
         dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
         dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-        dest_schema: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destSchema || "PUBLIC" : undefined,
+        dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
         dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
         sample_rows: sampleRows,
         estimated_bytes: estimatedBytes,
@@ -1982,6 +1988,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             onSelectType={(type) => {
               setDestType(type);
               setConnectorId("");
+              setDestHost(getConnectorDefaults(type).host);
               setDestPort(defaultPortForType(type));
             }}
           />
@@ -2062,7 +2069,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
               </label>
               <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destDriverType === "mongodb" ? "my_collection" : destDriverType === "dynamodb" ? "orders" : "my_table"} />
             </div>
-            {destDriverType === "postgresql" && (
+            {getGenericSqlGroup(destType) === "postgresql+psycopg2" && (
               <div className="df2-field df2-field-120">
                 <label className="df2-label">Schema</label>
                 <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} />
