@@ -111,13 +111,17 @@ def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str
 
 
 def mongodb_connection_string(cfg: dict[str, Any]) -> str:
-    if cfg.get("connection_string"):
-        return cfg["connection_string"]
-    host = cfg.get("host") or "localhost"
-    port = int(cfg.get("port") or 27017)
-    if cfg.get("username") and cfg.get("password"):
-        return f"mongodb://{cfg['username']}:{cfg['password']}@{host}:{port}/"
-    return f"mongodb://{host}:{port}/"
+    from connectors.mongodb_common import normalize_mongodb_connection_string
+
+    return normalize_mongodb_connection_string(
+        cfg.get("connection_string", ""),
+        database=cfg.get("database", ""),
+        host=cfg.get("host", ""),
+        port=int(cfg.get("port") or 0),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        ssl=bool(cfg.get("ssl")),
+    )
 
 
 def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:

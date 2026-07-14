@@ -624,13 +624,15 @@ def normalize_cell(value: Any) -> str:
         except (json.JSONDecodeError, TypeError):
             pass
     # Normalize date/time formatting differences ("T" vs " ", "Z" vs "+00:00", etc.).
+    # Always canonicalize date-only values to midnight UTC so date and datetime
+    # representations of the same day produce identical checksums.
     if text:
-        dt = _parse_date(text)
-        if dt:
-            return dt
         dtm = _parse_datetime(text)
         if dtm:
             return dtm
+        dt = _parse_date(text)
+        if dt:
+            return f"{dt}T00:00:00Z"
     return text
 
 

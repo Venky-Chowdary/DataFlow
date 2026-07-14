@@ -32,13 +32,19 @@ class WriteResult:
 
 
 def _connection_string(
-    host: str, port: int, username: str, password: str, connection_string: str
+    host: str, port: int, username: str, password: str, connection_string: str, database: str = "", ssl: bool = False
 ) -> str:
-    if connection_string:
-        return connection_string
-    if username and password:
-        return f"mongodb://{username}:{password}@{host}:{port or 27017}/"
-    return f"mongodb://{host}:{port or 27017}/"
+    from connectors.mongodb_common import normalize_mongodb_connection_string
+
+    return normalize_mongodb_connection_string(
+        connection_string,
+        database=database,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        ssl=ssl,
+    )
 
 
 def write_mapped_rows(
@@ -104,7 +110,7 @@ def write_mapped_rows(
     policy = transform_error_policy(error_policy)
 
     try:
-        conn_str = _connection_string(host, port, username, password, connection_string)
+        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl)
         client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
         
         # Test connection

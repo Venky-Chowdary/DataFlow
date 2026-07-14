@@ -87,23 +87,29 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("sqlite")) return "sqlite";
 
   // Generic SQL fallback — any SQL engine with a SQLAlchemy dialect is routed through generic_sql.
-  if (
-    id.includes("mssql") || id.includes("sql_server") || id.includes("microsoft_sql") || id.includes("azure_sql") ||
-    id.includes("oracle") || id.includes("db2") || id.includes("teradata") || id.includes("netezza") ||
-    id.includes("vertica") || id.includes("exasol") || id.includes("sybase") || id.includes("sap_ase") ||
-    id.includes("sap_iq") || id.includes("sap_hana") || id.includes("hana") || id.includes("firebird") ||
-    id.includes("h2") || id.includes("clickhouse") || id.includes("druid") || id.includes("pinot") ||
-    id.includes("presto") || id.includes("trino") || id.includes("hive") || id.includes("spark") ||
-    id.includes("impala") || id.includes("phoenix") || id.includes("duckdb") || id.includes("databricks") ||
-    id.includes("greenplum") || id.includes("cratedb") || id.includes("questdb") || id.includes("doris") ||
-    id.includes("starrocks") || id.includes("yellowbrick") || id.includes("actian") || id.includes("informix") ||
-    id.includes("athena") || id.includes("synapse") || id.includes("dremio") || id.includes("firebolt") ||
-    id.includes("risingwave") || id.includes("materialize") || id.includes("citus")
-  ) {
-    return "generic_sql";
+  if (isGenericSql(id)) {
+    return id;
   }
 
   return id.split("_")[0] || id;
+}
+
+export function isGenericSql(id: string): boolean {
+  const type = id.toLowerCase().trim();
+  if (!type) return false;
+  return (
+    type.includes("mssql") || type.includes("sql_server") || type.includes("sqlserver") || type.includes("microsoft_sql") || type.includes("azure_sql") ||
+    type.includes("oracle") || type.includes("db2") || type.includes("teradata") || type.includes("netezza") ||
+    type.includes("vertica") || type.includes("exasol") || type.includes("sybase") || type.includes("sap_ase") ||
+    type.includes("sap_iq") || type.includes("sap_hana") || type.includes("hana") || type.includes("firebird") ||
+    type.includes("h2") || type.includes("clickhouse") || type.includes("druid") || type.includes("pinot") ||
+    type.includes("presto") || type.includes("trino") || type.includes("hive") || type.includes("spark") ||
+    type.includes("impala") || type.includes("phoenix") || type.includes("duckdb") || type.includes("databricks") ||
+    type.includes("greenplum") || type.includes("cratedb") || type.includes("questdb") || type.includes("doris") ||
+    type.includes("starrocks") || type.includes("yellowbrick") || type.includes("actian") || type.includes("informix") ||
+    type.includes("athena") || type.includes("synapse") || type.includes("dremio") || type.includes("firebolt") ||
+    type.includes("risingwave") || type.includes("materialize") || type.includes("citus")
+  );
 }
 
 export function isTransferLiveType(type: string): boolean {
@@ -133,7 +139,7 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   }
   return {
     host: "localhost",
-    port: item?.port ?? 5432,
+    port: item?.port ?? (isGenericSql(type) ? 0 : 5432),
     label: item?.label ?? type,
   };
 }

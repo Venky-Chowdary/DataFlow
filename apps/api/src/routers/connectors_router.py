@@ -93,20 +93,22 @@ async def test_connection(request: TestConnectionRequest):
     """Test a connector configuration before saving"""
     try:
         if request.type == "mongodb":
+            from connectors.mongodb_common import normalize_mongodb_connection_string
             from pymongo import MongoClient
-            
-            if request.connection_string:
-                conn_str = request.connection_string
-            else:
-                if request.username and request.password:
-                    conn_str = f"mongodb://{request.username}:{request.password}@{request.host}:{request.port}/"
-                else:
-                    conn_str = f"mongodb://{request.host}:{request.port}/"
-            
+
+            conn_str = normalize_mongodb_connection_string(
+                request.connection_string or "",
+                database=request.database or "",
+                host=request.host or "",
+                port=request.port or 0,
+                username=request.username or "",
+                password=request.password or "",
+                ssl=bool(request.ssl) if request.ssl is not None else False,
+            )
             client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
             info = client.server_info()
             client.close()
-            
+
             return {
                 "success": True,
                 "message": "Connection successful",

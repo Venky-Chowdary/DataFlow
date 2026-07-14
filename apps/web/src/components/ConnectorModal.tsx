@@ -8,8 +8,10 @@ import type { Connector } from "../lib/types";
 import { saveConnector, testConnection, updateConnector } from "../lib/api";
 import {
   getConnectorDefaults,
+  getGenericSqlPlaceholder,
   isAwsConnector,
   isGcpConnector,
+  isGenericSql,
   isConfigurableInStudio,
   resolveCatalogIdToType,
 } from "../lib/connectorTypes";
@@ -52,6 +54,7 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
     ];
   }
   const sqlish = ["postgresql", "mysql", "redshift", "mariadb", "sqlite", "generic_sql"].includes(type);
+  const genericSql = isGenericSql(type);
   const mongo = type === "mongodb";
   const snowflake = type === "snowflake";
   const elastic = type === "elasticsearch";
@@ -60,10 +63,10 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
   const azure = type === "adls";
 
   const options: { value: AuthMode; label: string }[] = [];
-  if (sqlish || mongo || snowflake || elastic || azure) {
+  if (sqlish || genericSql || mongo || snowflake || elastic || azure) {
     options.push({ value: "user_pass", label: "Username & password" });
   }
-  if (sqlish || mongo || snowflake || azure) {
+  if (sqlish || genericSql || mongo || snowflake || azure) {
     options.push({ value: "connection_string", label: "Connection string" });
   }
   if (gcp) {
@@ -108,6 +111,26 @@ export function ConnectorModal({
   const [serviceAccount, setServiceAccount] = useState(editing?.service_account ?? "");
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
+  const isMongo = type === "mongodb";
+
+  // Parse a pasted MongoDB URI into host/port/user/pass/database/ssl.
+  useEffect(() => {
+    if (isMongo && authMode === "connection_string" && connectionString.trim()) {
+      try {
+        const url = new URL(connectionString);
+        if (url.hostname) setHost(url.hostname);
+        if (url.port) setPort(parseInt(url.port, 10));
+        if (url.username) setUsername(decodeURIComponent(url.username));
+        if (url.password) setPassword(decodeURIComponent(url.password));
+        const db = url.pathname.replace(/^\//, "").split("?")[0];
+        if (db && !database) setDatabase(db);
+        const params = url.searchParams;
+        if (params.has("ssl") || params.has("tls")) setSsl(true);
+      } catch {
+        // leave manual fields as-is while the user is typing
+      }
+    }
+  }, [isMongo, authMode, connectionString, database]);
 
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -117,7 +140,6 @@ export function ConnectorModal({
   const catalogItem = CONNECTOR_CATALOG.find((c) => c.id === type);
   const isBigQuery = type === "bigquery";
   const isSnowflake = type === "snowflake";
-  const isMongo = type === "mongodb";
   const isDynamo = type === "dynamodb";
   const isS3 = type === "s3";
   const isAwsKeyed = isS3 || isDynamo;
@@ -453,7 +475,7 @@ export function ConnectorModal({
                   <label className="df2-label">Connection string</label>
                   <input
                     className="df2-input"
-                    placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : "driver://user:pass@host:port/db"}
+                    placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : isGenericSql(type) ? getGenericSqlPlaceholder(type) : "driver://user:pass@host:port/db"}
                     value={connectionString}
                     onChange={(e) => setConnectionString(e.target.value)}
                   />

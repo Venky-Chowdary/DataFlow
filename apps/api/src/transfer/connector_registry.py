@@ -167,7 +167,8 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
 
         # The catalog id (e.g. tidb, clickhouse) must reach the generic SQL engine
         # builder so it can pick the right SQLAlchemy drivername and port.
-        return test_generic_sql(type=catalog_id, **probe_kwargs)
+        engine_type = cfg.get("type") or catalog_id
+        return test_generic_sql(type=engine_type, **probe_kwargs)
 
     if not spec:
         return False, f"No connectivity probe for {db_type}"

@@ -172,6 +172,7 @@ def resolve_driver_type(catalog_id: str) -> str:
         # Generic SQL engines
         ("mssql", "generic_sql"),
         ("sql_server", "generic_sql"),
+        ("sqlserver", "generic_sql"),
         ("microsoft_sql", "generic_sql"),
         ("azure_sql", "generic_sql"),
         ("oracle", "generic_sql"),
