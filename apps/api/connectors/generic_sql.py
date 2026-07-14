@@ -11,6 +11,7 @@ engine.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
@@ -1029,6 +1030,11 @@ def read_table_batch(
 
     try:
         with engine.connect() as conn:
+            # RisingWave streams writes through a barrier; issue a FLUSH so the
+            # subsequent SELECT observes rows written by a just-finished ingest.
+            if (cfg.get("type") or "").lower() == "risingwave":
+                with contextlib.suppress(Exception):
+                    conn.execute(sa.text("FLUSH"))
             try:
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
@@ -1101,6 +1107,9 @@ def read_table_cursor_batch(
 
     try:
         with engine.connect() as conn:
+            if (cfg.get("type") or "").lower() == "risingwave":
+                with contextlib.suppress(Exception):
+                    conn.execute(sa.text("FLUSH"))
             table_obj = _reflect_table(engine, table, schema_name, columns)
             if cursor_column not in table_obj.c:
                 raise ValueError(f"Cursor column '{cursor_column}' not found in table {table}")
