@@ -55,7 +55,7 @@ def _source_name(source: EndpointConfig) -> str:
     if fmt == "dynamodb":
         return source.table or source.collection or source.database or ""
     if fmt == "elasticsearch":
-        return source.database or source.table or source.collection or ""
+        return source.table or source.database or source.collection or ""
     if fmt == "s3":
         return source.table or source.collection or source.schema or ""
     if fmt == "gcs":

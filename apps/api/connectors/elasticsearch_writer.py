@@ -101,6 +101,10 @@ def write_mapped_rows(
                 yield action
 
         written, bulk_errors = bulk(client, gen_actions(), raise_on_error=False)
+        try:
+            client.indices.refresh(index=index)
+        except Exception:
+            pass
         if on_checkpoint:
             on_checkpoint(1, 1, written)
         return WriteResult(

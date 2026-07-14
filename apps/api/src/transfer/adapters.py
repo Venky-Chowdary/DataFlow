@@ -465,9 +465,9 @@ def read_source_database(
     if db_type == "elasticsearch":
         from connectors.elasticsearch_reader import read_index_batch
 
-        index = endpoint.database or endpoint.table or endpoint.collection
+        index = endpoint.table or endpoint.database or endpoint.collection
         if not index:
-            raise ValueError("Elasticsearch index name required (database field)")
+            raise ValueError("Elasticsearch index name required (table or database field)")
         batch, _ = read_index_batch(cfg=cfg, index=index, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, index)
