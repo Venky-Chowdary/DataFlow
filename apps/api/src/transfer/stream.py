@@ -379,6 +379,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -414,6 +415,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -448,6 +450,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -483,6 +486,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -510,6 +514,7 @@ def _write_batch(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
@@ -519,6 +524,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -540,12 +546,14 @@ def _write_batch(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            service_account=cfg.get("service_account", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
             column_types=column_types,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -579,6 +587,7 @@ def _write_batch(
             auth_mode=cfg.get("auth_mode", ""),
             api_key=cfg.get("api_key", ""),
             service_account=cfg.get("service_account", ""),
+            auth_source=cfg.get("auth_source", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
@@ -604,7 +613,7 @@ def _write_batch(
             password=cfg.get("password", ""),
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
-            ssl=False,
+            ssl=cfg.get("ssl", False),
             type=type_name,
             table_name=table_name,
             headers=headers,
@@ -615,6 +624,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
