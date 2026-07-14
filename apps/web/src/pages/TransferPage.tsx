@@ -42,7 +42,7 @@ import {
   updateTransferPlan,
   uploadFile,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, resolveDriverType } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, resolveDriverType } from "../lib/connectorTypes";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -1997,14 +1997,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
-              {destDriverType === "mongodb" ? (
+              {destDriverType === "mongodb" || isGenericSql(destType) ? (
                 <div className="df2-field df2-field-flex">
                   <label className="df2-label">Connection String (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
                     onChange={(e) => setDestConnectionString(e.target.value)}
-                    placeholder="mongodb://localhost:27017/"
+                    placeholder={destDriverType === "mongodb" ? "mongodb://localhost:27017/" : getGenericSqlPlaceholder(destType)}
                   />
                 </div>
               ) : null}
