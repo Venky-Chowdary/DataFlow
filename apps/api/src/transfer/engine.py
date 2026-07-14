@@ -52,6 +52,12 @@ from .file_stream import peek_file_source, should_stream_file, stream_file_to_da
 from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
 try:
+    from .contract_engine import enforce_or_create_contract, finalize_contract
+    from services.data_contract import ContractViolation
+except ImportError:  # pragma: no cover - compatibility for tests
+    from src.transfer.contract_engine import enforce_or_create_contract, finalize_contract
+    from src.services.data_contract import ContractViolation
+try:
     from ai.training.training_scheduler import schedule_training_on_transfer
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.ai.training.training_scheduler import schedule_training_on_transfer
@@ -296,6 +302,7 @@ class UniversalTransferEngine:
             )
 
         pf = None
+        contract_id = ""
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -438,6 +445,21 @@ class UniversalTransferEngine:
 
             if pf:
                 mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+
+            # Data contract / circuit breaker enforcement.
+            try:
+                contract_id = enforce_or_create_contract(request, schema, mappings, pf)
+            except ContractViolation as cv:
+                msg = cv.message
+                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    error_details={"violations": cv.violations},
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+
             ddl_log: list[str] = []
             dest_summary: dict = {}
             rows_written = 0
@@ -594,6 +616,7 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
                 destination_summary=dest_summary,
             )
+            finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -611,8 +634,10 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
+                contract_id=contract_id,
             )
         except Exception as e:
+            finalize_contract(contract_id, success=False)
             error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
@@ -632,6 +657,7 @@ class UniversalTransferEngine:
                 error=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
+                contract_id=contract_id,
             )
 
     def _execute_streaming(
@@ -647,6 +673,7 @@ class UniversalTransferEngine:
         """Batched DB→DB path — never loads full table into memory."""
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
+        contract_id = ""
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -778,6 +805,20 @@ class UniversalTransferEngine:
             if pf:
                 mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
 
+            # Data contract / circuit breaker enforcement.
+            try:
+                contract_id = enforce_or_create_contract(request, schema, mappings, pf)
+            except ContractViolation as cv:
+                msg = cv.message
+                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    error_details={"violations": cv.violations},
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
@@ -895,6 +936,7 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
                 destination_summary=dest_summary,
             )
+            finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -913,8 +955,10 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
+                contract_id=contract_id,
             )
         except Exception as e:
+            finalize_contract(contract_id, success=False)
             error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
@@ -934,6 +978,7 @@ class UniversalTransferEngine:
                 error=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
+                contract_id=contract_id,
             )
 
     def _execute_file_streaming(
@@ -949,6 +994,7 @@ class UniversalTransferEngine:
         """Batched file → database path for large CSV/TSV/JSONL uploads."""
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
+        contract_id = ""
         try:
             content = request.source_content or b""
             filename = request.source_filename or "upload.csv"
@@ -1083,6 +1129,20 @@ class UniversalTransferEngine:
             if pf:
                 mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
 
+            # Data contract / circuit breaker enforcement.
+            try:
+                contract_id = enforce_or_create_contract(request, schema, mappings, pf)
+            except ContractViolation as cv:
+                msg = cv.message
+                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    error_details={"violations": cv.violations},
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
@@ -1201,6 +1261,7 @@ class UniversalTransferEngine:
                 source_summary={"kind": "file", "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
                 destination_summary=dest_summary,
             )
+            finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -1219,8 +1280,10 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
+                contract_id=contract_id,
             )
         except Exception as e:
+            finalize_contract(contract_id, success=False)
             error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
@@ -1240,6 +1303,7 @@ class UniversalTransferEngine:
                 error=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
+                contract_id=contract_id,
             )
 
     def _create_pending_job(self, request: TransferRequest) -> str:

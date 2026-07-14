@@ -73,6 +73,8 @@ class TransferRequest:
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
     stream_contracts: list[dict] = field(default_factory=list)
+    contract_id: str = ""
+    enforce_contract: bool = True
 
     @property
     def operation(self) -> str:
@@ -124,6 +126,8 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "validation_mode": request.validation_mode,
         "backfill_new_fields": request.backfill_new_fields,
         "stream_contracts": request.stream_contracts,
+        "contract_id": request.contract_id,
+        "enforce_contract": request.enforce_contract,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -144,6 +148,8 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
         stream_contracts=data.get("stream_contracts") or [],
+        contract_id=data.get("contract_id") or "",
+        enforce_contract=bool(data.get("enforce_contract", True)),
     )
 
 
@@ -162,6 +168,7 @@ class TransferResult:
     reconciliation: dict = field(default_factory=dict)
     validation_plan: dict = field(default_factory=dict)
     payload_shape: dict = field(default_factory=dict)
+    contract_id: str = ""
 
 
 @dataclass
