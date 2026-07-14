@@ -13,12 +13,15 @@ from connectors.mongodb_common import normalize_mongodb_connection_string
 
 
 def test_appends_auth_source_and_database_from_form():
+    # Pasted connection strings with a separate Database field default authSource
+    # to admin (matching most managed MongoDB defaults) and use the database as
+    # the default database path.
     uri = normalize_mongodb_connection_string(
         "mongodb://mongo:pass@mongodb.railway.internal:27017",
         database="trueresume",
     )
     assert "trueresume" in uri
-    assert "authSource=trueresume" in uri
+    assert "authSource=admin" in uri
 
 
 def test_preserves_existing_auth_source():
