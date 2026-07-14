@@ -32,7 +32,14 @@ class WriteResult:
 
 
 def _connection_string(
-    host: str, port: int, username: str, password: str, connection_string: str, database: str = "", ssl: bool = False
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    connection_string: str,
+    database: str = "",
+    ssl: bool = False,
+    auth_source: str = "",
 ) -> str:
     from connectors.mongodb_common import normalize_mongodb_connection_string
 
@@ -44,6 +51,7 @@ def _connection_string(
         username=username,
         password=password,
         ssl=ssl,
+        auth_source=auth_source,
     )
 
 
@@ -68,6 +76,7 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    auth_source: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
     del backfill_new_fields
@@ -110,7 +119,7 @@ def write_mapped_rows(
     policy = transform_error_policy(error_policy)
 
     try:
-        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl)
+        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
         client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
         
         # Test connection

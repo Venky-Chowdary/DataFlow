@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -33,8 +34,36 @@ def _account_url(cfg: dict[str, Any]) -> str:
     return f"https://{account}.blob.core.windows.net"
 
 
+def _service_principal_credential(cfg: dict[str, Any]):
+    """Return an Azure credential from service_account JSON if available."""
+    sa = (cfg.get("service_account") or "").strip()
+    if not sa:
+        return None
+    try:
+        info = json.loads(sa)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    tenant_id = info.get("tenant_id") or info.get("tenantId")
+    client_id = info.get("client_id") or info.get("clientId")
+    client_secret = info.get("client_secret") or info.get("clientSecret")
+    if not (tenant_id and client_id and client_secret):
+        return None
+    try:
+        from azure.identity import ClientSecretCredential
+
+        return ClientSecretCredential(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    except Exception:
+        return None
+
+
 def blob_service_client(cfg: dict[str, Any]):
-    """Build a BlobServiceClient from connection string or account URL + key."""
+    """Build a BlobServiceClient from connection string, service principal, or account URL + key."""
     from azure.storage.blob import BlobServiceClient
 
     conn_str = _connection_string(cfg)
@@ -48,6 +77,11 @@ def blob_service_client(cfg: dict[str, Any]):
     }
     if conn_str:
         return BlobServiceClient.from_connection_string(conn_str, **client_kwargs)
+
+    sp = _service_principal_credential(cfg)
+    if sp:
+        url = _account_url(cfg)
+        return BlobServiceClient(account_url=url, credential=sp, **client_kwargs)
 
     account = _account_name(cfg)
     key = _account_key(cfg)

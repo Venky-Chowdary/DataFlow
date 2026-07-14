@@ -156,6 +156,11 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         dest_password=dest.get("password"),
         dest_connection_string=dest.get("connection_string"),
         dest_warehouse=dest.get("warehouse"),
+        dest_auth_source=dest.get("auth_source"),
+        dest_auth_mode=dest.get("auth_mode"),
+        dest_auth_role=dest.get("auth_role"),
+        dest_api_key=dest.get("api_key"),
+        dest_service_account=dest.get("service_account"),
         dest_kind=dest.get("kind", "database"),
     )
 

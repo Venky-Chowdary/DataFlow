@@ -30,6 +30,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.value_serializer import cell_to_string, json_default
 
+from .connector_registry import run_probe
 from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
 
@@ -158,6 +159,7 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
             client = MongoClient(conn_str, serverSelectionTimeoutMS=2500)
             client.admin.command("ping")
             client.close()
+            cfg["auth_source"] = auth_source
             return True, f"MongoDB reachable (authSource={auth_source})"
         except Exception as exc:
             last_error = str(exc)
@@ -249,6 +251,7 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
                 "type": conn.type,
                 "auth_mode": getattr(conn, "auth_mode", ""),
                 "auth_role": getattr(conn, "auth_role", ""),
+                "auth_source": getattr(conn, "auth_source", ""),
                 "api_key": getattr(conn, "api_key", ""),
                 "service_account": getattr(conn, "service_account", ""),
                 "role": getattr(conn, "auth_role", ""),
@@ -346,6 +349,12 @@ def read_source_database(
     if db_type == "mongodb":
         from connectors.mongodb_reader import read_collection_batch
 
+        # Resolve the auth database for MongoDB so the same credentials work
+        # even when the user was created in a different DB than the data DB.
+        ok, msg = run_probe("mongodb", cfg)
+        if not ok:
+            raise RuntimeError(msg)
+
         coll_name = endpoint.collection or endpoint.table
         if not coll_name:
             raise ValueError("Source MongoDB collection name required")
@@ -405,6 +414,7 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
+            service_account=cfg.get("service_account", ""),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -429,6 +439,7 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
+            role=cfg.get("role", ""),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -686,6 +697,13 @@ def write_destination_database(
 
     if db_type == "mongodb":
         from connectors.mongodb_writer import write_mapped_rows
+
+        # Resolve the auth database for MongoDB before the actual write.
+        ok, msg = run_probe("mongodb", cfg)
+        if not ok:
+            raise RuntimeError(msg)
+        common["auth_source"] = cfg.get("auth_source", "")
+
         common["schema"] = cfg.get("schema", "db")
         for col in columns:
             ddl_log.append(f"MONGODB FIELD {col} string")

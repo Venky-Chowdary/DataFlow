@@ -133,8 +133,14 @@ def test_saved_connector(connector_id: str):
         "role": conn.auth_role or "",
         "api_key": conn.api_key or "",
         "service_account": conn.service_account or "",
+        "auth_source": conn.auth_source or "",
     }
     ok, message = run_probe(conn.type or "", cfg)
 
+    # Persist any auto-resolved auth fields (e.g., MongoDB authSource) so the
+    # saved connector works end-to-end without re-entering the connection string.
+    if ok and cfg.get("auth_source") and cfg.get("auth_source") != (conn.auth_source or ""):
+        update_connector(connector_id, {"auth_source": cfg.get("auth_source", "")})
+
     mark_tested(connector_id, ok)
-    return {"success": ok, "message": message}
+    return {"success": ok, "message": message, "auth_source": cfg.get("auth_source", "")}

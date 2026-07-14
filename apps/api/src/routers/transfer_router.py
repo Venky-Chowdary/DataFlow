@@ -32,6 +32,7 @@ class EndpointDTO(BaseModel):
     ssl: bool = False
     auth_mode: str = ""
     auth_role: str = ""
+    auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
 
@@ -425,6 +426,7 @@ async def run_universal_transfer(
     dest_password: str = Form(""),
     dest_connection_string: str = Form(""),
     dest_warehouse: str = Form(""),
+    dest_auth_source: str = Form(""),
     source_connector_id: Optional[str] = Form(None),
     source_host: str = Form(""),
     source_port: int = Form(0),
@@ -435,6 +437,7 @@ async def run_universal_transfer(
     source_table: str = Form(""),
     source_collection: str = Form(""),
     source_connection_string: str = Form(""),
+    source_auth_source: str = Form(""),
     skip_preflight: str = Form("false"),
     async_mode: str = Form("true"),
     mappings_json: str = Form(""),
@@ -479,6 +482,7 @@ async def run_universal_transfer(
         table=source_table,
         collection=source_collection,
         connection_string=source_connection_string,
+        auth_source=source_auth_source,
     )
     destination = EndpointConfig(
         kind=dest_kind,
@@ -494,6 +498,7 @@ async def run_universal_transfer(
         password=dest_password,
         connection_string=dest_connection_string,
         warehouse=dest_warehouse,
+        auth_source=dest_auth_source,
     )
 
     request = TransferRequest(

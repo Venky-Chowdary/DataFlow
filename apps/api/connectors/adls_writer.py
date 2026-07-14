@@ -80,6 +80,7 @@ def write_mapped_rows(
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
     create_table: bool = True,
+    service_account: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
     del warehouse, backfill_new_fields, create_table
@@ -102,6 +103,7 @@ def write_mapped_rows(
         "password": password,
         "connection_string": connection_string,
         "database": container,
+        "service_account": service_account,
     }
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)

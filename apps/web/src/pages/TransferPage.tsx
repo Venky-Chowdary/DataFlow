@@ -281,6 +281,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       password: destPassword || undefined,
       connection_string: destConnectionString || undefined,
       warehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+      auth_source: selectedDestConnector?.auth_source || undefined,
+      auth_mode: selectedDestConnector?.auth_mode || undefined,
+      auth_role: selectedDestConnector?.auth_role || undefined,
+      api_key: selectedDestConnector?.api_key || undefined,
+      service_account: selectedDestConnector?.service_account || undefined,
     };
   };
 
@@ -387,6 +392,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       database: isDynamo ? tableOrPath : sourceConnector.database,
       table: isMongo ? undefined : tableOrPath || undefined,
       collection: isMongo ? tableOrPath : undefined,
+      auth_source: sourceConnector.auth_source || undefined,
+      auth_mode: sourceConnector.auth_mode || undefined,
+      auth_role: sourceConnector.auth_role || undefined,
+      api_key: sourceConnector.api_key || undefined,
+      service_account: sourceConnector.service_account || undefined,
     };
   };
 
@@ -1324,6 +1334,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         sourceCollection: sourceKind === "cloud"
           ? cloudPath || undefined
           : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
+        sourceAuthSource: sourceConnector?.auth_source,
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
@@ -1337,6 +1348,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         destPassword: !connectorId ? destPassword || undefined : undefined,
         destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
         destWarehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+        destAuthSource: selectedDestConnector?.auth_source,
         skipPreflight: !enforcePreflight,
         mappings: transferMappings,
         syncMode,

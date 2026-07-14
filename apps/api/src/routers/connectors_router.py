@@ -137,7 +137,7 @@ async def test_connection(request: TestConnectionRequest):
             "auth_source": request.auth_source or "",
         }
         ok, msg = run_probe(driver, cfg)
-        return {"success": ok, "message": msg, "driver": driver}
+        return {"success": ok, "message": msg, "driver": driver, "auth_source": cfg.get("auth_source", "")}
 
     except Exception as e:
         return {
@@ -163,6 +163,7 @@ async def create_connector(config: ConnectorConfig):
         "ssl": config.ssl,
         "auth_mode": config.auth_mode,
         "auth_role": config.auth_role,
+        "auth_source": config.auth_source,
         "role": config.role or "both",
         "api_key": config.api_key,
         "service_account": config.service_account,

@@ -19,8 +19,8 @@ def test_adls(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    service_account: str = "",
 ) -> ConnectResult:
-    from azure.storage.blob import BlobServiceClient
     del ssl, warehouse
     container = database or schema
     cfg = {
@@ -30,6 +30,7 @@ def test_adls(
         "password": password,
         "connection_string": connection_string,
         "database": container,
+        "service_account": service_account,
         # Probe-only timeouts: fail fast on unreachable endpoints so tests
         # and the UI connector-test don't hang.
         "connection_timeout": 5,

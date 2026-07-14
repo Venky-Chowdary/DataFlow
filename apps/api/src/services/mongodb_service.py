@@ -38,6 +38,7 @@ class MongoDBService:
             return True
         except ConnectionFailure as e:
             print(f"[ERROR] MongoDB connection failed: {e}")
+            self.client = None
             return False
     
     def disconnect(self):
@@ -305,14 +306,199 @@ class MongoDBService:
         return jobs
 
 
+class MemoryMongoDBService:
+    """In-memory fallback for tests and DATAFLOW_JOB_STORE=memory.
+
+    Mirrors the small subset of MongoDBService used by routers and the
+    transfer engine without requiring a running MongoDB server.
+    """
+
+    def __init__(self):
+        self._connectors: dict[str, dict] = {}
+        self._jobs: dict[str, dict] = {}
+        self.client: Any = None
+        self.connection_string = "memory://"
+        self.db_name = "datatransfer"
+
+    def connect(self) -> bool:
+        self.client = True
+        return True
+
+    def disconnect(self) -> None:
+        self.client = None
+
+    def get_database(self, db_name: Optional[str] = None) -> dict:
+        return {}
+
+    def test_connection(self) -> dict:
+        return {"connected": True, "version": "memory", "host": self.connection_string}
+
+    @staticmethod
+    def _new_id() -> str:
+        from bson import ObjectId
+
+        return str(ObjectId())
+
+    def save_connector(self, connector_data: dict) -> str:
+        oid = self._new_id()
+        rec = dict(connector_data)
+        rec["_id"] = oid
+        rec.setdefault("created_at", datetime.utcnow())
+        rec.setdefault("updated_at", datetime.utcnow())
+        self._connectors[oid] = rec
+        return oid
+
+    def get_connector(self, connector_id: str) -> Optional[dict]:
+        rec = self._connectors.get(connector_id)
+        if rec:
+            rec = dict(rec)
+            rec["_id"] = str(rec["_id"])
+            return rec
+        return None
+
+    def list_connectors(self) -> list[dict]:
+        items = sorted(
+            self._connectors.values(),
+            key=lambda c: c.get("created_at") or "",
+            reverse=True,
+        )
+        return [dict(c, _id=str(c["_id"])) for c in items]
+
+    def update_connector(self, connector_id: str, updates: dict) -> bool:
+        rec = self._connectors.get(connector_id)
+        if not rec:
+            return False
+        rec.update(updates)
+        rec["updated_at"] = datetime.utcnow()
+        return True
+
+    def delete_connector(self, connector_id: str) -> bool:
+        return self._connectors.pop(connector_id, None) is not None
+
+    def insert_data(
+        self,
+        database: str,
+        collection: str,
+        data: list[dict],
+        client: Optional[Any] = None,
+    ) -> dict:
+        return {
+            "success": True,
+            "inserted_count": len(data),
+            "database": database,
+            "collection": collection,
+        }
+
+    def get_client_for_connector(self, connector_id: str):
+        return None, None
+
+    def create_collection_from_schema(
+        self,
+        database: str,
+        collection: str,
+        schema: dict,
+        client: Optional[Any] = None,
+    ) -> dict:
+        return {
+            "success": True,
+            "message": f"Collection '{collection}' created in database '{database}'",
+        }
+
+    def get_collection_stats(self, database: str, collection: str) -> dict:
+        return {"success": True, "document_count": 0, "sample_documents": []}
+
+    def create_transfer_job(self, job_data: dict) -> str:
+        oid = self._new_id()
+        job = dict(job_data)
+        job["_id"] = oid
+        job.setdefault("status", "pending")
+        job.setdefault("created_at", datetime.utcnow())
+        job.setdefault("started_at", None)
+        job.setdefault("completed_at", None)
+        job.setdefault("records_processed", 0)
+        job.setdefault("errors", [])
+        job.setdefault("phases", [])
+        self._jobs[oid] = job
+        return oid
+
+    def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        rec.update(kwargs)
+        rec["status"] = status
+        rec["updated_at"] = datetime.utcnow()
+        if status == "running":
+            rec.setdefault("started_at", datetime.utcnow())
+        elif status in ("completed", "failed", "cancelled"):
+            rec["completed_at"] = datetime.utcnow()
+        phase_label = kwargs.get("phase")
+        if phase_label:
+            try:
+                from services.job_phases import advance_phase, complete_phases, initial_phases, phase_from_engine_label
+
+                phases = rec.get("phases") or initial_phases()
+                mapped = phase_from_engine_label(str(phase_label))
+                if status in ("completed",):
+                    phases = complete_phases(phases, success=True, message=kwargs.get("message", ""))
+                elif status in ("failed", "cancelled"):
+                    phases = complete_phases(
+                        phases,
+                        success=False,
+                        message=kwargs.get("error") or kwargs.get("message", ""),
+                    )
+                else:
+                    phases = advance_phase(
+                        phases,
+                        mapped,
+                        status="active",
+                        message=kwargs.get("message", ""),
+                    )
+                rec["phases"] = phases
+            except Exception:
+                pass
+        return True
+
+    def get_job(self, job_id: str) -> Optional[dict]:
+        rec = self._jobs.get(job_id)
+        if rec:
+            rec = dict(rec)
+            rec["_id"] = str(rec["_id"])
+            for key in ("created_at", "updated_at", "started_at", "completed_at"):
+                if rec.get(key) and hasattr(rec[key], "isoformat"):
+                    rec[key] = rec[key].isoformat()
+            return rec
+        return None
+
+    def list_jobs(self, limit: int = 50) -> list[dict]:
+        items = sorted(
+            self._jobs.values(),
+            key=lambda j: j.get("created_at") or "",
+            reverse=True,
+        )[:limit]
+        out = []
+        for rec in items:
+            job = dict(rec)
+            job["_id"] = str(job["_id"])
+            for key in ("created_at", "updated_at", "started_at", "completed_at"):
+                if job.get(key) and hasattr(job[key], "isoformat"):
+                    job[key] = job[key].isoformat()
+            out.append(job)
+        return out
+
+
 # Global instance
 _mongodb_service: Optional[MongoDBService] = None
 
 
 def get_mongodb_service() -> MongoDBService:
-    """Get or create MongoDB service instance"""
+    """Get or create MongoDB service instance."""
     global _mongodb_service
     if _mongodb_service is None:
-        _mongodb_service = MongoDBService()
-        _mongodb_service.connect()
+        if os.environ.get("DATAFLOW_JOB_STORE", "").lower() == "memory":
+            _mongodb_service = MemoryMongoDBService()
+            _mongodb_service.connect()
+        else:
+            _mongodb_service = MongoDBService()
+            _mongodb_service.connect()
     return _mongodb_service

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -15,6 +14,7 @@ from ..services.preflight_service import (
     run_file_preflight,
     run_transfer_policy_gates,
 )
+from ..transfer.connector_registry import run_probe
 
 router = APIRouter(prefix="/preflight", tags=["Preflight"])
 
@@ -58,6 +58,11 @@ class PreflightRequest(BaseModel):
     destination_column_types: dict[str, str] = Field(default_factory=dict)
     dest_schema: Optional[str] = None
     dest_warehouse: Optional[str] = None
+    dest_auth_source: Optional[str] = None
+    dest_auth_mode: Optional[str] = None
+    dest_auth_role: Optional[str] = None
+    dest_api_key: Optional[str] = None
+    dest_service_account: Optional[str] = None
     dest_table: Optional[str] = None
     dest_collection: Optional[str] = None
 
@@ -74,8 +79,6 @@ def _default_port(db_type: str) -> int:
 
 def _probe_inline_destination(body: PreflightRequest) -> tuple[bool, str]:
     """Probe destination using inline connection settings when no saved connector is selected."""
-    from ..transfer.connector_registry import run_probe
-
     db_type = (body.dest_type or "mongodb").lower()
     cfg = {
         "host": body.dest_host or "localhost",
@@ -88,55 +91,25 @@ def _probe_inline_destination(body: PreflightRequest) -> tuple[bool, str]:
         "ssl": False,
         "warehouse": body.dest_warehouse or "",
         "type": db_type,
+        "auth_source": body.dest_auth_source or "",
+        "auth_mode": body.dest_auth_mode or "",
+        "auth_role": body.dest_auth_role or "",
+        "api_key": body.dest_api_key or "",
+        "service_account": body.dest_service_account or "",
     }
     return run_probe(db_type, cfg)
 
 
 def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
     """Live connectivity probe for any saved connector type."""
-    from ..transfer.adapters import _lookup_saved_connector, probe_mongodb
+    from ..transfer.adapters import _lookup_saved_connector
 
     conn = _lookup_saved_connector(connector_id)
     if not conn:
         return False, f"Connector '{connector_id}' not found"
 
     db_type = (conn.get("type") or "").lower()
-
-    if db_type == "mongodb":
-        return probe_mongodb(conn)
-
-    probes = {
-        "postgresql": ("connectors.postgresql", "test_postgresql"),
-        "mysql": ("connectors.mysql", "test_mysql"),
-        "snowflake": ("connectors.snowflake", "test_snowflake"),
-        "bigquery": ("connectors.bigquery", "test_bigquery"),
-        "redshift": ("connectors.redshift", "test_redshift"),
-        "dynamodb": ("connectors.dynamodb", "test_dynamodb"),
-        "s3": ("connectors.s3", "test_s3"),
-        "gcs": ("connectors.gcs", "test_gcs"),
-        "redis": ("connectors.redis_kv", "test_redis"),
-        "elasticsearch": ("connectors.elasticsearch", "test_elasticsearch"),
-    }
-    if db_type not in probes:
-        return False, f"No connectivity probe for connector type '{db_type}'"
-
-    mod_name, fn_name = probes[db_type]
-    mod = importlib.import_module(mod_name)
-    probe_fn = getattr(mod, fn_name)
-    result = probe_fn(
-        host=conn.get("host") or "",
-        port=int(conn.get("port") or _default_port(db_type)),
-        database=conn.get("database") or "",
-        username=conn.get("username") or "",
-        password=conn.get("password") or "",
-        schema=conn.get("schema") or ("PUBLIC" if db_type == "snowflake" else "dataflow" if db_type == "bigquery" else "public"),
-        connection_string=conn.get("connection_string") or "",
-        ssl=conn.get("ssl", False),
-        warehouse=conn.get("warehouse") or "",
-    )
-    if result.ok:
-        return True, result.message or "Connected"
-    return False, result.error or "Connection failed"
+    return run_probe(db_type, conn)
 
 
 @router.post("/run")
@@ -167,6 +140,11 @@ async def run_preflight(body: PreflightRequest):
         dest_password=body.dest_password,
         dest_connection_string=body.dest_connection_string,
         dest_warehouse=body.dest_warehouse,
+        dest_auth_source=body.dest_auth_source,
+        dest_auth_mode=body.dest_auth_mode,
+        dest_auth_role=body.dest_auth_role,
+        dest_api_key=body.dest_api_key,
+        dest_service_account=body.dest_service_account,
         dest_kind=body.dest_kind,
     )
 
