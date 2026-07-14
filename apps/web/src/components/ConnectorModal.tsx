@@ -63,9 +63,10 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
   const awsStore = ["s3", "dynamodb"].includes(type);
   const gcp = isGcpConnector(type);
   const azure = type === "adls";
+  const connectionStringOnly = ["databricks", "athena"].includes(type);
 
   const options: { value: AuthMode; label: string }[] = [];
-  if (sqlish || genericSql || mongo || snowflake || elastic || azure) {
+  if ((sqlish || genericSql || mongo || snowflake || elastic || azure) && !connectionStringOnly) {
     options.push({ value: "user_pass", label: "Username & password" });
   }
   if (sqlish || genericSql || mongo || snowflake || azure) {
