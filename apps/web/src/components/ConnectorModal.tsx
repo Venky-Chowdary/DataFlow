@@ -420,6 +420,12 @@ export function ConnectorModal({
                 </div>
               </div>
 
+              {isFileFormat(type) && (
+                <p className="df2-field-note df2-label-hint" style={{ marginTop: 8, marginBottom: 12 }}>
+                  File format connectors only need a path or URL. No database host, port, or credentials are required.
+                </p>
+              )}
+
               {modeOptions.length > 1 && (
                 <div className="df2-form-row">
                   <div className="df2-field">
