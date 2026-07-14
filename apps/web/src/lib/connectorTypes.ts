@@ -54,7 +54,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   postgresql: { host: "localhost", port: 5432 },
   mysql: { host: "localhost", port: 3306 },
   mongodb: { host: "localhost", port: 27017 },
-  snowflake: { host: "localhost", port: 443 },
+  snowflake: { host: "account.snowflakecomputing.com", port: 443 },
   bigquery: { host: "bigquery.googleapis.com", port: 443 },
   redshift: { host: "localhost", port: 5439 },
   dynamodb: { host: "us-east-1", port: 443 },
@@ -148,12 +148,17 @@ export function getConnectorLabel(type: string, item?: { label?: string } | null
   return type
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase())
-    .replace(/\b(Sql|Db|Rds|Ibm|Db2|Aws|Gcs|Gcp|Azure|Api|Http|Url|Uri|Uid|Ssl|Ssh|Smtp|Pop3|Imap|Tidb)\b/g, (m) => {
+    .replace(/\b(Sql|Db|Rds|Ibm|Db2|Aws|Gcs|Gcp|Azure|Api|Http|Url|Uri|Uid|Ssl|Ssh|Smtp|Pop3|Imap|Tidb|Sap|Ase|Iq|Singlestore|Oceanbase|Polardb|Gaussdb|Goldendb|Starrocks|Cratedb|Questdb|Yugabytedb|Sparksql|Risingwave|Cockroachdb)\b/g, (m) => {
       const map: Record<string, string> = {
         Sql: "SQL", Db: "DB", Rds: "RDS", Ibm: "IBM", Db2: "DB2", Aws: "AWS",
         Gcs: "GCS", Gcp: "GCP", Azure: "Azure", Api: "API", Http: "HTTP",
         Url: "URL", Uri: "URI", Uid: "UID", Ssl: "SSL", Ssh: "SSH",
         Smtp: "SMTP", Pop3: "POP3", Imap: "IMAP", Tidb: "TiDB",
+        Sap: "SAP", Ase: "ASE", Iq: "IQ", Singlestore: "SingleStore",
+        Oceanbase: "OceanBase", Polardb: "PolarDB", Gaussdb: "GaussDB",
+        Goldendb: "GoldenDB", Starrocks: "StarRocks", Cratedb: "CrateDB",
+        Questdb: "QuestDB", Yugabytedb: "YugabyteDB", Sparksql: "Spark SQL",
+        Risingwave: "RisingWave", Cockroachdb: "CockroachDB",
       };
       return map[m] || m.toUpperCase();
     });
@@ -235,6 +240,7 @@ export function getGenericSqlPlaceholder(type: string): string {
   if (t === "athena" || base === "awsathena+rest") return `awsathena+rest://@athena.region.amazonaws.com:${port}/?s3_staging_dir=s3://bucket`;
   if (base === "presto" || base === "trino") return `${base}://user:pass@host:${port}/catalog`;
   if (base === "druid") return `druid://user:pass@host:${port}/druid/v2/sql`;
+  if (t === "databricks" || base === "databricks") return "databricks+thrift://token:dapi***@xxx.cloud.databricks.com?http_path=/sql/1.0/endpoints/...";
 
   return `${base}://user:pass@host:${port}/db`;
 }

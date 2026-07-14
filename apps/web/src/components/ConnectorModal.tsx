@@ -43,6 +43,7 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   if (["bigquery", "gcs", "google_cloud_storage"].includes(type)) return "service_account";
   if (type === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
   if (type === "adls") return "connection_string";
+  if (type === "databricks" || type === "athena") return "connection_string";
   if (type === "mongodb" && conn?.username) return "user_pass";
   return "user_pass";
 }
@@ -146,7 +147,9 @@ export function ConnectorModal({
   const isAwsKeyed = isS3 || isDynamo;
   const isElastic = type === "elasticsearch";
   const isGcp = isGcpConnector(type);
+  const isGcs = type === "gcs" || type === "google_cloud_storage";
   const isAzure = type === "adls";
+  const isRedis = type === "redis";
 
   const modeOptions = useMemo(() => authModeOptions(type), [type]);
 
@@ -368,19 +371,23 @@ export function ConnectorModal({
     if (isGcp) return isBigQuery ? "GCP project (optional)" : "Project / endpoint";
     if (isAzure) return "Storage account";
     if (isElastic) return "Host";
+    if (isSnowflake) return "Account host";
     return "Host";
-  }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic]);
+  }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic, isSnowflake]);
 
   const databaseLabel = useMemo(() => {
     if (isFileFormat(type)) return "Filename / pattern";
-    if (isS3) return "Bucket name";
+    if (isS3 || isGcs) return "Bucket name";
     if (isDynamo) return "Table name";
     if (isBigQuery) return "GCP project ID";
     if (isGcp) return "Project ID";
     if (isAzure) return "Container / filesystem";
     if (isElastic) return "Index (optional)";
+    if (isRedis) return "Database index";
+    if (["sqlite", "duckdb"].includes(type)) return "Database file / :memory:";
+    if (type === "databricks" || type === "athena") return "Catalog (optional)";
     return "Database";
-  }, [isS3, isDynamo, isBigQuery, isGcp, isAzure, isElastic, type]);
+  }, [isS3, isGcs, isDynamo, isBigQuery, isGcp, isAzure, isElastic, isRedis, type]);
 
   const schemaLabel = useMemo(() => {
     if (isBigQuery) return "Dataset";
@@ -536,7 +543,7 @@ export function ConnectorModal({
                     <label className="df2-label">{hostLabel}</label>
                     <input
                       className="df2-input"
-                      placeholder={isAwsKeyed ? "us-east-1" : isBigQuery ? "bigquery.googleapis.com" : "localhost"}
+                      placeholder={isAwsKeyed ? "us-east-1" : isBigQuery ? "bigquery.googleapis.com" : isSnowflake ? "account.snowflakecomputing.com" : "localhost"}
                       value={host}
                       onChange={(e) => setHost(e.target.value)}
                     />
@@ -561,7 +568,21 @@ export function ConnectorModal({
                     <label className="df2-label">{databaseLabel}</label>
                     <input
                       className="df2-input"
-                      placeholder={isS3 ? "my-data-bucket" : isBigQuery ? "dataflow-project" : isFileFormat(type) ? "sample.csv" : "dataflow"}
+                      placeholder={
+                        isS3 || isGcs
+                          ? "my-data-bucket"
+                          : isAzure
+                            ? "my-container"
+                            : isBigQuery
+                              ? "dataflow-project"
+                              : isRedis
+                                ? "0"
+                                : ["sqlite", "duckdb"].includes(type)
+                                  ? ":memory: or /path/to/db"
+                                  : isFileFormat(type)
+                                    ? "sample.csv"
+                                    : "dataflow"
+                      }
                       value={database}
                       onChange={(e) => setDatabase(e.target.value)}
                     />

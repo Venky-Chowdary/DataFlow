@@ -316,6 +316,10 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     if not port:
         port = _default_port(db_type)
 
+    query = None
+    if drivername.startswith("mssql+pyodbc"):
+        query = {"driver": "ODBC Driver 17 for SQL Server"}
+
     return sa.URL.create(
         drivername,
         username=cfg.get("username") or None,
@@ -323,6 +327,7 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         host=cfg.get("host") or "localhost",
         port=port if port else None,
         database=cfg.get("database") or None,
+        query=query,
     )
 
 
