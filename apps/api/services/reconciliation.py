@@ -829,13 +829,20 @@ def read_target_sample(
         if db_type == "duckdb":
             import duckdb
 
+            def _quote_id(name: str) -> str:
+                return '"' + str(name).replace('"', '""') + '"'
+
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
                 return []
             conn = duckdb.connect(str(path))
-            duckdb_col_sql = ", ".join(f'"{c}"' for c in cols) if cols != ["*"] else "*"
+            if cols == ["*"]:
+                duckdb_col_sql = "*"
+            else:
+                duckdb_col_sql = ", ".join(_quote_id(c) for c in cols)
             rows = conn.execute(
-                f'SELECT {duckdb_col_sql} FROM "{table_name}" ORDER BY 1 LIMIT {int(limit)}'
+                f"SELECT {duckdb_col_sql} FROM {_quote_id(table_name)} ORDER BY 1 LIMIT ?",
+                (int(limit),),
             ).fetchall()
             names = [d[0] for d in conn.description]
             conn.close()
