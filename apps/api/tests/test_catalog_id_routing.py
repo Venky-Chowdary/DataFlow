@@ -71,6 +71,19 @@ def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[st
             assert ok, f"file/{fid} -> database/{did}: {msg}"
 
 
+def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: list[str]):
+    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+    )]
+    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+    )]
+    for sid in db_ids:
+        for fid in file_ids:
+            ok, msg = validate_transfer("database", sid, "file_export", fid)
+            assert ok, f"database/{sid} -> file_export/{fid}: {msg}"
+
+
 def test_live_catalog_count_matches_health_manifest():
     live = _all_live_catalog_ids()
     assert len(live) >= 130, f"Expected at least 130 live catalog IDs, got {len(live)}"
