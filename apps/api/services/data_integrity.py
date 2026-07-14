@@ -144,7 +144,7 @@ def _check_financial_precision(
         transform = m.get("transform") or infer_transform_for_mapping(
             src, tgt, src_type, m.get("target_type"),
         )
-        if transform not in {"decimal", "integer"}:
+        if transform not in {"decimal", "integer", "currency", "percentage"}:
             continue
         values = [str(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
         for raw in values[:100]:

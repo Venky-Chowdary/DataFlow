@@ -39,6 +39,8 @@ ENGINE_TO_UI: dict[str, str] = {
 _STRING_TRANSFORMS: frozenset[str] = {
     "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "none",
     "date", "datetime", "json", "binary", "decimal",
+    "phone", "email", "url", "iban", "postal",
+    "currency", "percentage", "base64",
 }
 
 
@@ -48,15 +50,15 @@ def _type_compatible_transform(target_type: str, raw: str) -> bool:
     if t in {"string", "text"}:
         return raw in _STRING_TRANSFORMS
     if t == "integer":
-        return raw in {"integer", "decimal"}
+        return raw in {"integer", "decimal", "currency", "percentage"}
     if t == "decimal":
-        return raw in {"decimal", "integer"}
+        return raw in {"decimal", "integer", "currency", "percentage"}
     if t == "boolean":
         return raw in {"boolean"}
     if t == "datetime":
-        return raw in {"datetime", "date"}
+        return raw in {"datetime", "date", "timestamp"}
     if t == "date":
-        return raw in {"date", "datetime"}
+        return raw in {"date", "datetime", "timestamp"}
     if t in {"json", "array"}:
         return raw in {"json", "binary", "decimal", "integer", "boolean", "date", "datetime", "uuid"}
     if t == "binary":

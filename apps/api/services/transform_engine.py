@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.value_serializer import json_default
+from services.semantic_types import SemanticType, normalize_value_for_target, detect_semantic_type
 
 DATE_PATTERNS = (
     "%Y-%m-%d",
@@ -351,6 +352,7 @@ def _hash_pii(value: str) -> str:
 KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "none", "identity",
+    "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
 })
 
 
@@ -374,19 +376,27 @@ def infer_transform_for_mapping(
     target_col: str,
     source_type: str,
     target_type: str | None = None,
+    source_samples: list[str] | None = None,
 ) -> str:
-    """Pick transform from source/target logical types and column semantics."""
+    """Pick transform from source/target logical types, column semantics, and samples."""
     from services.type_system import normalize_logical_type
 
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type) if target_type else None
     tgt_name = target_col.lower()
 
-    # Explicit, non-generic target type wins.
+    semantic = detect_semantic_type(source_col, source_samples)
+
+    # Explicit, non-generic target type wins; if the source is already numeric
+    # use a direct numeric transform, otherwise apply semantic transforms.
     if tgt and tgt not in {"string", "text"}:
         if tgt == "integer":
             return "integer"
         if tgt == "decimal":
+            if src in {"string", "text", "unknown"} and semantic == "currency":
+                return "currency"
+            if src in {"string", "text", "unknown"} and semantic == "percentage":
+                return "percentage"
             return "decimal"
         if tgt == "boolean":
             return "boolean"
@@ -418,6 +428,26 @@ def infer_transform_for_mapping(
         return "date"
     if src == "uuid":
         return "uuid"
+
+    # Semantic column names drive the transform for generic string targets.
+    # For string/unknown targets, preserve currency/percentage as text to avoid
+    # data loss (e.g. '$100' should not be silently stripped to 100).
+    if semantic in {"currency", "percentage"}:
+        return "trim"
+    if semantic == "phone":
+        return "phone"
+    if semantic == "email":
+        return "email"
+    if semantic == "url":
+        return "url"
+    if semantic == "iban":
+        return "iban"
+    if semantic == "postal":
+        return "postal"
+    if semantic == "base64":
+        return "base64"
+    if semantic == "timestamp":
+        return "datetime"
 
     src_col = source_col.upper()
     if "amount" in tgt_name or "total" in tgt_name or "weight" in tgt_name or src_col in {
@@ -516,6 +546,27 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if transform == "hash_pii":
         return _hash_pii(text), None
 
+    semantic_transform_map = {
+        "phone": SemanticType.PHONE,
+        "email": SemanticType.EMAIL,
+        "url": SemanticType.URL,
+        "iban": SemanticType.IBAN,
+        "currency": SemanticType.CURRENCY,
+        "percentage": SemanticType.PERCENTAGE,
+        "postal": SemanticType.POSTAL,
+        "base64": SemanticType.BASE64,
+    }
+    if transform in semantic_transform_map:
+        st = semantic_transform_map[transform]
+        # Currency and percentage are numeric; convert to a fixed-point string so
+        # destinations that serialize rows as JSON are safe. Other semantic types
+        # stay string-safe.
+        target_string = st not in {SemanticType.CURRENCY, SemanticType.PERCENTAGE}
+        converted = normalize_value_for_target(text, st, "decimal" if not target_string else "string")
+        if not target_string and not isinstance(converted, Decimal):
+            return text, f"Invalid {transform}: {text!r}"
+        return str(converted) if not target_string and isinstance(converted, Decimal) else converted, None
+
     if transform not in KNOWN_TRANSFORMS:
         return None, f"Unknown transform: {transform!r}"
 
@@ -537,16 +588,17 @@ def dry_run_sample(
     source_idx = {h: i for i, h in enumerate(headers)}
 
     for m in mappings:
+        idx = source_idx.get(m["source"])
+        if idx is None:
+            errors.append(f"Source column missing: {m['source']}")
+            continue
         transform = m.get("transform") or infer_transform_for_mapping(
             m["source"],
             m["target"],
             column_types.get(m["source"], "VARCHAR"),
             m.get("target_type") or column_types.get(m["target"]),
+            source_samples=[str(r[idx]) for r in sample_rows[:sample_size] if idx < len(r)],
         )
-        idx = source_idx.get(m["source"])
-        if idx is None:
-            errors.append(f"Source column missing: {m['source']}")
-            continue
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
