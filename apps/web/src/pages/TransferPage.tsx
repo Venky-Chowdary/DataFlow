@@ -606,8 +606,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (!id) return;
     const conn = connectors.find((c) => c.id === id);
     if (!conn) return;
-    if (liveDestTypes.some((d) => resolveDriverType(d.id) === resolveDriverType(conn.type))) {
-      setDestType(conn.type);
+    const matched = liveDestTypes.find((d) => resolveDriverType(d.id) === resolveDriverType(conn.type));
+    if (matched) {
+      setDestType(matched.id);
     }
     if (conn.database) setTargetDb(conn.database);
     if (conn.host) setDestHost(conn.host);
