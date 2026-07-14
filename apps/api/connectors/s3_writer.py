@@ -11,7 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
-from connectors.aws_common import boto3_client
+from connectors.aws_common import boto3_client, is_local_endpoint, resolve_region
 from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum
 
 _api_root = Path(__file__).resolve().parents[1]
@@ -33,6 +33,31 @@ class WriteResult:
     driver: str = "boto3"
     rejected_rows: int = 0
     warnings: list[str] = field(default_factory=list)
+
+
+def _ensure_bucket(client, bucket: str, cfg: dict[str, Any]) -> None:
+    """Create the S3 bucket if it does not already exist."""
+    try:
+        client.head_bucket(Bucket=bucket)
+        return
+    except Exception:
+        pass
+    try:
+        if is_local_endpoint(cfg):
+            client.create_bucket(Bucket=bucket)
+        else:
+            region = resolve_region(cfg)
+            if region and region != "us-east-1":
+                client.create_bucket(
+                    Bucket=bucket,
+                    CreateBucketConfiguration={"LocationConstraint": region},
+                )
+            else:
+                client.create_bucket(Bucket=bucket)
+    except Exception as exc:
+        error_code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if error_code not in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
+            raise
 
 
 def write_mapped_rows(
@@ -141,8 +166,9 @@ def write_mapped_rows(
 
     try:
         client = boto3_client("s3", cfg)
+        _ensure_bucket(client, bucket, cfg)
         client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
-        checksum = row_checksum(mapped_rows)
+        checksum = row_checksum(mapped_rows, target_cols)
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
         return WriteResult(

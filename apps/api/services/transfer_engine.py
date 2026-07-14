@@ -9,7 +9,7 @@ from connectors.postgresql_writer import sanitize_identifier, write_mapped_rows
 from services.csv_profiler import parse_csv
 from services.file_parser import get_file
 from services.jobs import job_store
-from services.reconciliation import checksum_rows, reconcile
+from services.reconciliation import checksum_rows, reconcile, verify_postgres_table
 
 
 def _table_name_from_file(filename: str, file_id: str) -> str:
@@ -35,7 +35,6 @@ def execute_file_to_postgres(
     headers, data_rows, _enc, _delim = parse_csv(content)
     column_types = {c["name"]: c["inferred_type"] for c in record["columns"]}
 
-    source_checksum = checksum_rows(data_rows)
     total_rows = len(data_rows)
     table_name = _table_name_from_file(record["filename"], file_id)
 
@@ -65,11 +64,25 @@ def execute_file_to_postgres(
         job_store.fail(job_id, result.error or "Write failed")
         return {"ok": False, "error": result.error}
 
+    target_rows, target_checksum = verify_postgres_table(
+        host=dest.get("host", ""),
+        port=dest.get("port", 5432),
+        database=dest.get("database", ""),
+        username=dest.get("username", ""),
+        password=dest.get("password", ""),
+        schema=dest.get("schema", "public"),
+        connection_string=dest.get("connection_string", ""),
+        ssl=dest.get("ssl", True),
+        table_name=table_name,
+    )
+    if target_rows < 0:
+        target_rows = result.rows_written
+
     recon = reconcile(
         source_rows=total_rows,
-        target_rows=result.rows_written,
+        target_rows=target_rows,
         source_checksum=result.checksum,
-        target_checksum=result.checksum,
+        target_checksum=target_checksum,
         rejected_rows=int(getattr(result, "rejected_rows", 0) or 0),
     )
 

@@ -140,9 +140,15 @@ def write_mapped_rows(
 
     try:
         client = gcs_client(cfg)
-        blob = client.bucket(bucket).blob(key)
+        bucket_obj = client.bucket(bucket)
+        try:
+            if not bucket_obj.exists():
+                bucket_obj.create()
+        except Exception:
+            pass
+        blob = bucket_obj.blob(key)
         blob.upload_from_string(body, content_type=content_type)
-        checksum = row_checksum(mapped_rows)
+        checksum = row_checksum(mapped_rows, target_cols)
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
         return WriteResult(

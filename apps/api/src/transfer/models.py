@@ -172,6 +172,7 @@ class TransferResult:
     validation_plan: dict = field(default_factory=dict)
     payload_shape: dict = field(default_factory=dict)
     contract_id: str = ""
+    explanation: str = ""
 
 
 @dataclass

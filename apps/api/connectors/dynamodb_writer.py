@@ -149,7 +149,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table,
             target_schema=endpoint or region,
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
             warnings=errors[:10],
             rejected_rows=len(errors),

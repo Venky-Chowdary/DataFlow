@@ -140,7 +140,7 @@ def write_mapped_rows(
             container_client.create_container()
         blob = client.get_blob_client(container, key)
         blob.upload_blob(body, overwrite=True, content_type=content_type)
-        checksum = row_checksum(mapped_rows)
+        checksum = row_checksum(mapped_rows, target_cols)
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
         return WriteResult(

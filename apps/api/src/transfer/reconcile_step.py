@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from connectors.writer_common import build_mapped_rows, resolve_target_columns
 from services.reconciliation import (
     checksum_rows,
     read_target_sample,
@@ -16,6 +17,51 @@ from .adapters import records_to_matrix, resolve_connector_config
 from .models import EndpointConfig
 
 
+def _compute_source_checksum(
+    records: list[dict],
+    columns: list[str],
+    mappings: list[dict],
+    source_schema: dict[str, str] | None,
+    writer_checksum: str,
+    target_cols: list[str] | None = None,
+) -> str:
+    """Return the writer checksum, or recompute it from mapped source rows."""
+    if writer_checksum:
+        return writer_checksum
+    if not records:
+        return ""
+    _, data_rows = records_to_matrix(records, columns)
+    if target_cols is None:
+        target_cols, _ = resolve_target_columns(mappings, source_schema or {}, preserve_case=True)
+    mapped_rows, _ = build_mapped_rows(
+        headers=columns,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=source_schema or {},
+        error_policy="quarantine",
+        preserve_case=True,
+    )
+    return checksum_rows(mapped_rows, target_cols)
+
+
+def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
+    """Return the ordered list of target column names used for reconciliation."""
+    targets = list(dict.fromkeys(
+        str(m.get("target") or m.get("source") or "")
+        for m in mappings if m.get("target") or m.get("source")
+    ))
+    return targets or columns
+
+
+def _sort_key_for_columns(targets: list[str]) -> str | None:
+    """Pick a stable key for sample alignment."""
+    return next(
+        (c for c in targets if c.lower() == "id" or c.lower().endswith("_id")),
+        targets[0] if targets else None,
+    )
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -26,6 +72,7 @@ def run_reconciliation(
     dest_summary: dict[str, Any],
     mappings: list[dict] | None = None,
     source_schema: dict[str, str] | None = None,
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
@@ -42,21 +89,9 @@ def run_reconciliation(
         }
 
     db_type = endpoint.format.lower()
-
-    _, data_rows = records_to_matrix(records, columns)
-    source_checksum = writer_checksum or checksum_rows(data_rows)
     cfg = resolve_connector_config(endpoint)
     schema = dest_summary.get("schema") or cfg.get("schema", "public")
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
-
-    target_rows, target_checksum = verify_target(
-        db_type,
-        cfg,
-        schema=schema,
-        table_name=table_name,
-        fallback_rows=rows_written,
-        fallback_checksum=source_checksum,
-    )
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
     if source_schema:
@@ -70,24 +105,35 @@ def run_reconciliation(
             )
         except Exception:
             pass
+
+    target_cols = _mapped_targets(mapping_dicts, columns)
+    source_checksum = _compute_source_checksum(
+        records, columns, mapping_dicts, source_schema, writer_checksum, target_cols=target_cols
+    )
+
+    # Request a real read-back; if the verifier is unavailable we will detect
+    # the negative row count and surface a softer "writer only" result.
+    target_rows, target_checksum = verify_target(
+        db_type,
+        cfg,
+        schema=schema,
+        table_name=table_name,
+        fallback_rows=-1,
+        fallback_checksum="",
+        target_columns=target_cols,
+    )
+
+    strict_checksum = validation_mode in ("strict", "maximum")
+
     sample_compare = None
-    if records and table_name and db_type in {"postgresql", "mysql", "duckdb"}:
-        mapped_targets = list(dict.fromkeys(
-            str(m.get("target") or m.get("source") or "")
-            for m in mapping_dicts if m.get("target") or m.get("source")
-        ))
-        # Prefer a stable primary-key-like column for row alignment; otherwise
-        # fall back to the first mapped target column.
-        sort_key = next(
-            (c for c in mapped_targets if c.lower() == "id" or c.lower().endswith("_id")),
-            mapped_targets[0] if mapped_targets else None,
-        )
+    if records and table_name and target_cols:
+        sort_key = _sort_key_for_columns(target_cols)
         target_sample = read_target_sample(
             db_type,
             cfg,
             schema=schema,
             table_name=table_name,
-            columns=mapped_targets[:20] or None,
+            columns=target_cols[:20] or None,
             limit=min(50, len(records)),
             sort_key=sort_key,
         )
@@ -96,60 +142,61 @@ def run_reconciliation(
                 records,
                 target_sample,
                 mapping_dicts,
-                target_columns=mapped_targets,
+                target_columns=target_cols,
                 sample_size=min(50, len(records)),
                 sort_key=sort_key,
             )
 
-    # Destination tables may legitimately contain rows from earlier loads
-    # (writers append). Fail only when the target holds fewer rows than we
-    # just wrote — that indicates lost data from this transfer.
-    if target_rows >= 0 and target_rows < rows_written:
+    # No read-back verifier available for this destination. Trust the writer row
+    # count but do not fake a matching checksum.
+    if target_rows < 0:
+        if rows_written == expected_written:
+            return {
+                "passed": True,
+                "message": (
+                    f"Transfer verified by writer: {rows_written:,} rows written"
+                    + (f", {rejected_rows:,} rejected" if rejected_rows else "")
+                    + " (read-back verifier not available for this destination)"
+                ),
+                "source_rows": source_rows,
+                "target_rows": rows_written,
+                "source_checksum": source_checksum,
+                "target_checksum": "",
+                "rejected_rows": rejected_rows,
+            }
+        report = reconcile(
+            source_rows=source_rows,
+            target_rows=rows_written,
+            source_checksum=source_checksum,
+            target_checksum="",
+            rejected_rows=rejected_rows,
+            strict_checksum=False,
+        )
+        return report.to_dict()
+
+    # Data loss signal: the target table holds fewer rows than we just wrote.
+    if target_rows < rows_written:
         report = reconcile(
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,
-            target_checksum=target_checksum or source_checksum,
+            target_checksum=target_checksum,
             rejected_rows=rejected_rows,
+            strict_checksum=strict_checksum,
             sample_compare=sample_compare,
         )
         return report.to_dict()
 
-    if records and sample_compare and not sample_compare.get("passed", True):
-        report = reconcile(
-            source_rows=source_rows,
-            target_rows=target_rows if target_rows >= 0 else rows_written,
-            source_checksum=source_checksum,
-            target_checksum=target_checksum or source_checksum,
-            rejected_rows=rejected_rows,
-            sample_compare=sample_compare,
-        )
-        return report.to_dict()
-
-    extra = target_rows - rows_written if target_rows >= rows_written else 0
-    if not records and rows_written > 0 and target_rows >= rows_written:
-        return {
-            "passed": True,
-            "message": f"Streaming transfer verified: {rows_written:,} rows written"
-            + (f", {rejected_rows:,} rejected" if rejected_rows else "")
-            + (f" (table now holds {target_rows:,} rows)" if target_rows > rows_written else ""),
-            "source_rows": source_rows,
-            "target_rows": target_rows if target_rows >= 0 else rows_written,
-            "source_checksum": source_checksum,
-            "target_checksum": target_checksum or source_checksum,
-            "rejected_rows": rejected_rows,
-        }
-
-    return {
-        "passed": rows_written == expected_written,
-        "message": (
-            f"Transfer verified: {rows_written}/{expected_written} expected rows written"
-            + (f" ({rejected_rows} rejected)" if rejected_rows else "")
-            + (f" (table now holds {target_rows} rows incl. {extra} pre-existing)" if extra else "")
-        ),
-        "source_rows": source_rows,
-        "target_rows": target_rows if target_rows >= 0 else rows_written,
-        "source_checksum": source_checksum,
-        "target_checksum": target_checksum or source_checksum,
-        "rejected_rows": rejected_rows,
-    }
+    # We have a verified read-back. Run the full reconciliation; allow extra
+    # rows because destinations may legitimately contain pre-existing data.
+    report = reconcile(
+        source_rows=source_rows,
+        target_rows=target_rows,
+        source_checksum=source_checksum,
+        target_checksum=target_checksum,
+        rejected_rows=rejected_rows,
+        strict_checksum=strict_checksum,
+        allow_extra_rows=True,
+        sample_compare=sample_compare,
+    )
+    return report.to_dict()

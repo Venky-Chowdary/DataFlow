@@ -28,7 +28,12 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from connectors.writer_common import CHUNK_SIZE  # noqa: E402
+from connectors.writer_common import (  # noqa: E402
+    CHUNK_SIZE,
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+)
 try:
     from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
@@ -308,6 +313,7 @@ def stream_file_to_database(
         batch_iter = _iter_jsonl_batches(content, batch_size)
 
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     try:
         from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
@@ -383,7 +389,31 @@ def stream_file_to_database(
     if written == 0:
         raise ValueError("No records found in file")
 
-    dest_summary["checksum"] = last_checksum
+    # Compute a source checksum from the full file content so resumable chunked
+    # writes do not end up comparing a per-batch writer checksum against the
+    # whole target table.
+    try:
+        from services.file_parser import FileParser
+    except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+        from src.services.file_parser import FileParser
+    parsed = FileParser.parse(content, filename)
+    if parsed.success and parsed.data:
+        headers = parsed.columns or columns
+        data_rows = [[str(rec.get(h, "")) for h in headers] for rec in parsed.data]
+        mapped_rows, _ = build_mapped_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy="quarantine",
+            preserve_case=True,
+        )
+        final_checksum = row_checksum(mapped_rows, target_cols)
+    else:
+        final_checksum = ""
+
+    dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["rejected_details"] = rejected_details[:200]
     dest_summary["warnings"] = warning_samples[:10]

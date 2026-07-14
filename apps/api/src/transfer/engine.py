@@ -26,6 +26,7 @@ try:
     from services import lineage_telemetry as lineage
     from services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+    from services.pipeline_explanation import build_pipeline_explanation
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services import lineage_telemetry as lineage
     from src.services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+    from src.services.pipeline_explanation import build_pipeline_explanation
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -84,6 +86,30 @@ def _redacted_endpoint(ep: EndpointConfig) -> dict[str, Any]:
         "warehouse": ep.warehouse,
     }
     return {k: v for k, v in d.items() if v}
+
+
+def _build_explanation(
+    request: TransferRequest,
+    columns: list[str],
+    schema: dict[str, str] | None,
+    mappings: list[dict[str, Any]],
+    recon: dict[str, Any],
+    dest_summary: dict[str, Any],
+    pf: dict[str, Any] | None,
+    rows_written: int,
+) -> str:
+    rejected = int(dest_summary.get("rejected_rows", 0) or 0)
+    return build_pipeline_explanation(
+        request=request,
+        columns=columns,
+        source_schema=schema,
+        mappings=mappings,
+        reconciliation=recon,
+        destination_summary=dest_summary,
+        validation_plan=pf.get("validation_plan") if pf else None,
+        rows_written=rows_written,
+        rejected_rows=rejected,
+    )
 
 
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
@@ -560,6 +586,7 @@ class UniversalTransferEngine:
                 dest_summary=dest_summary,
                 mappings=mappings,
                 source_schema=schema,
+                validation_mode=request.validation_mode,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -578,6 +605,9 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                 )
 
+            explanation = _build_explanation(
+                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+            )
             mongo.update_job_status(
                 job_id, "completed",
                 records_processed=rows_written,
@@ -589,6 +619,7 @@ class UniversalTransferEngine:
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
+                explanation=explanation,
             )
             try:
                 samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
@@ -635,6 +666,7 @@ class UniversalTransferEngine:
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
+                explanation=explanation,
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
@@ -888,6 +920,7 @@ class UniversalTransferEngine:
                 dest_summary=dest_summary,
                 mappings=mappings,
                 source_schema=schema,
+                validation_mode=request.validation_mode,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -906,6 +939,9 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                 )
 
+            explanation = _build_explanation(
+                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+            )
             mongo.update_job_status(
                 job_id, "completed",
                 records_processed=rows_written,
@@ -917,6 +953,7 @@ class UniversalTransferEngine:
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
+                explanation=explanation,
             )
 
             lineage.emit_preflight_completed(
@@ -956,6 +993,7 @@ class UniversalTransferEngine:
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
+                explanation=explanation,
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
@@ -1213,6 +1251,7 @@ class UniversalTransferEngine:
                 dest_summary=dest_summary,
                 mappings=mappings,
                 source_schema=schema,
+                validation_mode=request.validation_mode,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -1231,6 +1270,9 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                 )
 
+            explanation = _build_explanation(
+                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+            )
             mongo.update_job_status(
                 job_id, "completed",
                 records_processed=rows_written,
@@ -1242,6 +1284,7 @@ class UniversalTransferEngine:
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
+                explanation=explanation,
             )
 
             lineage.emit_preflight_completed(
@@ -1281,6 +1324,7 @@ class UniversalTransferEngine:
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
+                explanation=explanation,
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)

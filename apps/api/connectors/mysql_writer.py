@@ -226,7 +226,7 @@ def write_mapped_rows(
         conn.close()
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=database,
-            checksum=row_checksum(mapped_rows), chunks_completed=chunks,
+            checksum=row_checksum(mapped_rows, target_cols), chunks_completed=chunks,
             rejected_rows=len(data_rows) - written,
             warnings=transform_errors,
         )

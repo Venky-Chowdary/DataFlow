@@ -300,7 +300,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=collection_name,
             target_schema=db_name,
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
             rejected_rows=len(data_rows) - written,
             warnings=transform_errors,

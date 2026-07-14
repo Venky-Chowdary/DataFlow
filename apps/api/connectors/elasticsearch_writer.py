@@ -113,7 +113,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=index,
             target_schema=host or "localhost",
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=1,
             warnings=(errors + [str(e) for e in bulk_errors[:5]])[:10],
             rejected_rows=len(errors) + len(bulk_errors or []),

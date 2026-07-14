@@ -26,21 +26,79 @@ class ReconciliationReport:
         return asdict(self)
 
 
-def checksum_rows(rows: list[Sequence[Any]]) -> str:
-    """Canonical, order-independent checksum over a matrix of typed values."""
+def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:
+    if not key:
+        return None
+    if key in rec:
+        return rec[key]
+    lower = key.lower()
+    for k, v in rec.items():
+        if k.lower() == lower:
+            return v
+    return None
+
+
+def canonical_checksum(
+    rows: list[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+) -> str:
+    """Stable, order-independent checksum that preserves column identity.
+
+    Accepts either a matrix of values (with an explicit column list) or a list
+    of dicts. Column names are included in the row fingerprint so that swapped
+    columns cannot collide. Column labels are normalized to lowercase so source
+    and target casing differences do not produce false mismatches. When no
+    columns are provided, the legacy cell-only fallback is used for matrices.
+    """
     if not rows:
         return hashlib.sha256(b"").hexdigest()[:16]
-    fingerprints: list[str] = []
-    for row in rows:
-        # Sort the normalized cells so rows with the same values in different
-        # column order produce the same fingerprint.
-        cells = sorted(normalize_cell(v) for v in row)
-        fingerprints.append("|".join(cells))
-    fingerprints.sort()
+
+    fingerprints: list[tuple[str, str]] = []
+    if columns is not None:
+        cols = columns
+        for row in rows:
+            if isinstance(row, dict):
+                rec: dict[str, Any] = {c: row.get(c) for c in cols}
+            else:
+                rec = {c: row[i] if i < len(row) else None for i, c in enumerate(cols)}
+            # Sort column names so the fingerprint is order-independent while
+            # preserving column identity (swapped columns cannot collide).
+            # Lowercase the label to avoid false mismatches across engines that
+            # return upper- or mixed-case column names for the same semantic field.
+            parts = [
+                f"{c.lower()}={normalize_cell(rec.get(c))}"
+                for c in sorted(cols, key=lambda x: x.lower())
+            ]
+            fingerprint = "\x1f".join(parts)
+            row_key = normalize_cell(_get_case_insensitive(rec, sort_key)) if sort_key else ""
+            fingerprints.append((row_key, fingerprint))
+    else:
+        for row in rows:
+            if isinstance(row, dict):
+                rec = {k: row.get(k) for k in sorted(row.keys())}
+                parts = [
+                    f"{k.lower()}={normalize_cell(v)}"
+                    for k, v in sorted(rec.items(), key=lambda item: item[0].lower())
+                ]
+                fingerprint = "\x1f".join(parts)
+                row_key = normalize_cell(_get_case_insensitive(row, sort_key)) if sort_key else ""
+            else:
+                fingerprint = "|".join(sorted(normalize_cell(v) for v in row))
+                row_key = ""
+            fingerprints.append((row_key, fingerprint))
+
+    fingerprints.sort(key=lambda x: (x[0], x[1]))
     h = hashlib.sha256()
-    for fp in fingerprints:
+    for _, fp in fingerprints:
         h.update(fp.encode("utf-8"))
     return h.hexdigest()[:16]
+
+
+def checksum_rows(rows: list[Any], columns: list[str] | None = None) -> str:
+    """Canonical, order-independent checksum over a matrix or list of dicts."""
+    return canonical_checksum(rows, columns)
 
 
 def aggregate_checksum(
@@ -49,25 +107,8 @@ def aggregate_checksum(
     *,
     sort_key: str | None = None,
 ) -> str:
-    """
-    Order-independent checksum for reconciliation.
-    Sorts row fingerprints before hashing — same data in different order = same checksum.
-    """
-    if not records:
-        return hashlib.sha256(b"").hexdigest()[:16]
-    cols = columns or sorted(records[0].keys())
-    fingerprints: list[str] = []
-    for rec in records:
-        parts = [f"{c}={normalize_cell(rec.get(c))}" for c in cols]
-        fingerprints.append("\x1f".join(parts))
-    if sort_key and sort_key in cols:
-        fingerprints.sort(key=lambda fp: fp.split("\x1f")[cols.index(sort_key)] if sort_key in cols else fp)
-    else:
-        fingerprints.sort()
-    h = hashlib.sha256()
-    for fp in fingerprints:
-        h.update(fp.encode("utf-8"))
-    return h.hexdigest()[:16]
+    """Order-independent checksum for reconciliation with column identity."""
+    return canonical_checksum(records, columns, sort_key=sort_key)
 
 
 def reconcile(
@@ -78,10 +119,15 @@ def reconcile(
     target_checksum: str,
     rejected_rows: int = 0,
     strict_checksum: bool = True,
+    allow_extra_rows: bool = False,
     sample_compare: dict[str, Any] | None = None,
 ) -> ReconciliationReport:
     expected_rows = max(source_rows - max(rejected_rows, 0), 0)
-    if expected_rows != target_rows:
+    row_count_ok = target_rows == expected_rows or (
+        allow_extra_rows and target_rows >= expected_rows
+    )
+    if not row_count_ok:
+        extra_note = f" (target has {target_rows - expected_rows} extra rows)" if target_rows > expected_rows else ""
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -90,7 +136,7 @@ def reconcile(
             target_checksum=target_checksum,
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
-                f"expected target {expected_rows} vs target {target_rows}"
+                f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
         )
@@ -109,6 +155,23 @@ def reconcile(
         )
 
     if source_checksum != target_checksum:
+        # When the target legitimately contains extra rows (append/upsert),
+        # whole-table checksums are not comparable; rely on the key-aligned
+        # sample compare already validated above.
+        if allow_extra_rows and target_rows > expected_rows:
+            return ReconciliationReport(
+                passed=True,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Transfer verified by key-aligned sample ({target_rows} rows"
+                    + (f", {rejected_rows} rejected" if rejected_rows else "")
+                    + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
+                ),
+                rejected_rows=rejected_rows,
+            )
         if strict_checksum:
             return ReconciliationReport(
                 passed=False,
@@ -161,6 +224,7 @@ def verify_postgres_table(
     connection_string: str,
     ssl: bool,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     try:
         import psycopg2
@@ -180,8 +244,10 @@ def verify_postgres_table(
             count = int(cur.fetchone()[0])
             cur.execute(f'SELECT * FROM "{schema}"."{table_name}" ORDER BY 1 LIMIT 5000')
             rows = cur.fetchall()
+            names = [d[0] for d in cur.description] if cur.description else []
         conn.close()
-        return count, checksum_rows(rows)
+        columns = names or target_columns or []
+        return count, checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -196,6 +262,7 @@ def verify_snowflake_table(
     connection_string: str,
     warehouse: str,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.snowflake_conn import get_connection, normalize_account
@@ -219,8 +286,10 @@ def verify_snowflake_table(
             count = int(cur.fetchone()[0])
             cur.execute(f'SELECT * FROM "{table_name}" ORDER BY 1 LIMIT 5000')
             rows = cur.fetchall()
+            names = [d[0] for d in cur.description] if cur.description else []
         conn.close()
-        return count, checksum_rows(rows)
+        columns = names or target_columns or []
+        return count, checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -235,6 +304,7 @@ def verify_mysql_table(
     connection_string: str,
     ssl: bool,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.mysql_conn import get_connection
@@ -249,8 +319,10 @@ def verify_mysql_table(
             count = int(cur.fetchone()[0])
             cur.execute(f"SELECT * FROM `{table_name}` ORDER BY 1 LIMIT 5000")
             rows = cur.fetchall()
+            names = [d[0] for d in cur.description] if cur.description else []
         conn.close()
-        return count, checksum_rows(rows)
+        columns = names or target_columns or []
+        return count, checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -261,6 +333,7 @@ def verify_bigquery_table(
     dataset_id: str,
     connection_string: str,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.bigquery_conn import get_client
@@ -270,13 +343,18 @@ def verify_bigquery_table(
         table = client.get_table(table_id)
         count = table.num_rows or 0
         rows = list(client.list_rows(table_id, max_results=5000))
-        return int(count), checksum_rows([list(row.values()) for row in rows])
+        field_names = [field.name for field in table.schema] if table.schema else []
+        row_values = [list(row.values()) if hasattr(row, "values") else list(row) for row in rows]
+        columns = field_names or target_columns or []
+        return int(count), checksum_rows(row_values, columns)
     except Exception:
         return -1, ""
 
 
-def _rows_from_object_bytes(body: bytes, key: str) -> list[Sequence[Any]]:
-    """Parse S3/GCS object payload (JSON, JSONL, CSV) into a row matrix."""
+def _rows_from_object_bytes(
+    body: bytes, key: str, columns: list[str] | None = None
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Parse S3/GCS object payload (JSON, JSONL, CSV) into dict rows and headers."""
     import csv
     import io
 
@@ -285,31 +363,36 @@ def _rows_from_object_bytes(body: bytes, key: str) -> list[Sequence[Any]]:
 
     if lower_key.endswith(".csv"):
         reader = csv.DictReader(io.StringIO(text))
-        return [list(row.values()) for row in reader]
+        rows = list(reader)
+        headers = reader.fieldnames or []
+        return rows, headers
 
     if lower_key.endswith(".jsonl"):
-        rows = []
+        rows: list[dict[str, Any]] = []
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
             parsed = json.loads(line)
             if isinstance(parsed, dict):
-                rows.append(list(parsed.values()))
+                rows.append(parsed)
             else:
-                rows.append([parsed])
-        return rows
+                rows.append({"value": parsed})
+        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
+        return rows, headers or (columns or [])
 
-    # Default: JSON array or newline-delimited JSON.
+    # Default: JSON array or single JSON object.
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         data = []
     if isinstance(data, list):
-        return [list(record.values()) for record in data if isinstance(record, dict)]
+        rows = [r for r in data if isinstance(r, dict)]
+        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
+        return rows, headers or (columns or [])
     if isinstance(data, dict):
-        return [list(data.values())]
-    return []
+        return [data], sorted(data.keys())
+    return [], columns or []
 
 
 def verify_s3_object(
@@ -322,6 +405,7 @@ def verify_s3_object(
     password: str,
     connection_string: str,
     ssl: bool,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile an S3 object by downloading and parsing its contents."""
     try:
@@ -339,8 +423,9 @@ def verify_s3_object(
         client = boto3_client("s3", cfg)
         obj = client.get_object(Bucket=bucket, Key=key)
         body = obj["Body"].read()
-        rows = _rows_from_object_bytes(body, key)
-        return len(rows), checksum_rows(rows)
+        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        columns = headers or target_columns or []
+        return len(rows), checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -352,6 +437,7 @@ def verify_gcs_blob(
     host: str,
     port: int,
     connection_string: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a GCS blob by downloading and parsing its contents."""
     try:
@@ -365,8 +451,9 @@ def verify_gcs_blob(
         client = gcs_client(cfg)
         blob = client.bucket(bucket).blob(key)
         body = blob.download_as_bytes()
-        rows = _rows_from_object_bytes(body, key)
-        return len(rows), checksum_rows(rows)
+        rows, headers = _rows_from_object_bytes(body, key, target_columns)
+        columns = headers or target_columns or []
+        return len(rows), checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -376,6 +463,7 @@ def verify_sqlite_table(
     connection_string: str,
     database: str,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a SQLite target by reading the local file."""
     try:
@@ -390,8 +478,10 @@ def verify_sqlite_table(
         count = cur.fetchone()[0]
         cur.execute(f'SELECT * FROM "{table_name}" LIMIT 5000')
         rows = cur.fetchall()
+        names = [d[0] for d in cur.description] if cur.description else []
         conn.close()
-        return int(count), checksum_rows(rows)
+        columns = names or target_columns or []
+        return int(count), checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -401,6 +491,7 @@ def verify_duckdb_table(
     connection_string: str,
     database: str,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a DuckDB target by reading the local file."""
     try:
@@ -412,8 +503,10 @@ def verify_duckdb_table(
         conn = duckdb.connect(str(path))
         count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
         rows = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 5000').fetchall()
+        names = [d[0] for d in conn.description] if conn.description else []
         conn.close()
-        return int(count), checksum_rows(rows)
+        columns = names or target_columns or []
+        return int(count), checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -423,11 +516,11 @@ def verify_mongodb_collection(
     connection_string: str,
     database: str,
     table_name: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
         from pymongo import MongoClient
-        from bson.decimal128 import Decimal128
 
         client = MongoClient(
             connection_string or "localhost", serverSelectionTimeoutMS=5000
@@ -435,9 +528,10 @@ def verify_mongodb_collection(
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
-        rows = list(coll.find({}, {"_id": 0}).limit(5000))
+        rows = list(coll.find({}).limit(5000))
         client.close()
-        return int(count), checksum_rows([list(doc.values()) for doc in rows])
+        columns = target_columns or sorted(set(k for doc in rows for k in doc.keys()))
+        return int(count), checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -449,6 +543,7 @@ def verify_dynamodb_table(
     table_name: str,
     username: str = "local",
     password: str = "local",
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile a DynamoDB target by Scan count and item fingerprint."""
     try:
@@ -469,12 +564,13 @@ def verify_dynamodb_table(
         ))
 
         deserializer = TypeDeserializer()
-        rows = []
+        rows: list[dict[str, Any]] = []
         for page in paginator.paginate(TableName=table_name, Limit=5000):
             for item in page.get("Items", []):
                 rows.append({k: deserializer.deserialize(v) for k, v in item.items()})
 
-        return int(count), checksum_rows([list(row.values()) for row in rows])
+        columns = target_columns or sorted(set(k for r in rows for k in r.keys()))
+        return int(count), checksum_rows(rows, columns)
     except Exception:
         return -1, ""
 
@@ -487,12 +583,14 @@ def verify_target(
     table_name: str,
     fallback_rows: int,
     fallback_checksum: str,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str]:
     if db_type == "mongodb":
         count, chk = verify_mongodb_collection(
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "dynamodb":
         from connectors.aws_common import resolve_endpoint_url
@@ -504,18 +602,21 @@ def verify_target(
             table_name=table_name,
             username=dest.get("username", "local"),
             password=dest.get("password", "local"),
+            target_columns=target_columns,
         )
     elif db_type == "sqlite":
         count, chk = verify_sqlite_table(
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "duckdb":
         count, chk = verify_duckdb_table(
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "postgresql":
         count, chk = verify_postgres_table(
@@ -528,6 +629,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             ssl=dest.get("ssl", True),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "snowflake":
         count, chk = verify_snowflake_table(
@@ -539,6 +641,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             warehouse=dest.get("warehouse", ""),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "mysql":
         count, chk = verify_mysql_table(
@@ -550,6 +653,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             ssl=dest.get("ssl", False),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
@@ -557,6 +661,7 @@ def verify_target(
             dataset_id=schema,
             connection_string=dest.get("connection_string", ""),
             table_name=table_name,
+            target_columns=target_columns,
         )
     elif db_type == "s3":
         count, chk = verify_s3_object(
@@ -568,6 +673,7 @@ def verify_target(
             password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
             ssl=bool(dest.get("ssl", False)),
+            target_columns=target_columns,
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -576,6 +682,7 @@ def verify_target(
             host=dest.get("host", ""),
             port=int(dest.get("port", 0)),
             connection_string=dest.get("connection_string", ""),
+            target_columns=target_columns,
         )
     else:
         count, chk = -1, ""
@@ -589,7 +696,7 @@ def normalize_cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return "1" if value else "0"
     if isinstance(value, float):
         return _canonicalize_number(str(value)) or "nan"
     if isinstance(value, int):
@@ -615,6 +722,13 @@ def normalize_cell(value: Any) -> str:
     canonical = _canonicalize_number(text)
     if canonical is not None:
         return canonical
+    # Canonicalize common boolean spellings so source/target pairs like
+    # True, 1, "true", "yes", and "on" all produce the same fingerprint.
+    lowered = text.lower()
+    if lowered in {"true", "t", "yes", "y", "on", "enabled", "active", "ok", "aye", "positive", "1"}:
+        return "1"
+    if lowered in {"false", "f", "no", "n", "off", "disabled", "inactive", "nope", "negative", "0"}:
+        return "0"
     # Normalize JSON payloads (e.g. jsonb) to a canonical string.
     if text.startswith(("{", "[")):
         try:
@@ -724,18 +838,11 @@ def sample_compare_rows(
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
-    Uses normalized string comparison to tolerate driver formatting differences.
-    Rows are sorted by a stable key (e.g. primary key) before comparing so source
-    and target align even when the destination writes columns in a different order.
+    Rows are aligned by a stable key (e.g. primary key) when available, so upserts
+    and out-of-order writes compare correctly. Falls back to sorted index alignment.
     """
     if not source_records or not target_rows or not mappings:
         return {"passed": True, "compared": 0, "mismatches": [], "skipped": True}
-
-    def _row_key(rec: Any) -> Any:
-        if isinstance(rec, dict):
-            val = rec.get(sort_key) if sort_key else None
-            return val or (rec.get(target_columns[0]) if target_columns else None)
-        return rec
 
     def _as_dict(tgt_raw: Any) -> dict[str, Any] | None:
         if isinstance(tgt_raw, dict):
@@ -744,15 +851,13 @@ def sample_compare_rows(
             return {col: tgt_raw[i] if i < len(tgt_raw) else None for i, col in enumerate(target_columns)}
         return None
 
-    source_sorted = sorted(source_records, key=lambda r: _row_key(r) or 0)
-    target_sorted = sorted(
-        (t for t in target_rows if _as_dict(t) is not None),
-        key=lambda r: _row_key(_as_dict(r)) or 0,
-    )
-
-    mismatches: list[dict[str, str]] = []
-    compared = 0
-    limit = min(sample_size, len(source_sorted), len(target_sorted))
+    target_dicts = [d for d in (_as_dict(t) for t in target_rows) if d is not None]
+    target_by_key: dict[str, dict[str, Any]] = {}
+    if sort_key:
+        for d in target_dicts:
+            key = normalize_cell(d.get(sort_key))
+            if key and key not in target_by_key:
+                target_by_key[key] = d
 
     def _normalize_source(raw: Any, transform: str | None) -> str:
         if transform:
@@ -764,9 +869,24 @@ def sample_compare_rows(
             converted = raw
         return normalize_cell(converted)
 
-    for idx in range(limit):
-        src = source_sorted[idx]
-        tgt = _as_dict(target_sorted[idx])
+    def _row_key(rec: Any) -> Any:
+        if isinstance(rec, dict):
+            val = rec.get(sort_key) if sort_key else None
+            return val or (rec.get(target_columns[0]) if target_columns else None)
+        return rec
+
+    source_sorted = sorted(source_records, key=lambda r: _row_key(r) or 0)[:sample_size]
+
+    mismatches: list[dict[str, str]] = []
+    compared = 0
+    target_fallback = sorted(target_dicts, key=lambda d: _row_key(d) or 0)
+
+    for idx, src in enumerate(source_sorted):
+        if sort_key and target_by_key:
+            key = normalize_cell(src.get(sort_key))
+            tgt = target_by_key.get(key) if key else None
+        else:
+            tgt = target_fallback[idx] if idx < len(target_fallback) else None
         if tgt is None:
             continue
 

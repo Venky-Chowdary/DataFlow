@@ -32,8 +32,8 @@ def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
     return f"{quote_char}{escaped}{quote_char}"
 
 
-def row_checksum(rows: list[tuple]) -> str:
-    return checksum_rows(rows)
+def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:
+    return checksum_rows(rows, columns)
 
 
 def dedupe_rows(

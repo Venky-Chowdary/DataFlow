@@ -15,7 +15,12 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from connectors.writer_common import CHUNK_SIZE  # noqa: E402
+from connectors.writer_common import (  # noqa: E402
+    CHUNK_SIZE,
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+)
 
 from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
 from .connector_capabilities import resolve_driver_type
@@ -767,6 +772,7 @@ def stream_database_transfer(
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     total_rows = probe.total_rows
 
@@ -1006,7 +1012,51 @@ def stream_database_transfer(
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
         set_watermark(cursor_key, running_cursor, metadata={"job_id": job_id, "sync_mode": effective_sync})
 
-    dest_summary["checksum"] = last_checksum
+    # Re-read the source and compute a checksum over the complete logical source.
+    # This avoids using the per-batch writer checksum for chunked/resumable runs,
+    # which only represented the last batch.
+    if src_type in {"postgresql", "redshift", "mysql", "snowflake", "bigquery", "sqlite", "generic_sql", "mongodb", "s3", "gcs", "adls"}:
+        source_rows_for_checksum: list[tuple] = []
+        cursor_type_for_read: str | None = None
+        if incremental and cursor_source_col:
+            cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
+        read_offset = 0
+        while True:
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    read_offset,
+                    chunk_size,
+                    database=src_db,
+                    cursor_column=cursor_source_col if incremental else "",
+                    cursor_after=watermark if incremental else None,
+                    cursor_type=cursor_type_for_read,
+                    known_total_rows=total_rows,
+                )
+            )
+            if not batch or not batch.rows:
+                break
+            mapped, _ = build_mapped_rows(
+                headers=batch.headers,
+                data_rows=batch.rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                error_policy="quarantine",
+                preserve_case=True,
+            )
+            source_rows_for_checksum.extend(mapped)
+            if len(batch.rows) < chunk_size:
+                break
+            read_offset += len(batch.rows)
+        final_checksum = row_checksum(source_rows_for_checksum, target_cols)
+    else:
+        final_checksum = last_checksum
+
+    dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if rejected_total else "none"

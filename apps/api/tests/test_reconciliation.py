@@ -139,7 +139,7 @@ def test_normalize_cell_equates_decimal_representations():
 def test_normalize_cell_preserves_booleans_and_text():
     from services.reconciliation import normalize_cell
 
-    assert normalize_cell(True) == "true"
-    assert normalize_cell(False) == "false"
+    assert normalize_cell(True) == "1"
+    assert normalize_cell(False) == "0"
     assert normalize_cell("hello") == "hello"
     assert normalize_cell(None) == ""

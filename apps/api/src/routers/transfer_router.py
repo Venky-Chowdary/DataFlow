@@ -582,6 +582,27 @@ async def run_universal_transfer(
         "columns": result.columns,
         "validation_plan": result.validation_plan,
         "payload_shape": result.payload_shape,
+        "reconciliation": result.reconciliation,
+        "explanation": result.explanation,
+    }
+
+
+@router.get("/{job_id}/explanation")
+async def get_transfer_explanation(job_id: str):
+    """Return the human-readable pipeline explanation for a transfer job."""
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "explanation": job.get("explanation", ""),
     }
 
 
