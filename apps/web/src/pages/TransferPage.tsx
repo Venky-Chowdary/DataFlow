@@ -555,6 +555,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const loadDestinationSchema = async () => {
     if (destKindMode !== "database" || !targetCollection.trim()) return;
     setDestSchemaLoading(true);
+    setDestTableExists(null);
     try {
       const { destination } = await introspectTransferEndpoints({
         source: buildSourceEndpoint(),
@@ -1443,7 +1444,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
   const canRunPreflight =
     canConfigureDest &&
-    (destKindMode === "file_export" || Boolean(targetDb && targetCollection));
+    (destKindMode === "file_export" ||
+      (Boolean(targetDb && targetCollection) && !destSchemaLoading && destTableExists !== null));
 
   const needsDbPreflight = destKindMode === "database";
   const canExecute =
