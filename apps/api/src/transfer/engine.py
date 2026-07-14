@@ -161,20 +161,28 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         return False
 
 
-def _enrich_mappings_with_types(mappings: list[dict], dest_types: dict[str, str]) -> list[dict]:
+def _enrich_mappings_with_types(
+    mappings: list[dict],
+    dest_types: dict[str, str] | None = None,
+    column_types: dict[str, str] | None = None,
+) -> list[dict]:
     if not mappings:
         return mappings
     try:
         from services.transform_resolver import attach_transforms_to_mappings
 
-        return attach_transforms_to_mappings(mappings, dest_types=dest_types)
+        return attach_transforms_to_mappings(
+            mappings,
+            column_types=column_types or {},
+            dest_types=dest_types or {},
+        )
     except Exception:
         pass
     out = []
     for m in mappings:
         enriched = dict(m)
         tgt = m.get("target")
-        if tgt and tgt in dest_types:
+        if tgt and dest_types and tgt in dest_types:
             enriched["target_type"] = dest_types[tgt]
         out.append(enriched)
     return out
@@ -348,7 +356,8 @@ class UniversalTransferEngine:
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=records[:100]),
-                dest_schema_types,
+                column_types=schema,
+                dest_types=dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -723,7 +732,8 @@ class UniversalTransferEngine:
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=sample_rows),
-                dest_schema_types,
+                column_types=schema,
+                dest_types=dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -1053,7 +1063,8 @@ class UniversalTransferEngine:
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=sample_rows),
-                dest_schema_types,
+                column_types=schema,
+                dest_types=dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 

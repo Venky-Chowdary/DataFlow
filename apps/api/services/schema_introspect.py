@@ -101,7 +101,7 @@ def introspect_schema(
     catalog_type: str = "",
     auth_source: str = "",
 ) -> dict[str, Any]:
-    if db_type == "generic_sql":
+    if db_type in ("generic_sql", "duckdb"):
         from connectors.generic_sql import introspect_table_schema
 
         cfg = {
@@ -113,7 +113,7 @@ def introspect_schema(
             "schema": schema,
             "connection_string": connection_string,
             "ssl": ssl,
-            "type": catalog_type,
+            "type": catalog_type or ("duckdb" if db_type == "duckdb" else ""),
         }
         return introspect_table_schema(cfg, table or "")
     if db_type == "postgresql" or db_type == "redshift":

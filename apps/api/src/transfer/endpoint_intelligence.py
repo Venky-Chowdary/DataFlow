@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .adapters import _introspect_table_schema, mongodb_connection_string, parse_file_content, read_source_database, resolve_connector_config
+from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 
@@ -258,6 +259,14 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "index"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.database and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "sqlite" or resolve_driver_type(fmt) == "generic_sql":
+        out["connected"] = True
+        out["message"] = f"{fmt.title()} connected — introspecting table schema"
+        if endpoint.table:
+            out["objects"] = [{"name": endpoint.table, "type": "table"}]
             _attach_db_sample(out, endpoint)
         return out
 
