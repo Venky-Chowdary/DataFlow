@@ -119,7 +119,7 @@ def search_catalog(
     enriched_all = _enriched_connectors()
 
     return {
-        "total": data.get("total", len(data.get("connectors", []))),
+        "total": total,
         "filtered": total,
         "connectors": page,
         "suggested": suggested if not q else page[:16],

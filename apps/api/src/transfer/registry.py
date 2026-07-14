@@ -3,15 +3,29 @@
 from __future__ import annotations
 
 LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"]
-LIVE_DEST_DATABASES = [
-    "mongodb", "postgresql", "snowflake", "mysql", "bigquery", "redshift",
-    "dynamodb", "s3", "gcs", "adls", "redis", "elasticsearch", "sqlite", "generic_sql",
-]
-LIVE_SOURCE_DATABASES = [
-    "postgresql", "mongodb", "snowflake", "mysql", "bigquery", "redshift",
-    "dynamodb", "s3", "gcs", "adls", "redis", "elasticsearch", "sqlite", "generic_sql",
-]
 LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson"]
+
+# Live drivers are discovered at import time; object stores and warehouses count
+# as database destinations, while the listed file formats are file targets.
+_FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"}
+
+def _live_db_drivers() -> list[str]:
+    try:
+        from .connector_capabilities import transfer_live_driver_types
+    except ImportError:
+        # Support loading this file directly (e.g. test_registry.py)
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parent / "connector_capabilities.py"
+        spec = importlib.util.spec_from_file_location("connector_capabilities_for_registry", path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        transfer_live_driver_types = mod.transfer_live_driver_types
+    return sorted(d for d in transfer_live_driver_types() if d not in _FILE_FORMATS)
+
+LIVE_DEST_DATABASES = _live_db_drivers()
+LIVE_SOURCE_DATABASES = _live_db_drivers()
 
 # (source_kind, source_format, dest_kind, dest_format) -> live
 LIVE_MATRIX: set[tuple[str, str, str, str]] = set()
