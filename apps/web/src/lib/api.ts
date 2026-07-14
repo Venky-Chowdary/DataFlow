@@ -532,6 +532,9 @@ export function streamJobProgress(
     destination_summary: raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined,
+    preflight: raw.preflight && typeof raw.preflight === "object"
+      ? raw.preflight as JobProgress["preflight"]
+      : undefined,
     phases: Array.isArray(raw.phases)
       ? raw.phases
           .map((p) => {

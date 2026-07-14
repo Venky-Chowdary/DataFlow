@@ -247,17 +247,20 @@ def stream_file_to_database(
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
-    avg_row_size = 100
-    if sample_rows:
-        avg_row_size = max(1, int(sum(len(json.dumps(row, default=str)) for row in sample_rows) / len(sample_rows)))
-    batch_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE)
-
     try:
         from .connector_capabilities import resolve_driver_type
     except ImportError:
         from transfer.connector_capabilities import resolve_driver_type
     dest_type = resolve_driver_type(destination.format)
     dest_cfg = resolve_connector_config(destination)
+
+    avg_row_size = 100
+    if sample_rows:
+        avg_row_size = max(1, int(sum(len(json.dumps(row, default=str)) for row in sample_rows) / len(sample_rows)))
+    # MongoDB can safely ingest larger batches; keep other destinations under 8 MB
+    # to avoid payload limits (e.g. BigQuery streaming insert ~10 MB).
+    target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
+    batch_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
     chunks = max(1, (total_rows + batch_size - 1) // batch_size)
     dest_table = resolve_dest_table(dest_type, destination, "import")
 

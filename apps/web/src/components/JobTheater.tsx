@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
-import { JobPhase, JobProgress } from "../lib/types";
+import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
 import { streamJobProgress } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
+import { PreflightTimeline } from "./PreflightTimeline";
 
 interface JobTheaterProps {
   jobId: string;
@@ -12,6 +13,7 @@ interface JobTheaterProps {
   destLabel?: string;
   sourceType?: string;
   destType?: string;
+  preflight?: PreflightResult;
   onComplete?: (job: JobProgress) => void;
   onFailed?: (job: JobProgress) => void;
 }
@@ -59,12 +61,12 @@ export function JobTheater({
   destLabel,
   sourceType = "file",
   destType = "database",
+  preflight,
   onComplete,
   onFailed,
 }: JobTheaterProps) {
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
-  const [logOpen, setLogOpen] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
@@ -103,8 +105,8 @@ export function JobTheater({
   }, [jobId, onComplete, onFailed]);
 
   useEffect(() => {
-    if (logOpen) logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [log, logOpen]);
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
+  }, [log]);
 
   const progress = job?.progress_pct ?? 5;
   const total = job?.total_rows ?? 0;
@@ -122,6 +124,7 @@ export function JobTheater({
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const rejectionRate = processed > 0 && rejectedRows > 0 ? (rejectedRows / processed) * 100 : 0;
+  const preflightResult = preflight || job?.preflight;
 
   const timelinePhases = useMemo(() => {
     if (job?.phases?.length) {
@@ -344,25 +347,25 @@ export function JobTheater({
         </div>
       )}
 
-      {log.length > 0 && (
-        <div className="df2-theater-v3-log-section">
-          <button type="button" className="df2-theater-v3-log-toggle" onClick={() => setLogOpen((o) => !o)}>
-            <DtIcon name="activity" size={14} />
-            {logOpen ? "Hide event log" : `Show event log (${log.length})`}
-          </button>
-          {logOpen && (
-            <div className="df2-theater-v3-log" ref={logRef}>
-              <div className="df2-theater-v3-log-head">
-                <strong>Execution events</strong>
-                <span>{log.length} updates</span>
-              </div>
-              {log.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
-            </div>
-          )}
+      {preflightResult && (
+        <div className="df2-theater-v3-preflight" aria-label="Preflight evidence">
+          <PreflightTimeline result={preflightResult} compact hideActions />
         </div>
       )}
+
+      <div className="df2-theater-v3-log-section">
+        <div className="df2-theater-v3-log" ref={logRef}>
+          <div className="df2-theater-v3-log-head">
+            <strong>Live event log</strong>
+            <span>{log.length ? `${log.length} updates` : "No events yet"}</span>
+          </div>
+          {log.length === 0 ? (
+            <div className="df2-theater-v3-log-empty">Waiting for job events…</div>
+          ) : (
+            log.map((line, i) => <div key={i}>{line}</div>)
+          )}
+        </div>
+      </div>
     </div>
   );
 }

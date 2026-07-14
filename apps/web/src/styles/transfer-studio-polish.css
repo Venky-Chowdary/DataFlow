@@ -1156,6 +1156,19 @@
 .df2-run-step .df2-theater-v3-log {
   border: 1px solid #253449;
   background: linear-gradient(180deg, #0f172a 0%, #101b31 100%);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-theater-v3-log-empty {
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 8px 0;
+  font-style: italic;
 }
 
 .df2-theater-v3-log-head {

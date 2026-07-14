@@ -436,6 +436,8 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            if pf:
+                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
             ddl_log: list[str] = []
             dest_summary: dict = {}
             rows_written = 0
@@ -467,6 +469,11 @@ class UniversalTransferEngine:
                 )
                 if checkpoint:
                     update["checkpoint"] = checkpoint
+                    update["destination_summary"] = {
+                        "checksum": checkpoint.get("checksum", ""),
+                        "rejected_rows": checkpoint.get("rejected_rows", 0),
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                    }
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -767,6 +774,9 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            if pf:
+                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
@@ -789,6 +799,11 @@ class UniversalTransferEngine:
                 )
                 if checkpoint:
                     update["checkpoint"] = checkpoint
+                    update["destination_summary"] = {
+                        "checksum": checkpoint.get("checksum", ""),
+                        "rejected_rows": checkpoint.get("rejected_rows", 0),
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                    }
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1063,6 +1078,9 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            if pf:
+                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
@@ -1085,6 +1103,11 @@ class UniversalTransferEngine:
                 )
                 if checkpoint:
                     update["checkpoint"] = checkpoint
+                    update["destination_summary"] = {
+                        "checksum": checkpoint.get("checksum", ""),
+                        "rejected_rows": checkpoint.get("rejected_rows", 0),
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                    }
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)

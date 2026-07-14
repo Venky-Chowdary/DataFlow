@@ -711,7 +711,7 @@ def stream_database_transfer(
         clear_object_cache()
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
-    # per-batch memory within ~8 MB while respecting the configured CHUNK_SIZE.
+    # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
     sample_probe, _ = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, 100, database=src_db,
@@ -724,7 +724,8 @@ def stream_database_transfer(
     avg_row_size = 100
     if sample_rows:
         avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
-    chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE)
+    target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
+    chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
 
     probe, ddb_cursor = _unwrap_read(
         _read_batch(

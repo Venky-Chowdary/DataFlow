@@ -62,6 +62,7 @@ export interface JobProgress extends TransferJob {
   rejected_rows?: number;
   rejected_details?: { row?: number; column?: string; reason?: string; value?: string }[];
   destination_summary?: Record<string, unknown>;
+  preflight?: PreflightResult;
   phases?: JobPhase[];
 }
 

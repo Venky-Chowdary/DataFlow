@@ -2469,6 +2469,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
               destLabel={`${targetDb}.${targetCollection}`}
               sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
               destType={destKindMode === "file_export" ? exportFormat : destType}
+              preflight={preflight || undefined}
               onComplete={handleJobComplete}
               onFailed={handleJobComplete}
             />
