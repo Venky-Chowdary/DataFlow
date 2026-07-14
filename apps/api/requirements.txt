@@ -57,14 +57,16 @@ vertica-python>=1.3.0        # Vertica
 hdbcli>=2.18.0               # SAP HANA
 pydruid>=0.6.0               # Apache Druid
 pinotdb>=0.4.0               # Apache Pinot
-impyla==0.17.0               # Apache Impala (pinned to keep thrift<0.23 with databricks)
+impyla==0.20.0               # Apache Impala (compatible with thrift 0.16.0)
 pyathena>=3.0.0              # Amazon Athena
 firebolt-sqlalchemy>=0.4.0   # Firebolt
 fdb>=2.0.0                   # Firebird
+thrift-sasl==0.4.3           # impyla dependency
 
 # Warehouses
 databricks-sqlalchemy>=2.0.0
-thrift>=0.22.0,<0.23.0
+databricks-sql-connector>=4.0.1,<4.3.0  # keep thrift<0.21 for impyla 0.20.x
+thrift==0.16.0               # shared pin for databricks<4.3 and impyla
 
 # Testing
 pytest>=7.4.0
