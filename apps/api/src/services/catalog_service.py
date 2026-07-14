@@ -29,6 +29,7 @@ def load_catalog() -> dict:
         return json.load(f)
 
 
+@lru_cache(maxsize=1)
 def _enriched_connectors() -> list[dict]:
     enriched = []
     for c in load_catalog().get("connectors", []):

@@ -50,10 +50,12 @@ def check_storage() -> dict[str, Any]:
 
 def aggregate_health() -> dict[str, Any]:
     from services.driver_bootstrap import driver_status
+    from src.services.catalog_service import catalog_summary
 
     drivers = driver_status()
     mongo = check_mongodb()
     storage = check_storage()
+    catalog = catalog_summary()
 
     services = {
         "api": "up",
@@ -71,6 +73,12 @@ def aggregate_health() -> dict[str, Any]:
         "status": status,
         "services": services,
         "drivers": drivers,
+        "catalog": {
+            "total": catalog.get("total"),
+            "live": catalog.get("live"),
+            "planned": catalog.get("planned"),
+            "beta": catalog.get("beta"),
+        },
         "mongodb": mongo,
         "storage": storage,
     }
