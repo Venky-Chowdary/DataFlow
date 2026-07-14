@@ -1,4 +1,4 @@
-"""File → file_export conversion end-to-end."""
+"""File → file_export conversion end-to-end for multiple formats."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
 
-def test_csv_to_parquet_export():
+def _run_export(dest_format: str, expected_ext: str, expected_mime_prefix: str) -> None:
     csv_content = b"id,name\n1,alice\n2,bob\n"
 
     request = TransferRequest(
@@ -24,7 +24,7 @@ def test_csv_to_parquet_export():
             kind="file", format="csv",
         ),
         destination=EndpointConfig(
-            kind="file_export", format="parquet",
+            kind="file_export", format=dest_format,
         ),
         source_filename="users.csv",
         source_content=csv_content,
@@ -36,5 +36,23 @@ def test_csv_to_parquet_export():
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
     assert result.success is True, result.error
     assert result.records_transferred == 2
-    assert result.destination_summary.get("format") == "parquet"
-    assert result.destination_summary.get("filename", "").endswith(".parquet")
+    assert result.destination_summary.get("format") == dest_format
+    assert result.destination_summary.get("filename", "").endswith(f".{expected_ext}")
+    mime = result.destination_summary.get("mime", "")
+    assert mime.startswith(expected_mime_prefix), mime
+
+
+def test_csv_to_parquet_export():
+    _run_export("parquet", "parquet", "application/vnd.apache.parquet")
+
+
+def test_csv_to_json_export():
+    _run_export("json", "json", "application/json")
+
+
+def test_csv_to_jsonl_export():
+    _run_export("jsonl", "jsonl", "application/x-ndjson")
+
+
+def test_csv_to_csv_export():
+    _run_export("csv", "csv", "text/csv")
