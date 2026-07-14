@@ -363,3 +363,76 @@ def test_adls_to_snowflake():
         skip_preflight=True,
     )
     _run(request, uuid.uuid4().hex[:24])
+
+
+def test_redis_to_snowflake():
+    fakesnow = pytest.importorskip("fakesnow")
+    try:
+        with socket.create_connection(("localhost", 6379), timeout=1):
+            pass
+    except OSError as exc:
+        pytest.skip(f"Emulator not reachable: {exc}")
+
+    import redis
+    import json
+
+    r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+    prefix = "redis_to_sf_" + uuid.uuid4().hex[:8]
+    for i in range(1, 3):
+        r.set(f"{prefix}:user:{i}", json.dumps({"id": str(i), "name": "alice" if i == 1 else "bob"}))
+    table_name = "redis_to_sf_" + uuid.uuid4().hex[:8]
+
+    request = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="redis",
+            host="localhost", port=6379,
+            database="0", table=f"{prefix}:user:*",
+        ),
+        destination=_snowflake_endpoint(table_name),
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[{
+            "name": "users",
+            "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id",
+            "selected": True,
+        }],
+        skip_preflight=True,
+    )
+    _run(request, uuid.uuid4().hex[:24])
+
+
+def test_elasticsearch_to_snowflake():
+    fakesnow = pytest.importorskip("fakesnow")
+    try:
+        with socket.create_connection(("localhost", 9200), timeout=1):
+            pass
+    except OSError as exc:
+        pytest.skip(f"Emulator not reachable: {exc}")
+
+    from elasticsearch import Elasticsearch
+
+    index = "es_to_sf_" + uuid.uuid4().hex[:8]
+    table_name = "es_to_sf_" + uuid.uuid4().hex[:8]
+
+    es = Elasticsearch(hosts=["http://localhost:9200"])
+    for i in range(1, 3):
+        es.index(index=index, id=str(i), body={"id": str(i), "name": "alice" if i == 1 else "bob"})
+    es.indices.refresh(index=index)
+
+    request = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="elasticsearch",
+            host="localhost", port=9200,
+            database=index, table="",
+        ),
+        destination=_snowflake_endpoint(table_name),
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[{
+            "name": "users",
+            "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id",
+            "selected": True,
+        }],
+        skip_preflight=True,
+    )
+    _run(request, uuid.uuid4().hex[:24])
