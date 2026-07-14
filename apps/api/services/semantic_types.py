@@ -97,7 +97,7 @@ def detect_semantic_type(name: str, samples: list[str] | None = None) -> Semanti
                 candidates[SemanticType.PERCENTAGE] = candidates.get(SemanticType.PERCENTAGE, 0) + 1
             elif re.match(r"^[\+\-]?\s*(\$|€|£|¥|₹|CHF|USD|EUR|GBP|JPY|INR)\s*[\d,]+(\.\d{1,4})?$", text) or re.match(r"^[\+\-]?\s*[\d,]+(\.\d{1,4})?\s*(\$|€|£|¥|₹|USD|EUR|GBP|JPY|INR|CHF)$", text):
                 candidates[SemanticType.CURRENCY] = candidates.get(SemanticType.CURRENCY, 0) + 1
-            elif re.match(r"^\d{4}-\d{1,2}-\d{1,2}(?:[T ]\d{2}:\d{2}:\d{2})?$", text):
+            elif re.match(r"^\d{4}-\d{1,2}-\d{1,2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?)?$", text):
                 candidates[SemanticType.TIMESTAMP] = candidates.get(SemanticType.TIMESTAMP, 0) + 1
 
         if candidates:

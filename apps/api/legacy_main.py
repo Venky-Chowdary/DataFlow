@@ -282,6 +282,7 @@ class SchemaIntrospectDTO(BaseModel):
     ssl: bool = True
     warehouse: str = ""
     table: str | None = None
+    auth_source: str = ""
 
 
 @app.get("/health")
@@ -373,6 +374,7 @@ def schema_introspect(body: SchemaIntrospectDTO):
         ssl=body.ssl,
         warehouse=body.warehouse,
         table=body.table,
+        auth_source=body.auth_source,
     )
 
 

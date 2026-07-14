@@ -292,6 +292,7 @@ def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, head
         warehouse=cfg.get("warehouse", ""),
         table=table,
         catalog_type=cfg.get("type", ""),
+        auth_source=cfg.get("auth_source", ""),
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}

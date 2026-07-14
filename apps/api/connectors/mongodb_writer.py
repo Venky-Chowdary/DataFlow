@@ -179,7 +179,18 @@ def write_mapped_rows(
                 if isinstance(value, _date):
                     return _datetime.combine(value, _time.min)
                 text = value.strip() if isinstance(value, str) else str(value)
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d"):
+                for fmt in (
+                    "%Y-%m-%d",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S.%fZ",
+                    "%Y-%m-%dT%H:%M:%S.%f%z",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%m/%d/%Y",
+                    "%d/%m/%Y",
+                    "%Y%m%d",
+                ):
                     try:
                         return _datetime.strptime(text, fmt)
                     except ValueError:
