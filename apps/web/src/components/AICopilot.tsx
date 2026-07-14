@@ -129,7 +129,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     } catch {
       setMessages((m) => [
         ...m,
-        { role: "assistant", text: "Could not reach Data Pilot. Ensure the API is running on port 8001." },
+        { role: "assistant", text: "Could not reach Data Pilot. Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in." },
       ]);
     }
     setLoading(false);

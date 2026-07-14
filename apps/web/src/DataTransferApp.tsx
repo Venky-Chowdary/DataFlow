@@ -127,7 +127,7 @@ function AppShell({
     } catch {
       setApiOnline(false);
       if (notifyOnError) {
-        toast({ title: "Could not load connectors", message: "Check that the API is running on port 8001.", tone: "error" });
+        toast({ title: "Could not load connectors", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in.", tone: "error" });
       }
     }
   }, [toast]);

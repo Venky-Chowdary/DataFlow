@@ -46,6 +46,31 @@ const CATALOG_ALIASES: Record<string, string> = {
   ndjson: "ndjson",
 };
 
+const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
+  postgresql: { host: "localhost", port: 5432 },
+  mysql: { host: "localhost", port: 3306 },
+  mongodb: { host: "localhost", port: 27017 },
+  snowflake: { host: "localhost", port: 443 },
+  bigquery: { host: "bigquery.googleapis.com", port: 443 },
+  redshift: { host: "localhost", port: 5439 },
+  dynamodb: { host: "us-east-1", port: 443 },
+  s3: { host: "", port: 443 },
+  gcs: { host: "", port: 443 },
+  google_cloud_storage: { host: "", port: 443 },
+  adls: { host: "", port: 443 },
+  redis: { host: "localhost", port: 6379 },
+  elasticsearch: { host: "localhost", port: 9200 },
+  sqlite: { host: "", port: 0 },
+  generic_sql: { host: "localhost", port: 0 },
+  csv: { host: "", port: 0 },
+  tsv: { host: "", port: 0 },
+  json: { host: "", port: 0 },
+  jsonl: { host: "", port: 0 },
+  ndjson: { host: "", port: 0 },
+  excel: { host: "", port: 0 },
+  parquet: { host: "", port: 0 },
+};
+
 /** Map marketplace catalog id → connectable type used by API/forms (strict) */
 export function resolveCatalogIdToType(catalogId: string): string {
   const id = catalogId.toLowerCase().trim();
@@ -120,28 +145,26 @@ export function isConnectOnlyType(type: string): boolean {
   return CONNECT_ONLY_TYPES.has(type);
 }
 
+export function resolveDriverType(catalogId: string): string {
+  const t = resolveCatalogIdToType(catalogId);
+  return isGenericSql(t) && t !== "generic_sql" ? "generic_sql" : t;
+}
+
+export function getConnectorLabel(type: string, item?: { label?: string } | null): string {
+  if (item?.label) return item.label;
+  const generic = GENERIC_SQL_DRIVERS.find((d) => d.id === type);
+  if (generic) return generic.label;
+  return type
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\b(Sql|Db)\b/g, (m) => (m === "Sql" ? "SQL" : "DB"));
+}
+
 export function getConnectorDefaults(type: string): { host: string; port: number; label: string } {
   const item = CONNECTOR_CATALOG.find((c) => c.id === type);
-  if (type === "mongodb") return { host: "localhost", port: 27017, label: "MongoDB" };
-  if (type === "mysql") return { host: "localhost", port: 3306, label: "MySQL" };
-  if (type === "postgresql") return { host: "localhost", port: 5432, label: "PostgreSQL" };
-  if (type === "dynamodb") return { host: "us-east-1", port: 443, label: "Amazon DynamoDB" };
-  if (type === "bigquery") return { host: "bigquery.googleapis.com", port: 443, label: "BigQuery" };
-  if (type === "snowflake") return { host: "localhost", port: 443, label: "Snowflake" };
-  if (type === "redshift") return { host: "localhost", port: 5439, label: "Amazon Redshift" };
-  if (type === "gcs") return { host: "", port: 443, label: "Google Cloud Storage" };
-  if (type === "redis") return { host: "localhost", port: 6379, label: "Redis" };
-  if (type === "elasticsearch") return { host: "localhost", port: 9200, label: "Elasticsearch" };
-  if (type === "sqlite") return { host: "", port: 0, label: "SQLite" };
-  if (type === "generic_sql") return { host: "", port: 0, label: "Generic SQL (any SQLAlchemy engine)" };
-  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(type)) {
-    return { host: "", port: 0, label: item?.label ?? type };
-  }
-  return {
-    host: "localhost",
-    port: item?.port ?? (isGenericSql(type) ? 0 : 5432),
-    label: item?.label ?? type,
-  };
+  const driver = resolveDriverType(type);
+  const base = BASE_DEFAULTS[driver] || { host: "localhost", port: 0 };
+  return { host: base.host, port: base.port, label: getConnectorLabel(type, item) };
 }
 
 export function isAwsConnector(type: string): boolean {
@@ -182,6 +205,7 @@ export function getGenericSqlPlaceholder(driver: string): string {
   const map: Record<string, string> = {
     postgresql: "postgresql+psycopg2://user:pass@host:5432/db",
     mysql: "mysql+pymysql://user:pass@host:3306/db",
+    redshift: "postgresql+psycopg2://user:pass@host:5439/db",
     mssql: "mssql+pyodbc://user:pass@host:1433/db",
     oracle: "oracle+oracledb://user:pass@host:1521/db",
     sqlite: "sqlite:////path/to/db.sqlite",

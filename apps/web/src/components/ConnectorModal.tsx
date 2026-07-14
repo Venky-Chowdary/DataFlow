@@ -14,6 +14,7 @@ import {
   isGenericSql,
   isConfigurableInStudio,
   resolveCatalogIdToType,
+  resolveDriverType,
 } from "../lib/connectorTypes";
 import { CONNECTOR_CATALOG } from "../lib/types";
 
@@ -475,7 +476,7 @@ export function ConnectorModal({
                   <label className="df2-label">Connection string</label>
                   <input
                     className="df2-input"
-                    placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : isGenericSql(type) ? getGenericSqlPlaceholder(type) : "driver://user:pass@host:port/db"}
+                    placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : isGenericSql(type) || ["mysql", "postgresql", "redshift", "sqlite"].includes(resolveDriverType(type)) ? getGenericSqlPlaceholder(resolveDriverType(type)) : "driver://user:pass@host:port/db"}
                     value={connectionString}
                     onChange={(e) => setConnectionString(e.target.value)}
                   />

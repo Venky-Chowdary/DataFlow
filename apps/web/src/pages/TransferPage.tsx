@@ -42,7 +42,7 @@ import {
   updateTransferPlan,
   uploadFile,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, resolveDriverType } from "../lib/connectorTypes";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -191,6 +191,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [uploading, setUploading] = useState(false);
   const [connectorId, setConnectorId] = useState("");
   const [destType, setDestType] = useState<string>("mongodb");
+  const destDriverType = resolveDriverType(destType);
   const [destKindMode, setDestKindMode] = useState<"database" | "file_export">("database");
   const [exportFormat, setExportFormat] = useState("json");
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
@@ -264,8 +265,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   }, [sourceConnectorId, sourceTable, sourceCollection, cloudPath, sourceKind]);
 
   const buildDestinationEndpoint = () => {
-    const isMongo = destType === "mongodb";
-    const isDynamo = destType === "dynamodb";
+    const isMongo = destDriverType === "mongodb";
+    const isDynamo = destDriverType === "dynamodb";
     return {
       kind: "database",
       format: destType,
@@ -279,7 +280,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       username: destUsername || undefined,
       password: destPassword || undefined,
       connection_string: destConnectionString || undefined,
-      warehouse: destType === "snowflake" ? destWarehouse : undefined,
+      warehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
     };
   };
 
@@ -309,7 +310,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     }
   }, [liveDestTypes, destType]);
 
-  const destConnectors = connectors.filter((c) => c.type === destType);
+  const destConnectors = connectors.filter((c) => resolveDriverType(c.type) === destDriverType);
   const testedDestConnectors = destConnectors.filter((c) => c.last_test_ok !== false);
   const selectedDestConnector = destConnectors.find((c) => c.id === connectorId);
   const dbSourceConnectors = connectors.filter((c) => liveSourceDbs.includes(c.type));
@@ -605,7 +606,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (!id) return;
     const conn = connectors.find((c) => c.id === id);
     if (!conn) return;
-    if (liveDestTypes.some((d) => d.id === conn.type)) {
+    if (liveDestTypes.some((d) => resolveDriverType(d.id) === resolveDriverType(conn.type))) {
       setDestType(conn.type);
     }
     if (conn.database) setTargetDb(conn.database);
@@ -692,7 +693,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           destFormat: destKindMode === "file_export" ? exportFormat : destType,
           destDatabase: targetDb,
           destTable: destType !== "mongodb" && destType !== "dynamodb" ? targetCollection : undefined,
-          destCollection: destType === "mongodb" || destType === "dynamodb" ? targetCollection : undefined,
+          destCollection: destDriverType === "mongodb" || destDriverType === "dynamodb" ? targetCollection : undefined,
         });
       } else {
         return;
@@ -1157,7 +1158,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           destFormat: destType,
           destDatabase: targetDb,
           destTable: destType !== "mongodb" ? targetCollection : undefined,
-          destCollection: destType === "mongodb" ? targetCollection : undefined,
+          destCollection: destDriverType === "mongodb" ? targetCollection : undefined,
           destConnectorId: connectorId || undefined,
         });
         columns = routePlan.source_columns ?? [];
@@ -1220,8 +1221,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
         dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
         dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-        dest_schema: destKindMode === "database" && !connectorId && destType === "snowflake" ? destSchema || "PUBLIC" : undefined,
-        dest_warehouse: destKindMode === "database" && !connectorId && destType === "snowflake" ? destWarehouse || undefined : undefined,
+        dest_schema: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destSchema || "PUBLIC" : undefined,
+        dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
         sample_rows: sampleRows,
         estimated_bytes: estimatedBytes,
         sync_mode: syncMode,
@@ -1319,16 +1320,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
-        destSchema: destType === "snowflake" ? "PUBLIC" : destType === "bigquery" ? destSchema : destSchema,
+        destSchema: destDriverType === "snowflake" ? "PUBLIC" : destDriverType === "bigquery" ? destSchema : destSchema,
         destTable: destType !== "mongodb" ? targetCollection : undefined,
-        destCollection: destType === "mongodb" ? targetCollection : targetCollection,
+        destCollection: destDriverType === "mongodb" ? targetCollection : targetCollection,
         destConnectorId: connectorId || undefined,
         destHost: !connectorId ? destHost : undefined,
         destPort: !connectorId ? destPort : undefined,
         destUsername: !connectorId ? destUsername || undefined : undefined,
         destPassword: !connectorId ? destPassword || undefined : undefined,
         destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
-        destWarehouse: destType === "snowflake" ? destWarehouse : undefined,
+        destWarehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
         skipPreflight: !enforcePreflight,
         mappings: transferMappings,
         syncMode,
@@ -1475,14 +1476,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         : "Database source";
   const mapDestRouteLabel = destKindMode === "file_export"
     ? `${exportFormat.toUpperCase()} export`
-    : destType === "dynamodb"
+    : destDriverType === "dynamodb"
       ? (targetCollection || targetDb || destinationLabel)
       : targetCollection
         ? `${targetDb}.${targetCollection}`
         : destinationLabel;
   const mapDestRouteSubtitle = destKindMode === "file_export"
     ? "File export destination"
-    : destType === "dynamodb"
+    : destDriverType === "dynamodb"
       ? destSchemaLoading
         ? `Fetching existing schema from DynamoDB table ${targetCollection || targetDb}`
         : destColumns.length > 0
@@ -1988,7 +1989,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
-              {destType === "mongodb" ? (
+              {destDriverType === "mongodb" ? (
                 <div className="df2-field df2-field-flex">
                   <label className="df2-label">Connection String (optional)</label>
                   <input
@@ -2019,7 +2020,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                   </div>
                 </>
               )}
-              {destType === "snowflake" && (
+              {destDriverType === "snowflake" && (
                 <div className="df2-field df2-field-160">
                   <label className="df2-label">Warehouse</label>
                   <input className="df2-input" value={destWarehouse} onChange={(e) => setDestWarehouse(e.target.value)} placeholder="COMPUTE_WH" />
@@ -2040,15 +2041,15 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <div className="df2-form-row">
             <div className="df2-field df2-field-flex">
               <label className="df2-label" htmlFor="dest-db">
-                {destType === "bigquery"
+                {destDriverType === "bigquery"
                   ? "GCP Project ID"
-                  : destType === "dynamodb"
+                  : destDriverType === "dynamodb"
                     ? "AWS region or local endpoint"
                     : "Database"}
               </label>
-              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destType === "bigquery" ? "my-gcp-project" : destType === "dynamodb" ? "us-east-1" : "test_db"} />
+              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destDriverType === "bigquery" ? "my-gcp-project" : destDriverType === "dynamodb" ? "us-east-1" : "test_db"} />
             </div>
-            {destType === "bigquery" && (
+            {destDriverType === "bigquery" && (
               <div className="df2-field df2-field-flex">
                 <label className="df2-label">Dataset</label>
                 <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} placeholder="dataflow" />
@@ -2056,11 +2057,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             )}
             <div className="df2-field df2-field-flex">
               <label className="df2-label" htmlFor="dest-col">
-                {destType === "mongodb" ? "Collection" : destType === "dynamodb" ? "DynamoDB table" : "Table"}
+                {destDriverType === "mongodb" ? "Collection" : destDriverType === "dynamodb" ? "DynamoDB table" : "Table"}
               </label>
-              <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destType === "mongodb" ? "my_collection" : destType === "dynamodb" ? "orders" : "my_table"} />
+              <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destDriverType === "mongodb" ? "my_collection" : destDriverType === "dynamodb" ? "orders" : "my_table"} />
             </div>
-            {destType === "postgresql" && (
+            {destDriverType === "postgresql" && (
               <div className="df2-field df2-field-120">
                 <label className="df2-label">Schema</label>
                 <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} />
@@ -2068,13 +2069,13 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             )}
           </div>
           </div>
-          {destType === "dynamodb" && (
+          {destDriverType === "dynamodb" && (
             <p className="df2-label-hint df2-field-note">
               Set region to <code>us-east-1</code> for AWS, or <code>http://localhost:8000</code> for DynamoDB Local / personal cloud.
               Table name is the DynamoDB table to read or write.
             </p>
           )}
-          {destType === "bigquery" && (
+          {destDriverType === "bigquery" && (
             <p className="df2-label-hint df2-field-note">
               Set Database to GCP project ID. Optional: save service account JSON path as connection string in connector settings.
             </p>
