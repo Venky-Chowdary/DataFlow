@@ -537,6 +537,7 @@ class UniversalTransferEngine:
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
                 mappings=mappings,
+                source_schema=schema,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -845,6 +846,7 @@ class UniversalTransferEngine:
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
                 mappings=mappings,
+                source_schema=schema,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -1150,6 +1152,7 @@ class UniversalTransferEngine:
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
                 mappings=mappings,
+                source_schema=schema,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(

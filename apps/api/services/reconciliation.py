@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
-from services.transform_engine import _parse_date, _parse_datetime
+from services.transform_engine import _parse_date, _parse_datetime, apply_transform
 
 
 @dataclass
@@ -720,26 +720,54 @@ def sample_compare_rows(
     *,
     target_columns: list[str] | None = None,
     sample_size: int = 50,
+    sort_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
     Uses normalized string comparison to tolerate driver formatting differences.
+    Rows are sorted by a stable key (e.g. primary key) before comparing so source
+    and target align even when the destination writes columns in a different order.
     """
     if not source_records or not target_rows or not mappings:
         return {"passed": True, "compared": 0, "mismatches": [], "skipped": True}
 
+    def _row_key(rec: Any) -> Any:
+        if isinstance(rec, dict):
+            val = rec.get(sort_key) if sort_key else None
+            return val or (rec.get(target_columns[0]) if target_columns else None)
+        return rec
+
+    def _as_dict(tgt_raw: Any) -> dict[str, Any] | None:
+        if isinstance(tgt_raw, dict):
+            return tgt_raw
+        if target_columns and isinstance(tgt_raw, (list, tuple)):
+            return {col: tgt_raw[i] if i < len(tgt_raw) else None for i, col in enumerate(target_columns)}
+        return None
+
+    source_sorted = sorted(source_records, key=lambda r: _row_key(r) or 0)
+    target_sorted = sorted(
+        (t for t in target_rows if _as_dict(t) is not None),
+        key=lambda r: _row_key(_as_dict(r)) or 0,
+    )
+
     mismatches: list[dict[str, str]] = []
     compared = 0
-    limit = min(sample_size, len(source_records), len(target_rows))
+    limit = min(sample_size, len(source_sorted), len(target_sorted))
+
+    def _normalize_source(raw: Any, transform: str | None) -> str:
+        if transform:
+            try:
+                converted, _ = apply_transform(raw, transform)
+            except Exception:
+                converted = raw
+        else:
+            converted = raw
+        return normalize_cell(converted)
 
     for idx in range(limit):
-        src = source_records[idx]
-        tgt_raw = target_rows[idx]
-        if isinstance(tgt_raw, dict):
-            tgt = tgt_raw
-        elif target_columns and isinstance(tgt_raw, (list, tuple)):
-            tgt = {col: tgt_raw[i] if i < len(tgt_raw) else None for i, col in enumerate(target_columns)}
-        else:
+        src = source_sorted[idx]
+        tgt = _as_dict(target_sorted[idx])
+        if tgt is None:
             continue
 
         for m in mappings:
@@ -747,7 +775,8 @@ def sample_compare_rows(
             tgt_col = str(m.get("target") or "")
             if not src_col or not tgt_col:
                 continue
-            src_val = normalize_cell(src.get(src_col))
+            transform = m.get("transform")
+            src_val = _normalize_source(src.get(src_col), transform)
             tgt_val = normalize_cell(tgt.get(tgt_col))
             compared += 1
             if src_val != tgt_val:
@@ -780,6 +809,7 @@ def read_target_sample(
     table_name: str,
     columns: list[str] | None = None,
     limit: int = 50,
+    sort_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read a small ordered sample from destination for value reconciliation."""
     cols = columns or ["*"]
@@ -798,9 +828,10 @@ def read_target_sample(
                 connection_string=dest.get("connection_string", ""),
                 ssl=dest.get("ssl", True),
             )
+            order_sql = f'"{sort_key.replace('"', '""')}"' if sort_key else "1"
             with conn.cursor() as cur:
                 cur.execute(
-                    f'SELECT {col_sql} FROM "{schema}"."{table_name}" ORDER BY 1 LIMIT %s',
+                    f'SELECT {col_sql} FROM "{schema}"."{table_name}" ORDER BY {order_sql} LIMIT %s',
                     (limit,),
                 )
                 names = [d[0] for d in cur.description]
@@ -821,8 +852,9 @@ def read_target_sample(
                 connection_string=dest.get("connection_string", ""),
                 ssl=dest.get("ssl", False),
             )
+            mysql_order = f"`{sort_key.replace('`', '``')}`" if sort_key else "1"
             with conn.cursor() as cur:
-                cur.execute(f"SELECT {mysql_col_sql} FROM `{table_name}` ORDER BY 1 LIMIT %s", (limit,))
+                cur.execute(f"SELECT {mysql_col_sql} FROM `{table_name}` ORDER BY {mysql_order} LIMIT %s", (limit,))
                 names = [d[0] for d in cur.description]
                 rows = cur.fetchall()
             conn.close()
@@ -842,8 +874,9 @@ def read_target_sample(
                 duckdb_col_sql = "*"
             else:
                 duckdb_col_sql = ", ".join(_quote_id(c) for c in cols)
+            duckdb_order = _quote_id(sort_key) if sort_key else "1"
             rows = conn.execute(
-                f"SELECT {duckdb_col_sql} FROM {_quote_id(table_name)} ORDER BY 1 LIMIT ?",
+                f"SELECT {duckdb_col_sql} FROM {_quote_id(table_name)} ORDER BY {duckdb_order} LIMIT ?",
                 (int(limit),),
             ).fetchall()
             names = [d[0] for d in conn.description]

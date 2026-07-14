@@ -25,6 +25,7 @@ def run_reconciliation(
     writer_checksum: str,
     dest_summary: dict[str, Any],
     mappings: list[dict] | None = None,
+    source_schema: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
@@ -58,12 +59,29 @@ def run_reconciliation(
     )
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
+    if source_schema:
+        try:
+            from services.transform_resolver import attach_transforms_to_mappings
+
+            mapping_dicts = attach_transforms_to_mappings(
+                mapping_dicts,
+                column_types=source_schema,
+                dest_types={},
+            )
+        except Exception:
+            pass
     sample_compare = None
     if records and table_name and db_type in {"postgresql", "mysql", "duckdb"}:
         mapped_targets = list(dict.fromkeys(
             str(m.get("target") or m.get("source") or "")
             for m in mapping_dicts if m.get("target") or m.get("source")
         ))
+        # Prefer a stable primary-key-like column for row alignment; otherwise
+        # fall back to the first mapped target column.
+        sort_key = next(
+            (c for c in mapped_targets if c.lower() == "id" or c.lower().endswith("_id")),
+            mapped_targets[0] if mapped_targets else None,
+        )
         target_sample = read_target_sample(
             db_type,
             cfg,
@@ -71,6 +89,7 @@ def run_reconciliation(
             table_name=table_name,
             columns=mapped_targets[:20] or None,
             limit=min(50, len(records)),
+            sort_key=sort_key,
         )
         if target_sample:
             sample_compare = sample_compare_rows(
@@ -79,6 +98,7 @@ def run_reconciliation(
                 mapping_dicts,
                 target_columns=mapped_targets,
                 sample_size=min(50, len(records)),
+                sort_key=sort_key,
             )
 
     # Destination tables may legitimately contain rows from earlier loads

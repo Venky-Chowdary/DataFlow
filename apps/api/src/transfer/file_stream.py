@@ -116,8 +116,6 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
         return headers, schema, total, sample
 
     if file_type == "parquet":
-        import io
-
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(io.BytesIO(content))
@@ -285,8 +283,6 @@ def stream_file_to_database(
 
         batch_iter = iter_excel_batches(content, batch_size)
     elif file_type == "parquet":
-        import io
-
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(io.BytesIO(content))
