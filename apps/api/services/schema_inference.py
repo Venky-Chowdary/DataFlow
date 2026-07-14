@@ -118,6 +118,14 @@ def _classify_value(value: str) -> str:
     if decimal_parsed is not None:
         if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
+        # MongoDB / BSON only supports signed 64-bit ints. Treat larger whole
+        # numbers as strings so they are not silently mangled or rejected.
+        try:
+            iv = int(decimal_parsed)
+        except (ValueError, TypeError):
+            return "VARCHAR"
+        if iv > 2**63 - 1 or iv < -(2**63):
+            return "VARCHAR"
         return "INTEGER"
 
     if len(s) > 255:

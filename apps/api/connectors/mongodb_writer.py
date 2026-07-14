@@ -161,9 +161,17 @@ def write_mapped_rows(
             upper = stype.upper()
             if upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 try:
-                    return int(value)
+                    iv = int(value)
                 except (ValueError, TypeError):
                     return value
+                # BSON supports signed 64-bit ints; fall back to Decimal128 or
+                # string when a value overflows.
+                if iv > 2**63 - 1 or iv < -(2**63):
+                    try:
+                        return Decimal128(str(iv))
+                    except Exception:
+                        return str(iv)
+                return iv
             if upper in {"BOOLEAN", "BOOL"}:
                 text = str(value).strip().lower()
                 if text in {"true", "t", "yes", "y", "1"}:
