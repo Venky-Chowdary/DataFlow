@@ -54,6 +54,7 @@ def write_mapped_rows(
     schema: str,
     connection_string: str,
     ssl: bool,
+    api_key: str = "",
     table_name: str,
     headers: list[str],
     data_rows: list[list[str]],
@@ -69,7 +70,7 @@ def write_mapped_rows(
     index = table_name or database
     cfg = {
         "host": host, "port": port, "username": username, "password": password,
-        "connection_string": connection_string, "ssl": ssl,
+        "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
     target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     mapped_rows, errors = build_mapped_rows(

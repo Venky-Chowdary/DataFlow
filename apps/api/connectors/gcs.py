@@ -17,6 +17,7 @@ def test_gcs(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    service_account: str = "",
 ) -> ConnectResult:
     del username, schema, ssl, warehouse
 
@@ -40,6 +41,7 @@ def test_gcs(
         client = gcs_client({
             "host": host,
             "port": port,
+            "service_account": service_account,
             "connection_string": connection_string or password,
             "password": password,
         })

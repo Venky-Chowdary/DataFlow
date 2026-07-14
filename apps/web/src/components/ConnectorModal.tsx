@@ -228,8 +228,8 @@ export function ConnectorModal({
         setFieldError("Service account JSON or file path is required.");
         return false;
       }
-      if (!database.trim() && !isGcp) {
-        setFieldError(isAzure ? "Storage account or container is required." : "Database / project is required.");
+      if (!database.trim()) {
+        setFieldError(isGcp ? "Project / bucket is required." : "Database / project is required.");
         return false;
       }
     } else if (authMode === "api_key") {
@@ -257,7 +257,7 @@ export function ConnectorModal({
           setFieldError("GCP project ID is required.");
           return false;
         }
-      } else if (!isGcp && !isAwsKeyed && !isElastic && !host.trim()) {
+      } else if (!isGcp && !isAwsKeyed && !host.trim()) {
         setFieldError("Host is required.");
         return false;
       }
@@ -278,12 +278,15 @@ export function ConnectorModal({
         !isAwsKeyed &&
         !isElastic &&
         !isRedis &&
-        !isAzure &&
         !isBigQuery &&
         !["sqlite", "duckdb"].includes(type) &&
         (!username.trim() || !password.trim())
       ) {
         setFieldError("Username and password are required.");
+        return false;
+      }
+      if (isAzure && !database.trim()) {
+        setFieldError("Container is required.");
         return false;
       }
       if (["s3", "dynamodb"].includes(type)) {
@@ -660,14 +663,10 @@ export function ConnectorModal({
                     <label className="df2-label">Auth source</label>
                     <input
                       className="df2-input"
-                      placeholder="Leave empty to use Database; enter admin if user is in admin DB"
+                      placeholder="e.g. admin"
                       value={authSource}
                       onChange={(e) => setAuthSource(e.target.value)}
                     />
-                    <p className="df2-field-note df2-label-hint">
-                      MongoDB authentication database. Leave blank to use the Database field above,
-                      or enter <code>admin</code> if your user is defined in the admin database.
-                    </p>
                   </div>
                 </div>
               )}

@@ -131,9 +131,8 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
         if driver == "mongodb":
             return (
-                "Authentication failed. Check the username/password and authSource. "
-                "If the user is defined in the admin database, include ?authSource=admin in the connection string. "
-                "If the user is defined in the database you entered below, include ?authSource=<database>."
+                "Authentication failed. Check the username/password and the Auth source field. "
+                "Use admin if the user is defined in the admin database, or the database name if the user is defined there."
             )
         if driver == "snowflake":
             return "Authentication failed. Check account name, username, password, role, and that the account is active."
@@ -226,7 +225,8 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     if db_type == "mongodb" and spec:
         from .adapters import probe_mongodb
 
-        return probe_mongodb(cfg)
+        ok, raw = probe_mongodb(cfg)
+        return ok, humanize_connection_error(db_type, raw)
 
     schema_default = (
         "PUBLIC" if db_type == "snowflake"

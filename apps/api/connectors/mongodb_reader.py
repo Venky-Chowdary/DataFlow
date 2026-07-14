@@ -86,6 +86,7 @@ def _connection_string(cfg: dict[str, Any]) -> str:
         username=cfg.get("username", ""),
         password=cfg.get("password", ""),
         ssl=bool(cfg.get("ssl")),
+        auth_source=cfg.get("auth_source", ""),
     )
 
 

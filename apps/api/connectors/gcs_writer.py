@@ -45,6 +45,7 @@ def write_mapped_rows(
     schema: str,
     connection_string: str,
     ssl: bool,
+    service_account: str = "",
     table_name: str,
     headers: list[str],
     data_rows: list[list[str]],
@@ -75,6 +76,7 @@ def write_mapped_rows(
     cfg = {
         "host": host,
         "port": port,
+        "service_account": service_account,
         "connection_string": connection_string,
         "password": password,
     }
