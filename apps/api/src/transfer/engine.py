@@ -50,7 +50,12 @@ from .adapters import (
 from .models import EndpointConfig, TransferRequest, TransferResult, transfer_request_to_dict
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
-from .file_stream import peek_file_source, should_stream_file, stream_file_to_database
+from .file_stream import (
+    peek_file_source,
+    prepare_stream_content,
+    should_stream_file,
+    stream_file_to_database,
+)
 from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
 try:
@@ -330,9 +335,9 @@ class UniversalTransferEngine:
         if (
             request.source.kind == "file"
             and request.destination.kind == "database"
-            and request.source_content
+            and (request.source_content or request.source_path)
             and should_stream_file(
-                request.source_content,
+                request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
                 request.destination,
             )
@@ -1055,8 +1060,12 @@ class UniversalTransferEngine:
         pf: dict | None = None
         contract_id = ""
         try:
-            content = request.source_content or b""
             filename = request.source_filename or "upload.csv"
+            content = prepare_stream_content(
+                content=request.source_content or b"",
+                filename=filename,
+                source_path=request.source_path or "",
+            )
 
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,

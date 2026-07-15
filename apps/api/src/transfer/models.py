@@ -70,6 +70,9 @@ class TransferRequest:
     skip_preflight: bool = False
     source_filename: str = ""
     source_content: bytes = b""
+    # Optional on-disk path for the source file.  Used for billion-row streaming
+    # when loading the whole file into memory would exhaust RAM.
+    source_path: str = ""
     sync_mode: str = "full_refresh_overwrite"
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"

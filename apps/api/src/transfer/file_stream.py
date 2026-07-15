@@ -1,4 +1,7 @@
-"""Streaming file → database transfer for CSV, TSV, and JSONL."""
+"""Streaming file → database transfer for CSV, TSV, JSONL, NDJSON, JSON arrays,
+Excel, and Parquet.  Supports in-memory ``bytes`` as well as on-disk paths so
+billion-row files can be processed without loading the whole payload into RAM.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +11,8 @@ import itertools
 import json
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -47,11 +52,173 @@ from .stream import _write_batch
 
 STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "excel", "parquet"}
 STREAM_THRESHOLD = int(os.getenv("DATAFLOW_STREAM_FILE_ROWS", "1"))
+FILE_SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
+SPILL_DIR = os.getenv("DATAFLOW_SPILL_DIR") or None
 
 
-def _decode(content: bytes) -> str:
-    enc = detect_encoding(content)
-    return content.decode(enc, errors="replace")
+def _is_path(value: Any) -> bool:
+    return isinstance(value, (str, os.PathLike))
+
+
+def _source_suffix(filename: str) -> str:
+    name = os.path.basename(filename or "upload")
+    _, ext = os.path.splitext(name)
+    return ext or ".tmp"
+
+
+def prepare_stream_content(
+    content: bytes = b"",
+    filename: str = "upload.csv",
+    source_path: str = "",
+) -> bytes | str:
+    """Return the most efficient source reference for streaming.
+
+    If an explicit ``source_path`` is provided and exists, it is used.
+    If ``content`` is larger than ``FILE_SPILL_THRESHOLD`` bytes, it is written
+    to a temporary file and that path is returned so iteration can stream from
+    disk.  Otherwise the original ``bytes`` payload is returned.
+    """
+    if source_path and os.path.isfile(source_path):
+        return source_path
+    if not content:
+        return content
+    if len(content) <= FILE_SPILL_THRESHOLD:
+        return content
+
+    suffix = _source_suffix(filename)
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="dataflow_spill_", dir=SPILL_DIR)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+    except Exception:
+        os.close(fd)
+        raise
+    return path
+
+
+def _first_bytes(content: bytes | str | os.PathLike, size: int = 8192) -> bytes:
+    if _is_path(content):
+        with open(content, "rb") as f:
+            return f.read(size)
+    return bytes(content[:size])
+
+
+def _open_binary(content: bytes | str | os.PathLike) -> Any:
+    if _is_path(content):
+        return open(content, "rb")
+    return io.BytesIO(content)
+
+
+@contextmanager
+def _text_reader(content: bytes | str | os.PathLike, encoding: str | None = None, newline: str = ""):
+    binary = _open_binary(content)
+    text = None
+    try:
+        if encoding is None:
+            encoding = detect_encoding(_first_bytes(content))
+        text = io.TextIOWrapper(binary, encoding=encoding, errors="replace", newline=newline)
+        yield text
+    finally:
+        if text is not None:
+            try:
+                text.close()
+            except Exception:
+                pass
+        else:
+            binary.close()
+
+
+def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ValueError(
+            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+        ) from exc
+
+    wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
+        io.BytesIO(content), read_only=True, data_only=True
+    )
+    try:
+        ws = wb.active
+        if ws is None:
+            return [], [], 0
+
+        row_iter = ws.iter_rows(values_only=True)
+        first = next(row_iter, None)
+        if not first:
+            return [], [], 0
+
+        headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+        preview: list[list[str]] = []
+        total = 0
+
+        for row in row_iter:
+            total += 1
+            if len(preview) < preview_rows:
+                preview.append([str(c).strip() if c is not None else "" for c in row])
+
+        return headers, preview, total
+    finally:
+        wb.close()
+
+
+def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ValueError(
+            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+        ) from exc
+
+    wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
+        io.BytesIO(content), read_only=True, data_only=True
+    )
+    try:
+        ws = wb.active
+        if ws is None:
+            return
+
+        row_iter = ws.iter_rows(values_only=True)
+        first = next(row_iter, None)
+        if not first:
+            return
+
+        headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+        batch: list[dict] = []
+        for row in row_iter:
+            record = {
+                headers[i]: ("" if c is None else str(c).strip())
+                for i, c in enumerate(row[: len(headers)])
+            }
+            batch.append(record)
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+    finally:
+        wb.close()
+
+
+def _excel_count(content: bytes | str | os.PathLike) -> int:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ValueError(
+            "Excel import is not ready on this platform node. DataFlow bundles file parsers — retry shortly."
+        ) from exc
+
+    wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
+        io.BytesIO(content), read_only=True, data_only=True
+    )
+    try:
+        ws = wb.active
+        if ws is None:
+            return 0
+        return max(0, (ws.max_row or 1) - 1)
+    finally:
+        wb.close()
 
 
 def supports_file_streaming(source_kind: str, filename: str, destination: EndpointConfig) -> bool:
@@ -65,29 +232,59 @@ def supports_file_streaming(source_kind: str, filename: str, destination: Endpoi
     return FileParser.detect_file_type(filename) in STREAMABLE_TYPES
 
 
-def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str, str], int, list[dict]]:
+def peek_file_source(
+    content: bytes | str | os.PathLike,
+    filename: str,
+) -> tuple[list[str], dict[str, str], int, list[dict]]:
+    """Return headers, inferred schema, total row count, and a sample of <=100 rows.
+
+    Accepts either an in-memory ``bytes`` payload or an on-disk path so the
+    whole file never has to be loaded at once.
+    """
     try:
         from services.file_parser import FileParser
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
         from src.services.file_parser import FileParser
 
     file_type = FileParser.detect_file_type(filename)
+
     if file_type in ("csv", "tsv"):
-        headers, rows, _enc, delim = parse_csv_preview(content, preview_rows=100)
-        if not headers:
-            raise ValueError("CSV file has no header row")
-        total = count_csv_rows(content)
-        sample = [dict(zip(headers, row)) for row in rows[:100]]
+        # Fast path for in-memory payloads that already fit in RAM.
+        if isinstance(content, bytes):
+            headers, rows, _enc, _delim = parse_csv_preview(content, preview_rows=100)
+            if not headers:
+                raise ValueError("CSV file has no header row")
+            total = count_csv_rows(content)
+            sample = [dict(zip(headers, row)) for row in rows[:100]]
+            schema = FileParser.infer_schema(sample)
+            return headers, schema, total, sample
+
+        # Path-based streaming: read only the preview rows we need and count the
+        # rest in a single pass without materializing every cell.
+        sample_bytes = _first_bytes(content)
+        delim = detect_delimiter(sample_bytes.decode(detect_encoding(sample_bytes), errors="replace"))
+        preview_rows: list[list[str]] = []
+        total = 0
+        headers: list[str] = []
+        with _text_reader(content) as reader_file:
+            reader = csv.reader(reader_file, delimiter=delim)
+            try:
+                headers = next(reader)
+            except StopIteration:
+                raise ValueError("CSV file has no header row") from None
+            for i, row in enumerate(reader):
+                total += 1
+                if i < 100:
+                    preview_rows.append(row)
+        sample = [dict(zip(headers, row)) for row in preview_rows]
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
 
     if file_type in ("jsonl", "ndjson"):
-        enc = detect_encoding(content)
         sample_objs: list[dict] = []
         columns: set[str] = set()
         total = 0
-        reader_file = io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
-        try:
+        with _text_reader(content) as reader_file:
             for line in reader_file:
                 line = line.strip()
                 if not line:
@@ -98,8 +295,6 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
                     if isinstance(obj, dict):
                         sample_objs.append(obj)
                         columns.update(obj.keys())
-        finally:
-            reader_file.close()
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = sorted(columns)
@@ -107,18 +302,9 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
-        import sys
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[2]
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        from services.excel_parser import count_excel_rows, parse_excel_preview
-
-        headers, rows, _preview_total = parse_excel_preview(content, preview_rows=100)
+        headers, rows, total = _excel_preview(content, preview_rows=100)
         if not headers:
             raise ValueError("Excel file has no header row")
-        total = count_excel_rows(content)
         sample = [dict(zip(headers, row)) for row in rows[:100]]
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
@@ -126,7 +312,7 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
     if file_type == "parquet":
         import pyarrow.parquet as pq
 
-        pf = pq.ParquetFile(io.BytesIO(content))
+        pf = pq.ParquetFile(content) if _is_path(content) else pq.ParquetFile(io.BytesIO(content))
         try:
             total = pf.metadata.num_rows
             headers = [str(c) for c in pf.schema_arrow.names]
@@ -148,17 +334,17 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
     if file_type == "json":
         import ijson
 
-        bio = io.BytesIO(content)
         sample_objs: list[dict] = []
         columns: set[str] = set()
         total = 0
-        for obj in ijson.items(bio, "item"):
-            if not isinstance(obj, dict):
-                continue
-            total += 1
-            if len(sample_objs) < 100:
-                sample_objs.append(obj)
-                columns.update(obj.keys())
+        with _open_binary(content) as bio:
+            for obj in ijson.items(bio, "item"):
+                if not isinstance(obj, dict):
+                    continue
+                total += 1
+                if len(sample_objs) < 100:
+                    sample_objs.append(obj)
+                    columns.update(obj.keys())
         if total == 0:
             raise ValueError("JSON file must be an array of objects")
         headers = sorted(columns)
@@ -168,12 +354,15 @@ def peek_file_source(content: bytes, filename: str) -> tuple[list[str], dict[str
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
-def _iter_csv_batches(content: bytes, chunk_size: int):
-    enc = detect_encoding(content)
-    sample = content[:8192].decode(enc, errors="replace")
+def _iter_csv_batches(
+    content: bytes | str | os.PathLike,
+    chunk_size: int,
+):
+    sample_bytes = _first_bytes(content)
+    enc = detect_encoding(sample_bytes)
+    sample = sample_bytes.decode(enc, errors="replace")
     delim = detect_delimiter(sample)
-    reader_file = io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
-    try:
+    with _text_reader(content, encoding=enc, newline="") as reader_file:
         reader = csv.DictReader(reader_file, delimiter=delim)
         batch: list[dict] = []
         for row in reader:
@@ -183,14 +372,13 @@ def _iter_csv_batches(content: bytes, chunk_size: int):
                 batch = []
         if batch:
             yield batch
-    finally:
-        reader_file.close()
 
 
-def _iter_jsonl_batches(content: bytes, chunk_size: int):
-    enc = detect_encoding(content)
-    reader_file = io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
-    try:
+def _iter_jsonl_batches(
+    content: bytes | str | os.PathLike,
+    chunk_size: int,
+):
+    with _text_reader(content) as reader_file:
         batch: list[dict] = []
         for line in reader_file:
             line = line.strip()
@@ -205,30 +393,36 @@ def _iter_jsonl_batches(content: bytes, chunk_size: int):
                 batch = []
         if batch:
             yield batch
-    finally:
-        reader_file.close()
 
 
-def _iter_json_array_batches(content: bytes, chunk_size: int):
+def _iter_json_array_batches(
+    content: bytes | str | os.PathLike,
+    chunk_size: int,
+):
     import ijson
 
     batch: list[dict] = []
-    for obj in ijson.items(io.BytesIO(content), "item"):
-        if not isinstance(obj, dict):
-            continue
-        batch.append(obj)
-        if len(batch) >= chunk_size:
-            yield batch
-            batch = []
+    with _open_binary(content) as bio:
+        for obj in ijson.items(bio, "item"):
+            if not isinstance(obj, dict):
+                continue
+            batch.append(obj)
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
     if batch:
         yield batch
 
 
-def _batch_iterator_for_type(file_type: str, content: bytes, batch_size: int):
+def _batch_iterator_for_type(
+    file_type: str,
+    content: bytes | str | os.PathLike,
+    batch_size: int,
+):
     """Return a fresh batch iterator for the given file type.
 
     Used to re-scan a file from the beginning (e.g. on resume) without mutating
-    the primary streaming iterator.
+    the primary streaming iterator.  Accepts either ``bytes`` or an on-disk path.
     """
     if file_type in ("csv", "tsv"):
         return _iter_csv_batches(content, batch_size)
@@ -237,19 +431,11 @@ def _batch_iterator_for_type(file_type: str, content: bytes, batch_size: int):
     if file_type == "jsonl" or file_type == "ndjson":
         return _iter_jsonl_batches(content, batch_size)
     if file_type == "excel":
-        import sys
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[2]
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        from services.excel_parser import iter_excel_batches
-
-        return iter_excel_batches(content, batch_size)
+        return _excel_batches(content, batch_size)
     if file_type == "parquet":
         import pyarrow.parquet as pq
 
-        pf = pq.ParquetFile(io.BytesIO(content))
+        pf = pq.ParquetFile(content) if _is_path(content) else pq.ParquetFile(io.BytesIO(content))
 
         def _parquet_batches():
             batch: list[dict] = []
@@ -262,8 +448,9 @@ def _batch_iterator_for_type(file_type: str, content: bytes, batch_size: int):
                         if len(batch) >= batch_size:
                             yield batch
                             batch = []
-                if batch:
-                    yield batch
+                    if batch:
+                        yield batch
+                        batch = []
             finally:
                 pf.close()
 
@@ -271,8 +458,28 @@ def _batch_iterator_for_type(file_type: str, content: bytes, batch_size: int):
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
+def should_stream_file(
+    content: bytes | str | os.PathLike,
+    filename: str,
+    destination: EndpointConfig,
+) -> bool:
+    if not supports_file_streaming("file", filename, destination):
+        return False
+    if _is_path(content):
+        return True
+    if STREAM_THRESHOLD <= 1 and content:
+        return True
+    if not content:
+        return False
+    try:
+        _, _, total, _ = peek_file_source(content, filename)
+        return total >= STREAM_THRESHOLD
+    except Exception:
+        return False
+
+
 def stream_file_to_database(
-    content: bytes,
+    content: bytes | str | os.PathLike,
     filename: str,
     destination: EndpointConfig,
     mappings: list[dict],
@@ -530,13 +737,3 @@ def stream_file_to_database(
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if rejected_total else "none"
     return written, ddl_log, dest_summary, columns
-
-
-def should_stream_file(content: bytes, filename: str, destination: EndpointConfig) -> bool:
-    if not supports_file_streaming("file", filename, destination):
-        return False
-    try:
-        _, _, total, _ = peek_file_source(content, filename)
-        return total >= STREAM_THRESHOLD
-    except Exception:
-        return False
