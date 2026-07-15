@@ -761,25 +761,50 @@ def _build_table_for_write(
     columns: list[str],
     column_types: dict[str, str],
     db_type: str = "",
+    conflict_columns: list[str] | None = None,
 ) -> sa.Table:
-    """Build an explicit Table definition for CREATE/INSERT using the target schema."""
+    """Build an explicit Table definition for CREATE/INSERT using the target schema.
+
+    When ``conflict_columns`` are supplied for upsert, add a PRIMARY KEY over them
+    so native ``ON CONFLICT`` / ``ON DUPLICATE KEY`` upsert has the required
+    unique constraint and retries are truly idempotent.
+    """
     metadata = sa.MetaData()
     dialect_name = engine.dialect.name if engine.dialect else ""
+    conflict_cols = [c for c in (conflict_columns or []) if c in columns]
+    pk_set = set()
+    if conflict_cols:
+        pk_set = set(conflict_cols)
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
+        is_pk = col in pk_set
+        # Setting autoincrement=False prevents SQLAlchemy from fabricating a
+        # backing sequence for dialects (e.g. DuckDB) that do not create it
+        # automatically.  The PK exists purely for upsert semantics, not identity.
+        autoincrement = False if is_pk else None
         cols.append(
             sa.Column(
                 col,
                 _sa_type_for_logical(logical, dialect_name, db_type),
+                primary_key=is_pk,
+                nullable=not is_pk,
+                autoincrement=autoincrement,
                 quote=True,
             )
         )
+
+    constraints: list[Any] = []
+    if conflict_cols and not pk_set.issubset(set(columns)):
+        constraints.append(sa.UniqueConstraint(*conflict_cols, quote=True))
+
     if dialect_name == "clickhouse" and ch_engines is not None:
         return sa.Table(
             table_name,
             metadata,
             *cols,
+            *constraints,
             ch_engines.MergeTree(order_by=sa.text("tuple()")),
             schema=schema,
             quote=True,
@@ -790,6 +815,7 @@ def _build_table_for_write(
         table_name,
         metadata,
         *cols,
+        *constraints,
         schema=schema,
         quote=True,
         quote_schema=True,
@@ -1137,35 +1163,119 @@ def read_table_cursor_batch(
         engine.dispose()
 
 
+def _delete_by_keys(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    chunk_size: int = 1000,
+) -> None:
+    """Delete existing rows that match the provided conflict keys.
+
+    Uses equality ``OR (a=1 AND b=2)`` clauses instead of ``(a,b) IN (...)`` so
+    that NULL keys match correctly and dialects with limited tuple-IN support
+    still work.  Deletions are chunked to avoid generating queries that exceed
+    engine statement-length limits.
+    """
+    if not rows:
+        return
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        clauses = [
+            sa.and_(*[
+                (table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c])
+                for c in conflict_cols
+            ])
+            for row in chunk
+        ]
+        conn.execute(sa.delete(table_obj).where(sa.or_(*clauses)))
+
+
 def _upsert_batch(
     conn: Any,
     table_obj: sa.Table,
     batch: list[dict[str, Any]],
     conflict_columns: list[str],
     target_cols: list[str],
+    dialect_name: str,
 ) -> None:
-    """Delete rows matching the batch conflict keys, then re-insert.
+    """Write a batch idempotently using the best native upsert available.
 
-    This works across any SQLAlchemy dialect that supports `WHERE (a,b) IN (...)`
-    and `INSERT`/`DELETE` in the same transaction.  Rows are deduplicated on the
-    conflict key so the final insert never contains duplicates.
+    Deduplicates the batch on the conflict key, then:
+      * PostgreSQL, SQLite, MySQL/MariaDB: native ``ON CONFLICT`` /
+        ``ON DUPLICATE KEY`` upsert.
+      * Everyone else: chunked DELETE by equality keys followed by INSERT.
     """
     conflict_cols = [c for c in conflict_columns if c in target_cols]
     if not conflict_cols:
         conn.execute(table_obj.insert(), batch)
         return
 
+    # Last occurrence of each conflict key wins within the batch.
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in batch:
         key = tuple(row[c] for c in conflict_cols)
         deduped[key] = row
     rows = list(deduped.values())
-    keys = list(deduped.keys())
 
-    conflict_expr = sa.tuple_(*[table_obj.c[c] for c in conflict_cols])
-    delete_stmt = sa.delete(table_obj).where(conflict_expr.in_(keys))
-    conn.execute(delete_stmt)
-    conn.execute(table_obj.insert(), rows)
+    update_cols = [c for c in target_cols if c not in conflict_cols]
+
+    def _native_upsert() -> bool:
+        try:
+            if dialect_name == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                stmt = pg_insert(table_obj).values(rows)
+                if update_cols:
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=conflict_cols,
+                        set_={c: stmt.excluded[c] for c in update_cols},
+                    )
+                else:
+                    stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+                conn.execute(stmt)
+                return True
+
+            if dialect_name == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                stmt = sqlite_insert(table_obj).values(rows)
+                if update_cols:
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=conflict_cols,
+                        set_={c: stmt.excluded[c] for c in update_cols},
+                    )
+                else:
+                    stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+                conn.execute(stmt)
+                return True
+
+            if dialect_name in ("mysql", "mariadb"):
+                from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+                stmt = mysql_insert(table_obj).values(rows)
+                if update_cols:
+                    stmt = stmt.on_duplicate_key_update(
+                        {c: stmt.inserted[c] for c in update_cols}
+                    )
+                else:
+                    stmt = stmt.prefix_with("IGNORE")
+                conn.execute(stmt)
+                return True
+        except Exception:
+            # Native upsert can fail if the table lacks the required unique
+            # index/constraint.  Roll back the aborted transaction so the
+            # delete+insert fallback can run cleanly.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        return False
+
+    if not _native_upsert():
+        _delete_by_keys(conn, table_obj, rows, conflict_cols)
+        conn.execute(table_obj.insert(), rows)
 
 
 def write_mapped_rows(
@@ -1238,7 +1348,15 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
 
-    table_obj = _build_table_for_write(engine, table_name, schema_name, target_cols, target_column_types, db_type=cfg.get("type", ""))
+    table_obj = _build_table_for_write(
+        engine,
+        table_name,
+        schema_name,
+        target_cols,
+        target_column_types,
+        db_type=cfg.get("type", ""),
+        conflict_columns=conflict_columns,
+    )
 
     dialect_name = engine.dialect.name if engine.dialect else ""
     sa_col_types = {col: _sa_type_for_logical(target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")) for col in target_cols}
@@ -1294,7 +1412,7 @@ def write_mapped_rows(
                     break
 
                 if write_mode == "upsert" and conflict_columns:
-                    _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols)
+                    _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols, dialect_name)
                 else:
                     conn.execute(table_obj.insert(), batch)
                 conn.commit()
