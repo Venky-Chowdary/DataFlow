@@ -50,7 +50,12 @@ class ConnectorSaveDTO(BaseModel):
 def _to_ui(c) -> dict[str, Any]:
     d = mask_connector(c)
     d["id"] = d["id"]
-    d["status"] = "configured" if c.last_test_ok else ("error" if c.last_tested_at and not c.last_test_ok else "configured")
+    if c.last_test_ok is True:
+        d["status"] = "configured"
+    elif c.last_test_ok is False and c.last_tested_at:
+        d["status"] = "error"
+    else:
+        d["status"] = "configured"
     return d
 
 

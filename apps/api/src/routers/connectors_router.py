@@ -287,7 +287,7 @@ async def list_connectors():
                         "host": c.host,
                         "port": c.port,
                         "database": c.database,
-                        "status": "configured" if c.last_test_ok else ("error" if c.last_tested_at and not c.last_test_ok else "configured"),
+                        "status": "configured" if c.last_test_ok is True else ("error" if c.last_tested_at and c.last_test_ok is False else "configured"),
                         "created_at": c.created_at,
                         "last_test_ok": c.last_test_ok,
                     }
@@ -301,20 +301,31 @@ async def list_connectors():
     try:
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
-        
+
+        def _status_from_doc(c: dict) -> str:
+            last_ok = c.get("last_test_ok")
+            last_at = c.get("last_tested_at")
+            if last_ok is True:
+                return "configured"
+            if last_ok is False and last_at:
+                return "error"
+            return "configured"
+
         result = []
         for c in connectors:
+            created = c.get("created_at")
             result.append({
                 "id": c["_id"],
                 "name": c["name"],
                 "type": c["type"],
-                "host": c["host"],
-                "port": c["port"],
+                "host": c.get("host", ""),
+                "port": c.get("port", 0),
                 "database": c.get("database", ""),
-                "status": c.get("status", "configured"),
-                "created_at": c["created_at"].isoformat() if c.get("created_at") else None,
+                "status": _status_from_doc(c),
+                "created_at": created.isoformat() if created and hasattr(created, "isoformat") else created,
+                "last_test_ok": c.get("last_test_ok"),
             })
-        
+
         return {"connectors": result, "count": len(result)}
         
     except Exception as e:
