@@ -34,7 +34,11 @@ export function StructurePreview({
 }: StructurePreviewProps) {
   const rowsPerPage = maxRows ?? (fill ? 40 : 10);
   const [page, setPage] = useState(0);
+  const [showAllFields, setShowAllFields] = useState(false);
   const previewCols = columns.slice(0, maxCols ?? columns.length);
+  const STRIP_CAP = 24;
+  const stripCols = showAllFields ? previewCols : previewCols.slice(0, STRIP_CAP);
+  const hiddenFieldCount = previewCols.length - stripCols.length;
   const pageCount = Math.max(1, Math.ceil(rows.length / rowsPerPage));
   const safePage = Math.min(page, pageCount - 1);
   const previewRows = rows.slice(safePage * rowsPerPage, (safePage + 1) * rowsPerPage);
@@ -66,13 +70,33 @@ export function StructurePreview({
       </div>
 
       {showFieldStrip && (
-        <div className="df2-structure-field-strip" aria-label="Detected fields">
-          {previewCols.map((col) => (
-            <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}>
-              <strong>{col}</strong>
-              <small className="df2-type-badge">{schema[col] || "string"}</small>
-            </span>
-          ))}
+        <div className="df2-structure-field-block">
+          <div className="df2-structure-field-strip" aria-label="Detected fields">
+            {stripCols.map((col) => (
+              <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`} title={`${col} · ${schema[col] || "string"}`}>
+                <strong>{col}</strong>
+                <small className="df2-type-badge">{schema[col] || "string"}</small>
+              </span>
+            ))}
+            {hiddenFieldCount > 0 && (
+              <button
+                type="button"
+                className="df2-structure-field-more"
+                onClick={() => setShowAllFields(true)}
+              >
+                +{hiddenFieldCount} more
+              </button>
+            )}
+            {showAllFields && previewCols.length > STRIP_CAP && (
+              <button
+                type="button"
+                className="df2-structure-field-more"
+                onClick={() => setShowAllFields(false)}
+              >
+                Show less
+              </button>
+            )}
+          </div>
         </div>
       )}
 

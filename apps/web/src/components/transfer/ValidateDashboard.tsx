@@ -115,10 +115,19 @@ export function ValidateDashboard({ preflight, running = false, confidenceThresh
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
   const reconciliation = proof?.reconciliation;
 
-  const statusForGate = (meta: GateMeta): { status: string; message: string } => {
+  // While validating we don't have real gate results yet, so animate the rules
+  // sequentially with the progress bar — one "running" at a time reads far
+  // cleaner than a wall of 12 spinners.
+  const activeRuleIndex = Math.floor((progress / 100) * GATE_META.length);
+
+  const statusForGate = (meta: GateMeta, index: number): { status: string; message: string } => {
     const gate = gateByKey.get(meta.key);
     if (gate) return { status: gate.status, message: gate.message };
-    if (running) return { status: "running", message: "Evaluating rule…" };
+    if (running) {
+      if (index < activeRuleIndex) return { status: "pass", message: "Checked" };
+      if (index === activeRuleIndex) return { status: "running", message: "Evaluating rule…" };
+      return { status: "pending", message: "Queued" };
+    }
     return { status: "pending", message: "Awaiting validation run." };
   };
 
@@ -181,12 +190,14 @@ export function ValidateDashboard({ preflight, running = false, confidenceThresh
         </div>
       </header>
 
-      <div className="df2-vd-metrics">
-        <Ring value={running ? progress : readiness} label="Readiness" sub="Overall route score" tone={heroTone} />
-        <Ring value={semantic * 100} label="Semantic mapping" sub="Column match confidence" tone="approve" />
-        <Ring value={quality * 100} label="Data quality" sub="Profiled quality grade" tone="approve" />
-        <Ring value={(1 - complianceRisk) * 100} label="Compliance" sub={`Risk ${complianceRisk.toFixed(2)}`} tone={complianceRisk > 0.4 ? "review" : "approve"} />
-      </div>
+      {!running && preflight && (
+        <div className="df2-vd-metrics">
+          <Ring value={readiness} label="Readiness" sub="Overall route score" tone={heroTone} />
+          <Ring value={semantic * 100} label="Semantic mapping" sub="Column match confidence" tone="approve" />
+          <Ring value={quality * 100} label="Data quality" sub="Profiled quality grade" tone="approve" />
+          <Ring value={(1 - complianceRisk) * 100} label="Compliance" sub={`Risk ${complianceRisk.toFixed(2)}`} tone={complianceRisk > 0.4 ? "review" : "approve"} />
+        </div>
+      )}
 
       <div className="df2-vd-rules">
         <div className="df2-vd-rules-head">
@@ -195,8 +206,8 @@ export function ValidateDashboard({ preflight, running = false, confidenceThresh
           <span>{totalGates} checks enforced before write · threshold {(confidenceThreshold * 100).toFixed(0)}%</span>
         </div>
         <div className="df2-vd-rules-grid">
-          {GATE_META.map((meta) => {
-            const { status, message } = statusForGate(meta);
+          {GATE_META.map((meta, index) => {
+            const { status, message } = statusForGate(meta, index);
             return (
               <article key={meta.key} className={`df2-vd-rule status-${status}`}>
                 <div className="df2-vd-rule-top">
