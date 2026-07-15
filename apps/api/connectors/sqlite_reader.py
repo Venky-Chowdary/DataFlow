@@ -45,8 +45,10 @@ def read_table_batch(
         cur.execute(f"SELECT COUNT(*) FROM {table_quoted}")
         total = cur.fetchone()[0]
 
+        # rowid gives a stable total order for ordinary SQLite tables, preventing
+        # duplicate/missing rows when paging with LIMIT/OFFSET.
         cur.execute(
-            f"SELECT * FROM {table_quoted} LIMIT ? OFFSET ?",
+            f"SELECT * FROM {table_quoted} ORDER BY rowid LIMIT ? OFFSET ?",
             (limit, offset),
         )
         rows = cur.fetchall()
