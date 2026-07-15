@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import date as _date, datetime as _datetime, time as _time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
@@ -697,6 +698,14 @@ def normalize_cell(value: Any) -> str:
         return ""
     if isinstance(value, bool):
         return "1" if value else "0"
+    if isinstance(value, _datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, _date):
+        return _datetime.combine(value, _time.min, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if isinstance(value, float):
         return _canonicalize_number(str(value)) or "nan"
     if isinstance(value, int):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -136,6 +137,7 @@ def _to_utc_z(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+@functools.lru_cache(maxsize=4096)
 def _parse_datetime(value: str) -> str | None:
     text = value.strip()
     if not _DATE_LIKE_RE.search(text):
@@ -164,6 +166,7 @@ _EPOCH_MS_RE = re.compile(r"^\d{13}$")
 _EPOCH_S_RE = re.compile(r"^\d{10}$")
 
 
+@functools.lru_cache(maxsize=4096)
 def _parse_date(value: str, *, with_time: bool = False) -> str | None:
     text = value.strip()
     if not text:
