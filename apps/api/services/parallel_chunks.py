@@ -38,10 +38,18 @@ class ChunkDispatcher:
     bookmarks) under the caller's control. Completed chunks are buffered and
     returned in ascending index order so checkpoints and accumulators can be
     updated sequentially while reads/writes overlap.
+
+    A bounded ``max_inflight`` cap is enforced in :meth:`submit` so a fast source
+    reader cannot outrun slow destination writers and exhaust memory.
     """
 
-    def __init__(self, max_workers: int | None = None) -> None:
+    def __init__(
+        self,
+        max_workers: int | None = None,
+        max_inflight: int | None = None,
+    ) -> None:
         self.max_workers = max_workers if max_workers is not None else DEFAULT_WORKERS
+        self.max_inflight = max_inflight if max_inflight is not None else max(self.max_workers * 2, 4)
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._pending: dict[concurrent.futures.Future, int] = {}
         self._buffer: dict[int, R] = {}
@@ -66,10 +74,24 @@ class ChunkDispatcher:
             self._executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
 
-    def submit(self, idx: int, item: T, process: Callable[[int, T], R]) -> None:
-        """Submit a chunk to the worker pool."""
+    def _wait_for_room(self) -> None:
+        """Block until at least one in-flight chunk has completed."""
         if self._executor is None:
             raise RuntimeError("Use ChunkDispatcher as a context manager (with ...)")
+        while len(self._pending) >= self.max_inflight:
+            done, _ = concurrent.futures.wait(
+                self._pending.keys(),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                idx = self._pending.pop(future)
+                self._buffer[idx] = future.result()
+
+    def submit(self, idx: int, item: T, process: Callable[[int, T], R]) -> None:
+        """Submit a chunk to the worker pool, blocking if the in-flight cap is reached."""
+        if self._executor is None:
+            raise RuntimeError("Use ChunkDispatcher as a context manager (with ...)")
+        self._wait_for_room()
         future = self._executor.submit(process, idx, item)
         self._pending[future] = idx
         if self._next_yield is None:
@@ -170,13 +192,6 @@ class OrderedChunkRunner(ChunkDispatcher):
 
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
-
-        def _pull_input() -> tuple[int, T] | None:
-            """Return the next prefetched item, or ``None`` if none is available yet."""
-            try:
-                return self._prefetch.get(timeout=0.05)
-            except queue.Empty:
-                return (..., ...)  # type: ignore[return-value]
 
         try:
             input_exhausted = False

@@ -159,6 +159,9 @@ class BatchDriftDetector:
             self.baseline = {
                 col: dict(s) for col, s in stats.get("columns", {}).items()
             }
+            self.baseline["__batch__"] = {
+                "total_rows": stats.get("total_rows", 0),
+            }
 
     def check(self, stats: dict[str, Any]) -> list[str]:
         if not self.baseline:
@@ -169,6 +172,17 @@ class BatchDriftDetector:
         current_cols = stats.get("columns", {})
 
         for col, base in self.baseline.items():
+            if col == "__batch__":
+                base_rows = base.get("total_rows", 0)
+                cur_rows = stats.get("total_rows", 0)
+                if base_rows and cur_rows:
+                    ratio = cur_rows / base_rows
+                    if ratio < 0.5 or ratio > 2.0:
+                        warnings.append(
+                            f"Batch row count drift: {base_rows} → {cur_rows} ({ratio:.2f}x)"
+                        )
+                continue
+
             if col not in current_cols:
                 warnings.append(f"Column '{col}' missing in current batch (schema drift)")
                 continue
@@ -212,11 +226,28 @@ class BatchDriftDetector:
                 and isinstance(cur_stdev, (int, float, Decimal))
                 and float(base_stdev) != 0.0
             ):
-                rel = abs(float(base_stdev) - float(cur_stdev)) / abs(float(base_stdev))
+                rel = abs(float(cur_stdev) - float(base_stdev)) / abs(float(base_stdev))
                 if rel > self.numeric_threshold:
                     warnings.append(
                         f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
                     )
+
+            # Range drift for numeric / date-like columns
+            for stat in ("min", "max"):
+                base_val = base.get(stat)
+                cur_val = cur.get(stat)
+                if (
+                    base_val is not None
+                    and cur_val is not None
+                    and isinstance(base_val, (int, float, Decimal))
+                    and isinstance(cur_val, (int, float, Decimal))
+                    and float(base_val) != 0.0
+                ):
+                    rel = abs(float(cur_val) - float(base_val)) / abs(float(base_val))
+                    if rel > self.numeric_threshold:
+                        warnings.append(
+                            f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
+                        )
 
         for col in current_cols:
             if col not in self.baseline:
