@@ -16,8 +16,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 try:
+    from services.pii_guard import detect_pii, is_sensitive_name
     from services.transform_engine import apply_transform
 except ImportError:  # pragma: no cover - compatibility for tests
+    from src.services.pii_guard import detect_pii, is_sensitive_name
     from src.services.transform_engine import apply_transform
 
 _UTC = timezone.utc
@@ -445,6 +447,39 @@ def run_integrity_audit(
         report.checks_passed += 1
 
     stats["anomalous_rows"] = len(anomalous_rows)
+
+    # 4. PII / sensitive-data scan (soft warnings)
+    protected_transforms = {"hash_pii", "mask_pii"}
+    protected_sources = {
+        m["source"]
+        for m in (mappings or [])
+        if m.get("transform") in protected_transforms
+        or (m.get("target") in {m2.get("target") for m2 in (mappings or []) if m2.get("transform") in protected_transforms})
+    }
+    pii_findings: dict[str, dict[str, int]] = {}
+    for h in headers:
+        idx = header_index[h]
+        values = [row[idx] if idx < len(row) else "" for row in rows]
+        col_findings: dict[str, int] = {}
+        for v in values:
+            if _is_null(v):
+                continue
+            res = detect_pii(v)
+            if res["has_pii"]:
+                for label, count in res["findings"].items():
+                    col_findings[label] = col_findings.get(label, 0) + count
+        if col_findings:
+            pii_findings[h] = col_findings
+            if h not in protected_sources:
+                _warn(
+                    f"Column '{h}' contains potential PII/PHI ({col_findings}); "
+                    f"consider hash_pii/mask_pii transform"
+                )
+        elif is_sensitive_name(h) and h not in protected_sources:
+            _warn(f"Column '{h}' has a sensitive name but no PII transform")
+
+    stats["pii_findings"] = pii_findings
+
     report.stats = stats
 
     # In maximum mode warnings are treated as blockers.

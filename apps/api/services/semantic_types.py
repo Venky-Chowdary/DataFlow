@@ -123,6 +123,12 @@ def normalize_value(value: Any, semantic_type: SemanticType, target_string: bool
         return None
 
     if semantic_type == SemanticType.PHONE:
+        # For generic string targets, preserve the original formatting so a
+        # phone like "+1-555-0199" is not silently stripped to "+15550199".
+        # If the caller explicitly asks for a non-string (canonical) form,
+        # the digits-only representation is returned instead.
+        if target_string:
+            return text
         digits = _digits_only(text)
         return digits if digits else text
 

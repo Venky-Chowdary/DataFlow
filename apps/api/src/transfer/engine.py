@@ -3,7 +3,9 @@
 from __future__ import annotations
 import logging
 import os
+import resource
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -288,7 +290,30 @@ class UniversalTransferEngine:
         job_id = self._create_pending_job(request)
         return self.execute_tracked(request, job_id)
 
+    @staticmethod
+    def _peak_memory_bytes() -> int:
+        """Return the maximum resident set size (bytes) for this process so far."""
+        try:
+            return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        except Exception:
+            return 0
+
     def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
+        """Timed wrapper around the core transfer engine."""
+        start = time.monotonic()
+        start_mem = self._peak_memory_bytes()
+        result = self._execute_tracked_core(request, job_id, resume=resume)
+        elapsed = time.monotonic() - start
+        result.elapsed_seconds = round(elapsed, 3)
+        result.records_per_second = round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+        result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
+        # Surface SLA metrics in the destination summary for the UI / API consumers.
+        result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
+        result.destination_summary["records_per_second"] = result.records_per_second
+        result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+        return result
+
+    def _execute_tracked_core(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
         checkpoint = None

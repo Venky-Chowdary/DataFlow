@@ -17,8 +17,9 @@ from services.transform_engine import apply_transform, infer_transform_for_mappi
 
 
 def test_apply_transform_phone():
-    assert apply_transform("+1 (555) 123-4567", "phone") == ("+15551234567", None)
-    assert apply_transform("555-123-4567", "phone") == ("5551234567", None)
+    # For generic string targets the phone transform preserves formatting.
+    assert apply_transform("+1 (555) 123-4567", "phone") == ("+1 (555) 123-4567", None)
+    assert apply_transform("555-123-4567", "phone") == ("555-123-4567", None)
 
 
 def test_apply_transform_email():

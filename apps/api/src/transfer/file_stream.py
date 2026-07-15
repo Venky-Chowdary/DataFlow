@@ -6,6 +6,7 @@ billion-row files can be processed without loading the whole payload into RAM.
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import itertools
 import json
@@ -96,16 +97,40 @@ def prepare_stream_content(
     return path
 
 
+def _is_gzip_bytes(sample: bytes) -> bool:
+    return bool(sample) and sample[:2] == b"\x1f\x8b"
+
+
+def _is_gzip_path(path: str | os.PathLike) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except Exception:
+        return False
+
+
 def _first_bytes(content: bytes | str | os.PathLike, size: int = 8192) -> bytes:
+    """Return a decompressed prefix for sniffing."""
     if _is_path(content):
+        if _is_gzip_path(content):
+            with gzip.open(content, "rb") as f:
+                return f.read(size)
         with open(content, "rb") as f:
+            return f.read(size)
+    if isinstance(content, (bytes, bytearray)) and _is_gzip_bytes(content):
+        with gzip.GzipFile(fileobj=io.BytesIO(content)) as f:
             return f.read(size)
     return bytes(content[:size])
 
 
 def _open_binary(content: bytes | str | os.PathLike) -> Any:
+    """Open a binary stream, transparently decompressing gzip payloads."""
     if _is_path(content):
+        if _is_gzip_path(content):
+            return gzip.open(content, "rb")
         return open(content, "rb")
+    if isinstance(content, (bytes, bytearray)) and _is_gzip_bytes(content):
+        return gzip.GzipFile(fileobj=io.BytesIO(content))
     return io.BytesIO(content)
 
 
@@ -232,6 +257,16 @@ def supports_file_streaming(source_kind: str, filename: str, destination: Endpoi
     return FileParser.detect_file_type(filename) in STREAMABLE_TYPES
 
 
+def _decompress_bytes_if_gzip(data: bytes) -> bytes:
+    """Decompress an in-memory gzip payload when applicable."""
+    if _is_gzip_bytes(data):
+        try:
+            return gzip.decompress(data)
+        except Exception:
+            pass
+    return data
+
+
 def peek_file_source(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -239,22 +274,25 @@ def peek_file_source(
     """Return headers, inferred schema, total row count, and a sample of <=100 rows.
 
     Accepts either an in-memory ``bytes`` payload or an on-disk path so the
-    whole file never has to be loaded at once.
+    whole file never has to be loaded at once.  Gzip-compressed payloads are
+    decompressed on the fly.
     """
     try:
         from services.file_parser import FileParser
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
         from src.services.file_parser import FileParser
 
-    file_type = FileParser.detect_file_type(filename)
+    raw_bytes = content if isinstance(content, bytes) else b""
+    file_type = FileParser.detect_file_type(filename, raw_bytes or None)
 
     if file_type in ("csv", "tsv"):
         # Fast path for in-memory payloads that already fit in RAM.
         if isinstance(content, bytes):
-            headers, rows, _enc, _delim = parse_csv_preview(content, preview_rows=100)
+            raw = _decompress_bytes_if_gzip(content)
+            headers, rows, _enc, _delim = parse_csv_preview(raw, preview_rows=100)
             if not headers:
                 raise ValueError("CSV file has no header row")
-            total = count_csv_rows(content)
+            total = count_csv_rows(raw)
             sample = [dict(zip(headers, row)) for row in rows[:100]]
             schema = FileParser.infer_schema(sample)
             return headers, schema, total, sample

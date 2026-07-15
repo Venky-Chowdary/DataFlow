@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.pii_guard import detect_pii, mask as pii_mask
 from services.value_serializer import json_default
 from services.semantic_types import SemanticType, normalize_value_for_target, detect_semantic_type
 
@@ -446,7 +447,7 @@ def _hash_pii(value: str) -> str:
 
 KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "json", "binary",
-    "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "none", "identity",
+    "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
 })
 
@@ -640,6 +641,9 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
     if transform == "hash_pii":
         return _hash_pii(text), None
+
+    if transform == "mask_pii":
+        return pii_mask(text), None
 
     semantic_transform_map = {
         "phone": SemanticType.PHONE,

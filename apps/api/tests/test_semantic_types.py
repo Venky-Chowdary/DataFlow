@@ -38,9 +38,16 @@ def test_detect_by_sample():
 
 
 def test_phone_normalization():
-    assert normalize_value("+1 (555) 123-4567", SemanticType.PHONE) == "+15551234567"
-    assert normalize_value("(555) 123-4567", SemanticType.PHONE) == "5551234567"
+    # Generic string targets preserve formatting to avoid data loss.
+    assert normalize_value("+1 (555) 123-4567", SemanticType.PHONE) == "+1 (555) 123-4567"
+    assert normalize_value("(555) 123-4567", SemanticType.PHONE) == "(555) 123-4567"
     assert normalize_value("N/A", SemanticType.PHONE) == "N/A"
+
+
+def test_phone_normalization_canonical_digits():
+    # When a non-string / typed target is requested, digits-only canonical form is used.
+    assert normalize_value("+1 (555) 123-4567", SemanticType.PHONE, target_string=False) == "+15551234567"
+    assert normalize_value("(555) 123-4567", SemanticType.PHONE, target_string=False) == "5551234567"
 
 
 def test_email_normalization():
