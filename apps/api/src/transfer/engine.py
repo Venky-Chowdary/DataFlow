@@ -29,6 +29,7 @@ try:
     from services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
     from services.pipeline_explanation import build_pipeline_explanation
+    from services.mirror_engine import apply_inferred_soft_deletes
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -42,6 +43,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
     from src.services.pipeline_explanation import build_pipeline_explanation
+    from src.services.mirror_engine import apply_inferred_soft_deletes
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -142,6 +144,27 @@ def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") 
         return dict(info.get("schema") or {})
     except Exception:
         return {}
+
+
+def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
+    """Infer the primary key target column for mirror/upsert transfers.
+
+    Prefers a mapping whose source column is named ``id`` or ends with ``_id``,
+    then any source column that looks like a unique identifier.  Returns the
+    target column name (or the source name if the mapping has no explicit target).
+    """
+    if not columns:
+        return ""
+    mapping_dict = {m.get("source", ""): m.get("target", m.get("source", "")) for m in mappings}
+    candidates = [c for c in columns if c.lower() == "id" or c.lower().endswith("_id")]
+    if not candidates:
+        # Fall back to the first short, non-nullable-looking column name.
+        candidates = [columns[0]]
+    for src in candidates:
+        tgt = mapping_dict.get(src, src)
+        if tgt:
+            return tgt
+    return mapping_dict.get(columns[0], columns[0])
 
 
 def _checkpoint_has_progress(checkpoint: Any) -> bool:
@@ -441,10 +464,12 @@ class UniversalTransferEngine:
                 checkpoint_service=checkpoint_service,
             )
 
+        mirror_mode = request.sync_mode.lower() in ("full_refresh_mirror", "mirror")
         if (
             request.source.kind == "file"
             and request.destination.kind == "database"
             and (request.source_content or request.source_path)
+            and not mirror_mode
             and should_stream_file(
                 request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
@@ -487,10 +512,15 @@ class UniversalTransferEngine:
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = contract.sync_mode if contract else request.sync_mode
+            effective_sync_lower = (effective_sync or "").lower()
             write_mode = "insert"
             conflict_columns: list[str] = []
             if contract and contract.primary_key:
                 conflict_columns = [map_source_to_target(contract.primary_key, mappings)]
+            if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror"):
+                inferred_pk = _infer_primary_key(columns, mappings)
+                if inferred_pk:
+                    conflict_columns = [inferred_pk]
             if requires_upsert(effective_sync) and conflict_columns:
                 write_mode = "upsert"
 
@@ -683,6 +713,17 @@ class UniversalTransferEngine:
                     _write_destination_with_drop,
                     budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                 )
+                if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
+                    mirror_summary = apply_inferred_soft_deletes(
+                        request.destination,
+                        records,
+                        columns,
+                        schema,
+                        mappings,
+                        conflict_columns,
+                    )
+                    dest_summary["mirror"] = mirror_summary
+                    rows_written = mirror_summary.get("active_rows", rows_written)
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
             elif request.destination.kind == "file_export":
@@ -1035,7 +1076,13 @@ class UniversalTransferEngine:
                 if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
                     _drop_destination_table(request.destination)
 
-            effective_sync = (resolve_sync_contract(request.stream_contracts).sync_mode if resolve_sync_contract(request.stream_contracts) else request.sync_mode).lower()
+            stream_contract = resolve_sync_contract(request.stream_contracts)
+            effective_sync = (stream_contract.sync_mode if stream_contract else request.sync_mode).lower()
+            if effective_sync in ("full_refresh_mirror", "mirror"):
+                raise NotImplementedError(
+                    "full_refresh_mirror is not supported for streaming database-to-database transfers; "
+                    "use a file source or a non-streaming database source."
+                )
             if effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
                     request.source,

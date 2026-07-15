@@ -346,6 +346,11 @@ def _engine(cfg: dict[str, Any]) -> Any:
     return create_engine(url, pool_pre_ping=True, pool_recycle=600)
 
 
+def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
+    """Public accessor for a configured SQLAlchemy engine."""
+    return _engine(cfg)
+
+
 def _schema_name(cfg: dict[str, Any]) -> str | None:
     schema = cfg.get("schema") or ""
     db_type = (cfg.get("type") or "").lower()
@@ -367,6 +372,11 @@ def _schema_name(cfg: dict[str, Any]) -> str | None:
         if db_type == "trino":
             return "default"
     return schema or None
+
+
+def get_sql_schema(cfg: dict[str, Any]) -> str | None:
+    """Public accessor for the SQL schema name implied by a connector config."""
+    return _schema_name(cfg)
 
 
 def _type_repr(type_obj: Any) -> str:
