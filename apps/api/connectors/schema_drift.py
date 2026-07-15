@@ -23,7 +23,9 @@ def add_missing_columns(
 
     If ``backfill`` is False no changes are made.  When True, existing tables
     are inspected and ``ALTER TABLE ADD COLUMN`` statements are issued for each
-    missing column.  Returns the list of DDL statements executed.
+    missing column.  Statements are idempotent: ``IF NOT EXISTS`` is used when the
+    dialect supports it, and "already exists" errors are swallowed so concurrent
+    or resume runs do not fail.  Returns the list of DDL statements executed.
     """
     if not backfill:
         return []
@@ -42,8 +44,22 @@ def add_missing_columns(
     dialect = engine.dialect
     dialect_name = getattr(dialect, "name", "")
     keyword = "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
+    supports_if_not_exists = dialect_name in {"postgresql", "sqlite", "duckdb"}
+    if_not_exists = " IF NOT EXISTS" if supports_if_not_exists else ""
     log: list[str] = []
     quoted_schema = f'"{schema}"' if schema else None
+
+    def _column_exists_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "already exists",
+                "duplicate column",
+                "column already exists",
+                "duplicate key",
+            )
+        )
 
     def _run(conn: Any) -> None:
         for col in missing:
@@ -57,10 +73,19 @@ def add_missing_columns(
                 qualified = f"{quoted_schema}.\"{table_name}\""
             else:
                 qualified = f'"{table_name}"'
-            alter = f"ALTER TABLE {qualified} {keyword} {col_ddl}"
-            conn.execute(sa.text(alter))
-            conn.commit()
-            log.append(alter)
+            alter = f"ALTER TABLE {qualified} {keyword}{if_not_exists} {col_ddl}"
+            try:
+                conn.execute(sa.text(alter))
+                conn.commit()
+                log.append(alter)
+            except Exception as exc:
+                if _column_exists_error(exc):
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    continue
+                raise
 
     if connection is None:
         with engine.connect() as conn:
