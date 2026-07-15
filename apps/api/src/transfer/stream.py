@@ -765,6 +765,11 @@ def stream_database_transfer(
         avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
     target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
     chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
+    # Chunked writes would overwrite the same key and silently lose data.
+    # Force a single chunk so all rows are written once.
+    if dest_type in ("s3", "gcs", "adls") and total_rows:
+        chunk_size = max(1, total_rows)
 
     probe, ddb_cursor = _unwrap_read(
         _read_batch(

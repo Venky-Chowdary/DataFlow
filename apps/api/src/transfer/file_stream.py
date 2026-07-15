@@ -560,6 +560,11 @@ def stream_file_to_database(
     # to avoid payload limits (e.g. BigQuery streaming insert ~10 MB).
     target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
     batch_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
+    # Writing multiple batches would overwrite the same key and silently lose data,
+    # so force a single batch for those destinations.
+    if dest_type in ("s3", "gcs", "adls") and total_rows:
+        batch_size = max(1, total_rows)
     chunks = max(1, (total_rows + batch_size - 1) // batch_size)
     dest_table = resolve_dest_table(dest_type, destination, "import")
 
