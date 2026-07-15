@@ -110,25 +110,17 @@ def apply_integrations_to_env() -> None:
 
     data = _load_raw()
     env_map = {
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": ("OPENAI_API_KEY", "OPENAI_MODEL"),
+        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
     }
-    for provider, env_key in env_map.items():
-        if os.environ.get(env_key):
-            continue
-        cfg = data["ai_providers"].get(provider, {})
-        if not cfg.get("enabled", True):
-            continue
-        stored = cfg.get("api_key", "")
-        if stored:
-            plain = decrypt_secret(stored)
+    for provider, (env_key, model_env_key) in env_map.items():
+        if not os.environ.get(env_key):
+            plain = resolve_provider_api_key(provider)
             if plain:
                 os.environ[env_key] = plain
-        model = cfg.get("model")
-        if provider == "openai" and model and not os.environ.get("OPENAI_MODEL"):
-            os.environ["OPENAI_MODEL"] = model
-        if provider == "anthropic" and model and not os.environ.get("ANTHROPIC_MODEL"):
-            os.environ["ANTHROPIC_MODEL"] = model
+        model = data["ai_providers"].get(provider, {}).get("model")
+        if model and not os.environ.get(model_env_key):
+            os.environ[model_env_key] = str(model)
 
     ollama = data["ai_providers"].get("ollama", {})
     if ollama.get("base_url") and not os.environ.get("OLLAMA_BASE_URL"):
@@ -268,15 +260,28 @@ def resolve_provider_api_key(provider: str) -> str:
 
     env_map = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
     env_key = env_map.get(provider)
-    if env_key and os.environ.get(env_key):
-        return os.environ[env_key]
+    if env_key:
+        env_val = os.environ.get(env_key, "")
+        if env_val and not _is_invalid_secret(env_val):
+            return env_val
 
     data = _load_raw()
     cfg = data["ai_providers"].get(provider, {})
     if not cfg.get("enabled", True):
         return ""
     stored = cfg.get("api_key", "")
-    return decrypt_secret(stored) if stored else ""
+    if not stored:
+        return ""
+    plain = decrypt_secret(stored)
+    return "" if _is_invalid_secret(plain) else plain
+
+
+def _is_invalid_secret(value: str) -> bool:
+    """True for masked, sentinel, or corrupted secret values."""
+    if not value:
+        return True
+    stripped = value.strip()
+    return stripped.startswith("[") or stripped.startswith("•") or stripped == _MASK
 
 
 def resolve_provider_model(provider: str, default: str) -> str:

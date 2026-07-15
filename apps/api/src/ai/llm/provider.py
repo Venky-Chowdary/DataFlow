@@ -13,6 +13,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def _is_valid_api_key(value: str) -> bool:
+    """Reject masked or sentinel keys that may leak through the store."""
+    if not value or not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return not (stripped.startswith("[") or stripped.startswith("•"))
+
+
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
@@ -52,7 +60,7 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
             from services.integrations_store import resolve_provider_api_key
 
             api_key = resolve_provider_api_key("openai")
-            if api_key:
+            if api_key and _is_valid_api_key(api_key):
                 try:
                     from openai import OpenAI
 
@@ -108,7 +116,7 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
             from services.integrations_store import resolve_provider_api_key
 
             api_key = resolve_provider_api_key("anthropic")
-            if api_key:
+            if api_key and _is_valid_api_key(api_key):
                 try:
                     import anthropic
 
