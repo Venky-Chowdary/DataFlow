@@ -48,15 +48,19 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
         self._init_client()
 
     def _init_client(self):
-        from services.integrations_store import resolve_provider_api_key
+        try:
+            from services.integrations_store import resolve_provider_api_key
 
-        api_key = resolve_provider_api_key("openai")
-        if api_key:
-            try:
-                from openai import OpenAI
-                self._client = OpenAI(api_key=api_key)
-            except ImportError:
-                pass
+            api_key = resolve_provider_api_key("openai")
+            if api_key:
+                try:
+                    from openai import OpenAI
+
+                    self._client = OpenAI(api_key=api_key)
+                except ImportError:
+                    pass
+        except Exception:
+            self._client = None
 
     def is_available(self) -> bool:
         return self._client is not None
@@ -100,15 +104,19 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
         self._init_client()
 
     def _init_client(self):
-        from services.integrations_store import resolve_provider_api_key
+        try:
+            from services.integrations_store import resolve_provider_api_key
 
-        api_key = resolve_provider_api_key("anthropic")
-        if api_key:
-            try:
-                import anthropic
-                self._client = anthropic.Anthropic(api_key=api_key)
-            except ImportError:
-                pass
+            api_key = resolve_provider_api_key("anthropic")
+            if api_key:
+                try:
+                    import anthropic
+
+                    self._client = anthropic.Anthropic(api_key=api_key)
+                except ImportError:
+                    pass
+        except Exception:
+            self._client = None
 
     def is_available(self) -> bool:
         return self._client is not None
