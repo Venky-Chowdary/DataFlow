@@ -13,9 +13,14 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from typing import Any
+
+try:
+    from services.transform_engine import apply_transform
+except ImportError:  # pragma: no cover - compatibility for tests
+    from src.services.transform_engine import apply_transform
 
 _UTC = timezone.utc
-from typing import Any
 
 
 @dataclass
@@ -55,26 +60,31 @@ def _to_decimal(value: Any) -> Decimal | None:
 def _to_float(value: Any) -> float | None:
     if _is_null(value):
         return None
+    # Reuse the engine's locale/currency/scientific-aware decimal parser.
+    parsed, _ = apply_transform(str(value).strip(), "decimal")
+    if parsed is None:
+        return None
     try:
-        return float(str(value).replace(",", ""))
-    except (ValueError, TypeError):
+        return float(Decimal(str(parsed)))
+    except (InvalidOperation, ValueError, TypeError, OverflowError):
         return None
 
 
 def _parse_iso_date(value: Any) -> datetime | None:
     if _is_null(value):
         return None
-    text = str(value).strip()
-    # Normalize ISO 8601 "Z" suffix to +0000 offset for strptime
+    # Reuse the engine's full date/datetime parser (handles ISO, day-first,
+    # epoch, and many locale formats) and convert the canonical result back.
+    parsed, _ = apply_transform(str(value).strip(), "datetime")
+    if not parsed:
+        return None
+    text = str(parsed).strip()
     if text.endswith("Z"):
-        text = text[:-1] + "+0000"
-    formats = ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d")
-    for fmt in formats:
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _is_required_target(target: str) -> bool:
@@ -123,6 +133,96 @@ def _iqr_outliers(values: list[float]) -> list[float]:
     return [v for v in values if v < lower or v > upper]
 
 
+class BatchDriftDetector:
+    """Compare per-batch column statistics against the first observed batch.
+
+    Warnings are produced when null rates, cardinality, or numeric mean/stdev
+    shift beyond configured thresholds.  These are typically warnings, but a
+    caller can escalate them to blockers in ``maximum`` validation mode.
+    """
+
+    def __init__(
+        self,
+        numeric_threshold: float = 0.20,
+        null_rate_threshold: float = 0.10,
+        cardinality_drop_threshold: float = 0.50,
+    ):
+        self.baseline: dict[str, dict[str, Any]] = {}
+        self.numeric_threshold = numeric_threshold
+        self.null_rate_threshold = null_rate_threshold
+        self.cardinality_drop_threshold = cardinality_drop_threshold
+
+    def update(self, stats: dict[str, Any]) -> None:
+        if not self.baseline and stats:
+            self.baseline = {
+                col: dict(s) for col, s in stats.get("columns", {}).items()
+            }
+
+    def check(self, stats: dict[str, Any]) -> list[str]:
+        if not self.baseline:
+            self.update(stats)
+            return []
+
+        warnings: list[str] = []
+        current_cols = stats.get("columns", {})
+
+        for col, base in self.baseline.items():
+            if col not in current_cols:
+                warnings.append(f"Column '{col}' missing in current batch (schema drift)")
+                continue
+
+            cur = current_cols[col]
+            base_null = base.get("null_rate", 0.0)
+            cur_null = cur.get("null_rate", 0.0)
+            if abs(float(cur_null) - float(base_null)) > self.null_rate_threshold:
+                warnings.append(
+                    f"Column '{col}' null-rate drift: {base_null:.0%} → {cur_null:.0%}"
+                )
+
+            base_card = base.get("cardinality", 0)
+            cur_card = cur.get("cardinality", 0)
+            if base_card and cur_card / base_card < 1 - self.cardinality_drop_threshold:
+                warnings.append(
+                    f"Column '{col}' cardinality drop: {base_card} → {cur_card}"
+                )
+
+            base_mean = base.get("mean")
+            cur_mean = cur.get("mean")
+            if (
+                base_mean is not None
+                and cur_mean is not None
+                and isinstance(base_mean, (int, float, Decimal))
+                and isinstance(cur_mean, (int, float, Decimal))
+                and float(base_mean) != 0.0
+            ):
+                rel = abs(float(cur_mean) - float(base_mean)) / abs(float(base_mean))
+                if rel > self.numeric_threshold:
+                    warnings.append(
+                        f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
+                    )
+
+            base_stdev = base.get("stdev")
+            cur_stdev = cur.get("stdev")
+            if (
+                base_stdev is not None
+                and cur_stdev is not None
+                and isinstance(base_stdev, (int, float, Decimal))
+                and isinstance(cur_stdev, (int, float, Decimal))
+                and float(base_stdev) != 0.0
+            ):
+                rel = abs(float(base_stdev) - float(cur_stdev)) / abs(float(base_stdev))
+                if rel > self.numeric_threshold:
+                    warnings.append(
+                        f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
+                    )
+
+        for col in current_cols:
+            if col not in self.baseline:
+                warnings.append(f"New column '{col}' appeared in later batch")
+
+        return warnings
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public audit API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +261,7 @@ def run_integrity_audit(
     total = len(rows)
     header_index = {h: i for i, h in enumerate(headers)}
     stats: dict[str, Any] = {"total_rows": total, "columns": {}}
+    anomalous_rows: set[int] = set()
 
     # ── Identify primary-key source column ───────────────────────────────────
     pk_source = primary_key
@@ -278,6 +379,28 @@ def run_integrity_audit(
                 else:
                     report.checks_passed += 1
 
+                # Row-level z-score anomalies (|z| > 3) using the same mean/stdev.
+                col_anomalous: set[int] = set()
+                if nums and col_stats.get("stdev"):
+                    mean = col_stats["mean"]
+                    stdev = col_stats["stdev"]
+                    if stdev:
+                        for offset, v in enumerate(values):
+                            f = _to_float(v)
+                            if f is None:
+                                continue
+                            z = abs(f - mean) / stdev
+                            if z > 3:
+                                col_anomalous.add(offset)
+                                anomalous_rows.add(offset)
+                if col_anomalous:
+                    col_stats["anomalous_count"] = len(col_anomalous)
+                    _warn(
+                        f"Column '{h}' has {len(col_anomalous)} row(s) with |z-score| > 3"
+                    )
+                else:
+                    report.checks_passed += 1
+
         # Date validity / future dates (soft)
         if col_type in {"DATE", "TIMESTAMP", "DATETIME"} or _is_date_column(h):
             dates = [_parse_iso_date(v) for v in non_null]
@@ -321,6 +444,7 @@ def run_integrity_audit(
     else:
         report.checks_passed += 1
 
+    stats["anomalous_rows"] = len(anomalous_rows)
     report.stats = stats
 
     # In maximum mode warnings are treated as blockers.

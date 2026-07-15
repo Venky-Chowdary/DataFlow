@@ -572,9 +572,10 @@ def stream_file_to_database(
     fp_accumulator = FingerprintAccumulator()
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     try:
-        from services.data_quality import run_integrity_audit  # noqa: E402
+        from services.data_quality import BatchDriftDetector, run_integrity_audit  # noqa: E402
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-        from src.services.data_quality import run_integrity_audit  # noqa: E402
+        from src.services.data_quality import BatchDriftDetector, run_integrity_audit  # noqa: E402
+    drift_detector = BatchDriftDetector()
 
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
@@ -611,6 +612,13 @@ def stream_file_to_database(
                 local_warnings.extend(audit.warnings[:10])
             if not audit.passed:
                 raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+
+            # Cross-batch drift detection against the first batch's statistics.
+            drift_warnings = drift_detector.check(audit.stats or {})
+            if drift_warnings:
+                if validation_mode == "maximum":
+                    raise ValueError(f"Batch {idx} drift detected: {'; '.join(drift_warnings[:3])}")
+                local_warnings.extend(drift_warnings[:3])
 
         # Compute source fingerprints from the mapped batch without materializing
         # the whole file.  This replaces the final FileParser.parse() pass.
