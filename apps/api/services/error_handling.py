@@ -8,6 +8,7 @@ quarantine for malformed records, and resume/replay support.
 
 from __future__ import annotations
 
+import os
 import random
 import re
 import time
@@ -22,6 +23,15 @@ class TransferCancelled(Exception):
 # Retriable exceptions are transient: network, rate limit, lock, timeout, etc.
 RETRIABLE_EXCEPTIONS: set[str] = {
     "connectionerror",
+    "connectionfailure",
+    "connectionrefusederror",
+    "newconnectionerror",
+    "operationalerror",
+    "interfaceerror",
+    "autoreconnect",
+    "serverselectiontimeouterror",
+    "readtimeout",
+    "connecttimeout",
     "timeouterror",
     "timeout",
     "transienterror",
@@ -45,6 +55,10 @@ RETRIABLE_EXCEPTIONS: set[str] = {
     "busy",
     "quota exceeded",
     "try again",
+    "temporary failure in name resolution",
+    "network",
+    "unreachable",
+    "refused",
 }
 
 # Non-retriable errors indicate a data or contract problem that will not fix itself.
@@ -86,11 +100,11 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 
 @dataclass
 class RetryBudget:
-    max_attempts: int = 3
-    base_delay_seconds: float = 1.0
-    max_delay_seconds: float = 60.0
-    exponential_base: float = 2.0
-    jitter: bool = True
+    max_attempts: int = field(default_factory=lambda: int(os.getenv("DATAFLOW_RETRY_MAX_ATTEMPTS", "3")))
+    base_delay_seconds: float = field(default_factory=lambda: float(os.getenv("DATAFLOW_RETRY_BASE_DELAY_SECONDS", "1.0")))
+    max_delay_seconds: float = field(default_factory=lambda: float(os.getenv("DATAFLOW_RETRY_MAX_DELAY_SECONDS", "60.0")))
+    exponential_base: float = field(default_factory=lambda: float(os.getenv("DATAFLOW_RETRY_EXPONENTIAL_BASE", "2.0")))
+    jitter: bool = field(default_factory=lambda: os.getenv("DATAFLOW_RETRY_JITTER", "true").lower() in ("1", "true", "yes"))
     budget_used: float = 0.0
     attempts_made: int = 0
 

@@ -80,7 +80,7 @@ def _source_name(source: EndpointConfig) -> str:
     return source.table or source.collection or ""
 
 
-def _read_batch(
+def _read_batch_impl(
     src_type: str,
     cfg: dict[str, Any],
     table: str,
@@ -343,6 +343,20 @@ def _read_batch(
             known_total_rows=known_total_rows,
         )
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
+
+
+def _read_batch(*args, **kwargs):
+    """Retry transient source-read errors without leaking partial state."""
+    return with_retry(
+        lambda: _read_batch_impl(*args, **kwargs),
+        budget=RetryBudget(
+            max_attempts=3,
+            base_delay_seconds=0.5,
+            max_delay_seconds=5.0,
+            exponential_base=2.0,
+            jitter=True,
+        ),
+    )
 
 
 def _unwrap_read(result):
