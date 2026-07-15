@@ -16,6 +16,19 @@ def _describe_type(column: str, schema: dict[str, str] | None) -> str:
     return (schema or {}).get(column, "inferred") or "inferred"
 
 
+def _sync_mode_note(sync_mode: str) -> str:
+    mode = (sync_mode or "full_refresh_overwrite").lower()
+    notes = {
+        "append": "New rows will be inserted without changing existing destination data.",
+        "upsert": "Rows will be merged by primary key; existing matches are updated and new rows are inserted.",
+        "incremental": "Only rows newer than the last watermark will be loaded.",
+        "cdc": "Changed rows since the last watermark will be applied, including soft deletes.",
+        "full_refresh_overwrite": "Destination will be cleared and fully replaced with source data.",
+        "overwrite": "Destination will be cleared and fully replaced with source data.",
+    }
+    return notes.get(mode, f"Sync mode '{sync_mode}' will be applied.")
+
+
 def _mapping_line(m: dict[str, Any], schema: dict[str, str] | None) -> str:
     src = m.get("source") or "?"
     tgt = m.get("target") or "?"
@@ -49,6 +62,7 @@ def build_pipeline_explanation(
     lines: list[str] = []
     lines.append(f"Transfer: {src} → {dst}")
     lines.append(f"Operation: {request.operation}, sync mode: {request.sync_mode}, validation: {request.validation_mode}")
+    lines.append(f"Sync behavior: {_sync_mode_note(request.sync_mode)}")
 
     lines.append(
         f"Source inferred {len(columns)} columns: {', '.join(columns[:10])}"
