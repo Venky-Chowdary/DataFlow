@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -53,6 +54,37 @@ def _connection_string(
         ssl=ssl,
         auth_source=auth_source,
     )
+
+
+def _idempotent_insert_many(coll, docs: list[dict]) -> int:
+    """Insert documents, treating duplicate-key errors as already-present rows.
+
+    Every document without an explicit ``_id`` gets a deterministic content hash
+    as its primary key so retries and resumable chunks produce the same _id and
+    do not create duplicates.
+    """
+    from pymongo.errors import BulkWriteError
+
+    for doc in docs:
+        if "_id" not in doc:
+            id_input = json.dumps(
+                {k: v for k, v in doc.items() if k != "_id"},
+                sort_keys=True,
+                default=str,
+            )
+            doc["_id"] = hashlib.sha256(id_input.encode("utf-8")).hexdigest()
+
+    try:
+        result = coll.insert_many(docs, ordered=False)
+        return len(result.inserted_ids)
+    except BulkWriteError as bwe:
+        details = bwe.details or {}
+        write_errors = details.get("writeErrors", [])
+        non_dup = [e for e in write_errors if e.get("code") != 11000]
+        if non_dup:
+            raise
+        # All errors were duplicate keys; those rows are already present.
+        return len(docs)
 
 
 def write_mapped_rows(
@@ -286,11 +318,9 @@ def write_mapped_rows(
                         coll.bulk_write(ops, ordered=False)
                     written += len(ops)
                 else:
-                    coll.insert_many(docs, ordered=False)
-                    written += len(docs)
+                    written += _idempotent_insert_many(coll, docs)
             else:
-                coll.insert_many(docs, ordered=False)
-                written += len(docs)
+                written += _idempotent_insert_many(coll, docs)
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 

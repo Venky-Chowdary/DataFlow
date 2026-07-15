@@ -33,7 +33,9 @@ from connectors.writer_common import (  # noqa: E402
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
+    row_fingerprints,
 )
+from services.reconciliation import fingerprint_checksum  # noqa: E402
 try:
     from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
@@ -236,6 +238,7 @@ def stream_file_to_database(
     checkpoint_service: CheckpointService | None = None,
     retry_budget: RetryBudget | None = None,
     backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -347,11 +350,49 @@ def stream_file_to_database(
     if chunk_idx > 0:
         batch_iter = itertools.islice(batch_iter, chunk_idx, None)
 
+    all_fingerprints: list[tuple[str, str]] = []
+    batch_quality_enabled = validation_mode in ("strict", "maximum")
+    try:
+        from services.data_quality import run_integrity_audit  # noqa: E402
+    except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+        from src.services.data_quality import run_integrity_audit  # noqa: E402
+
     for batch in batch_iter:
         if not batch:
             continue
         chunk_idx += 1
         headers, data_rows = records_to_matrix(batch, columns)
+
+        # Per-batch data-quality / anomaly gate.
+        if batch_quality_enabled:
+            audit = run_integrity_audit(
+                headers=headers,
+                rows=data_rows,
+                column_types=column_types,
+                mappings=mappings,
+                validation_mode=validation_mode,
+            )
+            if audit.issues:
+                warning_samples.extend(audit.issues[:10])
+            if audit.warnings:
+                warning_samples.extend(audit.warnings[:10])
+            if not audit.passed:
+                raise ValueError(f"Batch {chunk_idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+
+        # Compute source fingerprints from the mapped batch without materializing
+        # the whole file.  This replaces the final FileParser.parse() pass.
+        mapped_rows, _ = build_mapped_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy="quarantine",
+            preserve_case=True,
+        )
+        if mapped_rows:
+            all_fingerprints.extend(row_fingerprints(mapped_rows, target_cols))
+
         write_op = partial(
             _write_batch,
             dest_type,
@@ -389,29 +430,10 @@ def stream_file_to_database(
     if written == 0:
         raise ValueError("No records found in file")
 
-    # Compute a source checksum from the full file content so resumable chunked
-    # writes do not end up comparing a per-batch writer checksum against the
-    # whole target table.
-    try:
-        from services.file_parser import FileParser
-    except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-        from src.services.file_parser import FileParser
-    parsed = FileParser.parse(content, filename)
-    if parsed.success and parsed.data:
-        headers = parsed.columns or columns
-        data_rows = [[str(rec.get(h, "")) for h in headers] for rec in parsed.data]
-        mapped_rows, _ = build_mapped_rows(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            error_policy="quarantine",
-            preserve_case=True,
-        )
-        final_checksum = row_checksum(mapped_rows, target_cols)
-    else:
-        final_checksum = ""
+    # The source checksum has been accumulated incrementally from each batch's
+    # mapped fingerprints, so we do not need to parse the entire file a second
+    # time.  This keeps memory bounded by a single batch instead of the full file.
+    final_checksum = fingerprint_checksum(all_fingerprints) if all_fingerprints else last_checksum
 
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total

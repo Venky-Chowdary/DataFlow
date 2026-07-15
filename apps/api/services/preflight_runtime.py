@@ -8,6 +8,7 @@ from typing import Any
 
 from preflight.models import PreflightContext, TransferPlan
 
+from services.data_quality import run_integrity_audit
 from services.file_parser import get_file
 from services.object_store import storage_status
 from services.transform_engine import dry_run_sample
@@ -103,6 +104,38 @@ class RuntimePreflightContext(PreflightContext):
             column_types=column_types,
             sample_size=min(sample_size, len(rows)),
         )
+
+    def run_integrity_audit(self, sample_size: int = 1000) -> dict[str, Any]:
+        headers, rows, column_types = self._load_sample()
+        if not headers:
+            return {
+                "blocks_transfer": False,
+                "checks_passed": 0,
+                "checks_failed": 0,
+                "issues": [],
+                "summary": "No source sample available for integrity audit",
+            }
+
+        mapping_dicts = [
+            {"source": m.source, "target": m.target, "transform": m.transform}
+            for m in self.plan.mappings
+        ]
+        report = run_integrity_audit(
+            headers=headers,
+            rows=rows[:sample_size],
+            column_types=column_types,
+            mappings=mapping_dicts,
+            required_targets=self.plan.required_targets,
+            validation_mode=self.plan.validation_mode,
+        )
+        return {
+            "blocks_transfer": not report.passed,
+            "checks_passed": report.checks_passed,
+            "checks_failed": report.checks_failed,
+            "issues": report.issues,
+            "summary": report.summary,
+            "stats": report.stats,
+        }
 
 
 def compute_capacity(file_size_bytes: int, estimated_rows: int = 0) -> tuple[int, int]:

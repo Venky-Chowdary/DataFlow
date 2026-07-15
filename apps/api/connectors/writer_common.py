@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable
 
-from services.reconciliation import checksum_rows
+from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 
@@ -34,6 +34,16 @@ def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
 
 def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:
     return checksum_rows(rows, columns)
+
+
+def row_fingerprints(rows: list[Any], columns: list[str] | None = None, *, sort_key: str | None = None) -> list[tuple[str, str]]:
+    """Return the unsorted (row_key, fingerprint) tuples for a list of rows.
+
+    Streaming producers can accumulate these tuples across batches and then call
+    ``services.reconciliation.fingerprint_checksum`` once at the end, avoiding a
+    full materialization of every row as a dict/list.
+    """
+    return list(_iter_fingerprints(rows, columns, sort_key=sort_key))
 
 
 def dedupe_rows(

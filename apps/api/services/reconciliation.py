@@ -76,6 +76,16 @@ def _iter_fingerprints(
             yield (row_key, fingerprint)
 
 
+def fingerprint_checksum(fingerprints: list[tuple[str, str]]) -> str:
+    """Hash a pre-computed list of (row_key, fingerprint) tuples.
+
+    This is used by streaming producers that accumulate row fingerprints batch
+    by batch and only sort/hash once at the end, avoiding keeping all raw rows
+    in memory.
+    """
+    return _hash_fingerprints(fingerprints)
+
+
 def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
     fingerprints.sort(key=lambda x: (x[0], x[1]))
     h = hashlib.sha256()

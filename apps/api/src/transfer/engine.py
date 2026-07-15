@@ -214,6 +214,15 @@ def _auto_map(
     if not target_schema:
         return default_mappings(columns)
 
+    # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
+    # unless the source literally contains an _id column or the user supplied a mapping.
+    if (
+        request.destination.format == "mongodb"
+        and sync_mode not in {"full_refresh_overwrite", "overwrite"}
+        and "_id" not in columns
+    ):
+        target_schema = {k: v for k, v in target_schema.items() if k != "_id"}
+
     try:
         from services.mapping_pipeline import run_mapping_pipeline
 
@@ -1246,6 +1255,7 @@ class UniversalTransferEngine:
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
                 backfill_new_fields=request.backfill_new_fields,
+                validation_mode=request.validation_mode,
             )
 
             mongo.update_job_status(
