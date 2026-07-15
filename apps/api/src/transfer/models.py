@@ -77,6 +77,8 @@ class TransferRequest:
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
+    # Optional row-level source filter (column predicates, and/or composition).
+    source_filter: dict = field(default_factory=dict)
     stream_contracts: list[dict] = field(default_factory=list)
     contract_id: str = ""
     enforce_contract: bool = True

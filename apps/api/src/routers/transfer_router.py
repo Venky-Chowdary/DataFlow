@@ -446,6 +446,7 @@ async def run_universal_transfer(
     sync_mode: str = Form("full_refresh_overwrite"),
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("strict"),
+    source_filter_json: str = Form(""),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
 ):
@@ -502,6 +503,16 @@ async def run_universal_transfer(
         auth_source=dest_auth_source,
     )
 
+    source_filter: dict = {}
+    if source_filter_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(source_filter_json)
+            if isinstance(parsed, dict):
+                source_filter = parsed
+        except Exception:
+            source_filter = {}
+
     request = TransferRequest(
         source=source,
         destination=destination,
@@ -511,6 +522,7 @@ async def run_universal_transfer(
         sync_mode=sync_mode,
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        source_filter=source_filter,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
     if plan_id and plan_id.strip():

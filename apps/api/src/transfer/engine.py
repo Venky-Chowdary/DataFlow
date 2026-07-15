@@ -30,6 +30,7 @@ try:
     from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
     from services.pipeline_explanation import build_pipeline_explanation
     from services.mirror_engine import apply_inferred_soft_deletes
+    from services.row_filter import apply_row_filter
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
     from src.services.pipeline_explanation import build_pipeline_explanation
     from src.services.mirror_engine import apply_inferred_soft_deletes
+    from src.services.row_filter import apply_row_filter
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -494,6 +496,8 @@ class UniversalTransferEngine:
                 lambda: self._read_source(request),
                 budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
             )
+            if request.source_filter:
+                records = apply_row_filter(records, request.source_filter)
             if not records and request.source.kind != "database":
                 mongo.update_job_status(job_id, "failed", error="No records to transfer", phase="failed")
                 return TransferResult(success=False, error="No records to transfer", operation=request.operation, job_id=job_id)
@@ -902,6 +906,9 @@ class UniversalTransferEngine:
                     operation=request.operation, job_id=job_id,
                 )
 
+            if request.source_filter:
+                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
@@ -1112,6 +1119,7 @@ class UniversalTransferEngine:
                     checkpoint_service=checkpoint_service,
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
+                    source_filter=request.source_filter,
                 )
 
             mongo.update_job_status(
@@ -1260,6 +1268,9 @@ class UniversalTransferEngine:
                     success=False, error="File contains no records",
                     operation=request.operation, job_id=job_id,
                 )
+
+            if request.source_filter:
+                sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
@@ -1449,6 +1460,7 @@ class UniversalTransferEngine:
                 checkpoint_service=checkpoint_service,
                 backfill_new_fields=request.backfill_new_fields,
                 validation_mode=request.validation_mode,
+                source_filter=request.source_filter,
             )
 
             mongo.update_job_status(

@@ -26,11 +26,13 @@ try:
     from services.error_handling import RetryBudget, with_retry
     from services.parallel_chunks import OrderedChunkRunner
     from services.resilience import adaptive_chunk_size
+    from services.row_filter import apply_row_filter
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.parallel_chunks import OrderedChunkRunner
     from src.services.resilience import adaptive_chunk_size
+    from src.services.row_filter import apply_row_filter
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -532,6 +534,7 @@ def stream_file_to_database(
     retry_budget: RetryBudget | None = None,
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
+    source_filter: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -611,6 +614,9 @@ def stream_file_to_database(
     # Resume: skip chunks that were already committed
     if chunk_idx > 0:
         batch_iter = itertools.islice(batch_iter, chunk_idx, None)
+
+    if source_filter:
+        batch_iter = (apply_row_filter(batch, source_filter) for batch in batch_iter)
 
     fp_accumulator = FingerprintAccumulator()
     batch_quality_enabled = validation_mode in ("strict", "maximum")

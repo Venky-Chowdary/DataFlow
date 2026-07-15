@@ -34,6 +34,7 @@ try:
     from services.parallel_chunks import ChunkDispatcher
     from services.reconciliation import FingerprintAccumulator
     from services.resilience import adaptive_chunk_size
+    from services.row_filter import apply_row_filter, apply_row_filter_to_matrix
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.data_quality import run_integrity_audit
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.parallel_chunks import ChunkDispatcher
     from src.services.reconciliation import FingerprintAccumulator
     from src.services.resilience import adaptive_chunk_size
+    from src.services.row_filter import apply_row_filter, apply_row_filter_to_matrix
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -679,6 +681,7 @@ def stream_database_transfer(
     retry_budget: RetryBudget | None = None,
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
+    source_filter: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -978,7 +981,12 @@ def stream_database_transfer(
                 redis_scan_state = extra
             return batch
 
-    batch = _fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe
+    def _filter_batch(batch):
+        if source_filter and batch and batch.rows:
+            batch.rows = apply_row_filter_to_matrix(batch.headers, batch.rows, source_filter)
+        return batch
+
+    batch = _filter_batch(_fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe)
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     pk_source_col = cursor_source_col or ""
     if not pk_source_col and pk_target_cols and mappings:
@@ -1103,6 +1111,7 @@ def stream_database_transfer(
 
     def _prepare_and_submit(dispatcher: ChunkDispatcher, idx: int, batch: Any) -> None:
         nonlocal fetch_cursor, fetch_offset
+        batch = _filter_batch(batch)
         if incremental and cursor_source_col and batch.rows:
             batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
             if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
@@ -1113,6 +1122,7 @@ def stream_database_transfer(
     # Process the first batch synchronously so DDL (table/index creation) is
     # committed before any parallel workers try to insert into the new table.
     if batch:
+        batch = _filter_batch(batch)
         if incremental and cursor_source_col and batch.rows:
             batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
             if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
