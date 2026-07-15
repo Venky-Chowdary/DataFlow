@@ -5,12 +5,25 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
+from services.team_store import can_write_workspace
+
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
+
+
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
+
+
+def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return workspace_id
 
 
 class EndpointDTO(BaseModel):
@@ -452,6 +465,8 @@ async def run_universal_transfer(
     limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
+    request: Request = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """
     Execute universal transfer: file/db → db/file/warehouse.
@@ -460,6 +475,8 @@ async def run_universal_transfer(
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
     from ..transfer.background import run_transfer_async
+
+    workspace_id = _resolve_write_workspace(request, workspace_id)
 
     src_fmt = source_format
     if source_kind == "file" and file:
@@ -529,6 +546,7 @@ async def run_universal_transfer(
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,
+        workspace_id=workspace_id,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
     if plan_id and plan_id.strip():

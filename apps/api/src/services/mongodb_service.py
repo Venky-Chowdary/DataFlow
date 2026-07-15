@@ -291,13 +291,21 @@ class MongoDBService:
             result["_id"] = str(result["_id"])
         return result
     
-    def list_jobs(self, limit: int = 50) -> list[dict]:
-        """List recent transfer jobs"""
+    def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+        """List recent transfer jobs, optionally filtered to a workspace."""
         db = self.get_database()
         collection = db["transfer_jobs"]
-        
+
+        query: dict[str, Any] = {}
+        if workspace_id is not None:
+            # An empty workspace id shows only global jobs; a non-empty id shows
+            # that workspace plus global shared jobs.
+            allowed = [workspace_id, "", None]
+            if workspace_id == "":
+                allowed = ["", None]
+            query["$or"] = [{"workspace_id": w} for w in allowed if w is not None] + [{"workspace_id": {"$exists": False}}]
         jobs = []
-        for doc in collection.find().sort("created_at", -1).limit(limit):
+        for doc in collection.find(query).sort("created_at", -1).limit(limit):
             doc["_id"] = str(doc["_id"])
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if doc.get(key) and hasattr(doc[key], "isoformat"):
@@ -470,12 +478,17 @@ class MemoryMongoDBService:
             return rec
         return None
 
-    def list_jobs(self, limit: int = 50) -> list[dict]:
+    def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         items = sorted(
             self._jobs.values(),
             key=lambda j: j.get("created_at") or "",
             reverse=True,
         )[:limit]
+        if workspace_id is not None:
+            allowed = {workspace_id, "", None}
+            if workspace_id == "":
+                allowed = {"", None}
+            items = [j for j in items if j.get("workspace_id") in allowed]
         out = []
         for rec in items:
             job = dict(rec)
