@@ -45,6 +45,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     keywords: "data transfer wizard, column mapping, preflight gates, CSV upload, database write",
     robots: "noindex",
   },
+  query: {
+    title: "Query Playground",
+    description:
+      "Run safe, read-only SQL and MongoDB queries against saved connectors and export results to CSV, JSON, or Excel.",
+    keywords: "SQL query playground, MongoDB query, ad-hoc query, data export, connector query",
+    robots: "noindex",
+  },
   pilot: {
     title: "Data Pilot",
     description:

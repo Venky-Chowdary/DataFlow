@@ -1345,3 +1345,55 @@ export async function loginWorkspace(email: string, password: string): Promise<{
   }
   return res.json();
 }
+
+export interface QueryResult {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  column_schema: Record<string, string>;
+  row_count: number;
+  truncated: boolean;
+}
+
+export interface QueryExportResult {
+  success: boolean;
+  filename?: string;
+  download_url?: string;
+  path?: string;
+  row_count?: number;
+  format?: string;
+  error?: string;
+}
+
+export async function executeQuery(payload: {
+  connector_id: string;
+  query: string;
+  database?: string;
+  collection?: string;
+  limit?: number;
+}): Promise<QueryResult> {
+  const res = await apiFetch(`${API_BASE}/query/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Query failed"));
+  return res.json();
+}
+
+export async function exportQuery(payload: {
+  connector_id: string;
+  query: string;
+  database?: string;
+  collection?: string;
+  limit?: number;
+  format: string;
+  output_path?: string;
+}): Promise<QueryExportResult> {
+  const res = await apiFetch(`${API_BASE}/query/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Export failed"));
+  return res.json();
+}

@@ -1,0 +1,111 @@
+/* Query Playground — minimal styling layered on top of existing design tokens. */
+
+.df2-page-query .df2-query-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.df2-query-hero {
+  margin-bottom: 4px;
+}
+
+.df2-query-hero .df2-page-title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.df2-query-hero .df2-page-subtitle {
+  margin: 6px 0 0;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-query-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.df2-query-meta {
+  align-items: flex-end;
+}
+
+.df2-query-editor {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.df2-query-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.df2-query-results .df2-card-head {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.df2-query-export-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-query-export-bar .df2-input-sm {
+  min-width: 120px;
+}
+
+.df2-query-table-wrap {
+  overflow: auto;
+  max-height: 520px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 10px;
+}
+
+.df2-query-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.df2-query-table th,
+.df2-query-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.df2-query-table th {
+  position: sticky;
+  top: 0;
+  background: var(--df-surface-2, #f8fafc);
+  font-weight: 600;
+  color: var(--df-text-secondary, #475569);
+  z-index: 1;
+}
+
+.df2-query-table tr:last-child td {
+  border-bottom: none;
+}
+
+.df2-query-table td {
+  color: var(--df-text-primary, #0f172a);
+  font-family: var(--df-font-mono, ui-monospace, Menlo, monospace);
+}
+
+.df2-query-export-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.df2-query-export-notice .df2-btn {
+  margin-top: 8px;
+}

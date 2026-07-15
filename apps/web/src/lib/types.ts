@@ -3,7 +3,7 @@ export const API_BASE =
   import.meta.env.VITE_API_BASE ||
   "/api/v1";
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs";
 
 export interface Connector {
   id: string;

@@ -30,6 +30,7 @@ const ConnectorsPage = lazy(() => import("./pages/ConnectorsPage").then((m) => (
 const SchedulesPage = lazy(() => import("./pages/SchedulesPage").then((m) => ({ default: m.SchedulesPage })));
 const JobsPage = lazy(() => import("./pages/JobsPage").then((m) => ({ default: m.JobsPage })));
 const McpPage = lazy(() => import("./pages/McpPage").then((m) => ({ default: m.McpPage })));
+const QueryPage = lazy(() => import("./pages/QueryPage").then((m) => ({ default: m.QueryPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 const DocsPage = lazy(() => import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })));
 const AICopilot = lazy(() => import("./components/AICopilot").then((m) => ({ default: m.AICopilot })));
@@ -38,6 +39,7 @@ const ConnectorModal = lazy(() => import("./components/ConnectorModal").then((m)
 const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology" },
   { id: "transfer", label: "Transfer Studio", icon: "transfer", desc: "Move any data anywhere" },
+  { id: "query", label: "Query", icon: "search", desc: "Run and export ad-hoc queries" },
   { id: "pilot", label: "Data Pilot", icon: "sparkle", desc: "AI agent · natural language" },
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Sources & destinations" },
   { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs" },
@@ -449,6 +451,11 @@ function AppShell({
                       toast({ title: "Transfer complete", message: "View progress in Job Theater.", tone: "success" });
                     }}
                   />
+                </PageErrorBoundary>
+              )}
+              {screen === "query" && (
+                <PageErrorBoundary label="Query Playground">
+                  <QueryPage connectors={connectors} />
                 </PageErrorBoundary>
               )}
               {screen === "connectors" && (

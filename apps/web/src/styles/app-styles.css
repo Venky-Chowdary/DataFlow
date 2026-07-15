@@ -24,6 +24,7 @@
 @import "./connectors-page.css";
 @import "./pilot-chat.css";
 @import "./docs-page.css";
+@import "./query-playground.css";
 /* Canonical final layer — replaces page-redesign-v3, enterprise-final,
    ui-density, ui-stability, enterprise-ui-v4, jobs-page-redesign, polish overlays */
 @import "./enterprise-ui.css";
