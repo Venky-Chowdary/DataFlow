@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
-from services.transform_engine import _parse_date, _parse_datetime, apply_transform
+from services.transform_engine import _DATE_LIKE_RE, _parse_date, _parse_datetime, apply_transform
 
 
 @dataclass
@@ -740,7 +740,8 @@ def normalize_cell(value: Any) -> str:
     # Normalize date/time formatting differences ("T" vs " ", "Z" vs "+00:00", etc.).
     # Always canonicalize date-only values to midnight UTC so date and datetime
     # representations of the same day produce identical checksums.
-    if text:
+    # Fast heuristic: skip expensive strptime attempts for strings that cannot be dates.
+    if text and _DATE_LIKE_RE.search(text):
         dtm = _parse_datetime(text)
         if dtm:
             return dtm

@@ -17,6 +17,15 @@ from typing import Any
 from services.value_serializer import json_default
 from services.semantic_types import SemanticType, normalize_value_for_target, detect_semantic_type
 
+_MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+_DATE_LIKE_RE = re.compile(
+    r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|"
+    r"\d{8}|"
+    r"\d{1,2}\s+" + _MONTH_NAME_RE + r"\s+\d{2,4}|"
+    r"" + _MONTH_NAME_RE + r"\s+\d{1,2},?\s+\d{2,4}",
+    re.IGNORECASE,
+)
+
 DATE_PATTERNS = (
     "%Y-%m-%d",
     "%m/%d/%Y",
@@ -129,6 +138,8 @@ def _to_utc_z(dt: datetime) -> str:
 
 def _parse_datetime(value: str) -> str | None:
     text = value.strip()
+    if not _DATE_LIKE_RE.search(text):
+        return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
         return _to_utc_z(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
@@ -156,6 +167,8 @@ _EPOCH_S_RE = re.compile(r"^\d{10}$")
 def _parse_date(value: str, *, with_time: bool = False) -> str | None:
     text = value.strip()
     if not text:
+        return None
+    if not _DATE_LIKE_RE.search(text):
         return None
     if text.lower() in NULL_SENTINELS:
         return None
