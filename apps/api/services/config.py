@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         validation_alias="DATABASE_URL",
     )
     job_store_backend: str = Field(default="auto", validation_alias="DATAFLOW_JOB_STORE")
+    job_store_persist: bool = Field(default=False, validation_alias="DATAFLOW_JOB_STORE_PERSIST")
     seed_demo_jobs: bool = Field(default=False, validation_alias="DATAFLOW_SEED_DEMO")
 
     minio_endpoint: str = Field(default="localhost:9000", validation_alias="MINIO_ENDPOINT")

@@ -991,6 +991,36 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
         engine.dispose()
 
 
+def delete_by_primary_keys(
+    cfg: dict[str, Any],
+    table: str,
+    primary_key_column: str,
+    keys: list[str],
+    schema: str | None = None,
+) -> int:
+    """Delete rows by primary key using a dialect-aware parameterized statement."""
+    if not SQLALCHEMY_AVAILABLE or not keys:
+        return 0
+    engine = _engine(cfg)
+    try:
+        schema = schema or _schema_name(cfg)
+        table_quoted = quote_sql_identifier(table)
+        schema_quoted = quote_sql_identifier(schema) if schema else None
+        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+        pk_quoted = quote_sql_identifier(primary_key_column)
+        placeholders = ",".join([":k{}".format(i) for i in range(len(keys))])
+        params = {"k{}".format(i): k for i, k in enumerate(keys)}
+        stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"
+        with engine.connect() as conn:
+            result = conn.execute(sa.text(stmt), params)
+            conn.commit()
+            return result.rowcount or 0
+    except Exception:
+        return 0
+    finally:
+        engine.dispose()
+
+
 def _read_table_raw(
     conn: Any,
     table: str,

@@ -58,6 +58,7 @@ from .file_stream import (
     should_stream_file,
     stream_file_to_database,
 )
+from .cdc_transfer import run_cdc_database_transfer
 from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
 try:
@@ -73,6 +74,10 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from connectors.writer_common import CHUNK_SIZE
 from services.batch_progress import ThrottledCheckpoint
+try:
+    from services import schema_registry
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services import schema_registry
 from services.checkpoint_service import Checkpoint, CheckpointService, resume_or_create_checkpoint
 
 logger = logging.getLogger("dataflow.transfer")
@@ -200,6 +205,7 @@ def _auto_map(
     columns: list[str],
     schema: dict[str, str],
     sample_rows: list[dict] | None = None,
+    job_id: str = "",
 ) -> list[dict]:
     """Generate destination-aware mappings when no mapping contract was supplied.
 
@@ -208,71 +214,148 @@ def _auto_map(
     For full-refresh/overwrites into a new target, identity mappings are used so
     the destination can be created from the source shape.
     """
+    mappings: list[dict] | None = None
+
     if request.mappings:
-        return request.mappings
-    if request.destination.kind != "database":
-        return default_mappings(columns)
+        mappings = request.mappings
+    elif request.destination.kind != "database":
+        mappings = default_mappings(columns)
+    else:
+        sync_mode = (request.sync_mode or "full_refresh_overwrite").lower()
+        if sync_mode in {"full_refresh_overwrite", "overwrite"}:
+            mappings = default_mappings(columns)
+        else:
+            target_schema = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            if not target_schema:
+                mappings = default_mappings(columns)
+            else:
+                # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
+                # unless the source literally contains an _id column or the user supplied a mapping.
+                if (
+                    request.destination.format == "mongodb"
+                    and sync_mode not in {"full_refresh_overwrite", "overwrite"}
+                    and "_id" not in columns
+                ):
+                    target_schema = {k: v for k, v in target_schema.items() if k != "_id"}
 
-    sync_mode = (request.sync_mode or "full_refresh_overwrite").lower()
-    if sync_mode in {"full_refresh_overwrite", "overwrite"}:
-        return default_mappings(columns)
+                try:
+                    from services.mapping_pipeline import run_mapping_pipeline
 
-    target_schema = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
-    if not target_schema:
-        return default_mappings(columns)
+                    source_schemas = [
+                        {
+                            "name": c,
+                            "inferred_type": schema.get(c, "string"),
+                            "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                        }
+                        for c in columns
+                    ]
+                    target_columns = list(target_schema.keys())
+                    target_schemas = [
+                        {"name": c, "inferred_type": target_schema.get(c, "string"), "samples": []}
+                        for c in target_columns
+                    ]
+                    source_samples = {
+                        c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        for c in columns
+                    }
+                    result = run_mapping_pipeline(
+                        source_columns=columns,
+                        target_columns=target_columns,
+                        source_schemas=source_schemas,
+                        target_schemas=target_schemas,
+                        file_format=request.source.format,
+                        confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                        source_samples=source_samples,
+                        validation_mode=request.validation_mode,
+                        use_llm=False,
+                    )
+                    auto = result.get("mappings")
+                    if auto and isinstance(auto, list) and any(m.get("source") for m in auto):
+                        mapped_sources = {str(m.get("source")) for m in auto}
+                        if request.backfill_new_fields:
+                            for c in columns:
+                                if c not in mapped_sources:
+                                    auto.append({"source": c, "target": c, "confidence": 0.95})
+                        mappings = auto
+                except Exception as exc:
+                    logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
 
-    # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
-    # unless the source literally contains an _id column or the user supplied a mapping.
-    if (
-        request.destination.format == "mongodb"
-        and sync_mode not in {"full_refresh_overwrite", "overwrite"}
-        and "_id" not in columns
-    ):
-        target_schema = {k: v for k, v in target_schema.items() if k != "_id"}
+    if mappings is None:
+        mappings = default_mappings(columns)
 
-    try:
-        from services.mapping_pipeline import run_mapping_pipeline
+    _record_schema_and_lineage(request, mappings, schema, job_id)
+    return mappings
 
-        source_schemas = [
-            {
-                "name": c,
-                "inferred_type": schema.get(c, "string"),
-                "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
-            }
-            for c in columns
-        ]
-        target_columns = list(target_schema.keys())
-        target_schemas = [
-            {"name": c, "inferred_type": target_schema.get(c, "string"), "samples": []}
-            for c in target_columns
-        ]
-        source_samples = {
-            c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
-            for c in columns
-        }
-        result = run_mapping_pipeline(
-            source_columns=columns,
-            target_columns=target_columns,
-            source_schemas=source_schemas,
-            target_schemas=target_schemas,
-            file_format=request.source.format,
-            confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-            source_samples=source_samples,
-            validation_mode=request.validation_mode,
-            use_llm=False,
+
+def _record_schema_and_lineage(
+    request: TransferRequest,
+    mappings: list[dict[str, Any]],
+    schema: dict[str, str],
+    job_id: str,
+) -> None:
+    """Register source/target schemas and column-level lineage for this job."""
+    src_id = (
+        request.source.connector_id
+        or request.source.host
+        or (request.source_filename if request.source.kind == "file" else "")
+        or f"{request.source.kind}:{request.source.format}"
+    )
+    src_object = (
+        request.source.table
+        or request.source.collection
+        or (request.source_filename if request.source.kind == "file" else "")
+        or "source"
+    )
+    dst_id = (
+        request.destination.connector_id
+        or request.destination.host
+        or f"{request.destination.kind}:{request.destination.format}"
+    )
+    dst_object = (
+        request.destination.table
+        or request.destination.collection
+        or f"{request.destination.format}_export"
+    )
+
+    source_columns = [
+        {"name": name, "type": (schema.get(name) or "string"), "primary_key": False}
+        for name in schema.keys()
+    ]
+    schema_registry.register_schema(
+        columns=source_columns,
+        connector_type=request.source.format,
+        connector_id=src_id,
+        object_name=src_object,
+        job_id=job_id,
+        source_of_truth=True,
+    )
+
+    # Build a best-effort target schema from the mappings.
+    target_columns = []
+    for m in mappings:
+        src = str(m.get("source", "")).strip()
+        tgt = str(m.get("target", "")).strip()
+        if not src or not tgt:
+            continue
+        target_columns.append({
+            "name": tgt,
+            "type": schema.get(src, "string"),
+            "primary_key": False,
+        })
+    if target_columns:
+        schema_registry.register_schema(
+            columns=target_columns,
+            connector_type=request.destination.format,
+            connector_id=dst_id,
+            object_name=dst_object,
+            job_id=job_id,
         )
-        mappings = result.get("mappings")
-        if mappings and isinstance(mappings, list) and any(m.get("source") for m in mappings):
-            mapped_sources = {str(m.get("source")) for m in mappings}
-            if request.backfill_new_fields:
-                for c in columns:
-                    if c not in mapped_sources:
-                        mappings.append({"source": c, "target": c, "confidence": 0.95})
-            return mappings
-    except Exception as exc:
-        logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
-
-    return default_mappings(columns)
+        schema_registry.record_lineage(
+            source={"connector_type": request.source.format, "connector_id": src_id, "object_name": src_object},
+            target={"connector_type": request.destination.format, "connector_id": dst_id, "object_name": dst_object},
+            mappings=mappings,
+            job_id=job_id,
+        )
 
 
 class UniversalTransferEngine:
@@ -394,7 +477,7 @@ class UniversalTransferEngine:
 
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=records[:100]),
+                _auto_map(request, columns, schema, sample_rows=records[:100], job_id=job_id),
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
@@ -771,7 +854,7 @@ class UniversalTransferEngine:
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=sample_rows),
+                _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
@@ -942,20 +1025,37 @@ class UniversalTransferEngine:
                 if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
                     _drop_destination_table(request.destination)
 
-            rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
-                request.source,
-                request.destination,
-                mappings,
-                schema,
-                on_checkpoint=throttled_checkpoint,
-                sync_mode=request.sync_mode,
-                stream_contracts=request.stream_contracts,
-                job_id=job_id,
-                checkpoint=checkpoint,
-                checkpoint_service=checkpoint_service,
-                backfill_new_fields=request.backfill_new_fields,
-                validation_mode=request.validation_mode,
-            )
+            effective_sync = (resolve_sync_contract(request.stream_contracts).sync_mode if resolve_sync_contract(request.stream_contracts) else request.sync_mode).lower()
+            if effective_sync == "cdc":
+                rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
+                    request.source,
+                    request.destination,
+                    mappings,
+                    schema,
+                    on_checkpoint=throttled_checkpoint,
+                    sync_mode=request.sync_mode,
+                    stream_contracts=request.stream_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=request.backfill_new_fields,
+                    validation_mode=request.validation_mode,
+                )
+            else:
+                rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
+                    request.source,
+                    request.destination,
+                    mappings,
+                    schema,
+                    on_checkpoint=throttled_checkpoint,
+                    sync_mode=request.sync_mode,
+                    stream_contracts=request.stream_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=request.backfill_new_fields,
+                    validation_mode=request.validation_mode,
+                )
 
             mongo.update_job_status(
                 job_id, "running", phase="reconcile", progress_pct=95,
@@ -1107,7 +1207,7 @@ class UniversalTransferEngine:
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=sample_rows),
+                _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
