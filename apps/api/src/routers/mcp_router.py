@@ -14,11 +14,11 @@ class ToolCallRequest(BaseModel):
 
 
 @router.get("/manifest")
-async def mcp_manifest():
+async def mcp_manifest(http_request: Request):
     """MCP-compatible manifest for IDE and agent integrations."""
     from ..ai.copilot.tools import TOOL_DEFINITIONS
 
-    base = "http://localhost:8001/api/v1/mcp"
+    base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
         "name": "datatransfer",
         "title": "DataTransfer.space MCP Server",
@@ -113,27 +113,52 @@ async def mcp_request_logs(limit: int = 50):
 
 
 @router.get("/status")
-async def mcp_status():
+async def mcp_status(http_request: Request):
     from ..ai.copilot.pilot_agent import get_pilot_agent
     from services.connector_store import list_connectors
     from services.mcp_invocation_log import list_mcp_invocations
     from ..ai.copilot.tools import TOOL_DEFINITIONS
 
-    pilot = get_pilot_agent()
     try:
-        from ..services.mongodb_service import get_mongodb_service
-        jobs = len(get_mongodb_service().list_jobs(limit=100))
+        pilot = get_pilot_agent()
+        anthropic_available = pilot.anthropic.is_available()
+        datasets = len(pilot.analyst.list_datasets())
     except Exception:
-        jobs = 0
+        pilot = None
+        anthropic_available = False
+        datasets = 0
+
+    try:
+        jobs_service = None
+        try:
+            from ..services.mongodb_service import get_mongodb_service
+            jobs_service = get_mongodb_service()
+        except Exception:
+            pass
+        if jobs_service is None:
+            from services.jobs import job_store
+            jobs_service = job_store
+        jobs = len(jobs_service.list_jobs(limit=100))
+    except Exception:
+        try:
+            from services.jobs import job_store
+            jobs = len(job_store.list_recent(limit=100))
+        except Exception:
+            jobs = 0
+
+    try:
+        connectors = len(list_connectors())
+    except Exception:
+        connectors = 0
 
     recent = list_mcp_invocations(limit=1)
-    online = True
     return {
-        "status": "online" if online else "offline",
-        "agent_mode": "anthropic_tools" if pilot.anthropic.is_available() else "local_tools",
-        "datasets_indexed": len(pilot.analyst.list_datasets()),
-        "connectors": len(list_connectors()),
+        "status": "online",
+        "agent_mode": "anthropic_tools" if anthropic_available else "local_tools",
+        "datasets_indexed": datasets,
+        "connectors": connectors,
         "jobs": jobs,
         "tools_registered": len(TOOL_DEFINITIONS),
         "last_invocation_ms": recent[0]["ms"] if recent else None,
+        "manifest_url": f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp/manifest",
     }
