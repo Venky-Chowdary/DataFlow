@@ -152,88 +152,102 @@ def write_mapped_rows(
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     policy = transform_error_policy(error_policy)
 
+    mapped_rows: list[tuple] = []
+    converted_rows: list[tuple] = []
+    chunks = 0
+    written = 0
+    transform_errors: list[str] = []
+
     try:
-        conn = sqlite3.connect(path, timeout=8)
-        with conn:
-            cur = conn.cursor()
-            if create_table:
-                col_defs = ", ".join(f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types))
-                cur.execute(f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})")
+        mapped_rows, transform_errors = build_mapped_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            error_policy=policy,
+            preserve_case=True,
+        )
 
-            if backfill_new_fields:
-                existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table_quoted})")}
-                for col, typ in zip(target_cols, target_types):
-                    if col not in existing:
-                        try:
-                            cur.execute(f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}")
-                        except sqlite3.OperationalError:
-                            pass
+        converted_rows = [
+            tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))
+            for row in mapped_rows
+        ]
 
-            mapped_rows, transform_errors = build_mapped_rows(
-                headers=headers,
-                data_rows=data_rows,
-                mappings=mappings,
-                target_cols=target_cols,
-                column_types=column_types,
-                dest_types=dest_types,
-                error_policy=policy,
-                preserve_case=True,
+        rejected_rows = len(data_rows) - len(mapped_rows)
+        if transform_errors and policy == "fail":
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "main",
+                checksum="",
+                chunks_completed=0,
+                error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+                rejected_rows=rejected_rows,
+                warnings=transform_errors,
             )
 
-            converted_rows = [
-                tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))
-                for row in mapped_rows
-            ]
+        total = len(converted_rows)
+        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
+        conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
+        placeholders = ", ".join("?" for _ in target_cols)
+        insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"
 
-            rejected_rows = len(data_rows) - len(mapped_rows)
-            if transform_errors and policy == "fail":
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=table_name,
-                    target_schema=schema or "main",
-                    checksum="",
-                    chunks_completed=0,
-                    error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-                    rejected_rows=rejected_rows,
-                    warnings=transform_errors,
-                )
+        conn = sqlite3.connect(path, timeout=8)
+        try:
+            # Schema setup in its own transaction.
+            with conn:
+                cur = conn.cursor()
+                if create_table:
+                    col_defs = ", ".join(f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types))
+                    cur.execute(f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})")
 
-            total = len(converted_rows)
-            chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
-            written = 0
-            placeholders = ", ".join("?" for _ in target_cols)
-            insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"
-            conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
+                if backfill_new_fields:
+                    existing = {row[1] for row in cur.execute(f"PRAGMA table_info({table_quoted})")}
+                    for col, typ in zip(target_cols, target_types):
+                        if col not in existing:
+                            try:
+                                cur.execute(f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}")
+                            except sqlite3.OperationalError:
+                                pass
+
+            # Each chunk is a separate transaction so checkpoints are durable
+            # and a failed chunk can be retried without writing partial data.
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE
                 batch = converted_rows[start : start + CHUNK_SIZE]
                 if not batch:
                     break
 
-                if write_mode == "upsert" and conflict_cols:
-                    _sqlite_upsert_batch(cur, table_name, target_cols, batch, conflict_cols)
-                else:
-                    cur.executemany(insert, batch)
+                with conn:
+                    cur = conn.cursor()
+                    if write_mode == "upsert" and conflict_cols:
+                        _sqlite_upsert_batch(cur, table_name, target_cols, batch, conflict_cols)
+                    else:
+                        cur.executemany(insert, batch)
+
                 written += len(batch)
                 if on_checkpoint:
                     on_checkpoint(chunk_idx + 1, chunks, written)
 
-        conn.close()
-        return WriteResult(
-            ok=True,
-            rows_written=written,
-            table_name=table_name,
-            target_schema=schema or "main",
-            # Checksum must reflect the values as stored in SQLite so the read-back
-            # verifier can match them exactly (e.g. booleans become 0/1 integers).
-            checksum=row_checksum(converted_rows, target_cols),
-            chunks_completed=chunks,
-            rejected_rows=len(data_rows) - written,
-            warnings=transform_errors,
-        )
+            return WriteResult(
+                ok=True,
+                rows_written=written,
+                table_name=table_name,
+                target_schema=schema or "main",
+                # Checksum must reflect the values as stored in SQLite so the read-back
+                # verifier can match them exactly (e.g. booleans become 0/1 integers).
+                checksum=row_checksum(converted_rows, target_cols),
+                chunks_completed=chunks,
+                rejected_rows=len(data_rows) - written,
+                warnings=transform_errors,
+            )
+        finally:
+            conn.close()
     except Exception as exc:
         return WriteResult(
-            ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",
-            checksum="", chunks_completed=0, error=str(exc),
+            ok=False, rows_written=written, table_name=table_name, target_schema=schema or "main",
+            checksum="", chunks_completed=chunks, error=str(exc),
         )
