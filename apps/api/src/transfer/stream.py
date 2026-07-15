@@ -20,6 +20,7 @@ from connectors.writer_common import (  # noqa: E402
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
+    row_fingerprints,
 )
 
 from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
@@ -28,10 +29,12 @@ from .connector_capabilities import resolve_driver_type
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
+    from services.reconciliation import FingerprintAccumulator
     from services.resilience import adaptive_chunk_size
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
+    from src.services.reconciliation import FingerprintAccumulator
     from src.services.resilience import adaptive_chunk_size
 
 
@@ -1016,7 +1019,12 @@ def stream_database_transfer(
     # This avoids using the per-batch writer checksum for chunked/resumable runs,
     # which only represented the last batch.
     if src_type in {"postgresql", "redshift", "mysql", "snowflake", "bigquery", "sqlite", "generic_sql", "mongodb", "s3", "gcs", "adls"}:
-        source_rows_for_checksum: list[tuple] = []
+        # Re-read the source in chunks and feed mapped fingerprints into the
+        # streaming accumulator.  This keeps database→database strict-mode
+        # reconciliation memory-bounded by a single batch, even for billion-row
+        # tables, and avoids the previous `source_rows_for_checksum` list that
+        # materialized the full source a second time.
+        fp_accumulator = FingerprintAccumulator()
         cursor_type_for_read: str | None = None
         if incremental and cursor_source_col:
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
@@ -1048,11 +1056,12 @@ def stream_database_transfer(
                 error_policy="quarantine",
                 preserve_case=True,
             )
-            source_rows_for_checksum.extend(mapped)
+            if mapped:
+                fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
             if len(batch.rows) < chunk_size:
                 break
             read_offset += len(batch.rows)
-        final_checksum = row_checksum(source_rows_for_checksum, target_cols)
+        final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
     else:
         final_checksum = last_checksum
 
