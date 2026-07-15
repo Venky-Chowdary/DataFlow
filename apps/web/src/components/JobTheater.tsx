@@ -5,7 +5,6 @@ import { Spinner } from "./LoadingState";
 import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
 import { streamJobProgress } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
-import { PreflightTimeline } from "./PreflightTimeline";
 
 interface JobTheaterProps {
   jobId: string;
@@ -74,43 +73,63 @@ export function JobTheater({
   const [log, setLog] = useState<string[]>([]);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
+  const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
+    loggedRows: 0,
+  });
 
   useEffect(() => {
     startRef.current = Date.now();
     doneRef.current = false;
+    prevRef.current = { loggedRows: 0 };
+    const append = (line: string) =>
+      setLog((l) => [...l.slice(-200), `${new Date().toLocaleTimeString()} — ${line}`]);
     setLog([`${new Date().toLocaleTimeString()} — Connecting to live job stream…`]);
     const stop = streamJobProgress(
       jobId,
       (update) => {
-        setJob((prev) => {
-          const changed =
-            update.message && update.message !== prev?.message
-              ? update.message
-              : update.phase && update.phase !== prev?.phase
-                ? `Entered ${update.phase} phase`
-                : null;
-          if (changed) {
-            setLog((l) => [...l.slice(-120), `${new Date().toLocaleTimeString()} — ${changed}`]);
-          }
-          return update;
-        });
-        const elapsed = (Date.now() - startRef.current) / 1000;
+        const prev = prevRef.current;
+
+        if (update.phase && update.phase !== prev.phase) {
+          append(`Entered ${update.phase} phase`);
+          prev.phase = update.phase;
+        }
+        if (update.message && update.message !== prev.message) {
+          append(update.message);
+          prev.message = update.message;
+        }
+        if (update.chunk_current != null && update.chunk_current !== prev.chunk) {
+          const total = update.chunk_total != null ? `/${update.chunk_total}` : "";
+          append(`Batch ${update.chunk_current}${total} written`);
+          prev.chunk = update.chunk_current;
+        }
         const processed = update.records_processed ?? 0;
+        // Log a row milestone at least every 10k rows so the feed keeps moving
+        // even when the backend only streams counters.
+        if (processed - prev.loggedRows >= 10000) {
+          prev.loggedRows = processed;
+          append(`${processed.toLocaleString()} rows processed`);
+        }
+
+        setJob(update);
+        const elapsed = (Date.now() - startRef.current) / 1000;
         if (elapsed > 0.5 && processed > 0) {
           setThroughput(Math.round(processed / elapsed));
         }
         if (!doneRef.current && update.status === "completed") {
           doneRef.current = true;
-          setLog((l) => [...l.slice(-120), `${new Date().toLocaleTimeString()} — Job completed`]);
+          append(`Job completed — ${processed.toLocaleString()} rows transferred`);
           onComplete?.(update);
         }
         if (!doneRef.current && update.status === "failed") {
           doneRef.current = true;
-          setLog((l) => [...l.slice(-120), `${new Date().toLocaleTimeString()} — Job failed`]);
+          append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
           onFailed?.(update);
         }
       },
-      () => setJob((j) => (j ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : null)),
+      () => {
+        append("Live stream interrupted — connection lost");
+        setJob((j) => (j ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : null));
+      },
     );
     return stop;
   }, [jobId, onComplete, onFailed]);
@@ -164,7 +183,6 @@ export function JobTheaterView({
   throughput,
   log,
   startedAtFallback,
-  preflight,
 }: JobTheaterViewProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -212,7 +230,6 @@ export function JobTheaterView({
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const rejectionRate = processed > 0 && rejectedRows > 0 ? (rejectedRows / processed) * 100 : 0;
-  const preflightResult = preflight || job.preflight;
 
   const timelinePhases = useMemo(() => {
     if (job.phases?.length) {
@@ -275,6 +292,16 @@ export function JobTheaterView({
           <span className="df2-theater-v3-job-id" title={jobId}>#{jobId.slice(0, 8)}</span>
         </div>
       </header>
+
+      {isFailed && (
+        <div className="df2-theater-v3-alert error">
+          <DtIcon name="alert" size={18} />
+          <div>
+            <strong>Transfer failed{job.phase ? ` during ${job.phase}` : ""}</strong>
+            <p>{job.error || job.message || "The job stopped before completing. Review the event log below and re-run."}</p>
+          </div>
+        </div>
+      )}
 
       <div className="df2-theater-v3-progress-block">
         <div className="df2-theater-v3-progress-top">
@@ -408,16 +435,6 @@ export function JobTheaterView({
         </article>
       </div>
 
-      {isFailed && job.error && (
-        <div className="df2-theater-v3-alert error">
-          <DtIcon name="alert" size={18} />
-          <div>
-            <strong>Error</strong>
-            <p>{job.error}</p>
-          </div>
-        </div>
-      )}
-
       {isComplete && (
         <div className="df2-theater-v3-alert success">
           <DtIcon name="check" size={18} />
@@ -438,11 +455,6 @@ export function JobTheaterView({
         </div>
       )}
 
-      {preflightResult && (
-        <div className="df2-theater-v3-preflight" aria-label="Preflight evidence">
-          <PreflightTimeline result={preflightResult} compact hideActions />
-        </div>
-      )}
       </div>
 
       <div className="df2-theater-v3-log-section">
