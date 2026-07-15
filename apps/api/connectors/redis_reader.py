@@ -87,6 +87,30 @@ def read_keys_batch(
                 state.exhausted = True
                 break
 
+        # If every stored value is a JSON object, flatten its keys so mappings
+        # like id -> id / amount -> amount work against Redis-stored records.
+        object_values: list[dict] = []
+        for row in rows:
+            try:
+                parsed = json.loads(row[1])
+            except Exception:
+                parsed = None
+            if not isinstance(parsed, dict):
+                object_values = []
+                break
+            object_values.append(parsed)
+
+        if object_values and len(object_values) == len(rows):
+            fieldnames = []
+            seen: set[str] = set()
+            for obj in object_values:
+                for key in obj.keys():
+                    if key not in seen:
+                        seen.add(key)
+                        fieldnames.append(key)
+            headers = fieldnames
+            rows = [[str(obj.get(field, "")) for field in fieldnames] for obj in object_values]
+
         total = known_total_rows if known_total_rows is not None else state.keys_seen
         return ReadBatch(headers=headers, rows=rows, offset=state.keys_seen, total_rows=total), state
     finally:
