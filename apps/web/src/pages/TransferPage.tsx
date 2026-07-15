@@ -14,12 +14,12 @@ import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
-import { PreflightTimeline } from "../components/PreflightTimeline";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
-import { ProofDashboard } from "../components/transfer/ProofDashboard";
+import { ValidateDashboard } from "../components/transfer/ValidateDashboard";
+import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import { useActiveData } from "../lib/DataContext";
 import {
@@ -2385,23 +2385,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_VALIDATE && (
-        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split">
-          <div className="df2-proof-dashboard-wrap">
-            <ProofDashboard preflight={preflight} running={preflighting} />
-          </div>
-          <PreflightTimeline
-            result={preflight ?? {
-              passed: false,
-              passed_count: 0,
-              total_gates: 11,
-              readiness_score: 0,
-              gates: [],
-              blockers: [],
-            }}
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
+          <ValidateDashboard
+            preflight={preflight}
             running={preflighting}
             confidenceThreshold={confidenceThreshold}
-            compact
-            hideActions
           />
         </div>
       )}
@@ -2485,7 +2473,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
       {step === STEP_RUN && activeJobId && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body">
+          <div className="df2-card-body df2-run-theater-host">
             <JobTheater
               jobId={activeJobId}
               sourceLabel={file?.name || sourceConnector?.name}
@@ -2501,35 +2489,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_RUN && result && !activeJobId && (
-        <div className={`df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-banner df2-transfer-panel ${result.success ? "success" : "error"}`}>
-          {result.success ? (
-            <div>
-              <span className="df2-badge df2-badge-live df2-result-badge"><DtIcon name="check" size={14} /> Transfer Complete</span>
-              <p className="df2-result-stat">{result.records_transferred?.toLocaleString()} records transferred</p>
-              {result.destination?.path && (
-                <p className="df2-result-meta">Exported to {result.destination.path}</p>
-              )}
-              {result.ddl_executed && result.ddl_executed.length > 0 && (
-                <ul className="df2-result-ddl">
-                  {result.ddl_executed.map((d) => <li key={d}>{d}</li>)}
-                </ul>
-              )}
-              <div className="df2-result-actions">
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => setStep(STEP_SOURCE)}>
-                  <DtIcon name="plus" size={14} /> New transfer
-                </button>
-                <button
-                  type="button"
-                  className="df2-btn"
-                  onClick={() => void handleScheduleRoute()}
-                >
-                  <DtIcon name="activity" size={14} /> Schedule this route
-                </button>
-              </div>
-            </div>
-          ) : (
-            <span className="df2-badge df2-badge-error"><DtIcon name="x" size={14} /> {result.error || "Transfer failed"}</span>
-          )}
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
+          <TransferResultDashboard
+            result={result}
+            sourceLabel={sourceLabel}
+            destLabel={mapDestRouteLabel}
+            sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
+            destType={destKindMode === "file_export" ? exportFormat : destType}
+            onNewTransfer={() => setStep(STEP_SOURCE)}
+            onSchedule={() => void handleScheduleRoute()}
+          />
         </div>
       )}
       </main>
