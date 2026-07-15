@@ -532,6 +532,9 @@ export function streamJobProgress(
     destination_summary: raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined,
+    preflight: raw.preflight && typeof raw.preflight === "object"
+      ? raw.preflight as JobProgress["preflight"]
+      : undefined,
     phases: Array.isArray(raw.phases)
       ? raw.phases
           .map((p) => {
@@ -689,6 +692,7 @@ export async function testConnection(payload: {
   ssl?: boolean;
   auth_mode?: string;
   auth_role?: string;
+  auth_source?: string;
   api_key?: string;
   service_account?: string;
 }): Promise<{ success: boolean; message: string }> {
@@ -715,6 +719,7 @@ export async function saveConnector(payload: {
   ssl?: boolean;
   auth_mode?: string;
   auth_role?: string;
+  auth_source?: string;
   api_key?: string;
   service_account?: string;
 }): Promise<Connector> {
@@ -1006,6 +1011,7 @@ export async function runUniversalTransfer(options: {
   sourceTable?: string;
   sourceCollection?: string;
   sourceConnectionString?: string;
+  sourceAuthSource?: string;
   destKind?: string;
   destFormat?: string;
   destDatabase?: string;
@@ -1019,6 +1025,7 @@ export async function runUniversalTransfer(options: {
   destPassword?: string;
   destConnectionString?: string;
   destWarehouse?: string;
+  destAuthSource?: string;
   skipPreflight?: boolean;
   mappings?: { source: string; target: string; confidence: number; reason?: string }[];
   syncMode?: string;
@@ -1053,6 +1060,7 @@ export async function runUniversalTransfer(options: {
   if (options.sourceTable) formData.append("source_table", options.sourceTable);
   if (options.sourceCollection) formData.append("source_collection", options.sourceCollection);
   if (options.sourceConnectionString) formData.append("source_connection_string", options.sourceConnectionString);
+  if (options.sourceAuthSource) formData.append("source_auth_source", options.sourceAuthSource);
   if (options.destConnectorId) formData.append("dest_connector_id", options.destConnectorId);
   if (options.destHost) formData.append("dest_host", options.destHost);
   if (options.destPort) formData.append("dest_port", String(options.destPort));
@@ -1060,6 +1068,7 @@ export async function runUniversalTransfer(options: {
   if (options.destPassword) formData.append("dest_password", options.destPassword);
   if (options.destConnectionString) formData.append("dest_connection_string", options.destConnectionString);
   if (options.destWarehouse) formData.append("dest_warehouse", options.destWarehouse);
+  if (options.destAuthSource) formData.append("dest_auth_source", options.destAuthSource);
   if (options.mappings?.length) {
     formData.append("mappings_json", JSON.stringify(options.mappings));
   }

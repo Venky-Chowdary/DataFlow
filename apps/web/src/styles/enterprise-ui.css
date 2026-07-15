@@ -2557,11 +2557,27 @@
   flex-direction: column !important;
   gap: 0 !important;
   padding: 0 !important;
-  overflow: hidden !important;
+  overflow: hidden auto !important;
   background: #fff;
   border: none;
   border-radius: 0;
   box-sizing: border-box;
+}
+
+.df2-theater-v3-preflight {
+  padding: 0 14px;
+  border-top: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.df2-theater-v3-log-section {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 14px;
+  background: #ffffff;
+  border-top: 1px solid #e2e8f0;
+  z-index: 2;
 }
 
 .df2-theater-v3-top {

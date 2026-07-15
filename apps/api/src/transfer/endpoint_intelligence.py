@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from .adapters import _introspect_table_schema, mongodb_connection_string, parse_file_content, probe_mongodb, read_source_database, resolve_connector_config
+from .adapters import _introspect_table_schema, mongodb_connection_string, parse_file_content, read_source_database, resolve_connector_config
+from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 
@@ -76,11 +77,15 @@ def introspect_endpoint(
     if fmt == "mongodb":
         try:
             from pymongo import MongoClient
+            from .connector_registry import humanize_connection_error, run_probe
 
-            ok, msg = probe_mongodb(cfg)
+            ok, msg = run_probe(fmt, cfg)
             if not ok:
                 out["message"] = msg
                 return out
+            # Carry the resolved auth_source into the endpoint so subsequent
+            # sample reads use the same authentication database.
+            endpoint.auth_source = cfg.get("auth_source", "") or endpoint.auth_source
             client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
             db_name = endpoint.database or cfg["database"] or "test"
             db = client[db_name]
@@ -92,7 +97,7 @@ def introspect_endpoint(
                 _attach_db_sample(out, endpoint)
             client.close()
         except Exception as e:
-            out["message"] = str(e)
+            out["message"] = humanize_connection_error("mongodb", e)
         return out
 
     if fmt == "snowflake":
@@ -108,6 +113,7 @@ def introspect_endpoint(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
@@ -149,6 +155,7 @@ def introspect_endpoint(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            service_account=cfg.get("service_account", ""),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
@@ -198,6 +205,7 @@ def introspect_endpoint(
             username=cfg.get("username", ""), password=cfg.get("password", ""),
             schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            service_account=cfg.get("service_account", ""),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "object"} for t in probe.tables]
@@ -245,11 +253,20 @@ def introspect_endpoint(
             username=cfg.get("username", ""), password=cfg.get("password", ""),
             schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            api_key=cfg.get("api_key", ""),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "index"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.database and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "sqlite" or resolve_driver_type(fmt) == "generic_sql":
+        out["connected"] = True
+        out["message"] = f"{fmt.title()} connected — introspecting table schema"
+        if endpoint.table:
+            out["objects"] = [{"name": endpoint.table, "type": "table"}]
             _attach_db_sample(out, endpoint)
         return out
 

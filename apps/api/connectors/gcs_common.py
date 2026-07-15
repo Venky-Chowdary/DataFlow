@@ -44,7 +44,7 @@ def gcs_client(cfg: dict[str, Any]):
     project = (cfg.get("host") or "").strip() or None
     if project and project.startswith("http"):
         project = None
-    creds_ref = (cfg.get("connection_string") or cfg.get("password") or "").strip()
+    creds_ref = (cfg.get("service_account") or cfg.get("connection_string") or cfg.get("password") or "").strip()
     if creds_ref.startswith("http://") or creds_ref.startswith("https://"):
         endpoint = creds_ref.rstrip("/")
         creds_ref = ""

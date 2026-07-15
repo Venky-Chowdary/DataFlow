@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import gzip
 import io
 import json
 import sys
@@ -43,34 +44,62 @@ class FileParser:
     
     @staticmethod
     def detect_file_type(filename: str, content: bytes | None = None) -> str:
-        """Detect file type from filename, with content sniffing as fallback."""
+        """Detect file type from filename, with content sniffing as fallback.
+
+        Handles ``.gz``-suffixed compressed files by inspecting the inner extension
+        and, when no filename hint exists, decompresses a small prefix to sniff the
+        payload.  This keeps billion-row CSV/JSONL ingest path-compatible.
+        """
         filename_lower = (filename or "").lower()
 
-        if filename_lower.endswith(".json"):
-            return "json"
-        if filename_lower.endswith(".csv"):
-            return "csv"
-        if filename_lower.endswith(".tsv"):
-            return "tsv"
-        if filename_lower.endswith((".jsonl", ".ndjson")):
-            return "jsonl" if filename_lower.endswith(".jsonl") else "ndjson"
-        if filename_lower.endswith((".xlsx", ".xls")):
-            return "excel"
-        if filename_lower.endswith(".parquet"):
-            return "parquet"
-        if filename_lower.endswith(".xml"):
-            return "xml"
+        def _from_extension(name: str) -> str | None:
+            if name.endswith(".json"):
+                return "json"
+            if name.endswith(".csv"):
+                return "csv"
+            if name.endswith(".tsv"):
+                return "tsv"
+            if name.endswith((".jsonl", ".ndjson")):
+                return "jsonl" if name.endswith(".jsonl") else "ndjson"
+            if name.endswith((".xlsx", ".xls")):
+                return "excel"
+            if name.endswith(".parquet"):
+                return "parquet"
+            if name.endswith(".xml"):
+                return "xml"
+            return None
 
+        ext_result = _from_extension(filename_lower)
+        if ext_result:
+            return ext_result
+
+        # Handle data.csv.gz, data.jsonl.gz, etc.
+        if filename_lower.endswith(".gz"):
+            inner = filename_lower[:-3]
+            ext_result = _from_extension(inner)
+            if ext_result:
+                return ext_result
+
+        # Content sniffing — decompress a gzip prefix if needed.
+        sample_bytes: bytes = b""
         if content:
-            sample = content[:4096]
-            stripped = sample.lstrip()
+            if content[:2] == b"\x1f\x8b":
+                try:
+                    with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
+                        sample_bytes = gz.read(4096)
+                except Exception:
+                    sample_bytes = content[:4096]
+            else:
+                sample_bytes = content[:4096]
+
+            stripped = sample_bytes.lstrip()
             if stripped[:1] in (b"{", b"["):
                 return "json"
-            if b"\n{" in sample or b"\n[" in sample:
+            if b"\n{" in sample_bytes or b"\n[" in sample_bytes:
                 return "jsonl"
-            if b"," in sample[:512]:
+            if b"," in sample_bytes[:512]:
                 return "csv"
-            if b"\t" in sample[:512]:
+            if b"\t" in sample_bytes[:512]:
                 return "tsv"
 
         return "unknown"
@@ -334,15 +363,24 @@ class FileParser:
 
     @classmethod
     def parse(cls, content: str | bytes, filename: str) -> ParseResult:
-        """Parse file based on type detection"""
+        """Parse file based on type detection, transparently handling gzip."""
         raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+
+        # Transparent gzip decompression for in-memory payloads.
+        if isinstance(content, bytes) and raw_bytes[:2] == b"\x1f\x8b":
+            try:
+                raw_bytes = gzip.decompress(raw_bytes)
+            except Exception:
+                pass
+
         file_type = cls.detect_file_type(filename, raw_bytes)
 
         if isinstance(content, bytes):
+            decoded = raw_bytes
             try:
-                content = content.decode("utf-8")
+                content = decoded.decode("utf-8")
             except UnicodeDecodeError:
-                content = content.decode("latin-1")
+                content = decoded.decode("latin-1")
         
         if file_type == "json":
             return cls.parse_json(content)

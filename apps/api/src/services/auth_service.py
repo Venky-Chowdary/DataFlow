@@ -30,6 +30,15 @@ def auth_required() -> bool:
 
 
 def _load_users() -> list[dict[str, str]]:
+    admin_email = os.getenv("DATAFLOW_ADMIN_EMAIL", "").strip()
+    admin_password = os.getenv("DATAFLOW_ADMIN_PASSWORD", "").strip()
+    if admin_email and admin_password:
+        return [{
+            "email": admin_email,
+            "password_hash": hash_password(admin_password),
+            "name": "Admin",
+            "role": "admin",
+        }]
     raw = os.getenv("DATAFLOW_AUTH_USERS", "").strip()
     if raw:
         try:

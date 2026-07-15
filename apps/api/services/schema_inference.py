@@ -76,6 +76,21 @@ def _is_binary_field_name(name: str) -> bool:
     return bool(_BINARY_FIELD_RE.search(name or ""))
 
 
+# Date / time / timestamp field-name heuristics used to disambiguate long integer
+# strings (10-13 digits) from Unix-epoch timestamps.  Without this, a phone
+# number such as 5558675309 is misclassified as a timestamp.
+_TIMESTAMP_FIELD_RE = re.compile(
+    r"(?:^|_)(?:time|date|timestamp|datetime|epoch|unix|created|updated|modified|"
+    r"logged|expires|occurred|at|on|dt|utc|timezone|scheduled|start|end|from|to)"
+    r"\d*(?:$|_)",
+    re.I,
+)
+
+
+def _is_timestamp_field_name(name: str) -> bool:
+    return bool(_TIMESTAMP_FIELD_RE.search(name or ""))
+
+
 def _classify_value(value: str) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -118,6 +133,14 @@ def _classify_value(value: str) -> str:
     if decimal_parsed is not None:
         if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
+        # MongoDB / BSON only supports signed 64-bit ints. Treat larger whole
+        # numbers as strings so they are not silently mangled or rejected.
+        try:
+            iv = int(decimal_parsed)
+        except (ValueError, TypeError):
+            return "VARCHAR"
+        if iv > 2**63 - 1 or iv < -(2**63):
+            return "VARCHAR"
         return "INTEGER"
 
     if len(s) > 255:
@@ -181,6 +204,25 @@ def infer_type(
                     pass
         if valid == len(non_empty):
             return "BINARY"
+
+    # A column of long-integer strings (phone numbers, IDs, SSNs, etc.) must not
+    # be inferred as a Unix-epoch timestamp unless the field name indicates a
+    # date/time value.  YYYYMMDD values still come through as DATE above and are
+    # left unchanged.
+    if (
+        inferred == "TIMESTAMP"
+        and field_name
+        and not _is_timestamp_field_name(field_name)
+    ):
+        if all(re.match(r"^[+\-]?\d+$", v) for v in non_empty):
+            # If every value is a valid integer, prefer INTEGER; otherwise keep
+            # it as a safe VARCHAR so no semantic transform is misapplied.
+            try:
+                for v in non_empty:
+                    int(v)
+                return "INTEGER"
+            except ValueError:
+                return "VARCHAR"
 
     return inferred
 

@@ -28,6 +28,37 @@ class ReadBatch:
     total_rows: int
 
 
+def _primary_key_columns(cur, table: str) -> list[str] | None:
+    """Return the ordered list of PRIMARY KEY columns for ``table`` if one exists."""
+    try:
+        cur.execute(
+            "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE "
+            "WHERE TABLE_NAME = %s AND CONSTRAINT_NAME = 'PRIMARY' "
+            "ORDER BY ORDINAL_POSITION",
+            (table,),
+        )
+        rows = cur.fetchall()
+        if rows:
+            return [r[0] for r in rows]
+    except Exception:
+        pass
+    return None
+
+
+def _order_by_clause(cur, table: str, columns: list[str] | None) -> str:
+    """Build a deterministic ORDER BY clause for stable pagination.
+
+    Uses the primary key when available; otherwise falls back to the first column
+    so LIMIT/OFFSET batches are reproducible and do not drop or duplicate rows.
+    """
+    pk = _primary_key_columns(cur, table)
+    if pk:
+        return ", ".join(f"`{c}`" for c in pk)
+    if columns:
+        return f"`{columns[0]}`"
+    return "1"
+
+
 def read_table_batch(
     *,
     host: str,
@@ -61,11 +92,12 @@ def read_table_batch(
             else:
                 cur.execute(f"SELECT COUNT(*) FROM `{table}`")
                 total = int(cur.fetchone()[0])
+            order_by = _order_by_clause(cur, table, columns)
             if columns:
                 col_list = ", ".join(f"`{c}`" for c in columns)
-                query = f"SELECT {col_list} FROM `{table}` LIMIT %s OFFSET %s"
+                query = f"SELECT {col_list} FROM `{table}` ORDER BY {order_by} LIMIT %s OFFSET %s"
             else:
-                query = f"SELECT * FROM `{table}` LIMIT %s OFFSET %s"
+                query = f"SELECT * FROM `{table}` ORDER BY {order_by} LIMIT %s OFFSET %s"
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])

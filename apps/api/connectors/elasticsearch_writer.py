@@ -54,6 +54,7 @@ def write_mapped_rows(
     schema: str,
     connection_string: str,
     ssl: bool,
+    api_key: str = "",
     table_name: str,
     headers: list[str],
     data_rows: list[list[str]],
@@ -69,15 +70,17 @@ def write_mapped_rows(
     index = table_name or database
     cfg = {
         "host": host, "port": port, "username": username, "password": password,
-        "connection_string": connection_string, "ssl": ssl,
+        "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
-    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         preserve_case=True,
     )
 
@@ -91,7 +94,7 @@ def write_mapped_rows(
         def gen_actions():
             for row in mapped_rows:
                 source = {
-                    target_cols[i]: _to_es_value(value, source_types[i])
+                    target_cols[i]: _to_es_value(value, logical_types[i])
                     for i, value in enumerate(row)
                 }
                 doc_id = source.pop("_id", None)
@@ -101,6 +104,10 @@ def write_mapped_rows(
                 yield action
 
         written, bulk_errors = bulk(client, gen_actions(), raise_on_error=False)
+        try:
+            client.indices.refresh(index=index)
+        except Exception:
+            pass
         if on_checkpoint:
             on_checkpoint(1, 1, written)
         return WriteResult(
@@ -108,7 +115,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=index,
             target_schema=host or "localhost",
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=1,
             warnings=(errors + [str(e) for e in bulk_errors[:5]])[:10],
             rejected_rows=len(errors) + len(bulk_errors or []),

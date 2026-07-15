@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any, Callable
 
-from services.reconciliation import checksum_rows
+from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 
@@ -32,8 +32,18 @@ def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
     return f"{quote_char}{escaped}{quote_char}"
 
 
-def row_checksum(rows: list[tuple]) -> str:
-    return checksum_rows(rows)
+def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:
+    return checksum_rows(rows, columns)
+
+
+def row_fingerprints(rows: list[Any], columns: list[str] | None = None, *, sort_key: str | None = None) -> list[tuple[str, str]]:
+    """Return the unsorted (row_key, fingerprint) tuples for a list of rows.
+
+    Streaming producers can accumulate these tuples across batches and then call
+    ``services.reconciliation.fingerprint_checksum`` once at the end, avoiding a
+    full materialization of every row as a dict/list.
+    """
+    return list(_iter_fingerprints(rows, columns, sort_key=sort_key))
 
 
 def dedupe_rows(
@@ -121,13 +131,16 @@ def build_mapped_rows(
                 row_has_error = True
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
-                if policy == "coerce_null":
+                if policy in {"coerce_null", "quarantine"}:
+                    # Quarantine preserves the row; the bad cell becomes NULL and the
+                    # error is surfaced as a warning so the transfer does not silently
+                    # lose data.
                     converted = None
                 else:
                     continue
             if target_idx >= 0:
                 out[target_idx] = converted
-        if row_has_error and policy in {"fail", "quarantine"}:
+        if row_has_error and policy == "fail":
             continue
         mapped.append(tuple(out))
 
@@ -138,12 +151,22 @@ def resolve_target_columns(
     mappings: list[dict],
     column_types: dict[str, str],
     preserve_case: bool = False,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
+    """Return target column names and their intended logical target types.
+
+    Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
+    then the source logical type, and finally ``VARCHAR``.
+    """
     target_cols: list[str] = []
-    source_types: list[str] = []
+    target_types: list[str] = []
     for m in mappings:
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
-            source_types.append(column_types.get(m["source"], "VARCHAR"))
-    return target_cols, source_types
+            target_types.append(
+                m.get("target_type")
+                or (dest_types or {}).get(tgt)
+                or column_types.get(m["source"], "VARCHAR")
+            )
+    return target_cols, target_types

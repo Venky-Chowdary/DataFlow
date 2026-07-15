@@ -118,3 +118,12 @@ class PreflightContext:
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         return self.plan.dry_run_passed, self.plan.dry_run_errors
+
+    def run_integrity_audit(self, sample_size: int = 1000) -> dict[str, Any]:
+        return {
+            "blocks_transfer": False,
+            "checks_passed": 0,
+            "checks_failed": 0,
+            "issues": [],
+            "summary": "Integrity audit not configured",
+        }

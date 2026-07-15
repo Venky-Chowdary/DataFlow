@@ -11,6 +11,7 @@ engine.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
@@ -212,6 +213,8 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
     "apache_hive": 10000,
     "apache_impala": 21000,
     "sparksql": 10000,
+    "spark": 10000,
+    "apache_spark": 10000,
     "phoenix": 8765,
     "sap_hana": 30015,
     "hana": 30015,
@@ -314,6 +317,10 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     if not port:
         port = _default_port(db_type)
 
+    query = None
+    if drivername.startswith("mssql+pyodbc"):
+        query = {"driver": "ODBC Driver 17 for SQL Server"}
+
     return sa.URL.create(
         drivername,
         username=cfg.get("username") or None,
@@ -321,6 +328,7 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         host=cfg.get("host") or "localhost",
         port=port if port else None,
         database=cfg.get("database") or None,
+        query=query,
     )
 
 
@@ -336,6 +344,11 @@ def _engine(cfg: dict[str, Any]) -> Any:
 
         return create_engine(url, poolclass=NullPool)
     return create_engine(url, pool_pre_ping=True, pool_recycle=600)
+
+
+def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
+    """Public accessor for a configured SQLAlchemy engine."""
+    return _engine(cfg)
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:
@@ -359,6 +372,11 @@ def _schema_name(cfg: dict[str, Any]) -> str | None:
         if db_type == "trino":
             return "default"
     return schema or None
+
+
+def get_sql_schema(cfg: dict[str, Any]) -> str | None:
+    """Public accessor for the SQL schema name implied by a connector config."""
+    return _schema_name(cfg)
 
 
 def _type_repr(type_obj: Any) -> str:
@@ -503,7 +521,7 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
     if t in ("json", "array"):
-        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
+        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto", "duckdb"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
@@ -545,7 +563,7 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
 
         if isinstance(parsed, (dict, list)):
             if _is_string_type(sa_type):
-                return json.dumps(parsed, ensure_ascii=False, default=str)
+                return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=str)
             return parsed
         if isinstance(value, str):
             return value
@@ -753,25 +771,50 @@ def _build_table_for_write(
     columns: list[str],
     column_types: dict[str, str],
     db_type: str = "",
+    conflict_columns: list[str] | None = None,
 ) -> sa.Table:
-    """Build an explicit Table definition for CREATE/INSERT using the target schema."""
+    """Build an explicit Table definition for CREATE/INSERT using the target schema.
+
+    When ``conflict_columns`` are supplied for upsert, add a PRIMARY KEY over them
+    so native ``ON CONFLICT`` / ``ON DUPLICATE KEY`` upsert has the required
+    unique constraint and retries are truly idempotent.
+    """
     metadata = sa.MetaData()
     dialect_name = engine.dialect.name if engine.dialect else ""
+    conflict_cols = [c for c in (conflict_columns or []) if c in columns]
+    pk_set = set()
+    if conflict_cols:
+        pk_set = set(conflict_cols)
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
+        is_pk = col in pk_set
+        # Setting autoincrement=False prevents SQLAlchemy from fabricating a
+        # backing sequence for dialects (e.g. DuckDB) that do not create it
+        # automatically.  The PK exists purely for upsert semantics, not identity.
+        autoincrement = False if is_pk else None
         cols.append(
             sa.Column(
                 col,
                 _sa_type_for_logical(logical, dialect_name, db_type),
+                primary_key=is_pk,
+                nullable=not is_pk,
+                autoincrement=autoincrement,
                 quote=True,
             )
         )
+
+    constraints: list[Any] = []
+    if conflict_cols and not pk_set.issubset(set(columns)):
+        constraints.append(sa.UniqueConstraint(*conflict_cols, quote=True))
+
     if dialect_name == "clickhouse" and ch_engines is not None:
         return sa.Table(
             table_name,
             metadata,
             *cols,
+            *constraints,
             ch_engines.MergeTree(order_by=sa.text("tuple()")),
             schema=schema,
             quote=True,
@@ -782,6 +825,7 @@ def _build_table_for_write(
         table_name,
         metadata,
         *cols,
+        *constraints,
         schema=schema,
         quote=True,
         quote_schema=True,
@@ -957,6 +1001,36 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
         engine.dispose()
 
 
+def delete_by_primary_keys(
+    cfg: dict[str, Any],
+    table: str,
+    primary_key_column: str,
+    keys: list[str],
+    schema: str | None = None,
+) -> int:
+    """Delete rows by primary key using a dialect-aware parameterized statement."""
+    if not SQLALCHEMY_AVAILABLE or not keys:
+        return 0
+    engine = _engine(cfg)
+    try:
+        schema = schema or _schema_name(cfg)
+        table_quoted = quote_sql_identifier(table)
+        schema_quoted = quote_sql_identifier(schema) if schema else None
+        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+        pk_quoted = quote_sql_identifier(primary_key_column)
+        placeholders = ",".join([":k{}".format(i) for i in range(len(keys))])
+        params = {"k{}".format(i): k for i, k in enumerate(keys)}
+        stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"
+        with engine.connect() as conn:
+            result = conn.execute(sa.text(stmt), params)
+            conn.commit()
+            return result.rowcount or 0
+    except Exception:
+        return 0
+    finally:
+        engine.dispose()
+
+
 def _read_table_raw(
     conn: Any,
     table: str,
@@ -1022,6 +1096,11 @@ def read_table_batch(
 
     try:
         with engine.connect() as conn:
+            # RisingWave streams writes through a barrier; issue a FLUSH so the
+            # subsequent SELECT observes rows written by a just-finished ingest.
+            if (cfg.get("type") or "").lower() == "risingwave":
+                with contextlib.suppress(Exception):
+                    conn.execute(sa.text("FLUSH"))
             try:
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
@@ -1094,6 +1173,9 @@ def read_table_cursor_batch(
 
     try:
         with engine.connect() as conn:
+            if (cfg.get("type") or "").lower() == "risingwave":
+                with contextlib.suppress(Exception):
+                    conn.execute(sa.text("FLUSH"))
             table_obj = _reflect_table(engine, table, schema_name, columns)
             if cursor_column not in table_obj.c:
                 raise ValueError(f"Cursor column '{cursor_column}' not found in table {table}")
@@ -1121,35 +1203,119 @@ def read_table_cursor_batch(
         engine.dispose()
 
 
+def _delete_by_keys(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    chunk_size: int = 1000,
+) -> None:
+    """Delete existing rows that match the provided conflict keys.
+
+    Uses equality ``OR (a=1 AND b=2)`` clauses instead of ``(a,b) IN (...)`` so
+    that NULL keys match correctly and dialects with limited tuple-IN support
+    still work.  Deletions are chunked to avoid generating queries that exceed
+    engine statement-length limits.
+    """
+    if not rows:
+        return
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        clauses = [
+            sa.and_(*[
+                (table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c])
+                for c in conflict_cols
+            ])
+            for row in chunk
+        ]
+        conn.execute(sa.delete(table_obj).where(sa.or_(*clauses)))
+
+
 def _upsert_batch(
     conn: Any,
     table_obj: sa.Table,
     batch: list[dict[str, Any]],
     conflict_columns: list[str],
     target_cols: list[str],
+    dialect_name: str,
 ) -> None:
-    """Delete rows matching the batch conflict keys, then re-insert.
+    """Write a batch idempotently using the best native upsert available.
 
-    This works across any SQLAlchemy dialect that supports `WHERE (a,b) IN (...)`
-    and `INSERT`/`DELETE` in the same transaction.  Rows are deduplicated on the
-    conflict key so the final insert never contains duplicates.
+    Deduplicates the batch on the conflict key, then:
+      * PostgreSQL, SQLite, MySQL/MariaDB: native ``ON CONFLICT`` /
+        ``ON DUPLICATE KEY`` upsert.
+      * Everyone else: chunked DELETE by equality keys followed by INSERT.
     """
     conflict_cols = [c for c in conflict_columns if c in target_cols]
     if not conflict_cols:
         conn.execute(table_obj.insert(), batch)
         return
 
+    # Last occurrence of each conflict key wins within the batch.
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in batch:
         key = tuple(row[c] for c in conflict_cols)
         deduped[key] = row
     rows = list(deduped.values())
-    keys = list(deduped.keys())
 
-    conflict_expr = sa.tuple_(*[table_obj.c[c] for c in conflict_cols])
-    delete_stmt = sa.delete(table_obj).where(conflict_expr.in_(keys))
-    conn.execute(delete_stmt)
-    conn.execute(table_obj.insert(), rows)
+    update_cols = [c for c in target_cols if c not in conflict_cols]
+
+    def _native_upsert() -> bool:
+        try:
+            if dialect_name == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                stmt = pg_insert(table_obj).values(rows)
+                if update_cols:
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=conflict_cols,
+                        set_={c: stmt.excluded[c] for c in update_cols},
+                    )
+                else:
+                    stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+                conn.execute(stmt)
+                return True
+
+            if dialect_name == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                stmt = sqlite_insert(table_obj).values(rows)
+                if update_cols:
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=conflict_cols,
+                        set_={c: stmt.excluded[c] for c in update_cols},
+                    )
+                else:
+                    stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+                conn.execute(stmt)
+                return True
+
+            if dialect_name in ("mysql", "mariadb"):
+                from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+                stmt = mysql_insert(table_obj).values(rows)
+                if update_cols:
+                    stmt = stmt.on_duplicate_key_update(
+                        {c: stmt.inserted[c] for c in update_cols}
+                    )
+                else:
+                    stmt = stmt.prefix_with("IGNORE")
+                conn.execute(stmt)
+                return True
+        except Exception:
+            # Native upsert can fail if the table lacks the required unique
+            # index/constraint.  Roll back the aborted transaction so the
+            # delete+insert fallback can run cleanly.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        return False
+
+    if not _native_upsert():
+        _delete_by_keys(conn, table_obj, rows, conflict_cols)
+        conn.execute(table_obj.insert(), rows)
 
 
 def write_mapped_rows(
@@ -1195,7 +1361,14 @@ def write_mapped_rows(
     schema_name = _schema_name(cfg)
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
-    target_column_types = {target_cols[i]: column_types.get(mappings[i]["source"], "string") for i in range(len(target_cols))}
+    target_column_types = {
+        target_cols[i]: (
+            mappings[i].get("target_type")
+            or column_types.get(mappings[i]["source"])
+            or "string"
+        )
+        for i in range(len(target_cols))
+    }
 
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors = build_mapped_rows(
@@ -1222,7 +1395,15 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
 
-    table_obj = _build_table_for_write(engine, table_name, schema_name, target_cols, target_column_types, db_type=cfg.get("type", ""))
+    table_obj = _build_table_for_write(
+        engine,
+        table_name,
+        schema_name,
+        target_cols,
+        target_column_types,
+        db_type=cfg.get("type", ""),
+        conflict_columns=conflict_columns,
+    )
 
     dialect_name = engine.dialect.name if engine.dialect else ""
     sa_col_types = {col: _sa_type_for_logical(target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")) for col in target_cols}
@@ -1249,14 +1430,23 @@ def write_mapped_rows(
                 table_exists = False
 
             if create_table and not table_exists:
-                if db_type == "questdb":
-                    # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
-                    ddl = str(sa.schema.CreateTable(table_obj, if_not_exists=True).compile(dialect=engine.dialect))
-                    ddl = ddl.replace("TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP").replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
-                    conn.execute(sa.text(ddl))
-                else:
-                    conn.execute(sa.schema.CreateTable(table_obj))
-                conn.commit()
+                try:
+                    if db_type == "questdb":
+                        # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
+                        ddl = str(sa.schema.CreateTable(table_obj, if_not_exists=True).compile(dialect=engine.dialect))
+                        ddl = ddl.replace("TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP").replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
+                        conn.execute(sa.text(ddl))
+                    else:
+                        conn.execute(sa.schema.CreateTable(table_obj, if_not_exists=True))
+                    conn.commit()
+                except Exception as exc:
+                    # If the dialect does not support IF NOT EXISTS and the table
+                    # was created concurrently, ignore the error and continue.
+                    err = str(exc).lower()
+                    if "already exists" in err or "duplicate" in err:
+                        conn.rollback()
+                    else:
+                        raise
 
             if table_exists and backfill_new_fields:
                 add_missing_columns(
@@ -1278,7 +1468,7 @@ def write_mapped_rows(
                     break
 
                 if write_mode == "upsert" and conflict_columns:
-                    _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols)
+                    _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols, dialect_name)
                 else:
                     conn.execute(table_obj.insert(), batch)
                 conn.commit()
@@ -1291,7 +1481,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=schema or database,
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
             rejected_rows=len(data_rows) - len(mapped_rows),
             warnings=transform_errors,

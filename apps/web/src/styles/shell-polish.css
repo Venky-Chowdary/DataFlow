@@ -2877,9 +2877,11 @@ textarea.df2-pilot-composer textarea {
 
 .df2-structure-field-strip {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   margin-bottom: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 
 .df2-structure-field-chip {
@@ -2931,7 +2933,8 @@ textarea.df2-pilot-composer textarea {
   text-align: left;
   border-bottom: 1px solid #f1f5f9;
   white-space: nowrap;
-  max-width: 180px;
+  min-width: 120px;
+  max-width: 420px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -2956,6 +2959,21 @@ textarea.df2-pilot-composer textarea {
 
 .df2-structure-empty-rows {
   margin: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.df2-structure-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.df2-structure-page-info {
   font-size: 12px;
   color: #64748b;
 }

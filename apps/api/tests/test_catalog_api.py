@@ -45,6 +45,12 @@ def test_search_status_live():
         assert c["status"] == "live"
 
 
+def test_search_status_live_count():
+    data = _catalog.search_catalog("", "all", "", "live", 1000)
+    assert data["total"] >= 130
+    assert data["filtered"] >= 130
+
+
 def test_search_query():
     data = _catalog.search_catalog("postgres", "all", "", "", 10)
     assert data["filtered"] > 0

@@ -45,6 +45,7 @@ def write_mapped_rows(
     schema: str,
     connection_string: str,
     ssl: bool,
+    service_account: str = "",
     table_name: str,
     headers: list[str],
     data_rows: list[list[str]],
@@ -75,16 +76,19 @@ def write_mapped_rows(
     cfg = {
         "host": host,
         "port": port,
+        "service_account": service_account,
         "connection_string": connection_string,
         "password": password,
     }
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         preserve_case=True,
     )
 
@@ -99,7 +103,7 @@ def write_mapped_rows(
                 from services.type_system import normalize_logical_type
             except Exception:
                 normalize_logical_type = lambda x: str(x or "").lower()
-            ctype = normalize_logical_type(column_types.get(col, "")) if column_types else ""
+            ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
             # Structural types are parsed as JSON objects/arrays.
             if ctype in {"json", "array", "object", "struct"}:
                 try:
@@ -138,9 +142,15 @@ def write_mapped_rows(
 
     try:
         client = gcs_client(cfg)
-        blob = client.bucket(bucket).blob(key)
+        bucket_obj = client.bucket(bucket)
+        try:
+            if not bucket_obj.exists():
+                bucket_obj.create()
+        except Exception:
+            pass
+        blob = bucket_obj.blob(key)
         blob.upload_from_string(body, content_type=content_type)
-        checksum = row_checksum(mapped_rows)
+        checksum = row_checksum(mapped_rows, target_cols)
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
         return WriteResult(
@@ -151,7 +161,7 @@ def write_mapped_rows(
             checksum=checksum,
             chunks_completed=1,
             warnings=errors[:10],
-            rejected_rows=len(errors),
+            rejected_rows=len(data_rows) - len(mapped_rows),
         )
     except Exception as exc:
         return WriteResult(

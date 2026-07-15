@@ -172,6 +172,7 @@ def resolve_driver_type(catalog_id: str) -> str:
         # Generic SQL engines
         ("mssql", "generic_sql"),
         ("sql_server", "generic_sql"),
+        ("sqlserver", "generic_sql"),
         ("microsoft_sql", "generic_sql"),
         ("azure_sql", "generic_sql"),
         ("oracle", "generic_sql"),
@@ -222,8 +223,10 @@ def resolve_driver_type(catalog_id: str) -> str:
         return "gcs"
     if "parquet" in cid:
         return "parquet"
-    if "s3" in cid or "aws_s3" in cid:
+    if "s3" in cid or "aws_s3" in cid or "object_storage" in cid:
         return "s3"
+    if "azure_blob_storage" in cid or "azure_data_lake" in cid or "adls" in cid:
+        return "adls"
     if cid.startswith("jsonl") or cid.endswith("jsonl"):
         return "jsonl"
     if "json" in cid and "jsonl" not in cid:
@@ -286,14 +289,14 @@ _GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
     "sap_hana": "hdbcli",
     "hana": "hdbcli",
     "firebird+fdb": "fdb",
-    "h2": "h2",
+    "h2": None,
     "clickhouse+native": "clickhouse_driver",
     "druid": "pydruid",
     "pinot": "pinotdb",
     "presto": "pyhive",
     "trino": "trino",
     "hive": "pyhive",
-    "impala": "impyla",
+    "impala": "impala",
     "spark": "pyhive",
     "phoenix": "phoenixdb",
     "databricks": "databricks",

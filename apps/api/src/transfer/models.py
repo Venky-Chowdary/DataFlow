@@ -24,6 +24,7 @@ class EndpointConfig:
     ssl: bool = False
     auth_mode: str = ""
     auth_role: str = ""
+    auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
     extra: dict = field(default_factory=dict)
@@ -48,13 +49,14 @@ class EndpointConfig:
             ssl=d.get("ssl", False),
             auth_mode=d.get("auth_mode", ""),
             auth_role=d.get("auth_role", ""),
+            auth_source=d.get("auth_source", ""),
             api_key=d.get("api_key", ""),
             service_account=d.get("service_account", ""),
             extra={k: v for k, v in d.items() if k not in {
                 "format", "type", "db_type", "connector_id", "host", "port",
                 "database", "schema", "table", "table_name", "collection",
                 "collection_name", "username", "password", "connection_string",
-                "warehouse", "ssl", "auth_mode", "auth_role", "api_key", "service_account",
+                "warehouse", "ssl", "auth_mode", "auth_role", "auth_source", "api_key", "service_account",
             }},
         )
 
@@ -68,11 +70,22 @@ class TransferRequest:
     skip_preflight: bool = False
     source_filename: str = ""
     source_content: bytes = b""
+    # Optional on-disk path for the source file.  Used for billion-row streaming
+    # when loading the whole file into memory would exhaust RAM.
+    source_path: str = ""
     sync_mode: str = "full_refresh_overwrite"
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
+    # Optional row-level source filter (column predicates, and/or composition).
+    source_filter: dict = field(default_factory=dict)
+    # Priority-first sync: sort source rows by this column before writing.
+    priority_column: str = ""
+    priority_direction: str = "desc"  # "asc" or "desc"
+    limit: int = 0  # 0 means no limit
     stream_contracts: list[dict] = field(default_factory=list)
+    contract_id: str = ""
+    enforce_contract: bool = True
 
     @property
     def operation(self) -> str:
@@ -106,6 +119,7 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "ssl": ep.ssl,
         "auth_mode": ep.auth_mode,
         "auth_role": ep.auth_role,
+        "auth_source": ep.auth_source,
         "api_key": ep.api_key,
         "service_account": ep.service_account,
     }
@@ -124,6 +138,8 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "validation_mode": request.validation_mode,
         "backfill_new_fields": request.backfill_new_fields,
         "stream_contracts": request.stream_contracts,
+        "contract_id": request.contract_id,
+        "enforce_contract": request.enforce_contract,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -143,7 +159,13 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         schema_policy=data.get("schema_policy") or "manual_review",
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
+        source_filter=data.get("source_filter") or {},
+        priority_column=(data.get("priority_column") or "").strip(),
+        priority_direction=(data.get("priority_direction") or "desc").lower(),
+        limit=int(data.get("limit") or 0),
         stream_contracts=data.get("stream_contracts") or [],
+        contract_id=data.get("contract_id") or "",
+        enforce_contract=bool(data.get("enforce_contract", True)),
     )
 
 
@@ -162,6 +184,11 @@ class TransferResult:
     reconciliation: dict = field(default_factory=dict)
     validation_plan: dict = field(default_factory=dict)
     payload_shape: dict = field(default_factory=dict)
+    contract_id: str = ""
+    explanation: str = ""
+    elapsed_seconds: float = 0.0
+    records_per_second: float = 0.0
+    peak_memory_bytes: int = 0
 
 
 @dataclass

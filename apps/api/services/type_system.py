@@ -266,7 +266,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "TEXT",
         LOGICAL_TEXT: "TEXT",
         LOGICAL_INTEGER: "INTEGER",
-        LOGICAL_DECIMAL: "REAL",
+        # SQLite has no true fixed-point type; store decimals as TEXT to avoid
+        # IEEE-754 precision loss for high-precision values.
+        LOGICAL_DECIMAL: "TEXT",
         LOGICAL_BOOLEAN: "INTEGER",
         LOGICAL_DATE: "TEXT",
         LOGICAL_DATETIME: "TEXT",
@@ -342,35 +344,87 @@ def is_binary_type(inferred: str | None) -> bool:
 
 
 def is_lossy_coercion(source_type: str, target_type: str) -> bool:
-    """True when converting source→target may lose precision or fail silently."""
+    """True when converting source→target may lose precision, fail silently, or
+    change the semantic meaning of a value.
+
+    The allow-list below captures the widening / reversible conversions that the
+    transform engine can perform without losing the original value:
+
+      * any value → string/text/json/array (structural serialization)
+      * integer → decimal/string/text/json
+      * decimal → string/text/json
+      * boolean → string/text/json/integer/decimal
+      * date → datetime/string/text/json
+      * datetime/time → string/text/json
+      * uuid → string/text/json
+      * json/array → string/text/json/array
+      * string/text/uuid/json/array → binary (base64 reversible)
+      * binary → string/text/json (base64 reversible)
+
+    Everything else is considered lossy and should be surfaced in preflight.
+    """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src == tgt:
         return False
-    if src == LOGICAL_BINARY and tgt != LOGICAL_BINARY:
-        return True
-    if tgt in LOSSLESS_TEXT_TYPES or tgt == LOGICAL_JSON:
+
+    safe: set[tuple[str, str]] = {
+        # text / structural containers are universal sinks
+        (LOGICAL_STRING, LOGICAL_TEXT),
+        (LOGICAL_TEXT, LOGICAL_STRING),
+        (LOGICAL_STRING, LOGICAL_JSON),
+        (LOGICAL_TEXT, LOGICAL_JSON),
+        (LOGICAL_JSON, LOGICAL_STRING),
+        (LOGICAL_JSON, LOGICAL_TEXT),
+        (LOGICAL_JSON, LOGICAL_JSON),
+        (LOGICAL_ARRAY, LOGICAL_STRING),
+        (LOGICAL_ARRAY, LOGICAL_TEXT),
+        (LOGICAL_ARRAY, LOGICAL_JSON),
+        (LOGICAL_ARRAY, LOGICAL_ARRAY),
+        (LOGICAL_JSON, LOGICAL_ARRAY),
+        # numeric widening and text renderings
+        (LOGICAL_INTEGER, LOGICAL_DECIMAL),
+        (LOGICAL_INTEGER, LOGICAL_STRING),
+        (LOGICAL_INTEGER, LOGICAL_TEXT),
+        (LOGICAL_INTEGER, LOGICAL_JSON),
+        (LOGICAL_DECIMAL, LOGICAL_STRING),
+        (LOGICAL_DECIMAL, LOGICAL_TEXT),
+        (LOGICAL_DECIMAL, LOGICAL_JSON),
+        # boolean renderings and scalar widenings
+        (LOGICAL_BOOLEAN, LOGICAL_STRING),
+        (LOGICAL_BOOLEAN, LOGICAL_TEXT),
+        (LOGICAL_BOOLEAN, LOGICAL_JSON),
+        (LOGICAL_BOOLEAN, LOGICAL_INTEGER),
+        (LOGICAL_BOOLEAN, LOGICAL_DECIMAL),
+        # date/time renderings and date→datetime widening
+        (LOGICAL_DATE, LOGICAL_DATETIME),
+        (LOGICAL_DATE, LOGICAL_STRING),
+        (LOGICAL_DATE, LOGICAL_TEXT),
+        (LOGICAL_DATE, LOGICAL_JSON),
+        (LOGICAL_DATETIME, LOGICAL_STRING),
+        (LOGICAL_DATETIME, LOGICAL_TEXT),
+        (LOGICAL_DATETIME, LOGICAL_JSON),
+        (LOGICAL_TIME, LOGICAL_STRING),
+        (LOGICAL_TIME, LOGICAL_TEXT),
+        (LOGICAL_TIME, LOGICAL_JSON),
+        # uuid renderings
+        (LOGICAL_UUID, LOGICAL_STRING),
+        (LOGICAL_UUID, LOGICAL_TEXT),
+        (LOGICAL_UUID, LOGICAL_JSON),
+        # binary ↔ text reversible (base64)
+        (LOGICAL_BINARY, LOGICAL_STRING),
+        (LOGICAL_BINARY, LOGICAL_TEXT),
+        (LOGICAL_BINARY, LOGICAL_JSON),
+        (LOGICAL_STRING, LOGICAL_BINARY),
+        (LOGICAL_TEXT, LOGICAL_BINARY),
+        (LOGICAL_UUID, LOGICAL_BINARY),
+        (LOGICAL_JSON, LOGICAL_BINARY),
+        (LOGICAL_ARRAY, LOGICAL_BINARY),
+    }
+
+    if (src, tgt) in safe:
         return False
-    if src in {LOGICAL_JSON, LOGICAL_ARRAY} and tgt in {
-        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_BINARY, LOGICAL_UUID,
-    }:
-        return True
-    if src in {LOGICAL_INTEGER, LOGICAL_DECIMAL} and tgt == LOGICAL_BOOLEAN:
-        return True
-    if src == LOGICAL_BOOLEAN and tgt in {LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_UUID, LOGICAL_BINARY}:
-        return True
-    if src == LOGICAL_DECIMAL and tgt == LOGICAL_INTEGER:
-        return True
-    if src in LOSSLESS_TEXT_TYPES and tgt in {
-        LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BOOLEAN, LOGICAL_DATE, LOGICAL_DATETIME, LOGICAL_TIME, LOGICAL_BINARY,
-    }:
-        return True
-    if src in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME} and tgt in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME}:
-        # Only date -> datetime is a safe widening; all other date/time/timezone trims lose information.
-        if src == LOGICAL_DATE and tgt == LOGICAL_DATETIME:
-            return False
-        return True
-    return False
+    return True
 
 
 def build_column_types(columns: list[str], schema: dict[str, str]) -> dict[str, str]:

@@ -32,6 +32,7 @@ class EndpointDTO(BaseModel):
     ssl: bool = False
     auth_mode: str = ""
     auth_role: str = ""
+    auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
 
@@ -190,6 +191,7 @@ async def map_columns_route(body: MapColumnsRequest):
         use_llm=body.use_llm,
         source_samples=body.source_samples or None,
         validation_mode=body.validation_mode,
+        schema_policy=getattr(body, "schema_policy", "manual_review"),
     )
     nested_fields: list[dict[str, str]] = []
     try:
@@ -425,6 +427,7 @@ async def run_universal_transfer(
     dest_password: str = Form(""),
     dest_connection_string: str = Form(""),
     dest_warehouse: str = Form(""),
+    dest_auth_source: str = Form(""),
     source_connector_id: Optional[str] = Form(None),
     source_host: str = Form(""),
     source_port: int = Form(0),
@@ -435,6 +438,7 @@ async def run_universal_transfer(
     source_table: str = Form(""),
     source_collection: str = Form(""),
     source_connection_string: str = Form(""),
+    source_auth_source: str = Form(""),
     skip_preflight: str = Form("false"),
     async_mode: str = Form("true"),
     mappings_json: str = Form(""),
@@ -442,6 +446,10 @@ async def run_universal_transfer(
     sync_mode: str = Form("full_refresh_overwrite"),
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("strict"),
+    source_filter_json: str = Form(""),
+    priority_column: str = Form(""),
+    priority_direction: str = Form("desc"),
+    limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
 ):
@@ -479,6 +487,7 @@ async def run_universal_transfer(
         table=source_table,
         collection=source_collection,
         connection_string=source_connection_string,
+        auth_source=source_auth_source,
     )
     destination = EndpointConfig(
         kind=dest_kind,
@@ -494,7 +503,18 @@ async def run_universal_transfer(
         password=dest_password,
         connection_string=dest_connection_string,
         warehouse=dest_warehouse,
+        auth_source=dest_auth_source,
     )
+
+    source_filter: dict = {}
+    if source_filter_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(source_filter_json)
+            if isinstance(parsed, dict):
+                source_filter = parsed
+        except Exception:
+            source_filter = {}
 
     request = TransferRequest(
         source=source,
@@ -505,6 +525,10 @@ async def run_universal_transfer(
         sync_mode=sync_mode,
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        source_filter=source_filter,
+        priority_column=priority_column,
+        priority_direction=priority_direction,
+        limit=int(limit) if limit.isdigit() else 0,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
     if plan_id and plan_id.strip():
@@ -571,12 +595,36 @@ async def run_universal_transfer(
         "job_id": result.job_id,
         "operation": result.operation,
         "records_transferred": result.records_transferred,
+        "elapsed_seconds": result.elapsed_seconds,
+        "records_per_second": result.records_per_second,
+        "peak_memory_bytes": result.peak_memory_bytes,
         "source": result.source_summary,
         "destination": result.destination_summary,
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
         "validation_plan": result.validation_plan,
         "payload_shape": result.payload_shape,
+        "reconciliation": result.reconciliation,
+        "explanation": result.explanation,
+    }
+
+
+@router.get("/{job_id}/explanation")
+async def get_transfer_explanation(job_id: str):
+    """Return the human-readable pipeline explanation for a transfer job."""
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "explanation": job.get("explanation", ""),
     }
 
 

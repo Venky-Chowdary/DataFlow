@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { typeBadgeClass } from "../../lib/typeDisplay";
 
@@ -25,15 +26,22 @@ export function StructurePreview({
   title = "Structure preview",
   subtitle,
   maxRows,
-  maxCols = 12,
+  maxCols,
   showFieldStrip = true,
   showBadge = false,
   className = "",
   fill = false,
 }: StructurePreviewProps) {
-  const resolvedMaxRows = maxRows ?? (fill ? 40 : 10);
-  const previewCols = columns.slice(0, maxCols);
-  const previewRows = rows.slice(0, resolvedMaxRows);
+  const rowsPerPage = maxRows ?? (fill ? 40 : 10);
+  const [page, setPage] = useState(0);
+  const [showAllFields, setShowAllFields] = useState(false);
+  const previewCols = columns.slice(0, maxCols ?? columns.length);
+  const STRIP_CAP = 24;
+  const stripCols = showAllFields ? previewCols : previewCols.slice(0, STRIP_CAP);
+  const hiddenFieldCount = previewCols.length - stripCols.length;
+  const pageCount = Math.max(1, Math.ceil(rows.length / rowsPerPage));
+  const safePage = Math.min(page, pageCount - 1);
+  const previewRows = rows.slice(safePage * rowsPerPage, (safePage + 1) * rowsPerPage);
 
   if (!columns.length) {
     return (
@@ -62,16 +70,33 @@ export function StructurePreview({
       </div>
 
       {showFieldStrip && (
-        <div className="df2-structure-field-strip" aria-label="Detected fields">
-          {columns.slice(0, maxCols).map((col) => (
-            <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}>
-              <strong>{col}</strong>
-              <small className="df2-type-badge">{schema[col] || "string"}</small>
-            </span>
-          ))}
-          {columns.length > maxCols && (
-            <span className="df2-structure-field-chip muted">+{columns.length - maxCols} more</span>
-          )}
+        <div className="df2-structure-field-block">
+          <div className="df2-structure-field-strip" aria-label="Detected fields">
+            {stripCols.map((col) => (
+              <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`} title={`${col} · ${schema[col] || "string"}`}>
+                <strong>{col}</strong>
+                <small className="df2-type-badge">{schema[col] || "string"}</small>
+              </span>
+            ))}
+            {hiddenFieldCount > 0 && (
+              <button
+                type="button"
+                className="df2-structure-field-more"
+                onClick={() => setShowAllFields(true)}
+              >
+                +{hiddenFieldCount} more
+              </button>
+            )}
+            {showAllFields && previewCols.length > STRIP_CAP && (
+              <button
+                type="button"
+                className="df2-structure-field-more"
+                onClick={() => setShowAllFields(false)}
+              >
+                Show less
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -104,16 +129,37 @@ export function StructurePreview({
               ))}
             </tbody>
           </table>
-          {rows.length > resolvedMaxRows && (
-            <p className="df2-structure-more-hint">
-              Showing {resolvedMaxRows} of {rows.length.toLocaleString()} sample rows
-            </p>
-          )}
         </div>
       ) : (
         <p className="df2-structure-empty-rows">
           Schema detected. Sample rows appear after profiling completes.
         </p>
+      )}
+
+      {rows.length > rowsPerPage && (
+        <div className="df2-structure-pagination">
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm df2-btn-ghost"
+            disabled={safePage === 0}
+            onClick={() => setPage(safePage - 1)}
+            aria-label="Previous sample rows"
+          >
+            <DtIcon name="chevron-left" size={14} /> Previous
+          </button>
+          <span className="df2-structure-page-info">
+            Page {safePage + 1} of {pageCount} · rows {safePage * rowsPerPage + 1}–{Math.min((safePage + 1) * rowsPerPage, rows.length)} of {rows.length.toLocaleString()}
+          </span>
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm df2-btn-ghost"
+            disabled={safePage >= pageCount - 1}
+            onClick={() => setPage(safePage + 1)}
+            aria-label="Next sample rows"
+          >
+            Next <DtIcon name="chevron-right" size={14} />
+          </button>
+        </div>
       )}
     </div>
   );

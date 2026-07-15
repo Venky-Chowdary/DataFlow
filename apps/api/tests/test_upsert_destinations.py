@@ -105,7 +105,7 @@ def test_sqlite_writer_upsert():
         con = sqlite3.connect(str(p))
         rows = con.execute("SELECT id, amount FROM payments ORDER BY id").fetchall()
         con.close()
-        assert rows == [(1, 1111.0), (2, 2000.5), (3, 3000.0)]
+        assert rows == [(1, "1111.00"), (2, "2000.50"), (3, "3000.00")]
 
 
 def test_generic_sql_duckdb_upsert_dedupes_within_batch():

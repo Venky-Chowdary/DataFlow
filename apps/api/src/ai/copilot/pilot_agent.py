@@ -23,6 +23,23 @@ from .tools import (
 )
 
 
+class _UnavailableAnthropic:
+    """Sentinel so a broken Anthropic provider key/config does not crash the agent."""
+
+    name = "anthropic"
+
+    def is_available(self) -> bool:
+        return False
+
+    def generate_agent(self, *args, **kwargs) -> dict:
+        return {"success": False, "error": "Anthropic provider is unavailable"}
+
+    def generate(self, *args, **kwargs):
+        from ..llm.provider import LLMResponse
+
+        return LLMResponse(content="", success=False, provider=self.name)
+
+
 def _tools_used(turn: "PilotTurn") -> list[dict]:
     return [
         {"name": tr.name, "success": tr.success, "summary": _tool_summary(tr)}
@@ -74,8 +91,11 @@ class DataPilotAgent:
     @property
     def anthropic(self):
         if self._anthropic is None:
-            from ..llm.provider import DataTransferAnthropicProvider
-            self._anthropic = DataTransferAnthropicProvider()
+            try:
+                from ..llm.provider import DataTransferAnthropicProvider
+                self._anthropic = DataTransferAnthropicProvider()
+            except Exception:
+                self._anthropic = _UnavailableAnthropic()
         return self._anthropic
 
     def chat(

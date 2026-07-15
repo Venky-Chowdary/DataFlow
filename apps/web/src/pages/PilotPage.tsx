@@ -156,9 +156,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
     } catch {
       setPilotOnline(false);
-      toast({ title: "Data Pilot unavailable", message: "Start the API on port 8001 and retry.", tone: "error" });
+      toast({ title: "Data Pilot unavailable", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in and retry.", tone: "error" });
       updateSession(activeId, {
-        messages: [...nextMessages, { role: "assistant", text: "Data Pilot unavailable — check that the API is running on port 8001 (`cd apps/api && python3 -m uvicorn src.main:app --reload --port 8001`)." }],
+        messages: [...nextMessages, { role: "assistant", text: "Data Pilot unavailable — the DataFlow API could not be reached. Check the API URL or sign in and retry." }],
       });
     }
     setLoading(false);

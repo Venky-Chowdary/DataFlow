@@ -29,9 +29,15 @@ def load_catalog() -> dict:
         return json.load(f)
 
 
+@lru_cache(maxsize=1)
 def _enriched_connectors() -> list[dict]:
     enriched = []
+    seen: set[str] = set()
     for c in load_catalog().get("connectors", []):
+        cid = c.get("id", "")
+        if cid in seen:
+            continue
+        seen.add(cid)
         try:
             row = enrich_catalog_entry(c)
             row["status"] = row.get("effective_status", row.get("status"))
@@ -119,7 +125,7 @@ def search_catalog(
     enriched_all = _enriched_connectors()
 
     return {
-        "total": data.get("total", len(data.get("connectors", []))),
+        "total": total,
         "filtered": total,
         "connectors": page,
         "suggested": suggested if not q else page[:16],

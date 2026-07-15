@@ -1,4 +1,7 @@
-export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api/v1";
+export const API_BASE =
+  (typeof window !== "undefined" && (window as any).DATAFLOW_API_BASE) ||
+  import.meta.env.VITE_API_BASE ||
+  "/api/v1";
 
 export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs";
 
@@ -19,6 +22,7 @@ export interface Connector {
   ssl?: boolean;
   auth_mode?: string;
   auth_role?: string;
+  auth_source?: string;
   api_key?: string;
   service_account?: string;
   created_at: string;
@@ -62,6 +66,7 @@ export interface JobProgress extends TransferJob {
   rejected_rows?: number;
   rejected_details?: { row?: number; column?: string; reason?: string; value?: string }[];
   destination_summary?: Record<string, unknown>;
+  preflight?: PreflightResult;
   phases?: JobPhase[];
 }
 

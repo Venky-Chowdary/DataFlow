@@ -74,6 +74,43 @@ def count_table_rows(
         conn.close()
 
 
+def _primary_key_columns(cur, schema: str, table: str) -> list[str] | None:
+    """Return ordered PRIMARY KEY columns for ``table`` if one exists."""
+    try:
+        cur.execute(
+            """
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+            WHERE tc.constraint_type = 'PRIMARY KEY'
+              AND tc.table_schema = %s
+              AND tc.table_name = %s
+            ORDER BY kcu.ordinal_position
+            """,
+            (schema, table),
+        )
+        rows = cur.fetchall()
+        if rows:
+            return [r[0] for r in rows]
+    except Exception:
+        pass
+    return None
+
+
+def _order_by_clause(cur, schema: str, table: str, columns: list[str] | None) -> str:
+    """Return a deterministic ORDER BY for stable LIMIT/OFFSET pagination."""
+    import psycopg2
+    from psycopg2 import sql
+    pk = _primary_key_columns(cur, schema, table)
+    if pk:
+        return ", ".join(sql.Identifier(c).as_string(cur) for c in pk)
+    if columns:
+        return sql.Identifier(columns[0]).as_string(cur)
+    return "1"
+
+
 def read_table_batch(
     *,
     host: str,
@@ -119,15 +156,16 @@ def read_table_batch(
                     ssl=ssl,
                     table=table,
                 )
+            order_by = _order_by_clause(cur, schema, table, columns)
             if columns:
                 col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
-                query = sql.SQL("SELECT {} FROM {}.{} ORDER BY 1 LIMIT %s OFFSET %s").format(
+                query = sql.SQL("SELECT {} FROM {}.{} ORDER BY " + order_by + " LIMIT %s OFFSET %s").format(
                     col_sql,
                     sql.Identifier(schema),
                     sql.Identifier(table),
                 )
             else:
-                query = sql.SQL("SELECT * FROM {}.{} ORDER BY 1 LIMIT %s OFFSET %s").format(
+                query = sql.SQL("SELECT * FROM {}.{} ORDER BY " + order_by + " LIMIT %s OFFSET %s").format(
                     sql.Identifier(schema),
                     sql.Identifier(table),
                 )

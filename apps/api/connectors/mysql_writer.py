@@ -116,7 +116,7 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=database,
@@ -124,7 +124,8 @@ def write_mapped_rows(
         )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
-    target_types = [mysql_type(t) for t in source_types]
+    target_types = [mysql_type(t) for t in logical_types]
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     policy = transform_error_policy(error_policy)
 
     try:
@@ -165,6 +166,7 @@ def write_mapped_rows(
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
+                dest_types=dest_types,
                 error_policy=policy,
                 preserve_case=True,
             )
@@ -226,7 +228,7 @@ def write_mapped_rows(
         conn.close()
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=database,
-            checksum=row_checksum(mapped_rows), chunks_completed=chunks,
+            checksum=row_checksum(mapped_rows, target_cols), chunks_completed=chunks,
             rejected_rows=len(data_rows) - written,
             warnings=transform_errors,
         )

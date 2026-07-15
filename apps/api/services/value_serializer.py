@@ -58,20 +58,17 @@ def _format_timedelta(value: timedelta) -> str:
 def _decimal_to_json(value: Decimal) -> Any:
     """Convert a Decimal to a JSON-compatible value.
 
-    JSON has no native Decimal type, so finite values are emitted as numbers
-    (float) when they fit. Values that are NaN, infinite, or larger than a
-    finite float can represent are emitted as strings to preserve the literal.
+    JSON has no native Decimal type, so we emit the exact decimal text as a
+    string. Converting to float would lose precision for values that are not
+    exactly representable in binary64 (e.g. 0.1, 1.2345, large integers). A
+    string preserves every digit and can be parsed back to an exact numeric
+    value by any downstream consumer.
     """
     if value.is_nan() or value.is_infinite():
         return None
-    try:
-        f = float(value)
-    except (ValueError, InvalidOperation, OverflowError):
-        return str(value)
-    if math.isfinite(f):
-        return f
-    # Value is finite as Decimal but overflows float (e.g. 1E+400).
-    return str(value)
+    # Use fixed-point notation so values like 1E-13 are emitted as
+    # "0.0000000000001" and trailing zeros are preserved.
+    return format(value, "f")
 
 
 def _json_default(value: Any) -> Any:
@@ -167,7 +164,9 @@ def cell_to_string(value: Any) -> str:
     if isinstance(value, Decimal):
         if value.is_nan() or value.is_infinite():
             return ""
-        return str(value)
+        # Fixed-point notation preserves scale and avoids scientific notation
+        # in CSV/JSON/JSONL exports (e.g. 1E-13 becomes "0.0000000000001").
+        return format(value, "f")
 
     if isinstance(value, datetime):
         return value.isoformat()

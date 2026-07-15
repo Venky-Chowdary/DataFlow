@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -32,13 +33,58 @@ class WriteResult:
 
 
 def _connection_string(
-    host: str, port: int, username: str, password: str, connection_string: str
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    connection_string: str,
+    database: str = "",
+    ssl: bool = False,
+    auth_source: str = "",
 ) -> str:
-    if connection_string:
-        return connection_string
-    if username and password:
-        return f"mongodb://{username}:{password}@{host}:{port or 27017}/"
-    return f"mongodb://{host}:{port or 27017}/"
+    from connectors.mongodb_common import normalize_mongodb_connection_string
+
+    return normalize_mongodb_connection_string(
+        connection_string,
+        database=database,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        ssl=ssl,
+        auth_source=auth_source,
+    )
+
+
+def _idempotent_insert_many(coll, docs: list[dict]) -> int:
+    """Insert documents, treating duplicate-key errors as already-present rows.
+
+    Every document without an explicit ``_id`` gets a deterministic content hash
+    as its primary key so retries and resumable chunks produce the same _id and
+    do not create duplicates.
+    """
+    from pymongo.errors import BulkWriteError
+
+    for doc in docs:
+        if "_id" not in doc:
+            id_input = json.dumps(
+                {k: v for k, v in doc.items() if k != "_id"},
+                sort_keys=True,
+                default=str,
+            )
+            doc["_id"] = hashlib.sha256(id_input.encode("utf-8")).hexdigest()
+
+    try:
+        result = coll.insert_many(docs, ordered=False)
+        return len(result.inserted_ids)
+    except BulkWriteError as bwe:
+        details = bwe.details or {}
+        write_errors = details.get("writeErrors", [])
+        non_dup = [e for e in write_errors if e.get("code") != 11000]
+        if non_dup:
+            raise
+        # All errors were duplicate keys; those rows are already present.
+        return len(docs)
 
 
 def write_mapped_rows(
@@ -62,6 +108,7 @@ def write_mapped_rows(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    auth_source: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
     del backfill_new_fields
@@ -87,7 +134,7 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -101,10 +148,11 @@ def write_mapped_rows(
 
     collection_name = sanitize_identifier(table_name, preserve_case=True)
     db_name = database or schema or "test"
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     policy = transform_error_policy(error_policy)
 
     try:
-        conn_str = _connection_string(host, port, username, password, connection_string)
+        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
         client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
         
         # Test connection
@@ -119,6 +167,7 @@ def write_mapped_rows(
             mappings=mappings,
             target_cols=target_cols,
             column_types=column_types,
+            dest_types=dest_types,
             error_policy=policy,
             preserve_case=True,
         )
@@ -146,9 +195,17 @@ def write_mapped_rows(
             upper = stype.upper()
             if upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 try:
-                    return int(value)
+                    iv = int(value)
                 except (ValueError, TypeError):
                     return value
+                # BSON supports signed 64-bit ints; fall back to Decimal128 or
+                # string when a value overflows.
+                if iv > 2**63 - 1 or iv < -(2**63):
+                    try:
+                        return Decimal128(str(iv))
+                    except Exception:
+                        return str(iv)
+                return iv
             if upper in {"BOOLEAN", "BOOL"}:
                 text = str(value).strip().lower()
                 if text in {"true", "t", "yes", "y", "1"}:
@@ -164,7 +221,18 @@ def write_mapped_rows(
                 if isinstance(value, _date):
                     return _datetime.combine(value, _time.min)
                 text = value.strip() if isinstance(value, str) else str(value)
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y%m%d"):
+                for fmt in (
+                    "%Y-%m-%d",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S.%fZ",
+                    "%Y-%m-%dT%H:%M:%S.%f%z",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%m/%d/%Y",
+                    "%d/%m/%Y",
+                    "%Y%m%d",
+                ):
                     try:
                         return _datetime.strptime(text, fmt)
                     except ValueError:
@@ -211,7 +279,7 @@ def write_mapped_rows(
 
         typed_rows: list[tuple] = []
         for row in mapped_rows:
-            typed_rows.append(tuple(_to_bson(v, t) for v, t in zip(row, source_types)))
+            typed_rows.append(tuple(_to_bson(v, t) for v, t in zip(row, logical_types)))
 
         total = len(typed_rows)
         chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
@@ -252,11 +320,9 @@ def write_mapped_rows(
                         coll.bulk_write(ops, ordered=False)
                     written += len(ops)
                 else:
-                    coll.insert_many(docs, ordered=False)
-                    written += len(docs)
+                    written += _idempotent_insert_many(coll, docs)
             else:
-                coll.insert_many(docs, ordered=False)
-                written += len(docs)
+                written += _idempotent_insert_many(coll, docs)
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 
@@ -266,7 +332,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=collection_name,
             target_schema=db_name,
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
             rejected_rows=len(data_rows) - written,
             warnings=transform_errors,

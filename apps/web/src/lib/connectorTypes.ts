@@ -1,4 +1,5 @@
 import { CONNECTOR_CATALOG } from "./types";
+import { GENERIC_SQL_INFO } from "./genericSqlMap";
 
 /** Implemented driver types — must match apps/api/src/transfer/connector_capabilities.py */
 export const TRANSFER_LIVE_TYPES = new Set([
@@ -9,6 +10,9 @@ export const TRANSFER_LIVE_TYPES = new Set([
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
+
+/** SQL engines that are first-class drivers; the rest of generic SQL IDs route through generic_sql. */
+const FIRST_CLASS_SQL = new Set(["mysql", "postgresql", "redshift", "sqlite"]);
 
 const CATALOG_ALIASES: Record<string, string> = {
   csv___tsv: "csv",
@@ -21,6 +25,10 @@ const CATALOG_ALIASES: Record<string, string> = {
   backblaze_b2: "s3",
   digitalocean_spaces: "s3",
   cloudflare_r2: "s3",
+  ibm_cloud_object_storage: "s3",
+  oracle_cloud_object_storage: "s3",
+  azure_blob_storage: "adls",
+  azure_data_lake: "adls",
   amazon_redshift: "redshift",
   google_bigquery: "bigquery",
   opensearch: "elasticsearch",
@@ -46,6 +54,31 @@ const CATALOG_ALIASES: Record<string, string> = {
   ndjson: "ndjson",
 };
 
+const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
+  postgresql: { host: "localhost", port: 5432 },
+  mysql: { host: "localhost", port: 3306 },
+  mongodb: { host: "localhost", port: 27017 },
+  snowflake: { host: "account.snowflakecomputing.com", port: 443 },
+  bigquery: { host: "bigquery.googleapis.com", port: 443 },
+  redshift: { host: "localhost", port: 5439 },
+  dynamodb: { host: "us-east-1", port: 443 },
+  s3: { host: "", port: 443 },
+  gcs: { host: "", port: 443 },
+  google_cloud_storage: { host: "", port: 443 },
+  adls: { host: "", port: 443 },
+  redis: { host: "localhost", port: 6379 },
+  elasticsearch: { host: "localhost", port: 9200 },
+  sqlite: { host: "", port: 0 },
+  generic_sql: { host: "localhost", port: 0 },
+  csv: { host: "", port: 0 },
+  tsv: { host: "", port: 0 },
+  json: { host: "", port: 0 },
+  jsonl: { host: "", port: 0 },
+  ndjson: { host: "", port: 0 },
+  excel: { host: "", port: 0 },
+  parquet: { host: "", port: 0 },
+};
+
 /** Map marketplace catalog id → connectable type used by API/forms (strict) */
 export function resolveCatalogIdToType(catalogId: string): string {
   const id = catalogId.toLowerCase().trim();
@@ -62,7 +95,7 @@ export function resolveCatalogIdToType(catalogId: string): string {
   // Substring match for wire-compatible databases / object stores / warehouses.
   if (id.includes("postgres")) return "postgresql";
   if (id.includes("mongo") || id.includes("documentdb")) return "mongodb";
-  if (id.includes("mysql") || id.includes("mariadb") || id.includes("percona") || id.includes("planetscale") || id.includes("vitess") || id.includes("tidb") || id.includes("oceanbase") || id.includes("polardb") || id.includes("singlestore") || id.includes("gaussdb") || id.includes("goldendb")) return "mysql";
+  if (id.includes("mysql") || id.includes("mariadb") || id.includes("percona") || id.includes("planetscale")) return "mysql";
   if (id.includes("aurora")) return "mysql";
   if (id.includes("snowflake")) return "snowflake";
   if (id.includes("bigquery")) return "bigquery";
@@ -71,12 +104,11 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("elastic") || id.includes("opensearch")) return "elasticsearch";
   if (id.includes("redshift")) return "redshift";
   if (id.includes("cockroach")) return "postgresql";
-  if (id.includes("yugabyte")) return "postgresql";
   if (id.includes("timescale")) return "postgresql";
   if (id.includes("alloydb")) return "postgresql";
   if (id.includes("supabase")) return "postgresql";
   if (id.includes("neon")) return "postgresql";
-  if (id.includes("gcs") || id.includes("google_cloud_storage") || id.includes("google_cloud_sql")) return "gcs";
+  if (id.includes("gcs") || id.includes("google_cloud_storage")) return "gcs";
   if (id.includes("minio") || id.includes("wasabi") || id.includes("backblaze") || id.includes("spaces") || id.includes("object_storage") || id.includes("r2") || id.includes("s3_compatible") || id.includes("s3_compatible_storage")) return "s3";
   if (id.includes("s3") || id.includes("aws_s3")) return "s3";
   if (id.includes("parquet")) return "parquet";
@@ -87,23 +119,17 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("sqlite")) return "sqlite";
 
   // Generic SQL fallback — any SQL engine with a SQLAlchemy dialect is routed through generic_sql.
-  if (
-    id.includes("mssql") || id.includes("sql_server") || id.includes("microsoft_sql") || id.includes("azure_sql") ||
-    id.includes("oracle") || id.includes("db2") || id.includes("teradata") || id.includes("netezza") ||
-    id.includes("vertica") || id.includes("exasol") || id.includes("sybase") || id.includes("sap_ase") ||
-    id.includes("sap_iq") || id.includes("sap_hana") || id.includes("hana") || id.includes("firebird") ||
-    id.includes("h2") || id.includes("clickhouse") || id.includes("druid") || id.includes("pinot") ||
-    id.includes("presto") || id.includes("trino") || id.includes("hive") || id.includes("spark") ||
-    id.includes("impala") || id.includes("phoenix") || id.includes("duckdb") || id.includes("databricks") ||
-    id.includes("greenplum") || id.includes("cratedb") || id.includes("questdb") || id.includes("doris") ||
-    id.includes("starrocks") || id.includes("yellowbrick") || id.includes("actian") || id.includes("informix") ||
-    id.includes("athena") || id.includes("synapse") || id.includes("dremio") || id.includes("firebolt") ||
-    id.includes("risingwave") || id.includes("materialize") || id.includes("citus")
-  ) {
-    return "generic_sql";
+  if (isGenericSql(id)) {
+    return id;
   }
 
   return id.split("_")[0] || id;
+}
+
+export function isGenericSql(id: string): boolean {
+  const type = id.toLowerCase().trim();
+  if (!type) return false;
+  return type in GENERIC_SQL_INFO && !FIRST_CLASS_SQL.has(type);
 }
 
 export function isTransferLiveType(type: string): boolean {
@@ -114,28 +140,49 @@ export function isConnectOnlyType(type: string): boolean {
   return CONNECT_ONLY_TYPES.has(type);
 }
 
+export function resolveDriverType(catalogId: string): string {
+  const t = resolveCatalogIdToType(catalogId);
+  return isGenericSql(t) && t !== "generic_sql" ? "generic_sql" : t;
+}
+
+export function getConnectorLabel(type: string, item?: { label?: string } | null): string {
+  if (item?.label) return item.label;
+  const generic = GENERIC_SQL_DRIVERS.find((d) => d.id === type);
+  if (generic) return generic.label;
+  return type
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\b(Sql|Db|Rds|Ibm|Db2|Aws|Gcs|Gcp|Azure|Api|Http|Url|Uri|Uid|Ssl|Ssh|Smtp|Pop3|Imap|Tidb|Sap|Ase|Iq|Singlestore|Oceanbase|Polardb|Gaussdb|Goldendb|Starrocks|Cratedb|Questdb|Yugabytedb|Sparksql|Risingwave|Cockroachdb)\b/g, (m) => {
+      const map: Record<string, string> = {
+        Sql: "SQL", Db: "DB", Rds: "RDS", Ibm: "IBM", Db2: "DB2", Aws: "AWS",
+        Gcs: "GCS", Gcp: "GCP", Azure: "Azure", Api: "API", Http: "HTTP",
+        Url: "URL", Uri: "URI", Uid: "UID", Ssl: "SSL", Ssh: "SSH",
+        Smtp: "SMTP", Pop3: "POP3", Imap: "IMAP", Tidb: "TiDB",
+        Sap: "SAP", Ase: "ASE", Iq: "IQ", Singlestore: "SingleStore",
+        Oceanbase: "OceanBase", Polardb: "PolarDB", Gaussdb: "GaussDB",
+        Goldendb: "GoldenDB", Starrocks: "StarRocks", Cratedb: "CrateDB",
+        Questdb: "QuestDB", Yugabytedb: "YugabyteDB", Sparksql: "Spark SQL",
+        Risingwave: "RisingWave", Cockroachdb: "CockroachDB",
+      };
+      return map[m] || m.toUpperCase();
+    });
+}
+
 export function getConnectorDefaults(type: string): { host: string; port: number; label: string } {
   const item = CONNECTOR_CATALOG.find((c) => c.id === type);
-  if (type === "mongodb") return { host: "localhost", port: 27017, label: "MongoDB" };
-  if (type === "mysql") return { host: "localhost", port: 3306, label: "MySQL" };
-  if (type === "postgresql") return { host: "localhost", port: 5432, label: "PostgreSQL" };
-  if (type === "dynamodb") return { host: "us-east-1", port: 443, label: "Amazon DynamoDB" };
-  if (type === "bigquery") return { host: "bigquery.googleapis.com", port: 443, label: "BigQuery" };
-  if (type === "snowflake") return { host: "localhost", port: 443, label: "Snowflake" };
-  if (type === "redshift") return { host: "localhost", port: 5439, label: "Amazon Redshift" };
-  if (type === "gcs") return { host: "", port: 443, label: "Google Cloud Storage" };
-  if (type === "redis") return { host: "localhost", port: 6379, label: "Redis" };
-  if (type === "elasticsearch") return { host: "localhost", port: 9200, label: "Elasticsearch" };
-  if (type === "sqlite") return { host: "", port: 0, label: "SQLite" };
-  if (type === "generic_sql") return { host: "", port: 0, label: "Generic SQL (any SQLAlchemy engine)" };
-  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(type)) {
-    return { host: "", port: 0, label: item?.label ?? type };
+  const driver = resolveDriverType(type);
+  const label = getConnectorLabel(type, item);
+
+  if (isGenericSql(type)) {
+    const info = GENERIC_SQL_INFO[type];
+    if (info) {
+      const host = info.base === "duckdb" || info.base === "sqlite" ? "" : "localhost";
+      return { host, port: info.port, label };
+    }
   }
-  return {
-    host: "localhost",
-    port: item?.port ?? 5432,
-    label: item?.label ?? type,
-  };
+
+  const base = BASE_DEFAULTS[driver] || { host: "localhost", port: 0 };
+  return { host: base.host, port: base.port, label };
 }
 
 export function isAwsConnector(type: string): boolean {
@@ -171,29 +218,38 @@ export const GENERIC_SQL_DRIVERS = [
   { id: "synapse", label: "Azure Synapse" },
 ];
 
-export function getGenericSqlPlaceholder(driver: string): string {
-  const d = (driver || "postgresql").toLowerCase();
-  const map: Record<string, string> = {
-    postgresql: "postgresql+psycopg2://user:pass@host:5432/db",
-    mysql: "mysql+pymysql://user:pass@host:3306/db",
-    mssql: "mssql+pyodbc://user:pass@host:1433/db",
-    oracle: "oracle+oracledb://user:pass@host:1521/db",
-    sqlite: "sqlite:////path/to/db.sqlite",
-    duckdb: "duckdb:////path/to/db.duckdb",
-    clickhouse: "clickhouse+http://user:pass@host:8123/db",
-    trino: "trino://user:pass@host:8080/catalog",
-    dremio: "dremio+flight://user:pass@host:32010",
-    firebolt: "firebolt://user:pass@host:443/db",
-    risingwave: "postgresql+psycopg2://user:pass@host:4566/db",
-    materialize: "postgresql+psycopg2://user:pass@host:6875/db",
-    db2: "db2+ibm_db://user:pass@host:50000/db",
-    teradata: "teradatasql://user:pass@host:1025/db",
-    sap_hana: "hana+hdbcli://user:pass@host:30015/db",
-    informix: "informix+pyodbc://user:pass@host:9088/db",
-    athena: "awsathena+rest://@athena.region.amazonaws.com:443/?s3_staging_dir=s3://bucket",
-    synapse: "mssql+pyodbc://user:pass@host:1433/db",
-  };
-  return map[d] || "driver://user:pass@host:port/db";
+export function getGenericSqlBase(type: string): string | undefined {
+  const info = GENERIC_SQL_INFO[type.toLowerCase().trim()];
+  return info?.base;
+}
+
+export function getGenericSqlPort(type: string): number {
+  return GENERIC_SQL_INFO[type.toLowerCase().trim()]?.port ?? 0;
+}
+
+export function getGenericSqlGroup(type: string): string {
+  const normalized = resolveCatalogIdToType(type);
+  return getGenericSqlBase(normalized) || normalized;
+}
+
+export function getGenericSqlPlaceholder(type: string): string {
+  const t = resolveCatalogIdToType(type).toLowerCase().trim();
+  if (t === "mysql" || t === "mariadb") return "mysql+pymysql://user:pass@host:3306/db";
+  if (t === "postgresql" || t === "redshift") return "postgresql+psycopg2://user:pass@host:5432/db";
+  if (t === "sqlite") return "sqlite:////path/to/db.sqlite";
+  const info = GENERIC_SQL_INFO[t];
+  if (!info) return "driver://user:pass@host:port/db";
+  const { base, port } = info;
+
+  if (base === "sqlite") return "sqlite:////path/to/db.sqlite";
+  if (base === "duckdb") return "duckdb:////path/to/db.duckdb";
+  if (t === "dremio" || base === "dremio+flight") return `dremio+flight://user:pass@host:${port}`;
+  if (t === "athena" || base === "awsathena+rest") return `awsathena+rest://@athena.region.amazonaws.com:${port}/?s3_staging_dir=s3://bucket`;
+  if (base === "presto" || base === "trino") return `${base}://user:pass@host:${port}/catalog`;
+  if (base === "druid") return `druid://user:pass@host:${port}/druid/v2/sql`;
+  if (t === "databricks" || base === "databricks") return "databricks+thrift://token:dapi***@xxx.cloud.databricks.com?http_path=/sql/1.0/endpoints/...";
+
+  return `${base}://user:pass@host:${port}/db`;
 }
 
 export function defaultPortForType(type: string): number {

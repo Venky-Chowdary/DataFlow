@@ -99,8 +99,9 @@ def introspect_schema(
     warehouse: str = "",
     table: str | None = None,
     catalog_type: str = "",
+    auth_source: str = "",
 ) -> dict[str, Any]:
-    if db_type == "generic_sql":
+    if db_type in ("generic_sql", "duckdb"):
         from connectors.generic_sql import introspect_table_schema
 
         cfg = {
@@ -112,7 +113,7 @@ def introspect_schema(
             "schema": schema,
             "connection_string": connection_string,
             "ssl": ssl,
-            "type": catalog_type,
+            "type": catalog_type or ("duckdb" if db_type == "duckdb" else ""),
         }
         return introspect_table_schema(cfg, table or "")
     if db_type == "postgresql" or db_type == "redshift":
@@ -164,6 +165,7 @@ def introspect_schema(
             username=username,
             password=password,
             connection_string=connection_string,
+            auth_source=auth_source,
             table=table,
         )
     if db_type == "dynamodb":
@@ -633,7 +635,13 @@ def _widen_mongodb_type(current: str, observed: str) -> str:
 
     TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE,
     UUID/BINARY/OBJECT are retained when observed.
+
+    Any observed or current TEXT/VARCHAR value demotes a column to TEXT so that
+    mixed fields (e.g. a referral code that is sometimes a date string and
+    sometimes a hex token) do not force a strict date/number type on all rows.
     """
+    if current in {"TEXT", "VARCHAR"} or observed in {"TEXT", "VARCHAR"}:
+        return "TEXT"
     order = {
         "TEXT": 0,
         "VARCHAR": 0,
@@ -654,17 +662,19 @@ def _widen_mongodb_type(current: str, observed: str) -> str:
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
+        from connectors.mongodb_common import normalize_mongodb_connection_string
         from pymongo import MongoClient
 
-        if kwargs.get("connection_string"):
-            conn_str = kwargs["connection_string"]
-        elif kwargs.get("username") and kwargs.get("password"):
-            conn_str = (
-                f"mongodb://{kwargs['username']}:{kwargs['password']}"
-                f"@{kwargs.get('host', 'localhost')}:{kwargs.get('port', 27017)}/"
-            )
-        else:
-            conn_str = f"mongodb://{kwargs.get('host', 'localhost')}:{kwargs.get('port', 27017)}/"
+        conn_str = normalize_mongodb_connection_string(
+            kwargs.get("connection_string", ""),
+            database=kwargs.get("database", ""),
+            host=kwargs.get("host", ""),
+            port=int(kwargs.get("port") or 0),
+            username=kwargs.get("username", ""),
+            password=kwargs.get("password", ""),
+            ssl=bool(kwargs.get("ssl")),
+            auth_source=kwargs.get("auth_source", ""),
+        )
         client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
         db_name = kwargs.get("database") or "test"
         db = client[db_name]

@@ -634,6 +634,11 @@ def inspect_destination_for_preflight(
     dest_password: str | None = None,
     dest_connection_string: str | None = None,
     dest_warehouse: str | None = None,
+    dest_auth_source: str | None = None,
+    dest_auth_mode: str | None = None,
+    dest_auth_role: str | None = None,
+    dest_api_key: str | None = None,
+    dest_service_account: str | None = None,
     dest_kind: str = "database",
 ) -> dict[str, Any]:
     """Introspect destination for table existence and column schema."""
@@ -677,6 +682,11 @@ def inspect_destination_for_preflight(
             connection_string=conn.get("connection_string", ""),
             warehouse=conn.get("warehouse", ""),
             ssl=conn.get("ssl", False),
+            auth_source=conn.get("auth_source", ""),
+            auth_mode=conn.get("auth_mode", ""),
+            auth_role=conn.get("auth_role", ""),
+            api_key=conn.get("api_key", ""),
+            service_account=conn.get("service_account", ""),
         )
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
@@ -694,6 +704,11 @@ def inspect_destination_for_preflight(
             password=dest_password or "",
             connection_string=dest_connection_string or "",
             warehouse=dest_warehouse or "",
+            auth_source=dest_auth_source or "",
+            auth_mode=dest_auth_mode or "",
+            auth_role=dest_auth_role or "",
+            api_key=dest_api_key or "",
+            service_account=dest_service_account or "",
         )
     else:
         out["message"] = "Destination not configured"

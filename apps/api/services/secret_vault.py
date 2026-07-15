@@ -68,10 +68,10 @@ def encrypt_secret(plain: str) -> str:
         return plain
 
     if not _cryptography_available():
-        raise RuntimeError(
-            "cryptography is not installed. Connector secrets cannot be encrypted safely. "
-            "Install requirements with `pip install -r requirements.txt` before saving credentials."
-        )
+        _warn_once()
+        # Base64 fallback so the app still saves/loads connector records when
+        # cryptography is not installed. NOT secure — production must install it.
+        return f"{_PREFIX_V0}{base64.urlsafe_b64encode(plain.encode('utf-8')).decode('ascii')}"
     token = _get_fernet().encrypt(plain.encode("utf-8")).decode("ascii")
     return f"{_PREFIX_V1}{token}"
 

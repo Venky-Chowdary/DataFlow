@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -16,8 +16,27 @@ from ..services.mongodb_service import get_mongodb_service
 from ..services.file_parser import FileParser
 from ..transfer.connector_capabilities import resolve_driver_type, get_capabilities
 from ..transfer.connector_registry import CONNECTOR_MODULES, run_probe
+from services.team_store import can_read_workspace, can_write_workspace
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+
+
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
+
+
+def _resolve_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Access to workspace denied")
+    return workspace_id
+
+
+def _require_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return workspace_id
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -42,6 +61,7 @@ class ConnectorConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="API key")
     service_account: Optional[str] = Field(default=None, description="Service account JSON")
     options: dict = Field(default_factory=dict, description="Additional options")
+    auth_source: Optional[str] = None
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
 
 
@@ -55,6 +75,7 @@ class ConnectorResponse(BaseModel):
     database: str
     status: str
     created_at: str
+    workspace_id: str = ""
 
 
 class TestConnectionRequest(BaseModel):
@@ -73,6 +94,7 @@ class TestConnectionRequest(BaseModel):
     auth_role: Optional[str] = ""
     api_key: Optional[str] = None
     service_account: Optional[str] = None
+    auth_source: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
@@ -91,73 +113,9 @@ class TransferRequest(BaseModel):
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest):
     """Test a connector configuration before saving"""
+    from ..transfer.connector_registry import humanize_connection_error
+
     try:
-        if request.type == "mongodb":
-            from pymongo import MongoClient
-            
-            if request.connection_string:
-                conn_str = request.connection_string
-            else:
-                if request.username and request.password:
-                    conn_str = f"mongodb://{request.username}:{request.password}@{request.host}:{request.port}/"
-                else:
-                    conn_str = f"mongodb://{request.host}:{request.port}/"
-            
-            client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
-            info = client.server_info()
-            client.close()
-            
-            return {
-                "success": True,
-                "message": "Connection successful",
-                "details": {
-                    "version": info.get("version"),
-                    "host": request.host,
-                    "port": request.port,
-                }
-            }
-        driver = resolve_driver_type(request.type)
-        if driver in CONNECTOR_MODULES:
-            cfg = {
-                "host": request.host or "",
-                "port": request.port or 0,
-                "database": request.database or "",
-                "username": request.username or "",
-                "password": request.password or "",
-                "schema": request.schema or "",
-                "connection_string": request.connection_string or "",
-                "ssl": bool(request.ssl) if request.ssl is not None else False,
-                "warehouse": request.warehouse or "",
-                "auth_mode": request.auth_mode or "",
-                "auth_role": request.auth_role or "",
-                "role": request.auth_role or "",
-                "api_key": request.api_key or "",
-                "service_account": request.service_account or "",
-            }
-            ok, msg = run_probe(driver, cfg)
-            return {"success": ok, "message": msg, "driver": driver}
-
-        if driver == "generic_sql":
-            cfg = {
-                "host": request.host or "",
-                "port": request.port or 0,
-                "database": request.database or "",
-                "username": request.username or "",
-                "password": request.password or "",
-                "schema": request.schema or "",
-                "connection_string": request.connection_string or "",
-                "ssl": bool(request.ssl) if request.ssl is not None else False,
-                "warehouse": request.warehouse or "",
-                "type": request.type,
-                "auth_mode": request.auth_mode or "",
-                "auth_role": request.auth_role or "",
-                "role": request.auth_role or "",
-                "api_key": request.api_key or "",
-                "service_account": request.service_account or "",
-            }
-            ok, msg = run_probe(driver, cfg)
-            return {"success": ok, "message": msg, "driver": driver}
-
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             path = (request.connection_string or request.host or "").strip()
             if path:
@@ -179,21 +137,94 @@ async def test_connection(request: TestConnectionRequest):
                 "details": {"format": request.type, "mode": "file_source"},
             }
 
-        return {
-            "success": False,
-            "message": f"Connector type '{request.type}' not yet implemented",
+        driver = resolve_driver_type(request.type)
+
+        # Enforce required fields per authentication mode so the UI and API behave
+        # consistently and do not pass empty values to a driver that will fail
+        # with a cryptic low-level error.
+        auth_mode = (request.auth_mode or "").strip().lower()
+        if not auth_mode:
+            if request.connection_string:
+                auth_mode = "connection_string"
+            elif request.service_account:
+                auth_mode = "service_account"
+            elif request.api_key:
+                auth_mode = "api_key"
+            elif request.username or request.password:
+                auth_mode = "user_pass"
+            else:
+                auth_mode = "user_pass"
+
+        if auth_mode in ("connection_string", "file_path"):
+            if not (request.connection_string or "").strip():
+                return {"success": False, "message": "Connection string is required.", "driver": driver, "auth_source": request.auth_source or ""}
+        elif auth_mode == "service_account":
+            if not (request.service_account or "").strip():
+                return {"success": False, "message": "Service account JSON or file path is required.", "driver": driver, "auth_source": request.auth_source or ""}
+            if not (request.database or "").strip():
+                return {"success": False, "message": "Project / bucket / database is required for service account authentication.", "driver": driver, "auth_source": request.auth_source or ""}
+        elif auth_mode == "api_key":
+            if not (request.api_key or "").strip():
+                return {"success": False, "message": "API key is required.", "driver": driver, "auth_source": request.auth_source or ""}
+            if not (request.host or "").strip():
+                return {"success": False, "message": "Host is required for API key authentication.", "driver": driver, "auth_source": request.auth_source or ""}
+        elif auth_mode == "aws_keys":
+            if not (request.host or "").strip() and not (request.database or "").strip():
+                return {"success": False, "message": "Region / endpoint and bucket / table are required for AWS authentication.", "driver": driver, "auth_source": request.auth_source or ""}
+            if not (request.username or "").strip() or not (request.password or "").strip():
+                return {"success": False, "message": "Access key ID and secret access key are required for AWS authentication.", "driver": driver, "auth_source": request.auth_source or ""}
+        elif auth_mode == "user_pass":
+            # Path-based engines (SQLite/DuckDB) use host as a file path; others
+            # need a real host and port.
+            path_based = driver in ("sqlite", "duckdb")
+            has_path = (request.host or "").strip() or (request.database or "").strip()
+            if not has_path and path_based:
+                return {"success": False, "message": "File path or database name is required for SQLite/DuckDB.", "driver": driver, "auth_source": request.auth_source or ""}
+            if not (request.host or "").strip() and not path_based:
+                return {"success": False, "message": "Host is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
+            if not path_based and driver not in ("bigquery", "snowflake", "s3", "dynamodb", "gcs", "adls", "elasticsearch"):
+                if not (request.port or 0):
+                    return {"success": False, "message": "Port is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
+            if driver not in ("sqlite", "duckdb", "bigquery", "s3", "dynamodb", "gcs", "adls"):
+                if not (request.username or "").strip() or not (request.password or "").strip():
+                    return {"success": False, "message": "Username and password are required.", "driver": driver, "auth_source": request.auth_source or ""}
+
+        cfg = {
+            "host": request.host or "",
+            "port": request.port or 0,
+            "database": request.database or "",
+            "username": request.username or "",
+            "password": request.password or "",
+            "schema": request.schema or "",
+            "connection_string": request.connection_string or "",
+            "ssl": bool(request.ssl) if request.ssl is not None else False,
+            "warehouse": request.warehouse or "",
+            "type": request.type,
+            "auth_mode": request.auth_mode or "",
+            "auth_role": request.auth_role or "",
+            "role": request.auth_role or "",
+            "api_key": request.api_key or "",
+            "service_account": request.service_account or "",
+            "auth_source": request.auth_source or "",
         }
-            
+        ok, msg = run_probe(driver, cfg)
+        return {"success": ok, "message": msg, "driver": driver, "auth_source": cfg.get("auth_source", "")}
+
     except Exception as e:
         return {
             "success": False,
-            "message": f"Connection failed: {str(e)}",
+            "message": humanize_connection_error(resolve_driver_type(request.type or ""), e),
         }
 
 
 @router.post("/", response_model=ConnectorResponse)
-async def create_connector(config: ConnectorConfig):
+async def create_connector(
+    config: ConnectorConfig,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Create and save a new connector configuration (file store + MongoDB when available)."""
+    workspace_id = _require_write_workspace(request, workspace_id)
     connector_data = {
         "name": config.name,
         "type": config.type,
@@ -208,10 +239,12 @@ async def create_connector(config: ConnectorConfig):
         "ssl": config.ssl,
         "auth_mode": config.auth_mode,
         "auth_role": config.auth_role,
+        "auth_source": config.auth_source,
         "role": config.role or "both",
         "api_key": config.api_key,
         "service_account": config.service_account,
         "options": config.options,
+        "workspace_id": workspace_id,
         "status": "configured",
     }
 
@@ -233,6 +266,7 @@ async def create_connector(config: ConnectorConfig):
             database=saved.database,
             status="configured",
             created_at=saved.created_at,
+            workspace_id=saved.workspace_id or "",
         )
     except Exception as fs_err:
         pass  # fall through to MongoDB
@@ -253,6 +287,7 @@ async def create_connector(config: ConnectorConfig):
             database=connector["database"],
             status=connector["status"],
             created_at=connector["created_at"].isoformat(),
+            workspace_id=connector.get("workspace_id", ""),
         )
         
     except Exception as e:
@@ -260,16 +295,20 @@ async def create_connector(config: ConnectorConfig):
 
 
 @router.get("/")
-async def list_connectors():
-    """List all saved connectors (file store first, MongoDB fallback)."""
+async def list_connectors(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """List saved connectors scoped to the requested workspace."""
+    workspace_id = _resolve_workspace(request, workspace_id)
     try:
         import sys
         from pathlib import Path
         _api_root = Path(__file__).resolve().parents[2]
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
-        from services.connector_store import list_connectors as fs_list, mask_connector
-        items = fs_list()
+        from services.connector_store import list_connectors as fs_list
+        items = fs_list(workspace_id=workspace_id)
         if items:
             return {
                 "connectors": [
@@ -280,9 +319,10 @@ async def list_connectors():
                         "host": c.host,
                         "port": c.port,
                         "database": c.database,
-                        "status": "configured" if c.last_test_ok else ("error" if c.last_tested_at and not c.last_test_ok else "configured"),
+                        "status": "configured" if c.last_test_ok is True else ("error" if c.last_tested_at and c.last_test_ok is False else "configured"),
                         "created_at": c.created_at,
                         "last_test_ok": c.last_test_ok,
+                        "workspace_id": c.workspace_id or "",
                     }
                     for c in items
                 ],
@@ -294,22 +334,36 @@ async def list_connectors():
     try:
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
-        
+
+        def _status_from_doc(c: dict) -> str:
+            last_ok = c.get("last_test_ok")
+            last_at = c.get("last_tested_at")
+            if last_ok is True:
+                return "configured"
+            if last_ok is False and last_at:
+                return "error"
+            return "configured"
+
         result = []
         for c in connectors:
+            if workspace_id and c.get("workspace_id") not in (workspace_id, "", None):
+                continue
+            created = c.get("created_at")
             result.append({
                 "id": c["_id"],
                 "name": c["name"],
                 "type": c["type"],
-                "host": c["host"],
-                "port": c["port"],
+                "host": c.get("host", ""),
+                "port": c.get("port", 0),
                 "database": c.get("database", ""),
-                "status": c.get("status", "configured"),
-                "created_at": c["created_at"].isoformat() if c.get("created_at") else None,
+                "status": _status_from_doc(c),
+                "created_at": created.isoformat() if created and hasattr(created, "isoformat") else created,
+                "last_test_ok": c.get("last_test_ok"),
+                "workspace_id": c.get("workspace_id", ""),
             })
-        
+
         return {"connectors": result, "count": len(result)}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -612,6 +666,10 @@ async def transfer_data(
     sync_mode: str = Form("full_refresh_overwrite"),
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("strict"),
+    source_filter_json: str = Form(""),
+    priority_column: str = Form(""),
+    priority_direction: str = Form("desc"),
+    limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
     mappings_json: str = Form(""),
@@ -626,6 +684,16 @@ async def transfer_data(
         src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
         if src_fmt == "unknown":
             src_fmt = "csv"
+
+        source_filter: dict = {}
+        if source_filter_json.strip():
+            try:
+                import json as _json
+                parsed = _json.loads(source_filter_json)
+                if isinstance(parsed, dict):
+                    source_filter = parsed
+            except Exception:
+                source_filter = {}
 
         request = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
@@ -650,6 +718,10 @@ async def transfer_data(
             sync_mode=sync_mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
+            source_filter=source_filter,
+            priority_column=priority_column,
+            priority_direction=priority_direction,
+            limit=int(limit) if limit.isdigit() else 0,
             backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         )
         if stream_contracts_json.strip():

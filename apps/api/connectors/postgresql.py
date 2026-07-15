@@ -28,8 +28,8 @@ def test_postgresql(
             conn = psycopg2.connect(connection_string, connect_timeout=8)
         else:
             conn = psycopg2.connect(
-                host=host,
-                port=port,
+                host=host or "localhost",
+                port=port or 5432,
                 dbname=database,
                 user=username,
                 password=password,

@@ -1,8 +1,11 @@
 """Pytest configuration — isolate tests from live infrastructure."""
 
 import os
+import socket
 import sys
 from pathlib import Path
+
+import pytest
 
 _api_root = Path(__file__).resolve().parents[1]
 _src_root = _api_root / "src"
@@ -22,3 +25,21 @@ sys.path.insert(0, str(_api_root))
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+
+
+def _is_mongo_reachable() -> bool:
+    try:
+        socket.create_connection(("localhost", 27017), timeout=1.0).close()
+        return True
+    except Exception:
+        return False
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip MongoDB-specific tests when no local MongoDB emulator is running."""
+    if _is_mongo_reachable():
+        return
+    skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
+    for item in items:
+        if "mongodb" in item.nodeid.lower():
+            item.add_marker(skip_mongo)

@@ -30,6 +30,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.value_serializer import cell_to_string, json_default
 
+from .connector_registry import run_probe
 from .models import EndpointConfig
 from .type_mapper import ddl_type, normalize_inferred
 
@@ -111,26 +112,58 @@ def records_to_matrix(records: list[dict], columns: list[str]) -> tuple[list[str
 
 
 def mongodb_connection_string(cfg: dict[str, Any]) -> str:
-    if cfg.get("connection_string"):
-        return cfg["connection_string"]
-    host = cfg.get("host") or "localhost"
-    port = int(cfg.get("port") or 27017)
-    if cfg.get("username") and cfg.get("password"):
-        return f"mongodb://{cfg['username']}:{cfg['password']}@{host}:{port}/"
-    return f"mongodb://{host}:{port}/"
+    from connectors.mongodb_common import normalize_mongodb_connection_string
+
+    return normalize_mongodb_connection_string(
+        cfg.get("connection_string", ""),
+        database=cfg.get("database", ""),
+        host=cfg.get("host", ""),
+        port=int(cfg.get("port") or 0),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        ssl=bool(cfg.get("ssl")),
+        auth_source=cfg.get("auth_source", ""),
+    )
 
 
 def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
-    """Ping MongoDB using resolved connector or inline host/port credentials."""
-    try:
-        from pymongo import MongoClient
+    """Ping MongoDB and automatically resolve the correct authSource.
 
-        client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000)
-        client.admin.command("ping")
-        client.close()
-        return True, "MongoDB reachable"
-    except Exception as exc:
-        return False, str(exc)
+    When auth_source is not supplied, the connection string may still work with
+    the default database (path) or admin. We try the candidates in order and
+    return the first one that succeeds, which keeps the UI connection-string
+    flow simple for users who do not know the authentication database.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    from pymongo import MongoClient
+
+    connection_string = (cfg.get("connection_string") or "").strip()
+    qs = parse_qs(urlparse(connection_string).query, keep_blank_values=True)
+    url_auth_source = qs.get("authSource", qs.get("authsource", [""]))[0]
+    database = (cfg.get("database") or "").strip()
+
+    candidates: list[str] = []
+    if cfg.get("auth_source"):
+        candidates.append(str(cfg.get("auth_source")).strip())
+    if url_auth_source:
+        candidates.append(url_auth_source)
+    if database:
+        candidates.append(database)
+    candidates.append("admin")
+
+    last_error = ""
+    for auth_source in candidates:
+        try:
+            conn_str = mongodb_connection_string({**cfg, "auth_source": auth_source})
+            client = MongoClient(conn_str, serverSelectionTimeoutMS=2500)
+            client.admin.command("ping")
+            client.close()
+            cfg["auth_source"] = auth_source
+            return True, f"MongoDB reachable (authSource={auth_source})"
+        except Exception as exc:
+            last_error = str(exc)
+    return False, last_error
 
 
 def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
@@ -166,6 +199,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         "type": endpoint.format,
         "auth_mode": endpoint.auth_mode,
         "auth_role": endpoint.auth_role,
+        "auth_source": endpoint.auth_source,
         "api_key": endpoint.api_key,
         "service_account": endpoint.service_account,
     }
@@ -189,6 +223,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
             "type": conn_dict.get("type") or endpoint.format,
             "auth_mode": conn_dict.get("auth_mode") or cfg["auth_mode"],
             "auth_role": conn_dict.get("auth_role") or cfg["auth_role"],
+            "auth_source": conn_dict.get("auth_source") or cfg["auth_source"],
             "api_key": conn_dict.get("api_key") or cfg["api_key"],
             "service_account": conn_dict.get("service_account") or cfg["service_account"],
             "role": conn_dict.get("role") or cfg["role"],
@@ -216,6 +251,7 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
                 "type": conn.type,
                 "auth_mode": getattr(conn, "auth_mode", ""),
                 "auth_role": getattr(conn, "auth_role", ""),
+                "auth_source": getattr(conn, "auth_source", ""),
                 "api_key": getattr(conn, "api_key", ""),
                 "service_account": getattr(conn, "service_account", ""),
                 "role": getattr(conn, "auth_role", ""),
@@ -256,6 +292,7 @@ def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, head
         warehouse=cfg.get("warehouse", ""),
         table=table,
         catalog_type=cfg.get("type", ""),
+        auth_source=cfg.get("auth_source", ""),
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
@@ -312,6 +349,12 @@ def read_source_database(
 
     if db_type == "mongodb":
         from connectors.mongodb_reader import read_collection_batch
+
+        # Resolve the auth database for MongoDB so the same credentials work
+        # even when the user was created in a different DB than the data DB.
+        ok, msg = run_probe("mongodb", cfg)
+        if not ok:
+            raise RuntimeError(msg)
 
         coll_name = endpoint.collection or endpoint.table
         if not coll_name:
@@ -372,6 +415,7 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
+            service_account=cfg.get("service_account", ""),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -396,6 +440,7 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
+            role=cfg.get("role", ""),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -448,9 +493,9 @@ def read_source_database(
     if db_type == "dynamodb":
         from connectors.dynamodb_reader import read_all_paginated
 
-        table = endpoint.database or endpoint.table
+        table = endpoint.table or endpoint.collection or endpoint.database
         if not table:
-            raise ValueError("DynamoDB table name required (database field)")
+            raise ValueError("DynamoDB table name required (table field)")
         batch = read_all_paginated(cfg, table, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -461,9 +506,9 @@ def read_source_database(
     if db_type == "elasticsearch":
         from connectors.elasticsearch_reader import read_index_batch
 
-        index = endpoint.database or endpoint.table or endpoint.collection
+        index = endpoint.table or endpoint.database or endpoint.collection
         if not index:
-            raise ValueError("Elasticsearch index name required (database field)")
+            raise ValueError("Elasticsearch index name required (table or database field)")
         batch, _ = read_index_batch(cfg=cfg, index=index, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, index)
@@ -475,6 +520,8 @@ def read_source_database(
         from connectors.redis_reader import read_keys_batch
 
         pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
+        if pattern != "*" and "*" not in pattern and "?" not in pattern:
+            pattern = f"{pattern}:*"
         batch, _ = read_keys_batch(cfg=cfg, pattern=pattern, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, pattern)
@@ -575,6 +622,10 @@ def write_destination_database(
         "schema": cfg.get("schema", "public"),
         "connection_string": cfg.get("connection_string", ""),
         "ssl": cfg.get("ssl", False),
+        "auth_source": cfg.get("auth_source", ""),
+        "service_account": cfg.get("service_account", ""),
+        "api_key": cfg.get("api_key", ""),
+        "role": cfg.get("role", ""),
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
@@ -649,6 +700,13 @@ def write_destination_database(
 
     if db_type == "mongodb":
         from connectors.mongodb_writer import write_mapped_rows
+
+        # Resolve the auth database for MongoDB before the actual write.
+        ok, msg = run_probe("mongodb", cfg)
+        if not ok:
+            raise RuntimeError(msg)
+        common["auth_source"] = cfg.get("auth_source", "")
+
         common["schema"] = cfg.get("schema", "db")
         for col in columns:
             ddl_log.append(f"MONGODB FIELD {col} string")

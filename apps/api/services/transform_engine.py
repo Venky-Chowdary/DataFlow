@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -14,25 +15,50 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.pii_guard import detect_pii, mask as pii_mask
 from services.value_serializer import json_default
+from services.semantic_types import SemanticType, normalize_value_for_target, detect_semantic_type
+
+_MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+_DATE_LIKE_RE = re.compile(
+    r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|"
+    r"\d{8}|"
+    r"\d{1,2}\s+" + _MONTH_NAME_RE + r"\s+\d{2,4}|"
+    r"" + _MONTH_NAME_RE + r"\s+\d{1,2},?\s+\d{2,4}",
+    re.IGNORECASE,
+)
 
 DATE_PATTERNS = (
     "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+    "%Y%m%d",
     "%m/%d/%Y",
     "%d/%m/%Y",
-    "%Y/%m/%d",
+    "%m/%d/%y",
+    "%d/%m/%y",
     "%m-%d-%Y",
     "%d-%m-%Y",
-    "%Y%m%d",
+    "%m-%d-%y",
+    "%d-%m-%y",
+    "%m.%d.%Y",
     "%d.%m.%Y",
-    "%Y.%m.%d",
+    "%m.%d.%y",
+    "%d.%m.%y",
     "%d-%b-%Y",
+    "%d-%b-%y",
     "%d-%B-%Y",
+    "%d-%B-%y",
     "%b %d, %Y",
+    "%b %d, %y",
     "%B %d, %Y",
+    "%B %d, %y",
     "%d %b %Y",
+    "%d %b %y",
     "%d %B %Y",
+    "%d %B %y",
     "%Y-%b-%d",
+    "%y-%b-%d",
 )
 
 # Additional patterns that represent a full date but may contain time.
@@ -45,16 +71,31 @@ DATE_WITH_TIME_PATTERNS = (
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%dT%H:%M:%SZ",
     "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S.%fZ",
+    "%Y-%m-%dT%H:%M:%S.%f%z",
     "%Y/%m/%d %H:%M:%S",
     "%m/%d/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M:%S",
+    "%m/%d/%y %H:%M:%S",
+    "%d/%m/%y %H:%M:%S",
     "%m-%d-%Y %H:%M:%S",
     "%d-%m-%Y %H:%M:%S",
+    "%m-%d-%y %H:%M:%S",
+    "%d-%m-%y %H:%M:%S",
+    "%m.%d.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M:%S",
+    "%m.%d.%y %H:%M:%S",
+    "%d.%m.%y %H:%M:%S",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d %I:%M:%S %p",
     "%Y-%m-%d %I:%M %p",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m-%d-%Y %I:%M %p",
     "%d-%b-%Y %H:%M:%S",
+    "%d-%b-%y %H:%M:%S",
     "%d-%B-%Y %H:%M:%S",
+    "%d-%B-%y %H:%M:%S",
 )
 
 DATETIME_PATTERNS = (
@@ -62,19 +103,31 @@ DATETIME_PATTERNS = (
     "%Y-%m-%d %H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%dT%H:%M:%SZ",
-    "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S.%f%z",
     "%Y/%m/%d %H:%M:%S",
     "%m/%d/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M:%S",
+    "%m/%d/%y %H:%M:%S",
+    "%d/%m/%y %H:%M:%S",
     "%m-%d-%Y %H:%M:%S",
     "%d-%m-%Y %H:%M:%S",
+    "%m-%d-%y %H:%M:%S",
+    "%d-%m-%y %H:%M:%S",
+    "%m.%d.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M:%S",
+    "%m.%d.%y %H:%M:%S",
+    "%d.%m.%y %H:%M:%S",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d %I:%M:%S %p",
     "%Y-%m-%d %I:%M %p",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m-%d-%Y %I:%M %p",
     "%d-%b-%Y %H:%M:%S",
+    "%d-%b-%y %H:%M:%S",
     "%d-%B-%Y %H:%M:%S",
+    "%d-%B-%y %H:%M:%S",
 )
 
 # Values that are unambiguously empty/missing for non-string types.
@@ -123,8 +176,49 @@ def _to_utc_z(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _detect_dayfirst(text: str) -> bool | None:
+    """Return True for day-first ordering, False for month-first, or None if ambiguous.
+
+    Looks at the first two numeric fields of slash/dash/dot-delimited dates.
+    A value like 31/12/2024 or 31.12.2024 is unambiguously day-first;
+    12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 we keep
+    the default (month-first) to stay compatible with existing data.
+    """
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text)
+    if not m:
+        return None
+    first, second = int(m.group(1)), int(m.group(2))
+    if first > 12:
+        return True
+    if second > 12:
+        return False
+    return None
+
+
+def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
+    """Move the most likely day/month ordering patterns to the front.
+
+    Year-first patterns only use 4-digit years (`%Y`).  Two-digit year-last
+    patterns (`%m/%d/%y`, `%d/%m/%y`, etc.) are grouped with their leading
+    month/day letter so that day-first vs month-first disambiguation works
+    correctly and two-digit years cannot be mistaken for the first field.
+    """
+    dayfirst = _detect_dayfirst(text)
+    if dayfirst is None:
+        return list(patterns)
+    year_first = [p for p in patterns if p.startswith("%Y")]
+    day_first = [p for p in patterns if p.startswith("%d")]
+    month_first = [p for p in patterns if p.startswith("%m")]
+    if dayfirst:
+        return year_first + day_first + month_first
+    return year_first + month_first + day_first
+
+
+@functools.lru_cache(maxsize=4096)
 def _parse_datetime(value: str) -> str | None:
     text = value.strip()
+    if not _DATE_LIKE_RE.search(text):
+        return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
         return _to_utc_z(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
@@ -135,7 +229,7 @@ def _parse_datetime(value: str) -> str | None:
         return _to_utc_z(datetime.fromisoformat(iso))
     except ValueError:
         pass
-    for fmt in DATETIME_PATTERNS:
+    for fmt in _reorder_date_patterns(text, DATETIME_PATTERNS):
         try:
             parsed = datetime.strptime(text, fmt)
             return _to_utc_z(parsed)
@@ -149,9 +243,12 @@ _EPOCH_MS_RE = re.compile(r"^\d{13}$")
 _EPOCH_S_RE = re.compile(r"^\d{10}$")
 
 
+@functools.lru_cache(maxsize=4096)
 def _parse_date(value: str, *, with_time: bool = False) -> str | None:
     text = value.strip()
     if not text:
+        return None
+    if not _DATE_LIKE_RE.search(text):
         return None
     if text.lower() in NULL_SENTINELS:
         return None
@@ -161,9 +258,9 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
             return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
         except ValueError:
             pass
-    patterns = list(DATE_PATTERNS)
+    patterns = _reorder_date_patterns(text, DATE_PATTERNS)
     if with_time:
-        patterns += list(DATE_WITH_TIME_PATTERNS)
+        patterns += _reorder_date_patterns(text, DATE_WITH_TIME_PATTERNS)
     for fmt in patterns:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
@@ -348,9 +445,43 @@ def _hash_pii(value: str) -> str:
     return digest[:32]
 
 
+TIME_PATTERNS = (
+    "%H:%M:%S.%f%z",
+    "%H:%M:%S%z",
+    "%H:%M:%S.%f",
+    "%H:%M:%S",
+    "%H:%M%z",
+    "%H:%M",
+    "%I:%M:%S %p",
+    "%I:%M:%S%p",
+    "%I:%M %p",
+    "%I:%M%p",
+)
+
+
+def _parse_time(value: str) -> str | None:
+    """Parse a time string and return a canonical ISO 8601 time.
+
+    Accepts 24-hour and 12-hour forms, with optional microseconds, time-zone
+    offsets, and AM/PM markers.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    text = text.upper().replace("Z", "+0000")
+    for fmt in TIME_PATTERNS:
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.time().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 KNOWN_TRANSFORMS = frozenset({
-    "decimal", "integer", "boolean", "date", "datetime", "json", "binary",
-    "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "none", "identity",
+    "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
+    "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
+    "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
 })
 
 
@@ -374,19 +505,27 @@ def infer_transform_for_mapping(
     target_col: str,
     source_type: str,
     target_type: str | None = None,
+    source_samples: list[str] | None = None,
 ) -> str:
-    """Pick transform from source/target logical types and column semantics."""
+    """Pick transform from source/target logical types, column semantics, and samples."""
     from services.type_system import normalize_logical_type
 
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type) if target_type else None
     tgt_name = target_col.lower()
 
-    # Explicit, non-generic target type wins.
+    semantic = detect_semantic_type(source_col, source_samples)
+
+    # Explicit, non-generic target type wins; if the source is already numeric
+    # use a direct numeric transform, otherwise apply semantic transforms.
     if tgt and tgt not in {"string", "text"}:
         if tgt == "integer":
             return "integer"
         if tgt == "decimal":
+            if src in {"string", "text", "unknown"} and semantic == "currency":
+                return "currency"
+            if src in {"string", "text", "unknown"} and semantic == "percentage":
+                return "percentage"
             return "decimal"
         if tgt == "boolean":
             return "boolean"
@@ -398,6 +537,8 @@ def infer_transform_for_mapping(
             return "datetime"
         if tgt == "date":
             return "date"
+        if tgt == "time":
+            return "time"
         if tgt == "uuid":
             return "uuid"
 
@@ -416,8 +557,30 @@ def infer_transform_for_mapping(
         return "datetime"
     if src == "date":
         return "date"
+    if src == "time":
+        return "time"
     if src == "uuid":
         return "uuid"
+
+    # Semantic column names drive the transform for generic string targets.
+    # For string/unknown targets, preserve currency/percentage as text to avoid
+    # data loss (e.g. '$100' should not be silently stripped to 100).
+    if semantic in {"currency", "percentage"}:
+        return "trim"
+    if semantic == "phone":
+        return "phone"
+    if semantic == "email":
+        return "email"
+    if semantic == "url":
+        return "url"
+    if semantic == "iban":
+        return "iban"
+    if semantic == "postal":
+        return "postal"
+    if semantic == "base64":
+        return "base64"
+    if semantic == "timestamp":
+        return "datetime"
 
     src_col = source_col.upper()
     if "amount" in tgt_name or "total" in tgt_name or "weight" in tgt_name or src_col in {
@@ -448,7 +611,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, None
 
     # Null/missing sentinels for typed transforms are treated as None.
-    if transform in {"decimal", "integer", "boolean", "date", "datetime", "json", "uuid", "binary"}:
+    if transform in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
         if text.lower() in NULL_SENTINELS:
             return None, None
 
@@ -480,6 +643,12 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         parsed = _parse_datetime(text)
         if parsed is None:
             return None, f"Invalid datetime: {text!r}"
+        return parsed, None
+
+    if transform == "time":
+        parsed = _parse_time(text)
+        if parsed is None:
+            return None, f"Invalid time: {text!r}"
         return parsed, None
 
     if transform == "json":
@@ -516,6 +685,30 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if transform == "hash_pii":
         return _hash_pii(text), None
 
+    if transform == "mask_pii":
+        return pii_mask(text), None
+
+    semantic_transform_map = {
+        "phone": SemanticType.PHONE,
+        "email": SemanticType.EMAIL,
+        "url": SemanticType.URL,
+        "iban": SemanticType.IBAN,
+        "currency": SemanticType.CURRENCY,
+        "percentage": SemanticType.PERCENTAGE,
+        "postal": SemanticType.POSTAL,
+        "base64": SemanticType.BASE64,
+    }
+    if transform in semantic_transform_map:
+        st = semantic_transform_map[transform]
+        # Currency and percentage are numeric; convert to a fixed-point string so
+        # destinations that serialize rows as JSON are safe. Other semantic types
+        # stay string-safe.
+        target_string = st not in {SemanticType.CURRENCY, SemanticType.PERCENTAGE}
+        converted = normalize_value_for_target(text, st, "decimal" if not target_string else "string")
+        if not target_string and not isinstance(converted, Decimal):
+            return text, f"Invalid {transform}: {text!r}"
+        return str(converted) if not target_string and isinstance(converted, Decimal) else converted, None
+
     if transform not in KNOWN_TRANSFORMS:
         return None, f"Unknown transform: {transform!r}"
 
@@ -537,16 +730,17 @@ def dry_run_sample(
     source_idx = {h: i for i, h in enumerate(headers)}
 
     for m in mappings:
+        idx = source_idx.get(m["source"])
+        if idx is None:
+            errors.append(f"Source column missing: {m['source']}")
+            continue
         transform = m.get("transform") or infer_transform_for_mapping(
             m["source"],
             m["target"],
             column_types.get(m["source"], "VARCHAR"),
             m.get("target_type") or column_types.get(m["target"]),
+            source_samples=[str(r[idx]) for r in sample_rows[:sample_size] if idx < len(r)],
         )
-        idx = source_idx.get(m["source"])
-        if idx is None:
-            errors.append(f"Source column missing: {m['source']}")
-            continue
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)

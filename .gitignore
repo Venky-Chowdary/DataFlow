@@ -20,6 +20,11 @@ apps/api/data/vector_store/
 apps/api/data/training/
 apps/api/data/upload_registry.json
 apps/api/data/audit_events.jsonl
+apps/api/data/schema_registry_schemas.json
+apps/api/data/schema_registry_lineage.json
+apps/api/data/sync_cursors.json
+apps/api/data/jobs.json
 apps/api/exports/
 apps/api/test
+.devin-files/
 apps/web/tsconfig.tsbuildinfo

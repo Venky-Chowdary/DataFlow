@@ -76,14 +76,18 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
 
 
 def _connection_string(cfg: dict[str, Any]) -> str:
-    if cfg.get("connection_string"):
-        return cfg["connection_string"]
-    if cfg.get("username") and cfg.get("password"):
-        return (
-            f"mongodb://{cfg['username']}:{cfg['password']}"
-            f"@{cfg['host']}:{cfg['port'] or 27017}/"
-        )
-    return f"mongodb://{cfg['host']}:{cfg['port'] or 27017}/"
+    from connectors.mongodb_common import normalize_mongodb_connection_string
+
+    return normalize_mongodb_connection_string(
+        cfg.get("connection_string", ""),
+        database=cfg.get("database", ""),
+        host=cfg.get("host", ""),
+        port=cfg.get("port", 0),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        ssl=bool(cfg.get("ssl")),
+        auth_source=cfg.get("auth_source", ""),
+    )
 
 
 def _serialize(value: Any) -> str:

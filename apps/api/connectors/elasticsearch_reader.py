@@ -33,6 +33,13 @@ def _client(cfg: dict[str, Any]):
     kwargs: dict[str, Any] = {"hosts": [url], "request_timeout": 60}
     if cfg.get("username") and cfg.get("password"):
         kwargs["basic_auth"] = (cfg["username"], cfg["password"])
+    elif cfg.get("api_key"):
+        api_key = cfg["api_key"].strip()
+        if ":" in api_key:
+            key_id, key_value = api_key.split(":", 1)
+            kwargs["api_key"] = (key_id, key_value)
+        else:
+            kwargs["api_key"] = api_key
     return Elasticsearch(**kwargs)
 
 

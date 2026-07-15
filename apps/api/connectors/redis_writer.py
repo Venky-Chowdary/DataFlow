@@ -52,13 +52,15 @@ def write_mapped_rows(
         "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl,
     }
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         preserve_case=True,
     )
 
@@ -79,10 +81,10 @@ def write_mapped_rows(
             rows_written=written,
             table_name=prefix,
             target_schema=f"db{database or 0}",
-            checksum=row_checksum(mapped_rows),
+            checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=1,
             warnings=errors[:10],
-            rejected_rows=len(errors),
+            rejected_rows=len(data_rows) - len(mapped_rows),
         )
     except Exception as exc:
         return WriteResult(

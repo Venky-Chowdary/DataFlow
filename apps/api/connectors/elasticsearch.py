@@ -16,6 +16,7 @@ def test_elasticsearch(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    api_key: str = "",
 ) -> ConnectResult:
     del schema, warehouse
 
@@ -45,6 +46,13 @@ def test_elasticsearch(
         kwargs: dict = {"hosts": [url], "request_timeout": 8}
         if username and password:
             kwargs["basic_auth"] = (username, password)
+        elif api_key.strip():
+            api_key = api_key.strip()
+            if ":" in api_key:
+                key_id, key_value = api_key.split(":", 1)
+                kwargs["api_key"] = (key_id, key_value)
+            else:
+                kwargs["api_key"] = api_key
         client = Elasticsearch(**kwargs)
         health = client.cluster.health()
         status = health.get("status", "unknown")

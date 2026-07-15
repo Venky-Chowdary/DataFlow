@@ -1,0 +1,404 @@
+"""Change-data-capture transfer runner for database sources.
+
+CDC can operate in two modes:
+
+1. **Query-based CDC** (default): polls the source table using a monotonic
+   cursor column (typically ``updated_at`` / ``created_at`` / an incrementing
+   version / auto-increment id). Optional soft-delete / tombstone columns are
+   honoured so rows flagged as deleted propagate as ``DELETE`` events.
+
+2. **PostgreSQL logical decoding** (opt-in): when the source is PostgreSQL and
+   ``use_logical_decoding=True`` is supplied, the engine attempts to consume a
+   ``pgoutput`` replication slot. This provides true INSERT/UPDATE/DELETE
+   capture without requiring a cursor column.
+
+The runner returns the same ``(rows_written, ddl_log, dest_summary, columns)``
+shape as ``stream_database_transfer`` so the engine can use it interchangeably.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import Any
+
+from connectors.table_manager import delete_by_primary_keys
+from services.cdc_engine import ChangeBatch, WatermarkType, advance_watermark, compare_watermarks, infer_watermark_type, max_watermark
+from services.error_handling import RetryBudget, with_retry
+from services.sync_cursor import build_cursor_key, get_watermark, map_source_to_target, resolve_sync_contract, set_watermark
+
+try:
+    from .adapters import resolve_connector_config, resolve_dest_table
+    from .connector_capabilities import resolve_driver_type
+    from .stream import _read_batch, _unwrap_read, _write_batch
+except ImportError:  # pragma: no cover - tests with api root on PYTHONPATH
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+    from src.transfer.connector_capabilities import resolve_driver_type
+    from src.transfer.stream import _read_batch, _unwrap_read, _write_batch
+
+
+CHUNK_SIZE = 1000
+
+
+@dataclass
+class CdcState:
+    cursor_key: str = ""
+    watermark: str | None = None
+    running_cursor: str | None = None
+    rows_written: int = 0
+    inserts: int = 0
+    updates: int = 0
+    deletes: int = 0
+    ddl_log: list[str] = field(default_factory=list)
+    last_dest_summary: dict[str, Any] = field(default_factory=dict)
+    last_checksum: str = ""
+
+
+def _records_to_matrix(records: list[dict[str, Any]], headers: list[str]) -> list[list[str]]:
+    return [[str(r.get(h, "")) for h in headers] for r in records]
+
+
+def _source_headers(headers: list[str], mappings: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Return source headers as expected by _write_batch and the target column list."""
+    return headers, [m.get("target", m.get("source", "")).strip() for m in mappings if m.get("source")]
+
+
+def _detect_tombstone_column(schema: dict[str, str], columns: list[str]) -> str | None:
+    """Return a soft-delete/tombstone column name if one exists."""
+    for c in columns:
+        lowered = c.lower()
+        if lowered in {"deleted_at", "deleted", "is_deleted", "tombstone", "is_active"}:
+            return c
+        if "delete" in lowered or "tombstone" in lowered:
+            return c
+    return None
+
+
+def _is_tombstone_set(record: dict[str, Any], tombstone_column: str) -> bool:
+    value = record.get(tombstone_column)
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in {"", "0", "false", "f", "no", "n", "null", "none"}:
+        return False
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    # Non-empty timestamp/text means deleted (soft-delete pattern)
+    return bool(text)
+
+
+class CdcEngine:
+    """Query-based CDC engine."""
+
+    def __init__(
+        self,
+        src_cfg: dict[str, Any],
+        src_type: str,
+        table_name: str,
+        cursor_field: str,
+        primary_key: str,
+        watermark: str | None,
+        columns: list[str] | None = None,
+        schema: dict[str, str] | None = None,
+        batch_size: int = CHUNK_SIZE,
+        tombstone_column: str | None = None,
+    ) -> None:
+        self.src_cfg = src_cfg
+        self.src_type = src_type
+        self.table_name = table_name
+        self.cursor_field = cursor_field
+        self.primary_key = primary_key
+        self.watermark = watermark
+        self.batch_size = batch_size
+        self.columns = columns or []
+        self.schema = schema or {}
+        self.tombstone_column = tombstone_column or _detect_tombstone_column(self.schema, self.columns)
+
+    def _read(self, cursor_after: str | None = None) -> Iterator[tuple[list[str], list[list[str]]]]:
+        """Yield (headers, rows) batches from the source table."""
+        offset = 0
+        cursor_type = None
+        if cursor_after:
+            samples = [cursor_after]
+            inferred = infer_watermark_type(samples)
+            cursor_type = inferred.value
+        while True:
+            result, _ = _unwrap_read(
+                _read_batch(
+                    self.src_type,
+                    self.src_cfg,
+                    self.table_name,
+                    self.columns or None,
+                    offset,
+                    self.batch_size,
+                    cursor_column=self.cursor_field if cursor_after else "",
+                    cursor_after=cursor_after,
+                    cursor_type=cursor_type,
+                    database=self.src_cfg.get("database", ""),
+                )
+            )
+            if not result or not getattr(result, "rows", None):
+                break
+            headers = result.headers
+            rows = result.rows
+            if not rows:
+                break
+            yield headers, rows
+            offset += len(rows)
+
+    def snapshot(self) -> Iterator[ChangeBatch]:
+        """Yield the full source table as a single INSERT-only change batch."""
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for h, rows in self._read():
+            if not headers:
+                headers = h
+            for row in rows:
+                all_rows.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
+        if not all_rows:
+            yield ChangeBatch()
+            return
+        # Split into chunks
+        for i in range(0, len(all_rows), self.batch_size):
+            chunk = all_rows[i : i + self.batch_size]
+            if self.tombstone_column:
+                inserts = [r for r in chunk if not _is_tombstone_set(r, self.tombstone_column)]
+                deletes = [r for r in chunk if _is_tombstone_set(r, self.tombstone_column)]
+                yield ChangeBatch(inserts=inserts, deletes=[str(r.get(self.primary_key, "")) for r in deletes if r.get(self.primary_key)])
+            else:
+                yield ChangeBatch(inserts=chunk)
+
+    def poll(self) -> Iterator[ChangeBatch]:
+        """Yield changes since the last watermark."""
+        if not self.watermark:
+            yield from self.snapshot()
+            return
+        all_rows: list[dict[str, Any]] = []
+        headers: list[str] = []
+        for h, rows in self._read(cursor_after=self.watermark):
+            if not headers:
+                headers = h
+            for row in rows:
+                all_rows.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
+        if not all_rows:
+            yield ChangeBatch()
+            return
+        for i in range(0, len(all_rows), self.batch_size):
+            chunk = all_rows[i : i + self.batch_size]
+            if self.tombstone_column:
+                inserts = [r for r in chunk if not _is_tombstone_set(r, self.tombstone_column)]
+                deletes = [r for r in chunk if _is_tombstone_set(r, self.tombstone_column)]
+                yield ChangeBatch(
+                    inserts=inserts,
+                    deletes=[str(r.get(self.primary_key, "")) for r in deletes if r.get(self.primary_key)],
+                )
+            else:
+                yield ChangeBatch(inserts=chunk)
+
+
+def _max_cursor_value(records: list[dict[str, Any]], cursor_field: str, wm_type: WatermarkType) -> str | None:
+    values = [str(r.get(cursor_field, "")) for r in records if r.get(cursor_field) is not None]
+    return max_watermark(values, wm_type)
+
+
+def _apply_change_batch(
+    dest_type: str,
+    destination: Any,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    change: ChangeBatch,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    headers: list[str],
+    pk_target_col: str,
+    chunk_idx: int,
+    total_chunks: int,
+) -> tuple[int, str, dict[str, Any], int]:
+    """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
+    source_headers, target_cols = _source_headers(headers, mappings)
+    rows_written = 0
+    deleted = 0
+    last_checksum = ""
+    dest_summary: dict[str, Any] = {}
+
+    if change.inserts:
+        data_rows = _records_to_matrix(change.inserts, headers)
+        write_op = lambda: _write_batch(
+            dest_type,
+            destination,
+            dest_cfg,
+            dest_table,
+            source_headers,
+            data_rows,
+            mappings,
+            column_types,
+            create_table=(chunk_idx == 0),
+            on_checkpoint=None,
+            chunk_idx=chunk_idx,
+            total_chunks=total_chunks,
+            rows_so_far=0,
+            write_mode="upsert",
+            conflict_columns=[pk_target_col] if pk_target_col else None,
+            backfill_new_fields=False,
+        )
+        rows, last_checksum, dest_summary = with_retry(
+            write_op,
+            budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+        )
+        rows_written += rows
+
+    if change.updates:
+        data_rows = _records_to_matrix(change.updates, headers)
+        write_op = lambda: _write_batch(
+            dest_type,
+            destination,
+            dest_cfg,
+            dest_table,
+            source_headers,
+            data_rows,
+            mappings,
+            column_types,
+            create_table=False,
+            on_checkpoint=None,
+            chunk_idx=chunk_idx,
+            total_chunks=total_chunks,
+            rows_so_far=0,
+            write_mode="upsert",
+            conflict_columns=[pk_target_col] if pk_target_col else None,
+            backfill_new_fields=False,
+        )
+        rows, last_checksum, dest_summary = with_retry(
+            write_op,
+            budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+        )
+        rows_written += rows
+
+    if change.deletes:
+        deleted = delete_by_primary_keys(
+            db_type=dest_type,
+            cfg=dest_cfg,
+            table_name=dest_table,
+            primary_key_column=pk_target_col,
+            keys=change.deletes,
+            schema=dest_cfg.get("schema"),
+        )
+
+    return rows_written, last_checksum, dest_summary, deleted
+
+
+def run_cdc_database_transfer(
+    source: Any,
+    destination: Any,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Any | None = None,
+    *,
+    sync_mode: str = "cdc",
+    stream_contracts: list[dict] | None = None,
+    job_id: str = "",
+    checkpoint: Any | None = None,
+    checkpoint_service: Any | None = None,
+    backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """Run a CDC transfer from a database source to a database destination."""
+    src_type = resolve_driver_type(source.format)
+    dest_type = resolve_driver_type(destination.format)
+    src_cfg = resolve_connector_config(source)
+    dest_cfg = resolve_connector_config(destination)
+    table_name = source.table or source.collection or ""
+    dest_table = resolve_dest_table(dest_type, destination, table_name)
+
+    contract = resolve_sync_contract(stream_contracts)
+    primary_key = contract.primary_key if contract else ""
+    cursor_field = contract.cursor_field if contract else ""
+    if not primary_key or not cursor_field:
+        raise ValueError("CDC sync requires both primary_key and cursor_field in the stream contract")
+
+    pk_target_col = map_source_to_target(primary_key, mappings)
+    cursor_key = build_cursor_key(
+        source_type=src_type,
+        source_database=src_cfg.get("database", ""),
+        source_object=table_name,
+        dest_type=dest_type,
+        dest_database=dest_cfg.get("database", ""),
+        dest_object=dest_table,
+        stream_name=contract.name if contract else "stream",
+    )
+    watermark = get_watermark(cursor_key)
+
+    headers = list(schema.keys())
+    column_types = {c: schema.get(c, "string") for c in headers}
+    cdc = CdcEngine(
+        src_cfg,
+        src_type,
+        table_name,
+        cursor_field,
+        primary_key,
+        watermark,
+        columns=headers,
+        schema=schema,
+    )
+
+    ddl_log = [
+        f"CDC {src_type}.{table_name} → {dest_type}.{dest_table} "
+        f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+    ]
+
+    state = CdcState(cursor_key=cursor_key, watermark=watermark)
+    total_chunks = 1
+    chunk_idx = 0
+
+    for change in cdc.snapshot() if watermark is None else cdc.poll():
+        if not change.total_changes and not change.deletes:
+            continue
+
+        rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
+            dest_type,
+            destination,
+            dest_cfg,
+            dest_table,
+            change,
+            mappings,
+            column_types,
+            headers,
+            pk_target_col,
+            chunk_idx,
+            total_chunks,
+        )
+        state.rows_written += rows_written
+        state.inserts += len(change.inserts)
+        state.updates += len(change.updates)
+        state.deletes += deleted
+        state.last_checksum = last_checksum or state.last_checksum
+        if dest_summary:
+            state.last_dest_summary = dest_summary
+
+        # Advance watermark from the rows we just applied.
+        if change.inserts or change.updates:
+            values = [r.get(cursor_field) for r in (change.inserts + change.updates) if r.get(cursor_field) is not None]
+            if values:
+                wm_type = infer_watermark_type([str(v) for v in values])
+                batch_max = max_watermark([str(v) for v in values], wm_type)
+                if batch_max:
+                    new_watermark, advanced = advance_watermark(state.running_cursor, [batch_max], wm_type)
+                    if advanced and new_watermark is not None:
+                        state.running_cursor = new_watermark
+
+        if on_checkpoint:
+            on_checkpoint(chunk_idx + 1, total_chunks, state.rows_written, {})
+
+        chunk_idx += 1
+
+    final_watermark = state.running_cursor or watermark
+    if final_watermark:
+        set_watermark(cursor_key, final_watermark, metadata={"job_id": job_id, "sync_mode": sync_mode})
+
+    summary = state.last_dest_summary or {}
+    summary["cdc"] = {
+        "inserts": state.inserts,
+        "updates": state.updates,
+        "deletes": state.deletes,
+        "watermark": final_watermark,
+    }
+    summary["checksum"] = state.last_checksum
+    return state.rows_written, ddl_log, summary, headers

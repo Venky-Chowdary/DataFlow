@@ -12,8 +12,10 @@ RUN npm ci --workspace=@dataflow/web 2>/dev/null || npm install --workspace=@dat
 
 # Set in Railway → Web service → Variables (or build ARG):
 # VITE_API_BASE=https://YOUR-API-SERVICE.up.railway.app/api/v1
-ARG VITE_API_BASE=https://localhost/api/v1
-ENV VITE_API_BASE=$VITE_API_BASE
+# Or set DATAFLOW_API_BASE at runtime to override without rebuilding.
+# Default is the production DataFlow API so DataPilot works out of the box.
+ARG VITE_API_BASE
+ENV VITE_API_BASE=${VITE_API_BASE:-https://dataflow-api-production-722b.up.railway.app/api/v1}
 
 RUN npm run build --workspace=@dataflow/web
 

@@ -65,3 +65,15 @@ def test_pipeline_plan_summary():
     assert r["plan_summary"]["mapped_count"] >= 1
     assert "coverage_pct" in r["plan_summary"]
 
+
+def test_pipeline_type_locked_blocks_type_change():
+    r = run_mapping_pipeline(
+        ["id"],
+        ["id"],
+        source_schemas=[{"name": "id", "inferred_type": "INTEGER", "samples": ["1"]}],
+        target_schemas=[{"name": "id", "inferred_type": "VARCHAR", "samples": []}],
+        schema_policy="type_locked",
+        use_llm=False,
+    )
+    assert any("type_locked" in issue or "INTEGER" in issue for issue in r["quality_issues"])
+

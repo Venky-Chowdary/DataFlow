@@ -3,7 +3,9 @@
 from __future__ import annotations
 import logging
 import os
+import resource
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,6 +28,10 @@ try:
     from services import lineage_telemetry as lineage
     from services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+    from services.pipeline_explanation import build_pipeline_explanation
+    from services.mirror_engine import apply_inferred_soft_deletes
+    from services.row_filter import apply_row_filter
+    from services.scd2_engine import apply_scd2
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -38,6 +44,10 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services import lineage_telemetry as lineage
     from src.services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
     from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+    from src.services.pipeline_explanation import build_pipeline_explanation
+    from src.services.mirror_engine import apply_inferred_soft_deletes
+    from src.services.row_filter import apply_row_filter
+    from src.services.scd2_engine import apply_scd2
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -48,9 +58,21 @@ from .adapters import (
 from .models import EndpointConfig, TransferRequest, TransferResult, transfer_request_to_dict
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
-from .file_stream import peek_file_source, should_stream_file, stream_file_to_database
+from .file_stream import (
+    peek_file_source,
+    prepare_stream_content,
+    should_stream_file,
+    stream_file_to_database,
+)
+from .cdc_transfer import run_cdc_database_transfer
 from .stream import peek_stream_source, stream_database_transfer, supports_streaming
 from .type_mapper import build_column_types, default_mappings
+try:
+    from .contract_engine import enforce_or_create_contract, finalize_contract
+    from services.data_contract import ContractViolation
+except ImportError:  # pragma: no cover - compatibility for tests
+    from src.transfer.contract_engine import enforce_or_create_contract, finalize_contract
+    from src.services.data_contract import ContractViolation
 try:
     from ai.training.training_scheduler import schedule_training_on_transfer
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
@@ -58,9 +80,48 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from connectors.writer_common import CHUNK_SIZE
 from services.batch_progress import ThrottledCheckpoint
+try:
+    from services import schema_registry
+except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services import schema_registry
 from services.checkpoint_service import Checkpoint, CheckpointService, resume_or_create_checkpoint
 
 logger = logging.getLogger("dataflow.transfer")
+
+
+def _coalesce_sort_value(value: Any) -> Any:
+    """Return a tuple that sorts None/empty values last regardless of direction."""
+    if value is None or value == "":
+        return (1, "")
+    if isinstance(value, (int, float)):
+        return (0, value)
+    try:
+        return (0, float(value))
+    except (TypeError, ValueError):
+        return (0, str(value).lower())
+
+
+def _apply_priority_and_limit(
+    records: list[dict[str, Any]],
+    priority_column: str,
+    direction: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Sort source rows by a priority column and optionally cap the row count."""
+    if not priority_column or not records:
+        if limit > 0:
+            return records[:limit]
+        return records
+
+    reverse = direction != "asc"
+    sorted_records = sorted(
+        records,
+        key=lambda r: _coalesce_sort_value(r.get(priority_column)),
+        reverse=reverse,
+    )
+    if limit > 0:
+        return sorted_records[:limit]
+    return sorted_records
 
 
 def _redacted_endpoint(ep: EndpointConfig) -> dict[str, Any]:
@@ -78,6 +139,30 @@ def _redacted_endpoint(ep: EndpointConfig) -> dict[str, Any]:
         "warehouse": ep.warehouse,
     }
     return {k: v for k, v in d.items() if v}
+
+
+def _build_explanation(
+    request: TransferRequest,
+    columns: list[str],
+    schema: dict[str, str] | None,
+    mappings: list[dict[str, Any]],
+    recon: dict[str, Any],
+    dest_summary: dict[str, Any],
+    pf: dict[str, Any] | None,
+    rows_written: int,
+) -> str:
+    rejected = int(dest_summary.get("rejected_rows", 0) or 0)
+    return build_pipeline_explanation(
+        request=request,
+        columns=columns,
+        source_schema=schema,
+        mappings=mappings,
+        reconciliation=recon,
+        destination_summary=dest_summary,
+        validation_plan=pf.get("validation_plan") if pf else None,
+        rows_written=rows_written,
+        rejected_rows=rejected,
+    )
 
 
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
@@ -98,6 +183,27 @@ def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") 
         return dict(info.get("schema") or {})
     except Exception:
         return {}
+
+
+def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
+    """Infer the primary key target column for mirror/upsert transfers.
+
+    Prefers a mapping whose source column is named ``id`` or ends with ``_id``,
+    then any source column that looks like a unique identifier.  Returns the
+    target column name (or the source name if the mapping has no explicit target).
+    """
+    if not columns:
+        return ""
+    mapping_dict = {m.get("source", ""): m.get("target", m.get("source", "")) for m in mappings}
+    candidates = [c for c in columns if c.lower() == "id" or c.lower().endswith("_id")]
+    if not candidates:
+        # Fall back to the first short, non-nullable-looking column name.
+        candidates = [columns[0]]
+    for src in candidates:
+        tgt = mapping_dict.get(src, src)
+        if tgt:
+            return tgt
+    return mapping_dict.get(columns[0], columns[0])
 
 
 def _checkpoint_has_progress(checkpoint: Any) -> bool:
@@ -129,20 +235,40 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         return False
 
 
-def _enrich_mappings_with_types(mappings: list[dict], dest_types: dict[str, str]) -> list[dict]:
+def _schema_for_endpoint(destination: EndpointConfig) -> str | None:
+    """Return the SQL schema name implied by a database endpoint config."""
+    try:
+        from .adapters import resolve_connector_config
+        from connectors.generic_sql import get_sql_schema
+
+        cfg = resolve_connector_config(destination)
+        return get_sql_schema(cfg)
+    except Exception:
+        return None
+
+
+def _enrich_mappings_with_types(
+    mappings: list[dict],
+    dest_types: dict[str, str] | None = None,
+    column_types: dict[str, str] | None = None,
+) -> list[dict]:
     if not mappings:
         return mappings
     try:
         from services.transform_resolver import attach_transforms_to_mappings
 
-        return attach_transforms_to_mappings(mappings, dest_types=dest_types)
+        return attach_transforms_to_mappings(
+            mappings,
+            column_types=column_types or {},
+            dest_types=dest_types or {},
+        )
     except Exception:
         pass
     out = []
     for m in mappings:
         enriched = dict(m)
         tgt = m.get("target")
-        if tgt and tgt in dest_types:
+        if tgt and dest_types and tgt in dest_types:
             enriched["target_type"] = dest_types[tgt]
         out.append(enriched)
     return out
@@ -153,6 +279,7 @@ def _auto_map(
     columns: list[str],
     schema: dict[str, str],
     sample_rows: list[dict] | None = None,
+    job_id: str = "",
 ) -> list[dict]:
     """Generate destination-aware mappings when no mapping contract was supplied.
 
@@ -161,62 +288,149 @@ def _auto_map(
     For full-refresh/overwrites into a new target, identity mappings are used so
     the destination can be created from the source shape.
     """
+    mappings: list[dict] | None = None
+
     if request.mappings:
-        return request.mappings
-    if request.destination.kind != "database":
-        return default_mappings(columns)
+        mappings = request.mappings
+    elif request.destination.kind != "database":
+        mappings = default_mappings(columns)
+    else:
+        sync_mode = (request.sync_mode or "full_refresh_overwrite").lower()
+        if sync_mode in {"full_refresh_overwrite", "overwrite"}:
+            mappings = default_mappings(columns)
+        else:
+            target_schema = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            if not target_schema:
+                mappings = default_mappings(columns)
+            else:
+                # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
+                # unless the source literally contains an _id column or the user supplied a mapping.
+                if (
+                    request.destination.format == "mongodb"
+                    and sync_mode not in {"full_refresh_overwrite", "overwrite"}
+                    and "_id" not in columns
+                ):
+                    target_schema = {k: v for k, v in target_schema.items() if k != "_id"}
 
-    sync_mode = (request.sync_mode or "full_refresh_overwrite").lower()
-    if sync_mode in {"full_refresh_overwrite", "overwrite"}:
-        return default_mappings(columns)
+                try:
+                    from services.mapping_pipeline import run_mapping_pipeline
 
-    target_schema = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
-    if not target_schema:
-        return default_mappings(columns)
+                    source_schemas = [
+                        {
+                            "name": c,
+                            "inferred_type": schema.get(c, "string"),
+                            "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                        }
+                        for c in columns
+                    ]
+                    target_columns = list(target_schema.keys())
+                    target_schemas = [
+                        {"name": c, "inferred_type": target_schema.get(c, "string"), "samples": []}
+                        for c in target_columns
+                    ]
+                    source_samples = {
+                        c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        for c in columns
+                    }
+                    result = run_mapping_pipeline(
+                        source_columns=columns,
+                        target_columns=target_columns,
+                        source_schemas=source_schemas,
+                        target_schemas=target_schemas,
+                        file_format=request.source.format,
+                        confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                        source_samples=source_samples,
+                        validation_mode=request.validation_mode,
+                        use_llm=False,
+                        schema_policy=request.schema_policy,
+                    )
+                    auto = result.get("mappings")
+                    if auto and isinstance(auto, list) and any(m.get("source") for m in auto):
+                        mapped_sources = {str(m.get("source")) for m in auto}
+                        if request.backfill_new_fields:
+                            for c in columns:
+                                if c not in mapped_sources:
+                                    auto.append({"source": c, "target": c, "confidence": 0.95})
+                        mappings = auto
+                except Exception as exc:
+                    logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
 
-    try:
-        from services.mapping_pipeline import run_mapping_pipeline
+    if mappings is None:
+        mappings = default_mappings(columns)
 
-        source_schemas = [
-            {
-                "name": c,
-                "inferred_type": schema.get(c, "string"),
-                "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
-            }
-            for c in columns
-        ]
-        target_columns = list(target_schema.keys())
-        target_schemas = [
-            {"name": c, "inferred_type": target_schema.get(c, "string"), "samples": []}
-            for c in target_columns
-        ]
-        source_samples = {
-            c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
-            for c in columns
-        }
-        result = run_mapping_pipeline(
-            source_columns=columns,
-            target_columns=target_columns,
-            source_schemas=source_schemas,
-            target_schemas=target_schemas,
-            file_format=request.source.format,
-            confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
-            source_samples=source_samples,
-            validation_mode=request.validation_mode,
-            use_llm=False,
+    _record_schema_and_lineage(request, mappings, schema, job_id)
+    return mappings
+
+
+def _record_schema_and_lineage(
+    request: TransferRequest,
+    mappings: list[dict[str, Any]],
+    schema: dict[str, str],
+    job_id: str,
+) -> None:
+    """Register source/target schemas and column-level lineage for this job."""
+    src_id = (
+        request.source.connector_id
+        or request.source.host
+        or (request.source_filename if request.source.kind == "file" else "")
+        or f"{request.source.kind}:{request.source.format}"
+    )
+    src_object = (
+        request.source.table
+        or request.source.collection
+        or (request.source_filename if request.source.kind == "file" else "")
+        or "source"
+    )
+    dst_id = (
+        request.destination.connector_id
+        or request.destination.host
+        or f"{request.destination.kind}:{request.destination.format}"
+    )
+    dst_object = (
+        request.destination.table
+        or request.destination.collection
+        or f"{request.destination.format}_export"
+    )
+
+    source_columns = [
+        {"name": name, "type": (schema.get(name) or "string"), "primary_key": False}
+        for name in schema.keys()
+    ]
+    schema_registry.register_schema(
+        columns=source_columns,
+        connector_type=request.source.format,
+        connector_id=src_id,
+        object_name=src_object,
+        job_id=job_id,
+        source_of_truth=True,
+    )
+
+    # Build a best-effort target schema from the mappings.
+    target_columns = []
+    for m in mappings:
+        src = str(m.get("source", "")).strip()
+        tgt = str(m.get("target", "")).strip()
+        if not src or not tgt:
+            continue
+        target_columns.append({
+            "name": tgt,
+            "type": schema.get(src, "string"),
+            "primary_key": False,
+        })
+    if target_columns:
+        schema_registry.register_schema(
+            columns=target_columns,
+            connector_type=request.destination.format,
+            connector_id=dst_id,
+            object_name=dst_object,
+            job_id=job_id,
         )
-        mappings = result.get("mappings")
-        if mappings and isinstance(mappings, list) and any(m.get("source") for m in mappings):
-            mapped_sources = {str(m.get("source")) for m in mappings}
-            if request.backfill_new_fields:
-                for c in columns:
-                    if c not in mapped_sources:
-                        mappings.append({"source": c, "target": c, "confidence": 0.95})
-            return mappings
-    except Exception as exc:
-        logger.warning("Auto-mapping failed: %s; falling back to identity mappings", exc)
-
-    return default_mappings(columns)
+        schema_registry.record_lineage(
+            source={"connector_type": request.source.format, "connector_id": src_id, "object_name": src_object},
+            target={"connector_type": request.destination.format, "connector_id": dst_id, "object_name": dst_object},
+            mappings=mappings,
+            job_id=job_id,
+        )
 
 
 class UniversalTransferEngine:
@@ -234,7 +448,30 @@ class UniversalTransferEngine:
         job_id = self._create_pending_job(request)
         return self.execute_tracked(request, job_id)
 
+    @staticmethod
+    def _peak_memory_bytes() -> int:
+        """Return the maximum resident set size (bytes) for this process so far."""
+        try:
+            return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        except Exception:
+            return 0
+
     def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
+        """Timed wrapper around the core transfer engine."""
+        start = time.monotonic()
+        start_mem = self._peak_memory_bytes()
+        result = self._execute_tracked_core(request, job_id, resume=resume)
+        elapsed = time.monotonic() - start
+        result.elapsed_seconds = round(elapsed, 3)
+        result.records_per_second = round(result.records_transferred / elapsed, 3) if elapsed > 0 else 0.0
+        result.peak_memory_bytes = max(self._peak_memory_bytes() - start_mem, 0)
+        # Surface SLA metrics in the destination summary for the UI / API consumers.
+        result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
+        result.destination_summary["records_per_second"] = result.records_per_second
+        result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+        return result
+
+    def _execute_tracked_core(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
         checkpoint = None
@@ -270,7 +507,11 @@ class UniversalTransferEngine:
             )
             return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
 
-        if supports_streaming(request.source, request.destination):
+        if (
+            supports_streaming(request.source, request.destination)
+            and not request.priority_column
+            and request.limit == 0
+        ):
             return self._execute_streaming(
                 request, job_id, mongo, src_fmt,
                 resume=resume,
@@ -278,12 +519,16 @@ class UniversalTransferEngine:
                 checkpoint_service=checkpoint_service,
             )
 
+        non_streaming_mode = request.sync_mode.lower() in ("full_refresh_mirror", "mirror", "scd2")
         if (
             request.source.kind == "file"
             and request.destination.kind == "database"
-            and request.source_content
+            and (request.source_content or request.source_path)
+            and not non_streaming_mode
+            and not request.priority_column
+            and request.limit == 0
             and should_stream_file(
-                request.source_content,
+                request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
                 request.destination,
             )
@@ -296,6 +541,7 @@ class UniversalTransferEngine:
             )
 
         pf = None
+        contract_id = ""
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -304,6 +550,14 @@ class UniversalTransferEngine:
             records, columns, schema = with_retry(
                 lambda: self._read_source(request),
                 budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+            )
+            if request.source_filter:
+                records = apply_row_filter(records, request.source_filter)
+            records = _apply_priority_and_limit(
+                records,
+                request.priority_column,
+                request.priority_direction,
+                request.limit,
             )
             if not records and request.source.kind != "database":
                 mongo.update_job_status(job_id, "failed", error="No records to transfer", phase="failed")
@@ -314,18 +568,24 @@ class UniversalTransferEngine:
 
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=records[:100]),
-                dest_schema_types,
+                _auto_map(request, columns, schema, sample_rows=records[:100], job_id=job_id),
+                column_types=schema,
+                dest_types=dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = contract.sync_mode if contract else request.sync_mode
+            effective_sync_lower = (effective_sync or "").lower()
             write_mode = "insert"
             conflict_columns: list[str] = []
             if contract and contract.primary_key:
                 conflict_columns = [map_source_to_target(contract.primary_key, mappings)]
+            if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror", "scd2"):
+                inferred_pk = _infer_primary_key(columns, mappings)
+                if inferred_pk:
+                    conflict_columns = [inferred_pk]
             if requires_upsert(effective_sync) and conflict_columns:
                 write_mode = "upsert"
 
@@ -436,6 +696,23 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            if pf:
+                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+
+            # Data contract / circuit breaker enforcement.
+            try:
+                contract_id = enforce_or_create_contract(request, schema, mappings, pf)
+            except ContractViolation as cv:
+                msg = cv.message
+                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    error_details={"violations": cv.violations},
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+
             ddl_log: list[str] = []
             dest_summary: dict = {}
             rows_written = 0
@@ -467,26 +744,75 @@ class UniversalTransferEngine:
                 )
                 if checkpoint:
                     update["checkpoint"] = checkpoint
+                    update["destination_summary"] = {
+                        "checksum": checkpoint.get("checksum", ""),
+                        "rejected_rows": checkpoint.get("rejected_rows", 0),
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                    }
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
             if request.destination.kind == "database":
                 is_streaming = False
-                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
-                    if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                should_drop_full_refresh = (
+                    request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite")
+                    and (not resume or not is_streaming or not _checkpoint_has_progress(checkpoint))
+                )
+
+                def _write_destination_with_drop():
+                    # Drop inside the retry boundary so a failed full-refresh write
+                    # retries from an empty table and cannot duplicate already-loaded rows.
+                    if should_drop_full_refresh:
                         _drop_destination_table(request.destination)
-                rows_written, ddl_log, dest_summary = with_retry(
-                    lambda: write_destination_database(
+                    return write_destination_database(
                         request.destination, records, columns, schema, mappings,
                         on_checkpoint=throttled_checkpoint,
                         validation_mode=request.validation_mode,
                         backfill_new_fields=request.backfill_new_fields,
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
-                    ),
-                    budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
-                )
+                    )
+
+                if effective_sync_lower == "scd2" and conflict_columns:
+                    scd2_summary = with_retry(
+                        lambda: apply_scd2(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            conflict_columns,
+                        ),
+                        budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                    )
+                    dest_summary = {
+                        "table": request.destination.table or request.destination.collection,
+                        "schema": _schema_for_endpoint(request.destination),
+                        "checksum": scd2_summary.get("active_checksum", ""),
+                        "scd2": scd2_summary,
+                    }
+                    rows_written = scd2_summary.get("rows_written", 0)
+                    ddl_log.append(
+                        f"SCD2 merge: {scd2_summary.get('active_rows', 0)} active, "
+                        f"{scd2_summary.get('updated_rows', 0)} expired"
+                    )
+                else:
+                    rows_written, ddl_log, dest_summary = with_retry(
+                        _write_destination_with_drop,
+                        budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                    )
+                    if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
+                        mirror_summary = apply_inferred_soft_deletes(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            conflict_columns,
+                        )
+                        dest_summary["mirror"] = mirror_summary
+                        rows_written = mirror_summary.get("active_rows", rows_written)
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
             elif request.destination.kind == "file_export":
@@ -530,6 +856,8 @@ class UniversalTransferEngine:
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
                 mappings=mappings,
+                source_schema=schema,
+                validation_mode=request.validation_mode,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -548,6 +876,9 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                 )
 
+            explanation = _build_explanation(
+                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+            )
             mongo.update_job_status(
                 job_id, "completed",
                 records_processed=rows_written,
@@ -559,15 +890,17 @@ class UniversalTransferEngine:
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
+                explanation=explanation,
             )
-            try:
-                samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
-                schedule_training_on_transfer(
-                    request.source_filename or dest_summary.get("table", "transfer"),
-                    columns, len(records), samples,
-                )
-            except Exception:
-                pass
+            if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
+                try:
+                    samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
+                    schedule_training_on_transfer(
+                        request.source_filename or dest_summary.get("table", "transfer"),
+                        columns, len(records), samples,
+                    )
+                except Exception:
+                    pass
 
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
@@ -586,6 +919,7 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
                 destination_summary=dest_summary,
             )
+            finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -603,8 +937,11 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
+                contract_id=contract_id,
+                explanation=explanation,
             )
         except Exception as e:
+            finalize_contract(contract_id, success=False)
             error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
@@ -624,6 +961,7 @@ class UniversalTransferEngine:
                 error=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
+                contract_id=contract_id,
             )
 
     def _execute_streaming(
@@ -639,6 +977,7 @@ class UniversalTransferEngine:
         """Batched DB→DB path — never loads full table into memory."""
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
+        contract_id = ""
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -652,11 +991,15 @@ class UniversalTransferEngine:
                     operation=request.operation, job_id=job_id,
                 )
 
+            if request.source_filter:
+                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=sample_rows),
-                dest_schema_types,
+                _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
+                column_types=schema,
+                dest_types=dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -767,6 +1110,23 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            if pf:
+                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+
+            # Data contract / circuit breaker enforcement.
+            try:
+                contract_id = enforce_or_create_contract(request, schema, mappings, pf)
+            except ContractViolation as cv:
+                msg = cv.message
+                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    error_details={"violations": cv.violations},
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
@@ -789,6 +1149,11 @@ class UniversalTransferEngine:
                 )
                 if checkpoint:
                     update["checkpoint"] = checkpoint
+                    update["destination_summary"] = {
+                        "checksum": checkpoint.get("checksum", ""),
+                        "rejected_rows": checkpoint.get("rejected_rows", 0),
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                    }
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -803,19 +1168,44 @@ class UniversalTransferEngine:
                 if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
                     _drop_destination_table(request.destination)
 
-            rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
-                request.source,
-                request.destination,
-                mappings,
-                schema,
-                on_checkpoint=throttled_checkpoint,
-                sync_mode=request.sync_mode,
-                stream_contracts=request.stream_contracts,
-                job_id=job_id,
-                checkpoint=checkpoint,
-                checkpoint_service=checkpoint_service,
-                backfill_new_fields=request.backfill_new_fields,
-            )
+            stream_contract = resolve_sync_contract(request.stream_contracts)
+            effective_sync = (stream_contract.sync_mode if stream_contract else request.sync_mode).lower()
+            if effective_sync in ("full_refresh_mirror", "mirror", "scd2"):
+                raise NotImplementedError(
+                    f"{effective_sync} is not supported for streaming database-to-database transfers; "
+                    "use a file source or a non-streaming database source."
+                )
+            if effective_sync == "cdc":
+                rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
+                    request.source,
+                    request.destination,
+                    mappings,
+                    schema,
+                    on_checkpoint=throttled_checkpoint,
+                    sync_mode=request.sync_mode,
+                    stream_contracts=request.stream_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=request.backfill_new_fields,
+                    validation_mode=request.validation_mode,
+                )
+            else:
+                rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
+                    request.source,
+                    request.destination,
+                    mappings,
+                    schema,
+                    on_checkpoint=throttled_checkpoint,
+                    sync_mode=request.sync_mode,
+                    stream_contracts=request.stream_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=request.backfill_new_fields,
+                    validation_mode=request.validation_mode,
+                    source_filter=request.source_filter,
+                )
 
             mongo.update_job_status(
                 job_id, "running", phase="reconcile", progress_pct=95,
@@ -830,6 +1220,8 @@ class UniversalTransferEngine:
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
                 mappings=mappings,
+                source_schema=schema,
+                validation_mode=request.validation_mode,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -848,6 +1240,9 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                 )
 
+            explanation = _build_explanation(
+                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+            )
             mongo.update_job_status(
                 job_id, "completed",
                 records_processed=rows_written,
@@ -859,6 +1254,7 @@ class UniversalTransferEngine:
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
+                explanation=explanation,
             )
 
             lineage.emit_preflight_completed(
@@ -878,6 +1274,7 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
                 destination_summary=dest_summary,
             )
+            finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -896,8 +1293,11 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
+                contract_id=contract_id,
+                explanation=explanation,
             )
         except Exception as e:
+            finalize_contract(contract_id, success=False)
             error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
@@ -917,6 +1317,7 @@ class UniversalTransferEngine:
                 error=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
+                contract_id=contract_id,
             )
 
     def _execute_file_streaming(
@@ -932,9 +1333,14 @@ class UniversalTransferEngine:
         """Batched file → database path for large CSV/TSV/JSONL uploads."""
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
+        contract_id = ""
         try:
-            content = request.source_content or b""
             filename = request.source_filename or "upload.csv"
+            content = prepare_stream_content(
+                content=request.source_content or b"",
+                filename=filename,
+                source_path=request.source_path or "",
+            )
 
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -948,11 +1354,15 @@ class UniversalTransferEngine:
                     operation=request.operation, job_id=job_id,
                 )
 
+            if request.source_filter:
+                sample_rows = apply_row_filter(sample_rows, request.source_filter)
+
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
             dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
             mappings = _enrich_mappings_with_types(
-                _auto_map(request, columns, schema, sample_rows=sample_rows),
-                dest_schema_types,
+                _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
+                column_types=schema,
+                dest_types=dest_schema_types,
             )
             column_types = request.column_types or build_column_types(columns, schema)
 
@@ -1063,6 +1473,23 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            if pf:
+                mongo.update_job_status(job_id, "running", phase="preflight", progress_pct=15, preflight=pf)
+
+            # Data contract / circuit breaker enforcement.
+            try:
+                contract_id = enforce_or_create_contract(request, schema, mappings, pf)
+            except ContractViolation as cv:
+                msg = cv.message
+                mongo.update_job_status(job_id, "failed", error=msg, phase="failed", progress_pct=0)
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    error_details={"violations": cv.violations},
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+
             def _check_cancelled() -> None:
                 try:
                     job = mongo.get_job(job_id)
@@ -1085,6 +1512,11 @@ class UniversalTransferEngine:
                 )
                 if checkpoint:
                     update["checkpoint"] = checkpoint
+                    update["destination_summary"] = {
+                        "checksum": checkpoint.get("checksum", ""),
+                        "rejected_rows": checkpoint.get("rejected_rows", 0),
+                        "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
+                    }
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1112,6 +1544,8 @@ class UniversalTransferEngine:
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
                 backfill_new_fields=request.backfill_new_fields,
+                validation_mode=request.validation_mode,
+                source_filter=request.source_filter,
             )
 
             mongo.update_job_status(
@@ -1127,6 +1561,8 @@ class UniversalTransferEngine:
                 writer_checksum=dest_summary.get("checksum", ""),
                 dest_summary=dest_summary,
                 mappings=mappings,
+                source_schema=schema,
+                validation_mode=request.validation_mode,
             )
             if not recon.get("passed"):
                 mongo.update_job_status(
@@ -1145,6 +1581,9 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                 )
 
+            explanation = _build_explanation(
+                request, columns, schema, mappings, recon, dest_summary, pf, rows_written
+            )
             mongo.update_job_status(
                 job_id, "completed",
                 records_processed=rows_written,
@@ -1156,6 +1595,7 @@ class UniversalTransferEngine:
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
+                explanation=explanation,
             )
 
             lineage.emit_preflight_completed(
@@ -1175,6 +1615,7 @@ class UniversalTransferEngine:
                 source_summary={"kind": "file", "format": src_fmt, "columns": len(columns), "rows": total_rows, "streaming": True},
                 destination_summary=dest_summary,
             )
+            finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
                 job_id=job_id,
@@ -1193,8 +1634,11 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 validation_plan=pf.get("validation_plan") if pf else {},
                 payload_shape=pf.get("payload_shape") if pf else {},
+                contract_id=contract_id,
+                explanation=explanation,
             )
         except Exception as e:
+            finalize_contract(contract_id, success=False)
             error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
@@ -1214,6 +1658,7 @@ class UniversalTransferEngine:
                 error=str(e),
                 error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
                 operation=request.operation,
+                contract_id=contract_id,
             )
 
     def _create_pending_job(self, request: TransferRequest) -> str:

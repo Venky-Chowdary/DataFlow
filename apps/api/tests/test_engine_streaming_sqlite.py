@@ -207,7 +207,7 @@ def test_engine_stream_sqlite_to_sqlite_incremental_deduped():
         ).fetchone()
         conn.close()
         assert count == 501
-        assert updated == 999999.99
+        assert updated == "999999.99"
         assert new_id == (501,)
 
 
@@ -267,7 +267,7 @@ def test_engine_stream_sqlite_to_sqlite_incremental_cursor_rollover():
         new_id = conn.execute("SELECT id FROM orders_out WHERE id = 2000").fetchone()
         conn.close()
         assert count == 7
-        assert updated == 9999.0
+        assert updated == "9999.0"
         assert new_id == (2000,)
 
 

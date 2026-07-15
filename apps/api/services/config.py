@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         validation_alias="DATABASE_URL",
     )
     job_store_backend: str = Field(default="auto", validation_alias="DATAFLOW_JOB_STORE")
+    job_store_persist: bool = Field(default=False, validation_alias="DATAFLOW_JOB_STORE_PERSIST")
     seed_demo_jobs: bool = Field(default=False, validation_alias="DATAFLOW_SEED_DEMO")
 
     minio_endpoint: str = Field(default="localhost:9000", validation_alias="MINIO_ENDPOINT")
@@ -21,6 +22,12 @@ class Settings(BaseSettings):
     minio_secret_key: str = Field(default="dataflowsecret", validation_alias="MINIO_SECRET_KEY")
     minio_bucket: str = Field(default="dataflow-staging", validation_alias="MINIO_BUCKET")
     minio_secure: bool = Field(default=False, validation_alias="MINIO_SECURE")
+
+    retry_max_attempts: int = Field(default=3, validation_alias="DATAFLOW_RETRY_MAX_ATTEMPTS")
+    retry_base_delay_seconds: float = Field(default=1.0, validation_alias="DATAFLOW_RETRY_BASE_DELAY_SECONDS")
+    retry_max_delay_seconds: float = Field(default=60.0, validation_alias="DATAFLOW_RETRY_MAX_DELAY_SECONDS")
+    retry_exponential_base: float = Field(default=2.0, validation_alias="DATAFLOW_RETRY_EXPONENTIAL_BASE")
+    retry_jitter: bool = Field(default=True, validation_alias="DATAFLOW_RETRY_JITTER")
 
 
 settings = Settings()

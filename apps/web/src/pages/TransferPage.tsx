@@ -14,12 +14,12 @@ import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
-import { PreflightTimeline } from "../components/PreflightTimeline";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
-import { ProofDashboard } from "../components/transfer/ProofDashboard";
+import { ValidateDashboard } from "../components/transfer/ValidateDashboard";
+import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import { useActiveData } from "../lib/DataContext";
 import {
@@ -42,7 +42,7 @@ import {
   updateTransferPlan,
   uploadFile,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, resolveDriverType } from "../lib/connectorTypes";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -191,6 +191,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [uploading, setUploading] = useState(false);
   const [connectorId, setConnectorId] = useState("");
   const [destType, setDestType] = useState<string>("mongodb");
+  const destDriverType = resolveDriverType(destType);
   const [destKindMode, setDestKindMode] = useState<"database" | "file_export">("database");
   const [exportFormat, setExportFormat] = useState("json");
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
@@ -264,8 +265,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   }, [sourceConnectorId, sourceTable, sourceCollection, cloudPath, sourceKind]);
 
   const buildDestinationEndpoint = () => {
-    const isMongo = destType === "mongodb";
-    const isDynamo = destType === "dynamodb";
+    const isMongo = destDriverType === "mongodb";
+    const isDynamo = destDriverType === "dynamodb";
     return {
       kind: "database",
       format: destType,
@@ -279,7 +280,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       username: destUsername || undefined,
       password: destPassword || undefined,
       connection_string: destConnectionString || undefined,
-      warehouse: destType === "snowflake" ? destWarehouse : undefined,
+      warehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+      auth_source: selectedDestConnector?.auth_source || undefined,
+      auth_mode: selectedDestConnector?.auth_mode || undefined,
+      auth_role: selectedDestConnector?.auth_role || undefined,
+      api_key: selectedDestConnector?.api_key || undefined,
+      service_account: selectedDestConnector?.service_account || undefined,
     };
   };
 
@@ -309,7 +315,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     }
   }, [liveDestTypes, destType]);
 
-  const destConnectors = connectors.filter((c) => c.type === destType);
+  const destConnectors = connectors.filter((c) => getGenericSqlGroup(c.type) === getGenericSqlGroup(destType));
   const testedDestConnectors = destConnectors.filter((c) => c.last_test_ok !== false);
   const selectedDestConnector = destConnectors.find((c) => c.id === connectorId);
   const dbSourceConnectors = connectors.filter((c) => liveSourceDbs.includes(c.type));
@@ -386,6 +392,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       database: isDynamo ? tableOrPath : sourceConnector.database,
       table: isMongo ? undefined : tableOrPath || undefined,
       collection: isMongo ? tableOrPath : undefined,
+      auth_source: sourceConnector.auth_source || undefined,
+      auth_mode: sourceConnector.auth_mode || undefined,
+      auth_role: sourceConnector.auth_role || undefined,
+      api_key: sourceConnector.api_key || undefined,
+      service_account: sourceConnector.service_account || undefined,
     };
   };
 
@@ -555,6 +566,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const loadDestinationSchema = async () => {
     if (destKindMode !== "database" || !targetCollection.trim()) return;
     setDestSchemaLoading(true);
+    setDestTableExists(null);
     try {
       const { destination } = await introspectTransferEndpoints({
         source: buildSourceEndpoint(),
@@ -604,18 +616,25 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (!id) return;
     const conn = connectors.find((c) => c.id === id);
     if (!conn) return;
-    if (liveDestTypes.some((d) => d.id === conn.type)) {
-      setDestType(conn.type);
+    const matched = liveDestTypes.find((d) => getGenericSqlGroup(d.id) === getGenericSqlGroup(conn.type));
+    if (matched) {
+      setDestType(matched.id);
     }
     if (conn.database) setTargetDb(conn.database);
-    if (conn.host) setDestHost(conn.host);
-    if (conn.port) setDestPort(conn.port);
+    if (conn.schema) setDestSchema(conn.schema);
+    setDestHost(conn.host || getConnectorDefaults(conn.type).host);
+    setDestPort(conn.port || defaultPortForType(conn.type));
   };
 
   useEffect(() => {
+    if (connectorId) return;
+    setDestHost(getConnectorDefaults(destType).host);
     setDestPort(defaultPortForType(destType));
+    const group = getGenericSqlGroup(destType);
+    if (group === "postgresql+psycopg2") setDestSchema("public");
+    if (group === "mssql+pyodbc") setDestSchema("dbo");
     autoSelectedConnector.current = false;
-  }, [destType]);
+  }, [connectorId, destType]);
 
   useEffect(() => {
     if (autoSelectedConnector.current || connectorId || destConnectors.length === 0) return;
@@ -691,7 +710,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           destFormat: destKindMode === "file_export" ? exportFormat : destType,
           destDatabase: targetDb,
           destTable: destType !== "mongodb" && destType !== "dynamodb" ? targetCollection : undefined,
-          destCollection: destType === "mongodb" || destType === "dynamodb" ? targetCollection : undefined,
+          destCollection: destDriverType === "mongodb" || destDriverType === "dynamodb" ? targetCollection : undefined,
         });
       } else {
         return;
@@ -1156,7 +1175,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           destFormat: destType,
           destDatabase: targetDb,
           destTable: destType !== "mongodb" ? targetCollection : undefined,
-          destCollection: destType === "mongodb" ? targetCollection : undefined,
+          destCollection: destDriverType === "mongodb" ? targetCollection : undefined,
           destConnectorId: connectorId || undefined,
         });
         columns = routePlan.source_columns ?? [];
@@ -1219,8 +1238,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
         dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
         dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-        dest_schema: destKindMode === "database" && !connectorId && destType === "snowflake" ? destSchema || "PUBLIC" : undefined,
-        dest_warehouse: destKindMode === "database" && !connectorId && destType === "snowflake" ? destWarehouse || undefined : undefined,
+        dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
+        dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
         sample_rows: sampleRows,
         estimated_bytes: estimatedBytes,
         sync_mode: syncMode,
@@ -1315,19 +1334,21 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         sourceCollection: sourceKind === "cloud"
           ? cloudPath || undefined
           : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
+        sourceAuthSource: sourceConnector?.auth_source,
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
-        destSchema: destType === "snowflake" ? "PUBLIC" : destType === "bigquery" ? destSchema : destSchema,
+        destSchema: destDriverType === "snowflake" ? "PUBLIC" : destDriverType === "bigquery" ? destSchema : destSchema,
         destTable: destType !== "mongodb" ? targetCollection : undefined,
-        destCollection: destType === "mongodb" ? targetCollection : targetCollection,
+        destCollection: destDriverType === "mongodb" ? targetCollection : targetCollection,
         destConnectorId: connectorId || undefined,
         destHost: !connectorId ? destHost : undefined,
         destPort: !connectorId ? destPort : undefined,
         destUsername: !connectorId ? destUsername || undefined : undefined,
         destPassword: !connectorId ? destPassword || undefined : undefined,
         destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
-        destWarehouse: destType === "snowflake" ? destWarehouse : undefined,
+        destWarehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+        destAuthSource: selectedDestConnector?.auth_source,
         skipPreflight: !enforcePreflight,
         mappings: transferMappings,
         syncMode,
@@ -1443,7 +1464,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
   const canRunPreflight =
     canConfigureDest &&
-    (destKindMode === "file_export" || Boolean(targetDb && targetCollection));
+    (destKindMode === "file_export" ||
+      (Boolean(targetDb && targetCollection) && !destSchemaLoading && destTableExists !== null));
 
   const needsDbPreflight = destKindMode === "database";
   const canExecute =
@@ -1473,14 +1495,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         : "Database source";
   const mapDestRouteLabel = destKindMode === "file_export"
     ? `${exportFormat.toUpperCase()} export`
-    : destType === "dynamodb"
+    : destDriverType === "dynamodb"
       ? (targetCollection || targetDb || destinationLabel)
       : targetCollection
         ? `${targetDb}.${targetCollection}`
         : destinationLabel;
   const mapDestRouteSubtitle = destKindMode === "file_export"
     ? "File export destination"
-    : destType === "dynamodb"
+    : destDriverType === "dynamodb"
       ? destSchemaLoading
         ? `Fetching existing schema from DynamoDB table ${targetCollection || targetDb}`
         : destColumns.length > 0
@@ -1978,6 +2000,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             onSelectType={(type) => {
               setDestType(type);
               setConnectorId("");
+              setDestHost(getConnectorDefaults(type).host);
               setDestPort(defaultPortForType(type));
             }}
           />
@@ -1986,14 +2009,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
-              {destType === "mongodb" ? (
+              {destDriverType === "mongodb" || isGenericSql(destType) || ["mysql", "postgresql", "redshift", "sqlite"].includes(destDriverType) ? (
                 <div className="df2-field df2-field-flex">
                   <label className="df2-label">Connection String (optional)</label>
                   <input
                     className="df2-input"
                     value={destConnectionString}
                     onChange={(e) => setDestConnectionString(e.target.value)}
-                    placeholder="mongodb://localhost:27017/"
+                    placeholder={destDriverType === "mongodb" ? "mongodb://localhost:27017/" : getGenericSqlPlaceholder(destType)}
                   />
                 </div>
               ) : null}
@@ -2017,7 +2040,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                   </div>
                 </>
               )}
-              {destType === "snowflake" && (
+              {destDriverType === "snowflake" && (
                 <div className="df2-field df2-field-160">
                   <label className="df2-label">Warehouse</label>
                   <input className="df2-input" value={destWarehouse} onChange={(e) => setDestWarehouse(e.target.value)} placeholder="COMPUTE_WH" />
@@ -2038,15 +2061,15 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <div className="df2-form-row">
             <div className="df2-field df2-field-flex">
               <label className="df2-label" htmlFor="dest-db">
-                {destType === "bigquery"
+                {destDriverType === "bigquery"
                   ? "GCP Project ID"
-                  : destType === "dynamodb"
+                  : destDriverType === "dynamodb"
                     ? "AWS region or local endpoint"
                     : "Database"}
               </label>
-              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destType === "bigquery" ? "my-gcp-project" : destType === "dynamodb" ? "us-east-1" : "test_db"} />
+              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destDriverType === "bigquery" ? "my-gcp-project" : destDriverType === "dynamodb" ? "us-east-1" : "test_db"} />
             </div>
-            {destType === "bigquery" && (
+            {destDriverType === "bigquery" && (
               <div className="df2-field df2-field-flex">
                 <label className="df2-label">Dataset</label>
                 <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} placeholder="dataflow" />
@@ -2054,11 +2077,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             )}
             <div className="df2-field df2-field-flex">
               <label className="df2-label" htmlFor="dest-col">
-                {destType === "mongodb" ? "Collection" : destType === "dynamodb" ? "DynamoDB table" : "Table"}
+                {destDriverType === "mongodb" ? "Collection" : destDriverType === "dynamodb" ? "DynamoDB table" : "Table"}
               </label>
-              <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destType === "mongodb" ? "my_collection" : destType === "dynamodb" ? "orders" : "my_table"} />
+              <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destDriverType === "mongodb" ? "my_collection" : destDriverType === "dynamodb" ? "orders" : "my_table"} />
             </div>
-            {destType === "postgresql" && (
+            {getGenericSqlGroup(destType) === "postgresql+psycopg2" && (
               <div className="df2-field df2-field-120">
                 <label className="df2-label">Schema</label>
                 <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} />
@@ -2066,13 +2089,13 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             )}
           </div>
           </div>
-          {destType === "dynamodb" && (
+          {destDriverType === "dynamodb" && (
             <p className="df2-label-hint df2-field-note">
               Set region to <code>us-east-1</code> for AWS, or <code>http://localhost:8000</code> for DynamoDB Local / personal cloud.
               Table name is the DynamoDB table to read or write.
             </p>
           )}
-          {destType === "bigquery" && (
+          {destDriverType === "bigquery" && (
             <p className="df2-label-hint df2-field-note">
               Set Database to GCP project ID. Optional: save service account JSON path as connection string in connector settings.
             </p>
@@ -2362,23 +2385,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_VALIDATE && (
-        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split">
-          <div className="df2-proof-dashboard-wrap">
-            <ProofDashboard preflight={preflight} running={preflighting} />
-          </div>
-          <PreflightTimeline
-            result={preflight ?? {
-              passed: false,
-              passed_count: 0,
-              total_gates: 11,
-              readiness_score: 0,
-              gates: [],
-              blockers: [],
-            }}
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
+          <ValidateDashboard
+            preflight={preflight}
             running={preflighting}
             confidenceThreshold={confidenceThreshold}
-            compact
-            hideActions
           />
         </div>
       )}
@@ -2462,13 +2473,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
       {step === STEP_RUN && activeJobId && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
-          <div className="df2-card-body">
+          <div className="df2-card-body df2-run-theater-host">
             <JobTheater
               jobId={activeJobId}
               sourceLabel={file?.name || sourceConnector?.name}
               destLabel={`${targetDb}.${targetCollection}`}
               sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
               destType={destKindMode === "file_export" ? exportFormat : destType}
+              preflight={preflight || undefined}
               onComplete={handleJobComplete}
               onFailed={handleJobComplete}
             />
@@ -2477,35 +2489,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_RUN && result && !activeJobId && (
-        <div className={`df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-banner df2-transfer-panel ${result.success ? "success" : "error"}`}>
-          {result.success ? (
-            <div>
-              <span className="df2-badge df2-badge-live df2-result-badge"><DtIcon name="check" size={14} /> Transfer Complete</span>
-              <p className="df2-result-stat">{result.records_transferred?.toLocaleString()} records transferred</p>
-              {result.destination?.path && (
-                <p className="df2-result-meta">Exported to {result.destination.path}</p>
-              )}
-              {result.ddl_executed && result.ddl_executed.length > 0 && (
-                <ul className="df2-result-ddl">
-                  {result.ddl_executed.map((d) => <li key={d}>{d}</li>)}
-                </ul>
-              )}
-              <div className="df2-result-actions">
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => setStep(STEP_SOURCE)}>
-                  <DtIcon name="plus" size={14} /> New transfer
-                </button>
-                <button
-                  type="button"
-                  className="df2-btn"
-                  onClick={() => void handleScheduleRoute()}
-                >
-                  <DtIcon name="activity" size={14} /> Schedule this route
-                </button>
-              </div>
-            </div>
-          ) : (
-            <span className="df2-badge df2-badge-error"><DtIcon name="x" size={14} /> {result.error || "Transfer failed"}</span>
-          )}
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
+          <TransferResultDashboard
+            result={result}
+            sourceLabel={sourceLabel}
+            destLabel={mapDestRouteLabel}
+            sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
+            destType={destKindMode === "file_export" ? exportFormat : destType}
+            onNewTransfer={() => setStep(STEP_SOURCE)}
+            onSchedule={() => void handleScheduleRoute()}
+          />
         </div>
       )}
       </main>

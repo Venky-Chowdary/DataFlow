@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from functools import partial
@@ -15,19 +16,33 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from connectors.writer_common import CHUNK_SIZE  # noqa: E402
+from connectors.writer_common import (  # noqa: E402
+    CHUNK_SIZE,
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    row_fingerprints,
+)
 
 from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
 from .connector_capabilities import resolve_driver_type
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
+    from services.data_quality import run_integrity_audit
     from services.error_handling import RetryBudget, with_retry
+    from services.parallel_chunks import ChunkDispatcher
+    from services.reconciliation import FingerprintAccumulator
     from services.resilience import adaptive_chunk_size
+    from services.row_filter import apply_row_filter, apply_row_filter_to_matrix
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
+    from src.services.data_quality import run_integrity_audit
     from src.services.error_handling import RetryBudget, with_retry
+    from src.services.parallel_chunks import ChunkDispatcher
+    from src.services.reconciliation import FingerprintAccumulator
     from src.services.resilience import adaptive_chunk_size
+    from src.services.row_filter import apply_row_filter, apply_row_filter_to_matrix
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -55,7 +70,7 @@ def _source_name(source: EndpointConfig) -> str:
     if fmt == "dynamodb":
         return source.table or source.collection or source.database or ""
     if fmt == "elasticsearch":
-        return source.database or source.table or source.collection or ""
+        return source.table or source.database or source.collection or ""
     if fmt == "s3":
         return source.table or source.collection or source.schema or ""
     if fmt == "gcs":
@@ -67,7 +82,7 @@ def _source_name(source: EndpointConfig) -> str:
     return source.table or source.collection or ""
 
 
-def _read_batch(
+def _read_batch_impl(
     src_type: str,
     cfg: dict[str, Any],
     table: str,
@@ -290,6 +305,7 @@ def _read_batch(
             table=table,
             limit=limit,
             offset=offset,
+            known_total_rows=known_total_rows,
         )
     if resolve_driver_type(src_type) == "generic_sql":
         from connectors.generic_sql import read_table_batch, read_table_cursor_batch
@@ -329,6 +345,20 @@ def _read_batch(
             known_total_rows=known_total_rows,
         )
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
+
+
+def _read_batch(*args, **kwargs):
+    """Retry transient source-read errors without leaking partial state."""
+    return with_retry(
+        lambda: _read_batch_impl(*args, **kwargs),
+        budget=RetryBudget(
+            max_attempts=3,
+            base_delay_seconds=0.5,
+            max_delay_seconds=5.0,
+            exponential_base=2.0,
+            jitter=True,
+        ),
+    )
 
 
 def _unwrap_read(result):
@@ -379,6 +409,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -414,6 +445,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -448,6 +480,7 @@ def _write_batch(
             create_table=create_table,
             write_mode=write_mode,
             conflict_columns=conflict_columns,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -483,6 +516,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -510,6 +544,7 @@ def _write_batch(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            role=cfg.get("role", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
@@ -519,6 +554,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -540,12 +576,14 @@ def _write_batch(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            service_account=cfg.get("service_account", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
             column_types=column_types,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -579,6 +617,7 @@ def _write_batch(
             auth_mode=cfg.get("auth_mode", ""),
             api_key=cfg.get("api_key", ""),
             service_account=cfg.get("service_account", ""),
+            auth_source=cfg.get("auth_source", ""),
             table_name=table_name,
             headers=headers,
             data_rows=data_rows,
@@ -604,7 +643,7 @@ def _write_batch(
             password=cfg.get("password", ""),
             schema=cfg.get("schema", ""),
             connection_string=cfg.get("connection_string", ""),
-            ssl=False,
+            ssl=cfg.get("ssl", False),
             type=type_name,
             table_name=table_name,
             headers=headers,
@@ -615,6 +654,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
+            auth_source=cfg.get("auth_source", ""),
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -640,6 +680,8 @@ def stream_database_transfer(
     checkpoint_service: CheckpointService | None = None,
     retry_budget: RetryBudget | None = None,
     backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+    source_filter: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -711,7 +753,7 @@ def stream_database_transfer(
         clear_object_cache()
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
-    # per-batch memory within ~8 MB while respecting the configured CHUNK_SIZE.
+    # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
     sample_probe, _ = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, 100, database=src_db,
@@ -724,7 +766,13 @@ def stream_database_transfer(
     avg_row_size = 100
     if sample_rows:
         avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
-    chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE)
+    target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
+    chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
+    # Chunked writes would overwrite the same key and silently lose data.
+    # Force a single chunk so all rows are written once.
+    if dest_type in ("s3", "gcs", "adls") and total_rows:
+        chunk_size = max(1, total_rows)
 
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
@@ -756,6 +804,7 @@ def stream_database_transfer(
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     total_rows = probe.total_rows
 
@@ -809,8 +858,15 @@ def stream_database_transfer(
 
     retry = retry_budget or RetryBudget()
 
+    # Separate fetch cursors from committed checkpoint cursors so we can read
+    # ahead in parallel while only persisting durable offsets after a batch is
+    # successfully written.
+    fetch_cursor = running_cursor
+    fetch_offset = offset
+    committed_offset = offset
+
     def _fetch_next_batch(last_batch):
-        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, running_cursor
+        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after
         if last_batch is not None and len(last_batch.rows) < chunk_size:
             if (
                 src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
@@ -826,7 +882,7 @@ def stream_database_transfer(
                     src_cfg,
                     table,
                     columns,
-                    offset,
+                    fetch_offset,
                     chunk_size,
                     database=src_db,
                     dynamodb_cursor=ddb_cursor,
@@ -841,11 +897,11 @@ def stream_database_transfer(
                     src_cfg,
                     table,
                     columns,
-                    offset,
+                    fetch_offset,
                     chunk_size,
                     database=src_db,
                     cursor_column=cursor_source_col,
-                    cursor_after=running_cursor,
+                    cursor_after=fetch_cursor,
                     cursor_type=column_types.get(cursor_source_col, "VARCHAR"),
                     known_total_rows=total_rows,
                 )
@@ -860,7 +916,7 @@ def stream_database_transfer(
                     src_cfg,
                     table,
                     columns,
-                    offset,
+                    fetch_offset,
                     chunk_size,
                     database=src_db,
                     cursor_column=keyset_col,
@@ -881,7 +937,7 @@ def stream_database_transfer(
                     src_cfg,
                     table,
                     columns,
-                    offset,
+                    fetch_offset,
                     chunk_size,
                     database=src_db,
                     known_total_rows=total_rows,
@@ -896,7 +952,7 @@ def stream_database_transfer(
                     src_cfg,
                     table,
                     columns,
-                    offset,
+                    fetch_offset,
                     chunk_size,
                     database=src_db,
                     known_total_rows=total_rows,
@@ -904,7 +960,7 @@ def stream_database_transfer(
                 )
             )
             return batch
-        elif offset >= total_rows:
+        elif fetch_offset >= total_rows:
             return None
         else:
             batch, extra = _unwrap_read(
@@ -913,7 +969,7 @@ def stream_database_transfer(
                     src_cfg,
                     table,
                     columns,
-                    offset,
+                    fetch_offset,
                     chunk_size,
                     database=src_db,
                     known_total_rows=total_rows,
@@ -925,12 +981,61 @@ def stream_database_transfer(
                 redis_scan_state = extra
             return batch
 
-    batch = _fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe
-    while True:
-        if not batch or not getattr(batch, "rows", None):
-            break
+    def _filter_batch(batch):
+        if source_filter and batch and batch.rows:
+            batch.rows = apply_row_filter_to_matrix(batch.headers, batch.rows, source_filter)
+        return batch
 
-        chunk_idx += 1
+    batch = _filter_batch(_fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe)
+    batch_quality_enabled = validation_mode in ("strict", "maximum")
+    pk_source_col = cursor_source_col or ""
+    if not pk_source_col and pk_target_cols and mappings:
+        target_to_source = {m.get("target", "").lower(): m.get("source", "") for m in mappings if m.get("target")}
+        for pk in pk_target_cols:
+            src = target_to_source.get(pk.lower())
+            if src:
+                pk_source_col = src
+                break
+
+    max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
+    if dest_type == "sqlite":
+        max_workers = 1
+
+    def _process_db_chunk(idx: int, batch: Any) -> dict[str, Any]:
+        if not batch or not getattr(batch, "rows", None):
+            return {
+                "batch_written": 0,
+                "last_checksum": "",
+                "dest_summary": {},
+                "rejected": 0,
+                "warnings": [],
+                "batch_max": None,
+                "batch_rows": 0,
+            }
+        local_warnings: list[str] = []
+        # Per-batch data-quality / anomaly gate for database streams.
+        if batch_quality_enabled:
+            audit = run_integrity_audit(
+                headers=batch.headers,
+                rows=batch.rows,
+                column_types=column_types,
+                mappings=mappings,
+                required_targets=pk_target_cols or [],
+                primary_key=pk_source_col if pk_source_col in batch.headers else None,
+                validation_mode=validation_mode,
+            )
+            if audit.issues:
+                local_warnings.extend(audit.issues[:10])
+            if audit.warnings:
+                local_warnings.extend(audit.warnings[:10])
+            if not audit.passed:
+                raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+
+        batch_max = None
+        if incremental and cursor_source_col:
+            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+
         write_op = partial(
             _write_batch,
             dest_type,
@@ -941,29 +1046,53 @@ def stream_database_transfer(
             batch.rows,
             mappings,
             column_types,
-            create_table=(chunk_idx == 1),
-            on_checkpoint=on_checkpoint,
-            chunk_idx=chunk_idx,
+            create_table=(idx == chunk_idx + 1),
+            on_checkpoint=None,
+            chunk_idx=idx,
             total_chunks=chunks,
-            rows_so_far=written,
+            rows_so_far=0,
             write_mode=write_mode,
             conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
         )
-        batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
-        written += batch_written
-        if incremental and cursor_source_col:
-            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
-            if batch_max and (running_cursor is None or compare_cursor_values(batch_max, running_cursor) > 0):
-                running_cursor = batch_max
-        rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
-        warning_samples.extend(dest_summary.get("warnings", []) or [])
+        batch_written, last_checksum, dest_summary = with_retry(
+            write_op,
+            budget=RetryBudget(
+                max_attempts=retry.max_attempts,
+                base_delay_seconds=retry.base_delay_seconds,
+                max_delay_seconds=retry.max_delay_seconds,
+                exponential_base=retry.exponential_base,
+                jitter=retry.jitter,
+            ),
+        )
+        return {
+            "batch_written": batch_written,
+            "last_checksum": last_checksum,
+            "dest_summary": dest_summary,
+            "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
+            "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
+            "batch_max": batch_max,
+            "batch_rows": len(batch.rows),
+        }
 
-        offset += len(batch.rows)
+    def _apply_result(idx: int, result: dict[str, Any]) -> None:
+        nonlocal written, rejected_total, last_checksum, running_cursor, committed_offset, dest_summary
+        written += result["batch_written"]
+        rejected_total += result["rejected"]
+        last_checksum = result["last_checksum"] or last_checksum
+        warning_samples.extend(result["warnings"])
+        if result["batch_max"] is not None:
+            if running_cursor is None or compare_cursor_values(result["batch_max"], running_cursor) > 0:
+                running_cursor = result["batch_max"]
+        committed_offset += result["batch_rows"]
+        if result["dest_summary"]:
+            dest_summary = result["dest_summary"]
 
-        # Persist durable checkpoint after the batch is committed
-        checkpoint.chunk_index = chunk_idx
-        checkpoint.offset = offset
+        # Persist durable checkpoint after the batch is committed.  We use the
+        # ordered result stream so checkpoint offsets/cursors can never skip
+        # ahead of an in-flight batch.
+        checkpoint.chunk_index = idx
+        checkpoint.offset = committed_offset
         checkpoint.rows_processed = written
         checkpoint.cursor_value = running_cursor or keyset_after
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
@@ -976,9 +1105,49 @@ def stream_database_transfer(
         checkpoint.status = "running"
         checkpoint_service.save(checkpoint)
         if on_checkpoint:
-            on_checkpoint(chunk_idx, chunks, written, checkpoint.to_dict())
+            on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
+    first_idx = chunk_idx + 1
+
+    def _prepare_and_submit(dispatcher: ChunkDispatcher, idx: int, batch: Any) -> None:
+        nonlocal fetch_cursor, fetch_offset
+        batch = _filter_batch(batch)
+        if incremental and cursor_source_col and batch.rows:
+            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+            if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
+                fetch_cursor = batch_max
+        dispatcher.submit(idx, batch, _process_db_chunk)
+        fetch_offset += len(batch.rows)
+
+    # Process the first batch synchronously so DDL (table/index creation) is
+    # committed before any parallel workers try to insert into the new table.
+    if batch:
+        batch = _filter_batch(batch)
+        if incremental and cursor_source_col and batch.rows:
+            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+            if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
+                fetch_cursor = batch_max
+        _apply_result(first_idx, _process_db_chunk(first_idx, batch))
+        fetch_offset += len(batch.rows)
+
+    idx = first_idx + 1
+    with ChunkDispatcher(max_workers=max_workers) as dispatcher:
+        # Fetch the next batch (the first one has already been committed).
         batch = _fetch_next_batch(batch)
+        while batch:
+            _prepare_and_submit(dispatcher, idx, batch)
+
+            # Process any completed batches in ascending index order.
+            for ready_idx, result in dispatcher.ready():
+                _apply_result(ready_idx, result)
+
+            # Fetch the next batch while earlier batches are still being written.
+            batch = _fetch_next_batch(batch)
+            idx += 1
+
+        # Drain the remaining in-flight writes.
+        for ready_idx, result in dispatcher.results():
+            _apply_result(ready_idx, result)
 
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
@@ -995,7 +1164,57 @@ def stream_database_transfer(
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
         set_watermark(cursor_key, running_cursor, metadata={"job_id": job_id, "sync_mode": effective_sync})
 
-    dest_summary["checksum"] = last_checksum
+    # Re-read the source and compute a checksum over the complete logical source.
+    # This avoids using the per-batch writer checksum for chunked/resumable runs,
+    # which only represented the last batch.
+    if src_type in {"postgresql", "redshift", "mysql", "snowflake", "bigquery", "sqlite", "generic_sql", "mongodb", "s3", "gcs", "adls"}:
+        # Re-read the source in chunks and feed mapped fingerprints into the
+        # streaming accumulator.  This keeps database→database strict-mode
+        # reconciliation memory-bounded by a single batch, even for billion-row
+        # tables, and avoids the previous `source_rows_for_checksum` list that
+        # materialized the full source a second time.
+        fp_accumulator = FingerprintAccumulator()
+        cursor_type_for_read: str | None = None
+        if incremental and cursor_source_col:
+            cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
+        read_offset = 0
+        while True:
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    read_offset,
+                    chunk_size,
+                    database=src_db,
+                    cursor_column=cursor_source_col if incremental else "",
+                    cursor_after=watermark if incremental else None,
+                    cursor_type=cursor_type_for_read,
+                    known_total_rows=total_rows,
+                )
+            )
+            if not batch or not batch.rows:
+                break
+            mapped, _ = build_mapped_rows(
+                headers=batch.headers,
+                data_rows=batch.rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                error_policy="quarantine",
+                preserve_case=True,
+            )
+            if mapped:
+                fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
+            if len(batch.rows) < chunk_size:
+                break
+            read_offset += len(batch.rows)
+        final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
+    else:
+        final_checksum = last_checksum
+
+    dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if rejected_total else "none"

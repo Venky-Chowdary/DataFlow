@@ -8,10 +8,13 @@ import type { Connector } from "../lib/types";
 import { saveConnector, testConnection, updateConnector } from "../lib/api";
 import {
   getConnectorDefaults,
+  getGenericSqlPlaceholder,
   isAwsConnector,
   isGcpConnector,
+  isGenericSql,
   isConfigurableInStudio,
   resolveCatalogIdToType,
+  resolveDriverType,
 } from "../lib/connectorTypes";
 import { CONNECTOR_CATALOG } from "../lib/types";
 
@@ -31,16 +34,18 @@ function isFileFormat(type: string): boolean {
 }
 
 function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMode {
+  const resolved = resolveCatalogIdToType(type);
   if (conn?.auth_mode) return conn.auth_mode as AuthMode;
-  if (isFileFormat(type)) return "file_path";
+  if (isFileFormat(resolved)) return "file_path";
   if (conn?.api_key) return "api_key";
   if (conn?.service_account) return "service_account";
   if (conn?.connection_string) return "connection_string";
-  if (["s3", "dynamodb"].includes(type)) return "aws_keys";
-  if (["bigquery", "gcs", "google_cloud_storage"].includes(type)) return "service_account";
-  if (type === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
-  if (type === "adls") return "connection_string";
-  if (type === "mongodb" && conn?.username) return "user_pass";
+  if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
+  if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
+  if (resolved === "adls") return "connection_string";
+  if (resolved === "databricks" || resolved === "athena") return "connection_string";
+  if (resolved === "mongodb" && conn?.username) return "user_pass";
   return "user_pass";
 }
 
@@ -52,18 +57,20 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
     ];
   }
   const sqlish = ["postgresql", "mysql", "redshift", "mariadb", "sqlite", "generic_sql"].includes(type);
+  const genericSql = isGenericSql(type);
   const mongo = type === "mongodb";
   const snowflake = type === "snowflake";
   const elastic = type === "elasticsearch";
   const awsStore = ["s3", "dynamodb"].includes(type);
   const gcp = isGcpConnector(type);
   const azure = type === "adls";
+  const connectionStringOnly = ["databricks", "athena"].includes(type);
 
   const options: { value: AuthMode; label: string }[] = [];
-  if (sqlish || mongo || snowflake || elastic || azure) {
+  if ((sqlish || genericSql || mongo || snowflake || elastic || azure) && !connectionStringOnly) {
     options.push({ value: "user_pass", label: "Username & password" });
   }
-  if (sqlish || mongo || snowflake || azure) {
+  if (sqlish || genericSql || mongo || snowflake || azure) {
     options.push({ value: "connection_string", label: "Connection string" });
   }
   if (gcp) {
@@ -101,13 +108,49 @@ export function ConnectorModal({
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState(editing?.password ?? "");
   const [connectionString, setConnectionString] = useState(editing?.connection_string ?? "");
+  const [showConnStr, setShowConnStr] = useState(false);
   const [schema, setSchema] = useState(editing?.schema ?? "");
   const [warehouse, setWarehouse] = useState(editing?.warehouse ?? "");
   const [authRole, setAuthRole] = useState(editing?.auth_role ?? "");
+  const [authSource, setAuthSource] = useState(editing?.auth_source ?? "");
   const [apiKey, setApiKey] = useState(editing?.api_key ?? "");
   const [serviceAccount, setServiceAccount] = useState(editing?.service_account ?? "");
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
+  const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
+  const isMongo = resolvedType === "mongodb";
+
+  // Parse a pasted MongoDB URI into host/port/user/pass/database/ssl.
+  useEffect(() => {
+    if (isMongo && authMode === "connection_string" && connectionString.trim()) {
+      try {
+        const url = new URL(connectionString);
+        if (url.hostname) setHost(url.hostname);
+        if (url.port) setPort(parseInt(url.port, 10));
+        if (url.username) setUsername(decodeURIComponent(url.username));
+        if (url.password) setPassword(decodeURIComponent(url.password));
+        const db = url.pathname.replace(/^\//, "").split("?")[0];
+        if (db && !database) setDatabase(db);
+        const params = url.searchParams;
+        if (params.has("ssl") || params.has("tls")) setSsl(true);
+        const as = params.get("authSource") || params.get("authsource") || "";
+        if (as && !authSource) setAuthSource(as);
+      } catch {
+        // Fallback for browsers/environments that do not parse mongodb:// URLs.
+        const match = connectionString.match(/^mongodb(?:\+srv)?:\/\/(?:([^:@]+)(?::([^@]+))?@)?([^\/?#:]+)(?::(\d+))?\/?([^?#]*)?/);
+        if (match) {
+          const [, user, pass, rawHost, rawPort, rawDb] = match;
+          if (rawHost) setHost(rawHost);
+          if (rawPort) setPort(parseInt(rawPort, 10));
+          if (user) setUsername(user);
+          if (pass) setPassword(pass);
+          if (rawDb && !database) setDatabase(rawDb);
+          const authMatch = connectionString.match(/[?&](?:authSource|authsource)=([^&#]*)/);
+          if (authMatch && !authSource) setAuthSource(decodeURIComponent(authMatch[1]));
+        }
+      }
+    }
+  }, [isMongo, authMode, connectionString, database, authSource]);
 
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -115,17 +158,18 @@ export function ConnectorModal({
   const [fieldError, setFieldError] = useState<string | null>(null);
 
   const catalogItem = CONNECTOR_CATALOG.find((c) => c.id === type);
-  const isBigQuery = type === "bigquery";
-  const isSnowflake = type === "snowflake";
-  const isMongo = type === "mongodb";
-  const isDynamo = type === "dynamodb";
-  const isS3 = type === "s3";
+  const isBigQuery = resolvedType === "bigquery";
+  const isSnowflake = resolvedType === "snowflake";
+  const isDynamo = resolvedType === "dynamodb";
+  const isS3 = resolvedType === "s3";
   const isAwsKeyed = isS3 || isDynamo;
-  const isElastic = type === "elasticsearch";
-  const isGcp = isGcpConnector(type);
-  const isAzure = type === "adls";
+  const isElastic = resolvedType === "elasticsearch";
+  const isGcp = isGcpConnector(resolvedType);
+  const isGcs = resolvedType === "gcs";
+  const isAzure = resolvedType === "adls";
+  const isRedis = resolvedType === "redis";
 
-  const modeOptions = useMemo(() => authModeOptions(type), [type]);
+  const modeOptions = useMemo(() => authModeOptions(resolvedType), [resolvedType]);
 
   useEffect(() => {
     if (modeOptions.find((o) => o.value === authMode)) return;
@@ -144,6 +188,7 @@ export function ConnectorModal({
     setSchema("");
     setWarehouse("");
     setAuthRole("");
+    setAuthSource("");
     setApiKey("");
     setServiceAccount("");
     setSsl(false);
@@ -185,8 +230,8 @@ export function ConnectorModal({
         setFieldError("Service account JSON or file path is required.");
         return false;
       }
-      if (!database.trim() && !isGcp) {
-        setFieldError(isAzure ? "Storage account or container is required." : "Database / project is required.");
+      if (!database.trim()) {
+        setFieldError(isGcp ? "Project / bucket is required." : "Database / project is required.");
         return false;
       }
     } else if (authMode === "api_key") {
@@ -204,8 +249,8 @@ export function ConnectorModal({
         return false;
       }
       const local = (host || connectionString).includes("localhost") || (host || connectionString).startsWith("http");
-      if (!local && (!username.trim() || !password.trim())) {
-        setFieldError("AWS Access Key ID and Secret Access Key are required for cloud endpoints.");
+      if ((isS3 || !local) && (!username.trim() || !password.trim())) {
+        setFieldError("AWS Access Key ID and Secret Access Key are required.");
         return false;
       }
     } else if (authMode === "user_pass") {
@@ -214,8 +259,36 @@ export function ConnectorModal({
           setFieldError("GCP project ID is required.");
           return false;
         }
-      } else if (!isGcp && !isAwsKeyed && !isElastic && !host.trim()) {
+      } else if (!isGcp && !isAwsKeyed && !host.trim()) {
         setFieldError("Host is required.");
+        return false;
+      }
+      if (
+        !isGcp &&
+        !isAwsKeyed &&
+        !isElastic &&
+        !isRedis &&
+        !isAzure &&
+        !["sqlite", "duckdb"].includes(type) &&
+        port <= 0
+      ) {
+        setFieldError("Port is required.");
+        return false;
+      }
+      if (
+        !isGcp &&
+        !isAwsKeyed &&
+        !isElastic &&
+        !isRedis &&
+        !isBigQuery &&
+        !["sqlite", "duckdb"].includes(type) &&
+        (!username.trim() || !password.trim())
+      ) {
+        setFieldError("Username and password are required.");
+        return false;
+      }
+      if (isAzure && !database.trim()) {
+        setFieldError("Container is required.");
         return false;
       }
       if (["s3", "dynamodb"].includes(type)) {
@@ -248,6 +321,7 @@ export function ConnectorModal({
       ssl,
       auth_mode: authMode,
       auth_role: isSnowflake ? authRole : undefined,
+      auth_source: isMongo ? authSource : undefined,
     };
 
     if (authMode === "user_pass") {
@@ -297,9 +371,14 @@ export function ConnectorModal({
         warehouse: isSnowflake ? warehouse : undefined,
         auth_role: isSnowflake ? authRole : undefined,
         auth_mode: authMode,
+        auth_source: isMongo ? authSource : undefined,
         ssl,
       });
       setTestResult(result);
+      if (isMongo && result.success) {
+        const authMatch = result.message.match(/authSource=([^\s)]+)/);
+        if (authMatch && !authSource) setAuthSource(authMatch[1]);
+      }
       toast({
         title: result.success ? "Connection successful" : "Connection failed",
         message: result.message,
@@ -341,23 +420,27 @@ export function ConnectorModal({
   const showAwsKeys = authMode === "aws_keys";
 
   const hostLabel = useMemo(() => {
-    if (isAwsKeyed) return isS3 ? "AWS region" : "AWS region or local endpoint";
+    if (isAwsKeyed) return isS3 ? "AWS region or endpoint" : "AWS region or local endpoint";
     if (isGcp) return isBigQuery ? "GCP project (optional)" : "Project / endpoint";
     if (isAzure) return "Storage account";
     if (isElastic) return "Host";
+    if (isSnowflake) return "Account host";
     return "Host";
-  }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic]);
+  }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic, isSnowflake]);
 
   const databaseLabel = useMemo(() => {
     if (isFileFormat(type)) return "Filename / pattern";
-    if (isS3) return "Bucket name";
+    if (isS3 || isGcs) return "Bucket name";
     if (isDynamo) return "Table name";
     if (isBigQuery) return "GCP project ID";
     if (isGcp) return "Project ID";
     if (isAzure) return "Container / filesystem";
     if (isElastic) return "Index (optional)";
+    if (isRedis) return "Database index";
+    if (["sqlite", "duckdb"].includes(type)) return "Database file / :memory:";
+    if (type === "databricks" || type === "athena") return "Catalog (optional)";
     return "Database";
-  }, [isS3, isDynamo, isBigQuery, isGcp, isAzure, isElastic, type]);
+  }, [isS3, isGcs, isDynamo, isBigQuery, isGcp, isAzure, isElastic, isRedis, type]);
 
   const schemaLabel = useMemo(() => {
     if (isBigQuery) return "Dataset";
@@ -420,6 +503,12 @@ export function ConnectorModal({
                 </div>
               </div>
 
+              {isFileFormat(type) && (
+                <p className="df2-field-note df2-label-hint" style={{ marginTop: 8, marginBottom: 12 }}>
+                  File format connectors only need a path or URL. No database host, port, or credentials are required.
+                </p>
+              )}
+
               {modeOptions.length > 1 && (
                 <div className="df2-form-row">
                   <div className="df2-field">
@@ -447,10 +536,19 @@ export function ConnectorModal({
                   <label className="df2-label">Connection string</label>
                   <input
                     className="df2-input"
-                    placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : "driver://user:pass@host:port/db"}
+                    type={showConnStr ? "text" : "password"}
+                    autoComplete="new-password"
+                    placeholder={isMongo ? "mongodb://user:pass@host:27017/db" : isAzure ? "DefaultEndpointsProtocol=..." : isGenericSql(type) || ["mysql", "postgresql", "redshift", "sqlite"].includes(resolveCatalogIdToType(type)) ? getGenericSqlPlaceholder(resolveCatalogIdToType(type)) : "driver://user:pass@host:port/db"}
                     value={connectionString}
                     onChange={(e) => setConnectionString(e.target.value)}
                   />
+                  <button
+                    type="button"
+                    style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12, color: "#6b7280" }}
+                    onClick={() => setShowConnStr((s) => !s)}
+                  >
+                    {showConnStr ? "Hide connection string" : "Show connection string"}
+                  </button>
                 </div>
               )}
 
@@ -501,13 +599,13 @@ export function ConnectorModal({
                 </div>
               )}
 
-              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount || showConnectionString) && !isFileFormat(type) && (
+              {(showUserPass || showAwsKeys || showApiKey || showServiceAccount) && !isFileFormat(type) && (
                 <div className="df2-form-row" style={{ marginTop: 8 }}>
                   <div className="df2-field">
                     <label className="df2-label">{hostLabel}</label>
                     <input
                       className="df2-input"
-                      placeholder={isAwsKeyed ? "us-east-1" : isBigQuery ? "bigquery.googleapis.com" : "localhost"}
+                      placeholder={isS3 ? "us-east-1 or localhost:9000" : isAwsKeyed ? "us-east-1" : isBigQuery ? "bigquery.googleapis.com" : isSnowflake ? "account.snowflakecomputing.com" : "localhost"}
                       value={host}
                       onChange={(e) => setHost(e.target.value)}
                     />
@@ -532,7 +630,21 @@ export function ConnectorModal({
                     <label className="df2-label">{databaseLabel}</label>
                     <input
                       className="df2-input"
-                      placeholder={isS3 ? "my-data-bucket" : isBigQuery ? "dataflow-project" : isFileFormat(type) ? "sample.csv" : "dataflow"}
+                      placeholder={
+                        isS3 || isGcs
+                          ? "my-data-bucket"
+                          : isAzure
+                            ? "my-container"
+                            : isBigQuery
+                              ? "dataflow-project"
+                              : isRedis
+                                ? "0"
+                                : ["sqlite", "duckdb"].includes(type)
+                                  ? ":memory: or /path/to/db"
+                                  : isFileFormat(type)
+                                    ? "sample.csv"
+                                    : "dataflow"
+                      }
                       value={database}
                       onChange={(e) => setDatabase(e.target.value)}
                     />
@@ -548,6 +660,20 @@ export function ConnectorModal({
                       />
                     </div>
                   )}
+                </div>
+              )}
+
+              {isMongo && (showConnectionString || showUserPass) && (
+                <div className="df2-form-row" style={{ marginTop: 8 }}>
+                  <div className="df2-field">
+                    <label className="df2-label">Auth source</label>
+                    <input
+                      className="df2-input"
+                      placeholder="e.g. admin"
+                      value={authSource}
+                      onChange={(e) => setAuthSource(e.target.value)}
+                    />
+                  </div>
                 </div>
               )}
 

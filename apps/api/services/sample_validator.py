@@ -45,6 +45,7 @@ def refine_mapping_confidence(
         mapping["target"],
         source_type,
         target_type,
+        source_samples=samples,
     )
     rate, issues = _parse_rate(samples, transform)
     conf = float(mapping.get("confidence", 0.0))

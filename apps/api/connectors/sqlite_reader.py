@@ -28,6 +28,7 @@ def read_table_batch(
     table: str,
     limit: int = 100_000,
     offset: int = 0,
+    known_total_rows: int | None = None,
 ) -> ReadBatch:
     """Read a batch of rows from a SQLite table."""
     del port, username, password, schema, ssl
@@ -42,11 +43,16 @@ def read_table_batch(
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) FROM {table_quoted}")
-        total = cur.fetchone()[0]
+        if known_total_rows is not None:
+            total = known_total_rows
+        else:
+            cur.execute(f"SELECT COUNT(*) FROM {table_quoted}")
+            total = cur.fetchone()[0]
 
+        # rowid gives a stable total order for ordinary SQLite tables, preventing
+        # duplicate/missing rows when paging with LIMIT/OFFSET.
         cur.execute(
-            f"SELECT * FROM {table_quoted} LIMIT ? OFFSET ?",
+            f"SELECT * FROM {table_quoted} ORDER BY rowid LIMIT ? OFFSET ?",
             (limit, offset),
         )
         rows = cur.fetchall()

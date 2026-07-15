@@ -161,6 +161,34 @@ def test_lossy_coercion_detection():
     assert not is_lossy_coercion("DATE", "DATE")
 
 
+@pytest.mark.parametrize(
+    "source_type,target_type,expected",
+    [
+        # widening / reversible conversions are safe
+        ("INTEGER", "DECIMAL", False),
+        ("INTEGER", "VARCHAR", False),
+        ("DATE", "DATETIME", False),
+        ("BOOLEAN", "INTEGER", False),
+        ("JSON", "TEXT", False),
+        ("BINARY", "TEXT", False),
+        ("TEXT", "BINARY", False),
+        ("UUID", "VARCHAR", False),
+        # narrowing or semantically incompatible conversions are lossy
+        ("VARCHAR", "UUID", True),
+        ("INTEGER", "UUID", True),
+        ("DECIMAL", "UUID", True),
+        ("DATETIME", "DATE", True),
+        ("DATE", "TIME", True),
+        ("VARCHAR", "BOOLEAN", True),
+        ("JSON", "INTEGER", True),
+        ("ARRAY", "BOOLEAN", True),
+        ("BINARY", "INTEGER", True),
+    ],
+)
+def test_is_lossy_coercion_matrix(source_type, target_type, expected):
+    assert is_lossy_coercion(source_type, target_type) is expected
+
+
 def test_build_mapped_rows_typed_matrix():
     headers = ["id", "amount", "active", "payload"]
     rows = [["1", "10.50", "true", '{"k":"v"}']]
@@ -298,3 +326,60 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
     assert is_lossy_coercion("VARCHAR", "INTEGER")
     assert is_lossy_coercion("DECIMAL", "INTEGER")
     assert not is_lossy_coercion("DATE", "DATE")
+
+
+@pytest.mark.parametrize(
+    "raw,transform,expected,expect_error",
+    [
+        # booleans with common spellings
+        ("true", "boolean", True, False),
+        ("FALSE", "boolean", False, False),
+        ("yes", "boolean", True, False),
+        ("0", "boolean", False, False),
+        ("n", "boolean", False, False),
+        ("maybe", "boolean", None, True),
+        # decimals preserve precision
+        ("12345678901234567890.12345", "decimal", "12345678901234567890.12345", False),
+        ("1.5e-10", "decimal", "0.00000000015", False),
+        # integers reject fractional values
+        ("42.0", "integer", 42, False),
+        ("999999999999999999999999999999", "integer", 999999999999999999999999999999, False),
+        ("3.14", "integer", None, True),
+        # timestamps with timezones
+        ("2024-06-01T12:00:00+05:30", "datetime", "2024-06-01T06:30:00Z", False),
+        # json and arrays
+        ('{"a": [1, 2]}', "json", '{"a":[1,2]}', False),
+        ("[1, 2, 3]", "json", "[1,2,3]", False),
+        ("not-json", "json", None, True),
+        # uuids
+        ("550e8400-e29b-41d4-a716-446655440000", "uuid", "550e8400-e29b-41d4-a716-446655440000", False),
+        # null sentinels collapse to None for typed transforms
+        ("NULL", "integer", None, False),
+        ("N/A", "decimal", None, False),
+        ("", "boolean", None, False),
+        # time values
+        ("12:30:45", "time", "12:30:45", False),
+        ("14:30", "time", "14:30:00", False),
+        ("02:30:45 PM", "time", "14:30:45", False),
+        ("not-a-time", "time", None, True),
+        # binary values
+        ("SGVsbG8=", "binary", "SGVsbG8=", False),
+        ("hello", "binary", "aGVsbG8=", False),
+        # semantic transforms
+        ("+1-555-0199", "phone", "+1-555-0199", False),
+        ("Test@Example.COM", "email", "test@example.com", False),
+        ("HTTPS://Example.COM/Path", "url", "https://Example.COM/Path", False),
+        ("GB82 west 1234 5698 7654 32", "iban", "GB82WEST12345698765432", False),
+        ("k1a 0b1", "postal", "K1A0B1", False),
+        ("$1,234.56", "currency", "1234.56", False),
+        ("50%", "percentage", "50", False),
+    ],
+)
+def test_apply_transform_edge_values(raw, transform, expected, expect_error):
+    val, err = apply_transform(raw, transform)
+    if expect_error:
+        assert err is not None
+        assert val is None
+    else:
+        assert err is None, f"{raw} -> {transform}: {err}"
+        assert val == expected
