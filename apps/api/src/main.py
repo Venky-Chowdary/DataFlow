@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
     try:
         from .transfer.background import run_transfer_async
         from .transfer.models import transfer_request_from_dict
-        from services.mongodb_service import get_mongodb_service
+        from .services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
         for job in mongo.list_jobs(limit=200):
