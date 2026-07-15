@@ -79,6 +79,10 @@ class TransferRequest:
     backfill_new_fields: bool = False
     # Optional row-level source filter (column predicates, and/or composition).
     source_filter: dict = field(default_factory=dict)
+    # Priority-first sync: sort source rows by this column before writing.
+    priority_column: str = ""
+    priority_direction: str = "desc"  # "asc" or "desc"
+    limit: int = 0  # 0 means no limit
     stream_contracts: list[dict] = field(default_factory=list)
     contract_id: str = ""
     enforce_contract: bool = True
@@ -155,6 +159,10 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         schema_policy=data.get("schema_policy") or "manual_review",
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
+        source_filter=data.get("source_filter") or {},
+        priority_column=(data.get("priority_column") or "").strip(),
+        priority_direction=(data.get("priority_direction") or "desc").lower(),
+        limit=int(data.get("limit") or 0),
         stream_contracts=data.get("stream_contracts") or [],
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),

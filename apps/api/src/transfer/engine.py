@@ -89,6 +89,41 @@ from services.checkpoint_service import Checkpoint, CheckpointService, resume_or
 logger = logging.getLogger("dataflow.transfer")
 
 
+def _coalesce_sort_value(value: Any) -> Any:
+    """Return a tuple that sorts None/empty values last regardless of direction."""
+    if value is None or value == "":
+        return (1, "")
+    if isinstance(value, (int, float)):
+        return (0, value)
+    try:
+        return (0, float(value))
+    except (TypeError, ValueError):
+        return (0, str(value).lower())
+
+
+def _apply_priority_and_limit(
+    records: list[dict[str, Any]],
+    priority_column: str,
+    direction: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Sort source rows by a priority column and optionally cap the row count."""
+    if not priority_column or not records:
+        if limit > 0:
+            return records[:limit]
+        return records
+
+    reverse = direction != "asc"
+    sorted_records = sorted(
+        records,
+        key=lambda r: _coalesce_sort_value(r.get(priority_column)),
+        reverse=reverse,
+    )
+    if limit > 0:
+        return sorted_records[:limit]
+    return sorted_records
+
+
 def _redacted_endpoint(ep: EndpointConfig) -> dict[str, Any]:
     """Return endpoint metadata without credentials for lineage and logging."""
     d = {
@@ -472,7 +507,11 @@ class UniversalTransferEngine:
             )
             return TransferResult(success=False, error=msg, operation=request.operation, job_id=job_id)
 
-        if supports_streaming(request.source, request.destination):
+        if (
+            supports_streaming(request.source, request.destination)
+            and not request.priority_column
+            and request.limit == 0
+        ):
             return self._execute_streaming(
                 request, job_id, mongo, src_fmt,
                 resume=resume,
@@ -486,6 +525,8 @@ class UniversalTransferEngine:
             and request.destination.kind == "database"
             and (request.source_content or request.source_path)
             and not non_streaming_mode
+            and not request.priority_column
+            and request.limit == 0
             and should_stream_file(
                 request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
@@ -512,6 +553,12 @@ class UniversalTransferEngine:
             )
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
+            records = _apply_priority_and_limit(
+                records,
+                request.priority_column,
+                request.priority_direction,
+                request.limit,
+            )
             if not records and request.source.kind != "database":
                 mongo.update_job_status(job_id, "failed", error="No records to transfer", phase="failed")
                 return TransferResult(success=False, error="No records to transfer", operation=request.operation, job_id=job_id)

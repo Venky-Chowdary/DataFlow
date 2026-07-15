@@ -667,6 +667,9 @@ async def transfer_data(
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("strict"),
     source_filter_json: str = Form(""),
+    priority_column: str = Form(""),
+    priority_direction: str = Form("desc"),
+    limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
     mappings_json: str = Form(""),
@@ -716,6 +719,9 @@ async def transfer_data(
             schema_policy=schema_policy,
             validation_mode=validation_mode,
             source_filter=source_filter,
+            priority_column=priority_column,
+            priority_direction=priority_direction,
+            limit=int(limit) if limit.isdigit() else 0,
             backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         )
         if stream_contracts_json.strip():
