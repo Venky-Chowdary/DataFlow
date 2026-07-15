@@ -659,18 +659,27 @@ class UniversalTransferEngine:
 
             if request.destination.kind == "database":
                 is_streaming = False
-                if request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite"):
-                    if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
+                should_drop_full_refresh = (
+                    request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite")
+                    and (not resume or not is_streaming or not _checkpoint_has_progress(checkpoint))
+                )
+
+                def _write_destination_with_drop():
+                    # Drop inside the retry boundary so a failed full-refresh write
+                    # retries from an empty table and cannot duplicate already-loaded rows.
+                    if should_drop_full_refresh:
                         _drop_destination_table(request.destination)
-                rows_written, ddl_log, dest_summary = with_retry(
-                    lambda: write_destination_database(
+                    return write_destination_database(
                         request.destination, records, columns, schema, mappings,
                         on_checkpoint=throttled_checkpoint,
                         validation_mode=request.validation_mode,
                         backfill_new_fields=request.backfill_new_fields,
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
-                    ),
+                    )
+
+                rows_written, ddl_log, dest_summary = with_retry(
+                    _write_destination_with_drop,
                     budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                 )
                 if total_rows <= CHUNK_SIZE:
