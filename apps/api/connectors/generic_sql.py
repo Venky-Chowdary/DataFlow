@@ -1383,14 +1383,23 @@ def write_mapped_rows(
                 table_exists = False
 
             if create_table and not table_exists:
-                if db_type == "questdb":
-                    # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
-                    ddl = str(sa.schema.CreateTable(table_obj, if_not_exists=True).compile(dialect=engine.dialect))
-                    ddl = ddl.replace("TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP").replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
-                    conn.execute(sa.text(ddl))
-                else:
-                    conn.execute(sa.schema.CreateTable(table_obj))
-                conn.commit()
+                try:
+                    if db_type == "questdb":
+                        # QuestDB supports TIMESTAMP but not the PG "WITHOUT TIME ZONE" clause.
+                        ddl = str(sa.schema.CreateTable(table_obj, if_not_exists=True).compile(dialect=engine.dialect))
+                        ddl = ddl.replace("TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP").replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
+                        conn.execute(sa.text(ddl))
+                    else:
+                        conn.execute(sa.schema.CreateTable(table_obj, if_not_exists=True))
+                    conn.commit()
+                except Exception as exc:
+                    # If the dialect does not support IF NOT EXISTS and the table
+                    # was created concurrently, ignore the error and continue.
+                    err = str(exc).lower()
+                    if "already exists" in err or "duplicate" in err:
+                        conn.rollback()
+                    else:
+                        raise
 
             if table_exists and backfill_new_fields:
                 add_missing_columns(
