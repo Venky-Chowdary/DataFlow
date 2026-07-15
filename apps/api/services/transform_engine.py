@@ -445,8 +445,41 @@ def _hash_pii(value: str) -> str:
     return digest[:32]
 
 
+TIME_PATTERNS = (
+    "%H:%M:%S.%f%z",
+    "%H:%M:%S%z",
+    "%H:%M:%S.%f",
+    "%H:%M:%S",
+    "%H:%M%z",
+    "%H:%M",
+    "%I:%M:%S %p",
+    "%I:%M:%S%p",
+    "%I:%M %p",
+    "%I:%M%p",
+)
+
+
+def _parse_time(value: str) -> str | None:
+    """Parse a time string and return a canonical ISO 8601 time.
+
+    Accepts 24-hour and 12-hour forms, with optional microseconds, time-zone
+    offsets, and AM/PM markers.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    text = text.upper().replace("Z", "+0000")
+    for fmt in TIME_PATTERNS:
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.time().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 KNOWN_TRANSFORMS = frozenset({
-    "decimal", "integer", "boolean", "date", "datetime", "json", "binary",
+    "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
 })
@@ -504,6 +537,8 @@ def infer_transform_for_mapping(
             return "datetime"
         if tgt == "date":
             return "date"
+        if tgt == "time":
+            return "time"
         if tgt == "uuid":
             return "uuid"
 
@@ -522,6 +557,8 @@ def infer_transform_for_mapping(
         return "datetime"
     if src == "date":
         return "date"
+    if src == "time":
+        return "time"
     if src == "uuid":
         return "uuid"
 
@@ -574,7 +611,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, None
 
     # Null/missing sentinels for typed transforms are treated as None.
-    if transform in {"decimal", "integer", "boolean", "date", "datetime", "json", "uuid", "binary"}:
+    if transform in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
         if text.lower() in NULL_SENTINELS:
             return None, None
 
@@ -606,6 +643,12 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         parsed = _parse_datetime(text)
         if parsed is None:
             return None, f"Invalid datetime: {text!r}"
+        return parsed, None
+
+    if transform == "time":
+        parsed = _parse_time(text)
+        if parsed is None:
+            return None, f"Invalid time: {text!r}"
         return parsed, None
 
     if transform == "json":

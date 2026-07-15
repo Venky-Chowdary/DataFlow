@@ -357,6 +357,22 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("NULL", "integer", None, False),
         ("N/A", "decimal", None, False),
         ("", "boolean", None, False),
+        # time values
+        ("12:30:45", "time", "12:30:45", False),
+        ("14:30", "time", "14:30:00", False),
+        ("02:30:45 PM", "time", "14:30:45", False),
+        ("not-a-time", "time", None, True),
+        # binary values
+        ("SGVsbG8=", "binary", "SGVsbG8=", False),
+        ("hello", "binary", "aGVsbG8=", False),
+        # semantic transforms
+        ("+1-555-0199", "phone", "+1-555-0199", False),
+        ("Test@Example.COM", "email", "test@example.com", False),
+        ("HTTPS://Example.COM/Path", "url", "https://Example.COM/Path", False),
+        ("GB82 west 1234 5698 7654 32", "iban", "GB82WEST12345698765432", False),
+        ("k1a 0b1", "postal", "K1A0B1", False),
+        ("$1,234.56", "currency", "1234.56", False),
+        ("50%", "percentage", "50", False),
     ],
 )
 def test_apply_transform_edge_values(raw, transform, expected, expect_error):
