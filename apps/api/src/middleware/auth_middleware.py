@@ -10,6 +10,9 @@ _PUBLIC_PREFIXES = (
     "/health",
     "/api/v1/auth/login",
     "/api/v1/auth/sso/providers",
+    "/api/v1/mcp/manifest",
+    "/api/v1/mcp/tools",
+    "/api/v1/mcp/status",
 )
 
 if docs_enabled():
