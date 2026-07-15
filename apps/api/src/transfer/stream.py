@@ -28,11 +28,13 @@ from .connector_capabilities import resolve_driver_type
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
+    from services.data_quality import run_integrity_audit
     from services.error_handling import RetryBudget, with_retry
     from services.reconciliation import FingerprintAccumulator
     from services.resilience import adaptive_chunk_size
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
+    from src.services.data_quality import run_integrity_audit
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.reconciliation import FingerprintAccumulator
     from src.services.resilience import adaptive_chunk_size
@@ -658,6 +660,7 @@ def stream_database_transfer(
     checkpoint_service: CheckpointService | None = None,
     retry_budget: RetryBudget | None = None,
     backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -946,11 +949,40 @@ def stream_database_transfer(
             return batch
 
     batch = _fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe
+    batch_quality_enabled = validation_mode in ("strict", "maximum")
+    pk_source_col = cursor_source_col or ""
+    if not pk_source_col and pk_target_cols and mappings:
+        target_to_source = {m.get("target", "").lower(): m.get("source", "") for m in mappings if m.get("target")}
+        for pk in pk_target_cols:
+            src = target_to_source.get(pk.lower())
+            if src:
+                pk_source_col = src
+                break
+
     while True:
         if not batch or not getattr(batch, "rows", None):
             break
 
         chunk_idx += 1
+
+        # Per-batch data-quality / anomaly gate for database streams.
+        if batch_quality_enabled:
+            audit = run_integrity_audit(
+                headers=batch.headers,
+                rows=batch.rows,
+                column_types=column_types,
+                mappings=mappings,
+                required_targets=pk_target_cols or [],
+                primary_key=pk_source_col if pk_source_col in batch.headers else None,
+                validation_mode=validation_mode,
+            )
+            if audit.issues:
+                warning_samples.extend(audit.issues[:10])
+            if audit.warnings:
+                warning_samples.extend(audit.warnings[:10])
+            if not audit.passed:
+                raise ValueError(f"Batch {chunk_idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+
         write_op = partial(
             _write_batch,
             dest_type,

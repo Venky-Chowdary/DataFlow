@@ -923,6 +923,7 @@ class UniversalTransferEngine:
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
                 backfill_new_fields=request.backfill_new_fields,
+                validation_mode=request.validation_mode,
             )
 
             mongo.update_job_status(
