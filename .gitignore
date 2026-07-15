@@ -26,4 +26,5 @@ apps/api/data/sync_cursors.json
 apps/api/data/jobs.json
 apps/api/exports/
 apps/api/test
+.devin-files/
 apps/web/tsconfig.tsbuildinfo
