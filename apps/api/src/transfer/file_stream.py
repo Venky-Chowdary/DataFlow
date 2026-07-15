@@ -222,6 +222,53 @@ def _iter_json_array_batches(content: bytes, chunk_size: int):
         yield batch
 
 
+def _batch_iterator_for_type(file_type: str, content: bytes, batch_size: int):
+    """Return a fresh batch iterator for the given file type.
+
+    Used to re-scan a file from the beginning (e.g. on resume) without mutating
+    the primary streaming iterator.
+    """
+    if file_type in ("csv", "tsv"):
+        return _iter_csv_batches(content, batch_size)
+    if file_type == "json":
+        return _iter_json_array_batches(content, batch_size)
+    if file_type == "jsonl" or file_type == "ndjson":
+        return _iter_jsonl_batches(content, batch_size)
+    if file_type == "excel":
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from services.excel_parser import iter_excel_batches
+
+        return iter_excel_batches(content, batch_size)
+    if file_type == "parquet":
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(io.BytesIO(content))
+
+        def _parquet_batches():
+            batch: list[dict] = []
+            try:
+                for record_batch in pf.iter_batches(batch_size=batch_size):
+                    chunk_df = record_batch.to_pandas()
+                    for _, row in chunk_df.iterrows():
+                        rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk_df.columns}
+                        batch.append(rec)
+                        if len(batch) >= batch_size:
+                            yield batch
+                            batch = []
+                if batch:
+                    yield batch
+            finally:
+                pf.close()
+
+        return _parquet_batches()
+    raise ValueError(f"File type '{file_type}' does not support streaming ingest")
+
+
 def stream_file_to_database(
     content: bytes,
     filename: str,
@@ -275,44 +322,7 @@ def stream_file_to_database(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
-    if file_type in ("csv", "tsv"):
-        batch_iter = _iter_csv_batches(content, batch_size)
-    elif file_type == "json":
-        batch_iter = _iter_json_array_batches(content, batch_size)
-    elif file_type == "excel":
-        import sys
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[2]
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        from services.excel_parser import iter_excel_batches
-
-        batch_iter = iter_excel_batches(content, batch_size)
-    elif file_type == "parquet":
-        import pyarrow.parquet as pq
-
-        pf = pq.ParquetFile(io.BytesIO(content))
-
-        def _parquet_batches():
-            batch: list[dict] = []
-            try:
-                for record_batch in pf.iter_batches(batch_size=batch_size):
-                    chunk_df = record_batch.to_pandas()
-                    for _, row in chunk_df.iterrows():
-                        rec = {str(k): (None if row[k] != row[k] else (row[k].item() if hasattr(row[k], "item") else row[k])) for k in chunk_df.columns}
-                        batch.append(rec)
-                        if len(batch) >= batch_size:
-                            yield batch
-                            batch = []
-                if batch:
-                    yield batch
-            finally:
-                pf.close()
-
-        batch_iter = _parquet_batches()
-    else:
-        batch_iter = _iter_jsonl_batches(content, batch_size)
+    batch_iter = _batch_iterator_for_type(file_type, content, batch_size)
 
     column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
@@ -339,6 +349,7 @@ def stream_file_to_database(
 
     written = checkpoint.rows_processed or 0
     chunk_idx = checkpoint.chunk_index or 0
+    resumed = chunk_idx > 0 or written > 0
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
@@ -433,7 +444,29 @@ def stream_file_to_database(
     # mapped fingerprints, so we do not need to parse the entire file a second
     # time.  The FingerprintAccumulator spills to disk above the threshold, so
     # even billion-row transfers stay memory-bounded by a single batch.
-    final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
+    # If the job resumed, we must re-scan the whole file so the fingerprint
+    # covers all source rows, not only the ones processed after the checkpoint.
+    if resumed and fp_accumulator.total < total_rows:
+        full_iter = _batch_iterator_for_type(file_type, content, batch_size)
+        full_accumulator = FingerprintAccumulator()
+        for batch in full_iter:
+            if not batch:
+                continue
+            headers, data_rows = records_to_matrix(batch, columns)
+            mapped_rows, _ = build_mapped_rows(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                error_policy="quarantine",
+                preserve_case=True,
+            )
+            if mapped_rows:
+                full_accumulator.add_many(row_fingerprints(mapped_rows, target_cols))
+        final_checksum = full_accumulator.digest() if full_accumulator.total else last_checksum
+    else:
+        final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
 
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
