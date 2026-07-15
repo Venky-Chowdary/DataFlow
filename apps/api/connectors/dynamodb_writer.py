@@ -94,19 +94,21 @@ def write_mapped_rows(
         "password": password,
         "connection_string": connection_string,
     }
-    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         preserve_case=True,
     )
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
-        _ensure_table(client, table, target_cols, mappings, source_types)
+        _ensure_table(client, table, target_cols, mappings, logical_types)
 
     key_types = _table_key_types(client, table)
 
@@ -133,7 +135,7 @@ def write_mapped_rows(
                     elif attr_type == "B":
                         if isinstance(value, str):
                             value = value.encode("utf-8")
-                    item[col] = _to_attr(value, source_types[i])
+                    item[col] = _to_attr(value, logical_types[i])
                 request_items.append({"PutRequest": {"Item": item}})
             _batch_write_with_retry(client, table, request_items)
             written += len(slice_rows)

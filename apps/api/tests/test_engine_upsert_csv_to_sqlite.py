@@ -98,4 +98,4 @@ def test_csv_to_sqlite_upsert_updates_existing_rows():
         conn = sqlite3.connect(str(db_path))
         rows = conn.execute("SELECT id, amount FROM payments ORDER BY id").fetchall()
         conn.close()
-        assert rows == [(1, 1111.0), (2, 2000.5), (3, 3000.0)]
+        assert rows == [(1, "1111.00"), (2, "2000.50"), (3, "3000.00")]

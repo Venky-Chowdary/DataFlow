@@ -127,7 +127,7 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub", load_method="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types)
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -141,7 +141,8 @@ def write_mapped_rows(
 
     schema = (schema or "PUBLIC").upper()
     table_name = sanitize_identifier(table_name)
-    target_types = [sf_type(t) for t in source_types]
+    target_types = [sf_type(t) for t in logical_types]
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
 
@@ -151,6 +152,7 @@ def write_mapped_rows(
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         error_policy=policy,
     )
 

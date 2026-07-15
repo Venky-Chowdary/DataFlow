@@ -72,13 +72,15 @@ def write_mapped_rows(
         "host": host, "port": port, "username": username, "password": password,
         "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
-    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         preserve_case=True,
     )
 
@@ -92,7 +94,7 @@ def write_mapped_rows(
         def gen_actions():
             for row in mapped_rows:
                 source = {
-                    target_cols[i]: _to_es_value(value, source_types[i])
+                    target_cols[i]: _to_es_value(value, logical_types[i])
                     for i, value in enumerate(row)
                 }
                 doc_id = source.pop("_id", None)

@@ -95,12 +95,13 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types)
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
             checksum="", chunks_completed=0, error="No column mappings",
         )
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
 
     try:
         from google.cloud import bigquery
@@ -117,7 +118,7 @@ def write_mapped_rows(
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
         schema_fields = [
-            bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types)
+            bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, logical_types)
         ]
         dataset_ref = f"{project_id}.{dataset_id}"
         existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
@@ -129,7 +130,7 @@ def write_mapped_rows(
         if backfill_new_fields:
             table = client.get_table(table_id)
             existing = {f.name for f in table.schema}
-            new_fields = [bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, source_types) if col not in existing]
+            new_fields = [bigquery.SchemaField(col, bq_type(t)) for col, t in zip(target_cols, logical_types) if col not in existing]
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
@@ -140,6 +141,7 @@ def write_mapped_rows(
             mappings=mappings,
             target_cols=target_cols,
             column_types=column_types,
+            dest_types=dest_types,
             error_policy=policy,
         )
         rejected_rows = len(data_rows) - len(mapped_rows)

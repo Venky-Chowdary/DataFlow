@@ -34,7 +34,7 @@ class WriteResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _to_json_value(value: Any, col: str, column_types: dict[str, str]) -> Any:
+def _to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     if value is None:
         return None
     if isinstance(value, str):
@@ -45,7 +45,7 @@ def _to_json_value(value: Any, col: str, column_types: dict[str, str]) -> Any:
             from services.type_system import normalize_logical_type
         except Exception:
             normalize_logical_type = lambda x: str(x or "").lower()
-        ctype = normalize_logical_type(column_types.get(col, "")) if column_types else ""
+        ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
         if ctype in {"json", "array", "object", "struct"}:
             try:
                 return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
@@ -106,17 +106,19 @@ def write_mapped_rows(
         "service_account": service_account,
     }
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
+        dest_types=dest_types,
         preserve_case=True,
     )
 
-    records = [{c: _to_json_value(v, c, column_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = [{c: _to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
     if key.endswith(".csv"):
         buf = io.StringIO()
@@ -151,7 +153,7 @@ def write_mapped_rows(
             checksum=checksum,
             chunks_completed=1,
             warnings=errors[:10],
-            rejected_rows=len(errors),
+            rejected_rows=len(data_rows) - len(mapped_rows),
         )
     except Exception as exc:
         return WriteResult(

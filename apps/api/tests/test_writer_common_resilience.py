@@ -17,7 +17,7 @@ def test_resolve_target_columns_preserves_mongodb_id():
     assert target_cols == ["_id", "name"]
 
 
-def test_quarantine_policy_skips_bad_rows():
+def test_quarantine_policy_preserves_rows_with_null_bad_cells():
     mapped, errors = build_mapped_rows(
         headers=["AMT", "CUST_ID"],
         data_rows=[["10.50", "C1"], ["not-a-number", "C2"], ["20.00", "C3"]],
@@ -29,7 +29,7 @@ def test_quarantine_policy_skips_bad_rows():
         column_types={"AMT": "DECIMAL", "CUST_ID": "TEXT"},
         error_policy="quarantine",
     )
-    assert mapped == [("10.50", "C1"), ("20.00", "C3")]
+    assert mapped == [("10.50", "C1"), (None, "C2"), ("20.00", "C3")]
     assert errors and "row 2" in errors[0]
 
 

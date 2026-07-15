@@ -131,13 +131,16 @@ def build_mapped_rows(
                 row_has_error = True
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
-                if policy == "coerce_null":
+                if policy in {"coerce_null", "quarantine"}:
+                    # Quarantine preserves the row; the bad cell becomes NULL and the
+                    # error is surfaced as a warning so the transfer does not silently
+                    # lose data.
                     converted = None
                 else:
                     continue
             if target_idx >= 0:
                 out[target_idx] = converted
-        if row_has_error and policy in {"fail", "quarantine"}:
+        if row_has_error and policy == "fail":
             continue
         mapped.append(tuple(out))
 
@@ -148,12 +151,22 @@ def resolve_target_columns(
     mappings: list[dict],
     column_types: dict[str, str],
     preserve_case: bool = False,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
+    """Return target column names and their intended logical target types.
+
+    Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
+    then the source logical type, and finally ``VARCHAR``.
+    """
     target_cols: list[str] = []
-    source_types: list[str] = []
+    target_types: list[str] = []
     for m in mappings:
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
-            source_types.append(column_types.get(m["source"], "VARCHAR"))
-    return target_cols, source_types
+            target_types.append(
+                m.get("target_type")
+                or (dest_types or {}).get(tgt)
+                or column_types.get(m["source"], "VARCHAR")
+            )
+    return target_cols, target_types

@@ -19,6 +19,17 @@ def test_apply_date():
     assert val == "2024-01-15"
 
 
+def test_apply_date_resolves_unambiguous_day_month_order():
+    # 31 cannot be a month, so it must be day-first.
+    val, err = apply_transform("31/12/2024", "date")
+    assert err is None
+    assert val == "2024-12-31"
+    # 31 cannot be a month, so month-first is the only valid reading.
+    val2, err2 = apply_transform("12/31/2024", "date")
+    assert err2 is None
+    assert val2 == "2024-12-31"
+
+
 def test_apply_json_and_boolean():
     val, err = apply_transform('{"b": 2, "a": 1}', "json")
     assert err is None

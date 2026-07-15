@@ -137,6 +137,38 @@ def _to_utc_z(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _detect_dayfirst(text: str) -> bool | None:
+    """Return True for day-first ordering, False for month-first, or None if ambiguous.
+
+    Looks at the first two numeric fields of slash/dash-delimited dates.  A value
+    like 31/12/2024 is unambiguously day-first; 12/31/2024 is month-first.  When
+    both fields are <= 12 we keep the default (month-first) to stay compatible
+    with existing data.
+    """
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?:[ T].*)?$", text)
+    if not m:
+        return None
+    first, second = int(m.group(1)), int(m.group(2))
+    if first > 12:
+        return True
+    if second > 12:
+        return False
+    return None
+
+
+def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
+    """Move the most likely day/month ordering patterns to the front."""
+    dayfirst = _detect_dayfirst(text)
+    if dayfirst is None:
+        return list(patterns)
+    year_first = [p for p in patterns if p.startswith(("%Y", "%y"))]
+    day_first = [p for p in patterns if p.startswith("%d")]
+    month_first = [p for p in patterns if p.startswith("%m")]
+    if dayfirst:
+        return year_first + day_first + month_first
+    return year_first + month_first + day_first
+
+
 @functools.lru_cache(maxsize=4096)
 def _parse_datetime(value: str) -> str | None:
     text = value.strip()
@@ -152,7 +184,7 @@ def _parse_datetime(value: str) -> str | None:
         return _to_utc_z(datetime.fromisoformat(iso))
     except ValueError:
         pass
-    for fmt in DATETIME_PATTERNS:
+    for fmt in _reorder_date_patterns(text, DATETIME_PATTERNS):
         try:
             parsed = datetime.strptime(text, fmt)
             return _to_utc_z(parsed)
@@ -181,9 +213,9 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
             return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
         except ValueError:
             pass
-    patterns = list(DATE_PATTERNS)
+    patterns = _reorder_date_patterns(text, DATE_PATTERNS)
     if with_time:
-        patterns += list(DATE_WITH_TIME_PATTERNS)
+        patterns += _reorder_date_patterns(text, DATE_WITH_TIME_PATTERNS)
     for fmt in patterns:
         try:
             return datetime.strptime(text, fmt).strftime("%Y-%m-%d")

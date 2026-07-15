@@ -119,7 +119,7 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, source_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -133,7 +133,8 @@ def write_mapped_rows(
 
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
-    target_types = [pg_type(t) for t in source_types]
+    target_types = [pg_type(t) for t in logical_types]
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     policy = transform_error_policy(error_policy)
 
     try:
@@ -206,6 +207,7 @@ def write_mapped_rows(
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
+                dest_types=dest_types,
                 error_policy=policy,
                 preserve_case=True,
             )
