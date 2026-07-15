@@ -5,7 +5,26 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import sqlalchemy as sa
+
 from connectors.base import ConnectResult
+
+
+def _sqlite_path(connection_string: str, database: str, host: str) -> str:
+    """Resolve a SQLite connection string or plain path to a filesystem path."""
+    raw = (connection_string or database or host or "").strip()
+    if not raw:
+        return ""
+    if raw == ":memory:" or raw.lower().startswith("sqlite://:memory:"):
+        return ":memory:"
+    if raw.startswith("sqlite://"):
+        try:
+            url = sa.engine.url.make_url(raw)
+            return url.database or ":memory:"
+        except Exception:
+            # Fallback: strip the protocol prefix and any leading slashes.
+            return raw.removeprefix("sqlite://").lstrip("/")
+    return raw
 
 
 def test_sqlite(
@@ -19,9 +38,9 @@ def test_sqlite(
     connection_string: str,
     ssl: bool,
 ) -> ConnectResult:
-    """Probe a SQLite database file. `database` is the path to the .db file."""
+    """Probe a SQLite database file. ``database`` is the path to the .db file."""
     del port, username, password, schema, ssl
-    path = connection_string or database or host
+    path = _sqlite_path(connection_string, database, host)
     if not path:
         return ConnectResult(ok=False, tables=[], error="SQLite path is required (database or connection_string).")
     try:

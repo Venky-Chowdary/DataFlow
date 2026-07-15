@@ -31,6 +31,7 @@ try:
     from services.pipeline_explanation import build_pipeline_explanation
     from services.mirror_engine import apply_inferred_soft_deletes
     from services.row_filter import apply_row_filter
+    from services.scd2_engine import apply_scd2
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
     from src.services.preflight_service import (
@@ -46,6 +47,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services.pipeline_explanation import build_pipeline_explanation
     from src.services.mirror_engine import apply_inferred_soft_deletes
     from src.services.row_filter import apply_row_filter
+    from src.services.scd2_engine import apply_scd2
 from .adapters import (
     parse_file_content,
     read_source_database,
@@ -196,6 +198,18 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         return drop_table(db_type, cfg, table_name, schema)
     except Exception:
         return False
+
+
+def _schema_for_endpoint(destination: EndpointConfig) -> str | None:
+    """Return the SQL schema name implied by a database endpoint config."""
+    try:
+        from .adapters import resolve_connector_config
+        from connectors.generic_sql import get_sql_schema
+
+        cfg = resolve_connector_config(destination)
+        return get_sql_schema(cfg)
+    except Exception:
+        return None
 
 
 def _enrich_mappings_with_types(
@@ -466,12 +480,12 @@ class UniversalTransferEngine:
                 checkpoint_service=checkpoint_service,
             )
 
-        mirror_mode = request.sync_mode.lower() in ("full_refresh_mirror", "mirror")
+        non_streaming_mode = request.sync_mode.lower() in ("full_refresh_mirror", "mirror", "scd2")
         if (
             request.source.kind == "file"
             and request.destination.kind == "database"
             and (request.source_content or request.source_path)
-            and not mirror_mode
+            and not non_streaming_mode
             and should_stream_file(
                 request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
@@ -521,7 +535,7 @@ class UniversalTransferEngine:
             conflict_columns: list[str] = []
             if contract and contract.primary_key:
                 conflict_columns = [map_source_to_target(contract.primary_key, mappings)]
-            if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror"):
+            if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror", "scd2"):
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
@@ -713,21 +727,45 @@ class UniversalTransferEngine:
                         conflict_columns=conflict_columns,
                     )
 
-                rows_written, ddl_log, dest_summary = with_retry(
-                    _write_destination_with_drop,
-                    budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
-                )
-                if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
-                    mirror_summary = apply_inferred_soft_deletes(
-                        request.destination,
-                        records,
-                        columns,
-                        schema,
-                        mappings,
-                        conflict_columns,
+                if effective_sync_lower == "scd2" and conflict_columns:
+                    scd2_summary = with_retry(
+                        lambda: apply_scd2(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            conflict_columns,
+                        ),
+                        budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                     )
-                    dest_summary["mirror"] = mirror_summary
-                    rows_written = mirror_summary.get("active_rows", rows_written)
+                    dest_summary = {
+                        "table": request.destination.table or request.destination.collection,
+                        "schema": _schema_for_endpoint(request.destination),
+                        "checksum": scd2_summary.get("active_checksum", ""),
+                        "scd2": scd2_summary,
+                    }
+                    rows_written = scd2_summary.get("rows_written", 0)
+                    ddl_log.append(
+                        f"SCD2 merge: {scd2_summary.get('active_rows', 0)} active, "
+                        f"{scd2_summary.get('updated_rows', 0)} expired"
+                    )
+                else:
+                    rows_written, ddl_log, dest_summary = with_retry(
+                        _write_destination_with_drop,
+                        budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
+                    )
+                    if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
+                        mirror_summary = apply_inferred_soft_deletes(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            conflict_columns,
+                        )
+                        dest_summary["mirror"] = mirror_summary
+                        rows_written = mirror_summary.get("active_rows", rows_written)
                 if total_rows <= CHUNK_SIZE:
                     mongo.update_job_status(job_id, "running", records_processed=rows_written, progress_pct=90)
             elif request.destination.kind == "file_export":
@@ -1085,9 +1123,9 @@ class UniversalTransferEngine:
 
             stream_contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = (stream_contract.sync_mode if stream_contract else request.sync_mode).lower()
-            if effective_sync in ("full_refresh_mirror", "mirror"):
+            if effective_sync in ("full_refresh_mirror", "mirror", "scd2"):
                 raise NotImplementedError(
-                    "full_refresh_mirror is not supported for streaming database-to-database transfers; "
+                    f"{effective_sync} is not supported for streaming database-to-database transfers; "
                     "use a file source or a non-streaming database source."
                 )
             if effective_sync == "cdc":

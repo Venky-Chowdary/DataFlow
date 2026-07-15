@@ -25,6 +25,9 @@ def _sync_mode_note(sync_mode: str) -> str:
         "cdc": "Changed rows since the last watermark will be applied, including soft deletes.",
         "full_refresh_overwrite": "Destination will be cleared and fully replaced with source data.",
         "overwrite": "Destination will be cleared and fully replaced with source data.",
+        "full_refresh_mirror": "Destination will be kept in sync with the source; missing rows are soft-deleted and reappearing rows are reactivated.",
+        "mirror": "Destination will be kept in sync with the source; missing rows are soft-deleted and reappearing rows are reactivated.",
+        "scd2": "A full history of every row version will be kept; changed attributes close the old version and insert a new current version.",
     }
     return notes.get(mode, f"Sync mode '{sync_mode}' will be applied.")
 

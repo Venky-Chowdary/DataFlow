@@ -111,24 +111,25 @@ def run_reconciliation(
         records, columns, mapping_dicts, source_schema, writer_checksum, target_cols=target_cols
     )
 
-    # Mirror (inferred-delete) transfers already compute an active-row checksum
-    # while applying soft deletes; use it directly so deleted rows do not fail
-    # strict reconciliation.
-    mirror_summary = (dest_summary or {}).get("mirror")
-    if mirror_summary and mirror_summary.get("active_checksum"):
-        active_rows = int(mirror_summary.get("active_rows", 0))
-        active_checksum = mirror_summary["active_checksum"]
-        report = reconcile(
-            source_rows=source_rows,
-            target_rows=active_rows,
-            source_checksum=source_checksum,
-            target_checksum=active_checksum,
-            rejected_rows=rejected_rows,
-            strict_checksum=True,
-            allow_extra_rows=False,
-            sample_compare=None,
-        )
-        return report.to_dict()
+    # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
+    # checksum while applying history/soft deletes; use it directly so closed or
+    # deleted rows do not fail strict reconciliation.
+    for sub_key in ("mirror", "scd2"):
+        sub_summary = (dest_summary or {}).get(sub_key)
+        if sub_summary and sub_summary.get("active_checksum"):
+            active_rows = int(sub_summary.get("active_rows", 0))
+            active_checksum = sub_summary["active_checksum"]
+            report = reconcile(
+                source_rows=source_rows,
+                target_rows=active_rows,
+                source_checksum=source_checksum,
+                target_checksum=active_checksum,
+                rejected_rows=rejected_rows,
+                strict_checksum=True,
+                allow_extra_rows=False,
+                sample_compare=None,
+            )
+            return report.to_dict()
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
