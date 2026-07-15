@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import json
+import os
+import struct
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date as _date, datetime as _datetime, time as _time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Sequence
+
+SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 from services.transform_engine import _DATE_LIKE_RE, _parse_date, _parse_datetime, apply_transform
 
@@ -76,14 +82,102 @@ def _iter_fingerprints(
             yield (row_key, fingerprint)
 
 
-def fingerprint_checksum(fingerprints: list[tuple[str, str]]) -> str:
-    """Hash a pre-computed list of (row_key, fingerprint) tuples.
+class FingerprintAccumulator:
+    """Streaming, order-independent checksum accumulator for arbitrary row counts.
 
-    This is used by streaming producers that accumulate row fingerprints batch
-    by batch and only sort/hash once at the end, avoiding keeping all raw rows
-    in memory.
+    Keeps fingerprints in memory until ``DATAFLOW_FINGERPRINT_SPILL_THRESHOLD``
+    is reached, then spills sorted chunks to disk and merges them at the end.
+    This lets the engine compute a strict source checksum for billion-row files
+    without holding every row's fingerprint in RAM.
     """
-    return _hash_fingerprints(fingerprints)
+
+    def __init__(self, threshold: int | None = None) -> None:
+        self.threshold = threshold or SPILL_THRESHOLD
+        self.buffer: list[tuple[str, str]] = []
+        self.chunk_files: list[str] = []
+        self.total = 0
+        self._tempdir: tempfile.TemporaryDirectory | None = None
+
+    def add(self, key: str, fingerprint: str) -> None:
+        self.buffer.append((key, fingerprint))
+        self.total += 1
+        if len(self.buffer) >= self.threshold:
+            self._spill()
+
+    def add_many(self, fingerprints: Iterable[tuple[str, str]]) -> None:
+        for key, fingerprint in fingerprints:
+            self.add(key, fingerprint)
+
+    def _spill(self) -> None:
+        if not self.buffer:
+            return
+        self.buffer.sort(key=lambda x: (x[0], x[1]))
+        if self._tempdir is None:
+            self._tempdir = tempfile.TemporaryDirectory(prefix="dataflow_fp_")
+        fd, path = tempfile.mkstemp(dir=self._tempdir.name, suffix=".chk")
+        with os.fdopen(fd, "wb") as f:
+            for key, fp in self.buffer:
+                key_b = key.encode("utf-8")
+                fp_b = fp.encode("utf-8")
+                f.write(struct.pack(">I", len(key_b)))
+                f.write(key_b)
+                f.write(struct.pack(">I", len(fp_b)))
+                f.write(fp_b)
+        self.chunk_files.append(path)
+        self.buffer = []
+
+    def _read_chunk(self, path: str) -> Iterable[tuple[str, str]]:
+        with open(path, "rb") as f:
+            while True:
+                key_len_b = f.read(4)
+                if not key_len_b:
+                    break
+                key_len = struct.unpack(">I", key_len_b)[0]
+                key = f.read(key_len).decode("utf-8")
+                fp_len_b = f.read(4)
+                if not fp_len_b:
+                    break
+                fp_len = struct.unpack(">I", fp_len_b)[0]
+                fp = f.read(fp_len).decode("utf-8")
+                yield (key, fp)
+
+    def _sorted_stream(self) -> Iterable[tuple[str, str]]:
+        if not self.chunk_files:
+            self.buffer.sort(key=lambda x: (x[0], x[1]))
+            yield from self.buffer
+            return
+        if self.buffer:
+            self._spill()
+        streams = [self._read_chunk(p) for p in self.chunk_files]
+        yield from heapq.merge(*streams, key=lambda x: (x[0], x[1]))
+
+    def digest(self) -> str:
+        h = hashlib.sha256()
+        for _, fp in self._sorted_stream():
+            h.update(fp.encode("utf-8"))
+        self.close()
+        return h.hexdigest()[:16]
+
+    def close(self) -> None:
+        if self._tempdir is not None:
+            self._tempdir.cleanup()
+            self._tempdir = None
+        self.chunk_files = []
+        self.buffer = []
+
+
+def fingerprint_checksum(fingerprints: Iterable[tuple[str, str]]) -> str:
+    """Hash a list/iterable of (row_key, fingerprint) tuples.
+
+    For small inputs the in-memory sort+hash path is used; for large or
+    streaming inputs an ``FingerprintAccumulator`` spills to disk so the
+    checksum stays memory-bounded.
+    """
+    if isinstance(fingerprints, list) and len(fingerprints) <= SPILL_THRESHOLD:
+        return _hash_fingerprints(fingerprints)
+    acc = FingerprintAccumulator()
+    acc.add_many(fingerprints)
+    return acc.digest()
 
 
 def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:

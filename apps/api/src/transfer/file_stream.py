@@ -32,10 +32,9 @@ from connectors.writer_common import (  # noqa: E402
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
-    row_checksum,
     row_fingerprints,
 )
-from services.reconciliation import fingerprint_checksum  # noqa: E402
+from services.reconciliation import FingerprintAccumulator  # noqa: E402
 try:
     from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
@@ -350,7 +349,7 @@ def stream_file_to_database(
     if chunk_idx > 0:
         batch_iter = itertools.islice(batch_iter, chunk_idx, None)
 
-    all_fingerprints: list[tuple[str, str]] = []
+    fp_accumulator = FingerprintAccumulator()
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     try:
         from services.data_quality import run_integrity_audit  # noqa: E402
@@ -391,7 +390,7 @@ def stream_file_to_database(
             preserve_case=True,
         )
         if mapped_rows:
-            all_fingerprints.extend(row_fingerprints(mapped_rows, target_cols))
+            fp_accumulator.add_many(row_fingerprints(mapped_rows, target_cols))
 
         write_op = partial(
             _write_batch,
@@ -432,8 +431,9 @@ def stream_file_to_database(
 
     # The source checksum has been accumulated incrementally from each batch's
     # mapped fingerprints, so we do not need to parse the entire file a second
-    # time.  This keeps memory bounded by a single batch instead of the full file.
-    final_checksum = fingerprint_checksum(all_fingerprints) if all_fingerprints else last_checksum
+    # time.  The FingerprintAccumulator spills to disk above the threshold, so
+    # even billion-row transfers stay memory-bounded by a single batch.
+    final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
 
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
