@@ -9,7 +9,7 @@ import os
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 from typing import Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 
@@ -88,8 +88,8 @@ class MongoDBService:
         db = self.get_database()
         collection = db["connectors"]
         
-        connector_data["created_at"] = datetime.utcnow()
-        connector_data["updated_at"] = datetime.utcnow()
+        connector_data["created_at"] = datetime.now(timezone.utc)
+        connector_data["updated_at"] = datetime.now(timezone.utc)
         
         result = collection.insert_one(connector_data)
         return str(result.inserted_id)
@@ -122,7 +122,7 @@ class MongoDBService:
         db = self.get_database()
         collection = db["connectors"]
         
-        updates["updated_at"] = datetime.utcnow()
+        updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
             {"_id": ObjectId(connector_id)},
             {"$set": updates}
@@ -227,7 +227,7 @@ class MongoDBService:
         collection = db["transfer_jobs"]
         
         job_data["status"] = "pending"
-        job_data["created_at"] = datetime.utcnow()
+        job_data["created_at"] = datetime.now(timezone.utc)
         job_data["started_at"] = None
         job_data["completed_at"] = None
         job_data["records_processed"] = 0
@@ -247,13 +247,13 @@ class MongoDBService:
         db = self.get_database()
         collection = db["transfer_jobs"]
         
-        updates = {"status": status, "updated_at": datetime.utcnow()}
+        updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
         
         if status == "running":
-            updates.setdefault("started_at", datetime.utcnow())
+            updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "failed", "cancelled"):
-            updates["completed_at"] = datetime.utcnow()
+            updates["completed_at"] = datetime.now(timezone.utc)
 
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
@@ -343,8 +343,8 @@ class MemoryMongoDBService:
         oid = self._new_id()
         rec = dict(connector_data)
         rec["_id"] = oid
-        rec.setdefault("created_at", datetime.utcnow())
-        rec.setdefault("updated_at", datetime.utcnow())
+        rec.setdefault("created_at", datetime.now(timezone.utc))
+        rec.setdefault("updated_at", datetime.now(timezone.utc))
         self._connectors[oid] = rec
         return oid
 
@@ -369,7 +369,7 @@ class MemoryMongoDBService:
         if not rec:
             return False
         rec.update(updates)
-        rec["updated_at"] = datetime.utcnow()
+        rec["updated_at"] = datetime.now(timezone.utc)
         return True
 
     def delete_connector(self, connector_id: str) -> bool:
@@ -412,7 +412,7 @@ class MemoryMongoDBService:
         job = dict(job_data)
         job["_id"] = oid
         job.setdefault("status", "pending")
-        job.setdefault("created_at", datetime.utcnow())
+        job.setdefault("created_at", datetime.now(timezone.utc))
         job.setdefault("started_at", None)
         job.setdefault("completed_at", None)
         job.setdefault("records_processed", 0)
@@ -427,11 +427,11 @@ class MemoryMongoDBService:
             return False
         rec.update(kwargs)
         rec["status"] = status
-        rec["updated_at"] = datetime.utcnow()
+        rec["updated_at"] = datetime.now(timezone.utc)
         if status == "running":
-            rec.setdefault("started_at", datetime.utcnow())
+            rec.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "failed", "cancelled"):
-            rec["completed_at"] = datetime.utcnow()
+            rec["completed_at"] = datetime.now(timezone.utc)
         phase_label = kwargs.get("phase")
         if phase_label:
             try:

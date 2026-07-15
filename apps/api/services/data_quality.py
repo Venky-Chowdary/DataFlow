@@ -13,6 +13,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+
+_UTC = timezone.utc
 from typing import Any
 
 
@@ -281,10 +283,10 @@ def run_integrity_audit(
             dates = [_parse_iso_date(v) for v in non_null]
             valid_dates = [d for d in dates if d is not None]
             if valid_dates:
-                now_naive = datetime.utcnow()
+                now = datetime.now(_UTC)
                 future = [
                     d for d in valid_dates
-                    if (d.replace(tzinfo=None) if d.tzinfo else d) > now_naive
+                    if (d.replace(tzinfo=_UTC) if d.tzinfo is None else d.astimezone(_UTC)) > now
                 ]
                 if future:
                     _warn(f"Date column '{h}' contains {len(future)} future timestamp(s)")
