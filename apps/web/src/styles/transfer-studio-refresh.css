@@ -1,0 +1,622 @@
+/* Transfer Studio refresh — Validate dashboard, Run theater fixes, Map polish.
+   Imported last so it layers over enterprise-ui.css. */
+
+/* ============================================================
+   RUN — Job Theater layout + element fixes
+   ============================================================ */
+.df2-run-step .df2-theater-v3 {
+  gap: 0 !important;
+  padding: 0 !important;
+  min-height: 520px;
+}
+
+.df2-theater-v3-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.df2-run-theater-host {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  height: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+}
+
+/* Center the % label inside the progress ring (was flowing below → overlap) */
+.df2-theater-v3-ring {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.df2-theater-v3-ring strong {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.df2-theater-v3-ring.is-failed .fill { stroke: #dc2626; }
+.df2-theater-v3-ring.is-done .fill { stroke: #16a34a; }
+
+.df2-theater-v3-progress-top {
+  align-items: flex-start !important;
+}
+.df2-theater-v3-progress-copy {
+  min-width: 0;
+  flex: 1;
+}
+.df2-theater-v3-progress-copy p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-theater-v3-progress-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.df2-theater-v3-chunk {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 5px;
+  margin-right: 0 !important;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #eef2f7;
+  border: 1px solid #e2e8f0;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+}
+.df2-theater-v3-chunk .dt-nav-icon { color: #0f766e; display: inline-flex; }
+.df2-theater-v3-chunk.is-working {
+  background: #ecfeff;
+  border-color: #a5f3fc;
+  color: #0e7490;
+}
+
+/* Progress bar — taller, with animated shimmer so it never looks frozen */
+.df2-theater-v3-bar {
+  position: relative;
+  height: 10px !important;
+}
+.df2-theater-v3-bar-fill {
+  position: relative;
+  overflow: hidden;
+  min-width: 6px;
+}
+.df2-theater-v3-bar.is-failed .df2-theater-v3-bar-fill {
+  background: linear-gradient(90deg, #dc2626, #f87171);
+}
+.df2-theater-v3-bar-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  transform: translateX(-100%);
+  animation: df2-theater-shimmer 1.25s linear infinite;
+}
+.df2-theater-v3-bar.is-stalled .df2-theater-v3-bar-shimmer {
+  animation-duration: 0.8s;
+}
+@keyframes df2-theater-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+.df2-theater-v3-bar-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-theater-v3-live-dot,
+.df2-theater-v3-log-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  display: inline-block;
+}
+.df2-theater-v3-live-pill.is-live .df2-theater-v3-live-dot {
+  animation: df2-theater-live-pulse 1.2s ease-in-out infinite;
+}
+
+.df2-theater-v3-endpoint-copy { min-width: 0; }
+.df2-theater-v3-endpoint-copy span {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+}
+.df2-theater-v3-endpoint-copy strong {
+  display: block;
+  font-size: 12.5px;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+/* Phase pulse dot */
+.df2-theater-v3-phase-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #0f766e;
+  animation: df2-theater-live-pulse 1s ease-in-out infinite;
+}
+
+/* Live log — light text on dark, pinned to the bottom, scrolls internally */
+.df2-theater-v3-log-section {
+  position: static !important;
+  flex: 0 0 auto;
+  padding: 12px 14px !important;
+  border-top: 1px solid #e2e8f0 !important;
+  background: #ffffff;
+}
+.df2-run-step .df2-theater-v3-log {
+  max-height: 200px;
+  min-height: 120px;
+}
+.df2-theater-v3-log-line {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: #cbd5e1;
+  padding: 1px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.df2-theater-v3-log-line:last-child { color: #5eead4; }
+.df2-theater-v3-log-dot { color: #34d399; }
+
+.df2-theater-v3-alert.warn {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+.df2-theater-v3-alert strong { font-size: 13px; }
+
+.df2-theater-v3-loading {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #64748b;
+  gap: 12px !important;
+}
+
+/* ============================================================
+   VALIDATE — Proof + rules dashboard
+   ============================================================ */
+.df2-validate-dashboard-host {
+  overflow: auto;
+  padding: 0 !important;
+}
+.df2-vd {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Hero */
+.df2-vd-hero {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 20px 22px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+}
+.df2-vd-approve .df2-vd-hero,
+.df2-vd-live .df2-vd-hero { border-color: #99f6e4; }
+.df2-vd-review .df2-vd-hero { border-color: #fde68a; }
+.df2-vd-block .df2-vd-hero { border-color: #fecaca; }
+
+.df2-vd-hero-ring {
+  position: relative;
+  width: 104px;
+  height: 104px;
+  flex-shrink: 0;
+}
+.df2-vd-hero-ring svg { width: 100%; height: 100%; }
+.df2-vd-hero-track { fill: none; stroke: #e2e8f0; stroke-width: 9; }
+.df2-vd-hero-fill {
+  fill: none;
+  stroke: #0f766e;
+  stroke-width: 9;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.5s ease;
+}
+.df2-vd-hero-ring.tone-review .df2-vd-hero-fill { stroke: #d97706; }
+.df2-vd-hero-ring.tone-block .df2-vd-hero-fill { stroke: #dc2626; }
+.df2-vd-hero-ring.tone-live .df2-vd-hero-fill { stroke: #0ea5e9; }
+.df2-vd-hero-ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.df2-vd-hero-ring-label strong {
+  font-size: 26px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1;
+}
+.df2-vd-hero-ring-label strong small { font-size: 13px; font-weight: 700; color: #64748b; }
+.df2-vd-hero-ring-label span {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+  margin-top: 3px;
+}
+
+.df2-vd-hero-copy { flex: 1; min-width: 0; }
+.df2-vd-hero-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.df2-vd-hero-head h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.df2-vd-decision {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+.df2-vd-decision .dt-nav-icon { display: inline-flex; }
+.df2-vd-decision-approve { background: #dcfce7; color: #15803d; }
+.df2-vd-decision-review { background: #fef3c7; color: #b45309; }
+.df2-vd-decision-block { background: #fee2e2; color: #b91c1c; }
+
+.df2-vd-hero-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 10px;
+}
+.df2-vd-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  background: #f1f5f9;
+  font-size: 12px;
+  color: #475569;
+  font-weight: 600;
+}
+.df2-vd-count strong { font-size: 15px; color: #0f172a; }
+.df2-vd-count.ok { background: #f0fdf4; color: #15803d; }
+.df2-vd-count.ok strong { color: #15803d; }
+.df2-vd-count.block { background: #fef2f2; color: #b91c1c; }
+.df2-vd-count.block strong { color: #b91c1c; }
+.df2-vd-count.skip { background: #f8fafc; }
+
+.df2-vd-hero-summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #64748b;
+}
+.df2-vd-progress {
+  margin-top: 12px;
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+.df2-vd-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #0ea5e9, #22d3ee);
+  transition: width 0.25s ease;
+}
+
+/* Metric rings */
+.df2-vd-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.df2-vd-ring {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+}
+.df2-vd-ring-svg {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  flex-shrink: 0;
+}
+.df2-vd-ring-svg svg { width: 100%; height: 100%; }
+.df2-vd-ring-track { fill: none; stroke: #eef2f7; stroke-width: 8; }
+.df2-vd-ring-fill {
+  fill: none;
+  stroke: #0f766e;
+  stroke-width: 8;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.5s ease;
+}
+.df2-vd-ring.tone-review .df2-vd-ring-fill { stroke: #d97706; }
+.df2-vd-ring.tone-block .df2-vd-ring-fill { stroke: #dc2626; }
+.df2-vd-ring.tone-live .df2-vd-ring-fill { stroke: #0ea5e9; }
+.df2-vd-ring-val {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.df2-vd-ring-val small { font-size: 9px; color: #94a3b8; }
+.df2-vd-ring-copy { min-width: 0; }
+.df2-vd-ring-copy strong {
+  display: block;
+  font-size: 13.5px;
+  color: #0f172a;
+}
+.df2-vd-ring-copy span {
+  display: block;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+/* Rules grid */
+.df2-vd-rules {
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+  overflow: hidden;
+}
+.df2-vd-rules-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #eef2f7;
+  background: #f8fafc;
+}
+.df2-vd-rules-head .dt-nav-icon { color: #0f766e; display: inline-flex; }
+.df2-vd-rules-head strong { font-size: 13px; color: #0f172a; }
+.df2-vd-rules-head span {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+.df2-vd-rules-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  padding: 14px;
+}
+.df2-vd-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 13px;
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #cbd5e1;
+  border-radius: 10px;
+  background: #ffffff;
+}
+.df2-vd-rule.status-pass { border-left-color: #22c55e; background: #f6fef9; }
+.df2-vd-rule.status-block { border-left-color: #ef4444; background: #fef7f7; }
+.df2-vd-rule.status-skip { border-left-color: #cbd5e1; background: #f8fafc; opacity: 0.85; }
+.df2-vd-rule.status-running { border-left-color: #0ea5e9; background: #f0f9ff; }
+.df2-vd-rule.status-pending { border-left-color: #e2e8f0; }
+.df2-vd-rule-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.df2-vd-rule-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #0f766e;
+}
+.df2-vd-rule-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: #f1f5f9;
+  color: #64748b;
+}
+.df2-vd-rule-status .dt-nav-icon { display: inline-flex; }
+.df2-vd-rule-status.status-pass { background: #dcfce7; color: #15803d; }
+.df2-vd-rule-status.status-block { background: #fee2e2; color: #b91c1c; }
+.df2-vd-rule-status.status-running { background: #e0f2fe; color: #0369a1; }
+.df2-vd-rule-status.status-skip { background: #f1f5f9; color: #94a3b8; }
+.df2-vd-rule-label { font-size: 13px; color: #0f172a; }
+.df2-vd-rule-desc {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #64748b;
+}
+.df2-vd-rule-msg {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #475569;
+  padding-top: 6px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+/* Reconciliation strip */
+.df2-vd-recon {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  font-size: 12px;
+  color: #475569;
+  font-weight: 600;
+}
+.df2-vd-recon-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+.df2-vd-recon-badge .dt-nav-icon { display: inline-flex; }
+.df2-vd-recon-badge.ok { background: #dcfce7; color: #15803d; }
+.df2-vd-recon-badge.warn { background: #fef3c7; color: #b45309; }
+
+/* Blockers */
+.df2-vd-blockers {
+  border: 1px solid #fecaca;
+  border-radius: 14px;
+  background: #fef7f7;
+  overflow: hidden;
+}
+.df2-vd-blockers-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px;
+  border-bottom: 1px solid #fecdcd;
+  color: #b91c1c;
+}
+.df2-vd-blockers-head .dt-nav-icon { display: inline-flex; }
+.df2-vd-blockers-head strong { font-size: 13px; flex: 1; }
+.df2-vd-blockers-head span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #fee2e2;
+  font-size: 12px;
+  font-weight: 700;
+}
+.df2-vd-blockers ul {
+  list-style: none;
+  margin: 0;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.df2-vd-blockers li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.df2-vd-blockers li strong { font-size: 13px; color: #0f172a; }
+.df2-vd-blockers li span { font-size: 12.5px; color: #475569; line-height: 1.5; }
+.df2-vd-blocker-fix {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  color: #0f766e !important;
+  font-weight: 600;
+  width: fit-content;
+}
+.df2-vd-blocker-fix .dt-nav-icon { display: inline-flex; color: #16a34a; }
+
+@media (max-width: 720px) {
+  .df2-vd-hero { flex-direction: column; align-items: flex-start; }
+}
+
+/* ============================================================
+   MAP — right intelligence card: stop label overlap
+   ============================================================ */
+/* Ellipsis on the endpoint label needs a min-width:0 flex parent */
+.df2-mapping-intelligence-endpoint > div {
+  min-width: 0;
+  flex: 1;
+}
+.df2-mapping-intelligence-endpoint small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.df2-mapping-intelligence-title > div { min-width: 0; }
+.df2-mapping-intelligence-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Keep the attention rows from colliding when the field name is long */
+.df2-mapping-attention-item { min-width: 0; }
+.df2-attention-field { min-width: 0; }
+
+/* Align the pair rows with the header (both include the trailing badge slot) */
+.df2-mapping-intelligence-pairs-head {
+  grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr) 40px auto;
+}
+.df2-mapping-intelligence-pair .pair-source,
+.df2-mapping-intelligence-pair .pair-target { min-width: 0; }
+.df2-mapping-intelligence-pair .df2-badge-xs {
+  justify-self: end;
+  white-space: nowrap;
+}
