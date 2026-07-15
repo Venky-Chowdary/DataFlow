@@ -1,4 +1,11 @@
-"""Saved connector profiles — file-backed CRUD used by preflight and Transfer Studio."""
+"""Saved connector profiles — file-backed CRUD used by preflight and Transfer Studio.
+
+All endpoints accept an optional ``X-Workspace-Id`` header.  When provided, the
+requesting user or API key must be a member of that workspace (owner, editor, or
+viewer for read; owner or editor for write).  Connectors created with a
+workspace id are only visible inside that workspace (plus the global workspace
+id ``""`` for shared templates).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 _api_root = Path(__file__).resolve().parents[2]
@@ -23,6 +30,7 @@ from services.connector_store import (  # noqa: E402
     mask_connector,
     update_connector,
 )
+from services.team_store import can_read_workspace, can_write_workspace  # noqa: E402
 
 router = APIRouter(prefix="/connectors/saved", tags=["Saved Connectors"])
 
@@ -47,6 +55,32 @@ class ConnectorSaveDTO(BaseModel):
     auth_source: str = ""
 
 
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
+
+
+def _resolve_workspace(
+    request: Request,
+    x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> str:
+    """Return the workspace id after verifying the actor can read it."""
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Access to workspace denied")
+    return workspace_id
+
+
+def _require_write_workspace(
+    request: Request,
+    x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> str:
+    """Return the workspace id after verifying the actor can write to it."""
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return workspace_id
+
+
 def _to_ui(c) -> dict[str, Any]:
     d = mask_connector(c)
     d["id"] = d["id"]
@@ -59,42 +93,81 @@ def _to_ui(c) -> dict[str, Any]:
     return d
 
 
+def _can_access_connector(request: Request, conn: Any) -> bool:
+    """True if the actor may see or mutate this connector."""
+    if not conn.workspace_id:
+        return True
+    return can_read_workspace(conn.workspace_id, _actor_email(request))
+
+
 @router.get("")
-def get_saved_connectors(role: str | None = None):
-    return {"connectors": [_to_ui(c) for c in list_connectors(role)]}
+def get_saved_connectors(
+    role: str | None = None,
+    request: Request = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    workspace_id = _resolve_workspace(request, workspace_id)
+    return {"connectors": [_to_ui(c) for c in list_connectors(role, workspace_id=workspace_id)]}
 
 
 @router.get("/{connector_id}")
-def get_saved_connector(connector_id: str):
-    conn = get_connector(connector_id)
-    if not conn:
+def get_saved_connector(
+    connector_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    workspace_id = _resolve_workspace(request, workspace_id)
+    conn = get_connector(connector_id, workspace_id=workspace_id)
+    if not conn or not _can_access_connector(request, conn):
         raise HTTPException(status_code=404, detail="Connector not found")
     return mask_connector(conn)
 
 
 @router.post("")
-def save_connector(body: ConnectorSaveDTO):
-    conn = create_connector(body.model_dump())
+def save_connector(
+    body: ConnectorSaveDTO,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    workspace_id = _require_write_workspace(request, workspace_id)
+    data = body.model_dump()
+    data["workspace_id"] = workspace_id
+    conn = create_connector(data)
     return _to_ui(conn)
 
 
 @router.put("/{connector_id}")
-def update_saved_connector(connector_id: str, body: ConnectorSaveDTO):
+def update_saved_connector(
+    connector_id: str,
+    body: ConnectorSaveDTO,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    workspace_id = _require_write_workspace(request, workspace_id)
     data = body.model_dump()
-    existing = get_connector(connector_id)
-    if not existing:
+    existing = get_connector(connector_id, workspace_id=workspace_id)
+    if not existing or not _can_access_connector(request, existing):
         raise HTTPException(status_code=404, detail="Connector not found")
     if data.get("password") in ("", "****"):
         data["password"] = existing.password
-    updated = update_connector(connector_id, data)
+    data["workspace_id"] = existing.workspace_id or workspace_id
+    updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     return _to_ui(updated)
 
 
 @router.delete("/{connector_id}")
-def remove_saved_connector(connector_id: str):
-    if not delete_connector(connector_id):
+def remove_saved_connector(
+    connector_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    workspace_id = _require_write_workspace(request, workspace_id)
+    conn = get_connector(connector_id, workspace_id=workspace_id)
+    if not conn or not _can_access_connector(request, conn):
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if not delete_connector(connector_id, workspace_id=workspace_id):
         raise HTTPException(status_code=404, detail="Connector not found")
     return {"ok": True}
 
@@ -105,9 +178,14 @@ def _sentinel_secret(value: str) -> bool:
 
 
 @router.post("/{connector_id}/test")
-def test_saved_connector(connector_id: str):
-    conn = get_connector(connector_id)
-    if not conn:
+def test_saved_connector(
+    connector_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    workspace_id = _resolve_workspace(request, workspace_id)
+    conn = get_connector(connector_id, workspace_id=workspace_id)
+    if not conn or not _can_access_connector(request, conn):
         raise HTTPException(status_code=404, detail="Connector not found")
 
     if _sentinel_secret(conn.password or "") or _sentinel_secret(conn.connection_string or ""):
@@ -145,7 +223,7 @@ def test_saved_connector(connector_id: str):
     # Persist any auto-resolved auth fields (e.g., MongoDB authSource) so the
     # saved connector works end-to-end without re-entering the connection string.
     if ok and cfg.get("auth_source") and cfg.get("auth_source") != (conn.auth_source or ""):
-        update_connector(connector_id, {"auth_source": cfg.get("auth_source", "")})
+        update_connector(connector_id, {"auth_source": cfg.get("auth_source", "")}, workspace_id=workspace_id)
 
     mark_tested(connector_id, ok)
     return {"success": ok, "message": message, "auth_source": cfg.get("auth_source", "")}

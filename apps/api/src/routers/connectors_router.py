@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -16,8 +16,27 @@ from ..services.mongodb_service import get_mongodb_service
 from ..services.file_parser import FileParser
 from ..transfer.connector_capabilities import resolve_driver_type, get_capabilities
 from ..transfer.connector_registry import CONNECTOR_MODULES, run_probe
+from services.team_store import can_read_workspace, can_write_workspace
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+
+
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
+
+
+def _resolve_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Access to workspace denied")
+    return workspace_id
+
+
+def _require_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return workspace_id
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -56,6 +75,7 @@ class ConnectorResponse(BaseModel):
     database: str
     status: str
     created_at: str
+    workspace_id: str = ""
 
 
 class TestConnectionRequest(BaseModel):
@@ -198,8 +218,13 @@ async def test_connection(request: TestConnectionRequest):
 
 
 @router.post("/", response_model=ConnectorResponse)
-async def create_connector(config: ConnectorConfig):
+async def create_connector(
+    config: ConnectorConfig,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Create and save a new connector configuration (file store + MongoDB when available)."""
+    workspace_id = _require_write_workspace(request, workspace_id)
     connector_data = {
         "name": config.name,
         "type": config.type,
@@ -219,6 +244,7 @@ async def create_connector(config: ConnectorConfig):
         "api_key": config.api_key,
         "service_account": config.service_account,
         "options": config.options,
+        "workspace_id": workspace_id,
         "status": "configured",
     }
 
@@ -240,6 +266,7 @@ async def create_connector(config: ConnectorConfig):
             database=saved.database,
             status="configured",
             created_at=saved.created_at,
+            workspace_id=saved.workspace_id or "",
         )
     except Exception as fs_err:
         pass  # fall through to MongoDB
@@ -260,6 +287,7 @@ async def create_connector(config: ConnectorConfig):
             database=connector["database"],
             status=connector["status"],
             created_at=connector["created_at"].isoformat(),
+            workspace_id=connector.get("workspace_id", ""),
         )
         
     except Exception as e:
@@ -267,16 +295,20 @@ async def create_connector(config: ConnectorConfig):
 
 
 @router.get("/")
-async def list_connectors():
-    """List all saved connectors (file store first, MongoDB fallback)."""
+async def list_connectors(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """List saved connectors scoped to the requested workspace."""
+    workspace_id = _resolve_workspace(request, workspace_id)
     try:
         import sys
         from pathlib import Path
         _api_root = Path(__file__).resolve().parents[2]
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
-        from services.connector_store import list_connectors as fs_list, mask_connector
-        items = fs_list()
+        from services.connector_store import list_connectors as fs_list
+        items = fs_list(workspace_id=workspace_id)
         if items:
             return {
                 "connectors": [
@@ -290,6 +322,7 @@ async def list_connectors():
                         "status": "configured" if c.last_test_ok is True else ("error" if c.last_tested_at and c.last_test_ok is False else "configured"),
                         "created_at": c.created_at,
                         "last_test_ok": c.last_test_ok,
+                        "workspace_id": c.workspace_id or "",
                     }
                     for c in items
                 ],
@@ -313,6 +346,8 @@ async def list_connectors():
 
         result = []
         for c in connectors:
+            if workspace_id and c.get("workspace_id") not in (workspace_id, "", None):
+                continue
             created = c.get("created_at")
             result.append({
                 "id": c["_id"],
@@ -324,10 +359,11 @@ async def list_connectors():
                 "status": _status_from_doc(c),
                 "created_at": created.isoformat() if created and hasattr(created, "isoformat") else created,
                 "last_test_ok": c.get("last_test_ok"),
+                "workspace_id": c.get("workspace_id", ""),
             })
 
         return {"connectors": result, "count": len(result)}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -5,7 +5,26 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.team_store import (
+    add_workspace_member,
+    can_admin_workspace,
+    create_workspace,
+    get_workspace,
+    list_workspace_members,
+    list_workspaces_for_user,
+    remove_workspace_member,
+)
+
 router = APIRouter(prefix="/workspace", tags=["Workspace"])
+
+
+class WorkspaceCreateBody(BaseModel):
+    name: str = Field(default="", max_length=128)
+
+
+class MemberAddBody(BaseModel):
+    email: str = Field(..., max_length=128)
+    role: str = Field(default="viewer", pattern="^(owner|editor|viewer)$")
 
 
 class WorkspaceSettingsBody(BaseModel):
@@ -177,4 +196,63 @@ async def delete_api_key(key_id: str, request: Request):
         level="warn",
         details={"id": key_id},
     )
+    return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Workspace / team management
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.post("/workspaces")
+async def post_workspace(body: WorkspaceCreateBody, request: Request):
+    ws = create_workspace(name=body.name, created_by=_actor(request))
+    return ws.to_dict()
+
+
+@router.get("/workspaces")
+async def get_workspaces(request: Request):
+    return {"workspaces": [ws.to_dict() for ws in list_workspaces_for_user(_actor(request))]}
+
+
+@router.get("/workspaces/{workspace_id}")
+async def get_workspace_by_id(workspace_id: str, request: Request):
+    ws = get_workspace(workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return ws.to_dict()
+
+
+@router.get("/workspaces/{workspace_id}/members")
+async def get_workspace_members_route(workspace_id: str, request: Request):
+    if not can_admin_workspace(workspace_id, _actor(request)) and not any(
+        m["workspace_id"] == workspace_id
+        for m in list_workspace_members(workspace_id)
+        if m["email"] == _actor(request)
+    ):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    return {"members": list_workspace_members(workspace_id)}
+
+
+@router.post("/workspaces/{workspace_id}/members")
+async def post_workspace_member(workspace_id: str, body: MemberAddBody, request: Request):
+    membership = add_workspace_member(
+        workspace_id=workspace_id,
+        email=body.email,
+        role=body.role,
+        added_by=_actor(request),
+    )
+    if not membership:
+        raise HTTPException(status_code=403, detail="Unable to add member")
+    return membership.to_dict()
+
+
+@router.delete("/workspaces/{workspace_id}/members/{email}")
+async def delete_workspace_member(workspace_id: str, email: str, request: Request):
+    if not remove_workspace_member(
+        workspace_id=workspace_id,
+        email=email,
+        removed_by=_actor(request),
+    ):
+        raise HTTPException(status_code=403, detail="Unable to remove member")
     return {"ok": True}

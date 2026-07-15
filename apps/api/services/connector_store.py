@@ -58,6 +58,7 @@ class SavedConnector:
     api_key: str = ""
     service_account: str = ""
     auth_source: str = ""
+    workspace_id: str = ""
     last_tested_at: str | None = None
     last_test_ok: bool | None = None
     created_at: str = field(default_factory=lambda: _now())
@@ -90,6 +91,7 @@ class SavedConnector:
             api_key=data.get("api_key", ""),
             service_account=data.get("service_account", ""),
             auth_source=data.get("auth_source", ""),
+            workspace_id=data.get("workspace_id", ""),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
             created_at=data.get("created_at", _now()),
@@ -240,50 +242,58 @@ def _seed_defaults() -> list[SavedConnector]:
     return defaults
 
 
-def _list_file(role: str | None) -> list[SavedConnector]:
+def _list_file(role: str | None, workspace_id: str | None = None) -> list[SavedConnector]:
     items = _load_all()
+    if workspace_id is not None:
+        items = [c for c in items if c.workspace_id == workspace_id or c.workspace_id == ""]
     if role:
         items = [c for c in items if c.role == role or c.role == "both"]
     return items
 
 
-def _list_mongo(role: str | None) -> list[SavedConnector]:
+def _list_mongo(role: str | None, workspace_id: str | None = None) -> list[SavedConnector]:
     coll = _mongo_collection()
-    query: dict[str, Any] = {}
+    filters: list[dict[str, Any]] = []
     if role:
-        query["$or"] = [{"role": role}, {"role": "both"}]
+        filters.append({"$or": [{"role": role}, {"role": "both"}]})
+    if workspace_id is not None:
+        filters.append({"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]})
+    query = {"$and": filters} if len(filters) > 1 else (filters[0] if filters else {})
     return [_doc_to_connector(c) for c in coll.find(query)]
 
 
-def list_connectors(role: str | None = None) -> list[SavedConnector]:
+def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
     if _use_mongo():
         try:
-            return _list_mongo(role)
+            return _list_mongo(role, workspace_id)
         except Exception as exc:
             logger.warning("MongoDB list_connectors failed, falling back to file: %s", exc)
-    return _list_file(role)
+    return _list_file(role, workspace_id)
 
 
-def _get_file(connector_id: str) -> SavedConnector | None:
+def _get_file(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     for c in _load_all():
-        if c.id == connector_id:
+        if c.id == connector_id and (workspace_id is None or c.workspace_id == workspace_id or c.workspace_id == ""):
             return c
     return None
 
 
-def _get_mongo(connector_id: str) -> SavedConnector | None:
+def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     coll = _mongo_collection()
-    doc = coll.find_one({"_id": connector_id})
+    query: dict[str, Any] = {"_id": connector_id}
+    if workspace_id is not None:
+        query["$or"] = [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]
+    doc = coll.find_one(query)
     return _doc_to_connector(doc) if doc else None
 
 
-def get_connector(connector_id: str) -> SavedConnector | None:
+def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     if _use_mongo():
         try:
-            return _get_mongo(connector_id)
+            return _get_mongo(connector_id, workspace_id)
         except Exception as exc:
             logger.warning("MongoDB get_connector failed, falling back to file: %s", exc)
-    return _get_file(connector_id)
+    return _get_file(connector_id, workspace_id)
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
@@ -306,6 +316,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         api_key=data.get("api_key", ""),
         service_account=data.get("service_account", ""),
         auth_source=data.get("auth_source", ""),
+        workspace_id=data.get("workspace_id", ""),
     )
 
     if _use_mongo():
@@ -322,10 +333,10 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
     return conn
 
 
-def update_connector(connector_id: str, data: dict[str, Any]) -> SavedConnector | None:
+def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
     if _use_mongo():
         try:
-            existing = _get_mongo(connector_id)
+            existing = _get_mongo(connector_id, workspace_id)
             if not existing:
                 return None
             updated = SavedConnector.from_dict({**existing.to_dict(), **data, "id": connector_id})
@@ -339,6 +350,8 @@ def update_connector(connector_id: str, data: dict[str, Any]) -> SavedConnector 
     for i, c in enumerate(connectors):
         if c.id != connector_id:
             continue
+        if workspace_id is not None and c.workspace_id not in (workspace_id, ""):
+            continue
         updated = SavedConnector.from_dict({**c.to_dict(), **data, "id": connector_id})
         connectors[i] = updated
         _save_all(connectors)
@@ -346,18 +359,28 @@ def update_connector(connector_id: str, data: dict[str, Any]) -> SavedConnector 
     return None
 
 
-def delete_connector(connector_id: str) -> bool:
+def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            result = coll.delete_one({"_id": connector_id})
+            query: dict[str, Any] = {"_id": connector_id}
+            if workspace_id is not None:
+                query["$or"] = [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]
+            result = coll.delete_one(query)
             return result.deleted_count > 0
         except Exception as exc:
             logger.warning("MongoDB delete_connector failed, falling back to file: %s", exc)
 
     connectors = _load_all()
-    filtered = [c for c in connectors if c.id != connector_id]
-    if len(filtered) == len(connectors):
+    before = len(connectors)
+    filtered = [
+        c for c in connectors
+        if not (
+            c.id == connector_id
+            and (workspace_id is None or c.workspace_id == workspace_id or c.workspace_id == "")
+        )
+    ]
+    if len(filtered) == before:
         return False
     _save_all(filtered)
     return True
@@ -395,6 +418,7 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
         d["api_key"] = "****"
     if d.get("service_account"):
         d["service_account"] = "****"
+    d.setdefault("workspace_id", "")
     return d
 
 
