@@ -83,6 +83,8 @@ class TransferRequest:
     priority_column: str = ""
     priority_direction: str = "desc"  # "asc" or "desc"
     limit: int = 0  # 0 means no limit
+    # Workspace isolation: transfers and their jobs can be scoped to a workspace.
+    workspace_id: str = ""
     stream_contracts: list[dict] = field(default_factory=list)
     contract_id: str = ""
     enforce_contract: bool = True
@@ -137,6 +139,11 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "schema_policy": request.schema_policy,
         "validation_mode": request.validation_mode,
         "backfill_new_fields": request.backfill_new_fields,
+        "source_filter": request.source_filter,
+        "priority_column": request.priority_column,
+        "priority_direction": request.priority_direction,
+        "limit": request.limit,
+        "workspace_id": request.workspace_id,
         "stream_contracts": request.stream_contracts,
         "contract_id": request.contract_id,
         "enforce_contract": request.enforce_contract,
@@ -163,6 +170,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),
         limit=int(data.get("limit") or 0),
+        workspace_id=(data.get("workspace_id") or "").strip(),
         stream_contracts=data.get("stream_contracts") or [],
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),

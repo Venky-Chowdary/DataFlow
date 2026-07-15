@@ -1677,6 +1677,7 @@ class UniversalTransferEngine:
             "progress_pct": 0,
             "phase": "queued",
             "message": "Transfer queued",
+            "workspace_id": request.workspace_id or "",
             "transfer_request": transfer_request_to_dict(request),
             "retry_of": None,
         })
