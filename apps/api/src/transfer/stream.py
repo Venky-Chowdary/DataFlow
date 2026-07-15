@@ -300,6 +300,7 @@ def _read_batch(
             table=table,
             limit=limit,
             offset=offset,
+            known_total_rows=known_total_rows,
         )
     if resolve_driver_type(src_type) == "generic_sql":
         from connectors.generic_sql import read_table_batch, read_table_cursor_batch
