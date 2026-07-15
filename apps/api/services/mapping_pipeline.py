@@ -172,6 +172,7 @@ def run_mapping_pipeline(
     source_samples: dict[str, list[str]] | None = None,
     validation_mode: str = "strict",
     destination_db_type: str = "",
+    schema_policy: str = "manual_review",
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -327,6 +328,7 @@ def run_mapping_pipeline(
         enriched_mappings,
         source_types={s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])},
         target_types={s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])},
+        schema_policy=schema_policy,
     )
     if coercion_issues:
         quality_issues = [*quality_issues, *[c["message"] for c in coercion_issues if c.get("severity") == "block"]]

@@ -268,6 +268,7 @@ def _auto_map(
                         source_samples=source_samples,
                         validation_mode=request.validation_mode,
                         use_llm=False,
+                        schema_policy=request.schema_policy,
                     )
                     auto = result.get("mappings")
                     if auto and isinstance(auto, list) and any(m.get("source") for m in auto):

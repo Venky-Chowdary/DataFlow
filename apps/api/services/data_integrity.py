@@ -56,6 +56,7 @@ def _check_coercion_safety(
     target_types: dict[str, str],
     *,
     dest_kind: str = "",
+    schema_policy: str = "manual_review",
 ) -> dict[str, Any]:
     from services.type_coercion_validator import coerce_blocks_transfer, validate_mapping_coercions
 
@@ -63,6 +64,7 @@ def _check_coercion_safety(
         mappings,
         source_types=source_types,
         target_types=target_types,
+        schema_policy=schema_policy,
     )
     schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
     if schemaless:
@@ -366,6 +368,7 @@ def run_integrity_audit(
     destination_db_type: str = "",
     sample_rows: list[dict] | None = None,
     validation_mode: str = "strict",
+    schema_policy: str = "manual_review",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -418,7 +421,7 @@ def run_integrity_audit(
     checks: list[dict[str, Any]] = []
 
     if mappings:
-        checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind))
+        checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind, schema_policy=schema_policy))
         checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind))

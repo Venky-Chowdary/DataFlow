@@ -12,8 +12,16 @@ def validate_mapping_coercions(
     *,
     source_types: dict[str, str],
     target_types: dict[str, str],
+    schema_policy: str = "manual_review",
 ) -> list[dict[str, Any]]:
-    """Return structured coercion issues for each mapping pair."""
+    """Return structured coercion issues for each mapping pair.
+
+    When ``schema_policy`` is ``type_locked`` the target type is treated as
+    immutable: any logical type change is a hard blocker, regardless of
+    confidence or whether the coercion is usually lossy. This prevents silent
+    data loss from schema drift.
+    """
+    type_locked = (schema_policy or "").lower() == "type_locked"
     issues: list[dict[str, Any]] = []
     for m in mappings:
         src = m.get("source", "")
@@ -25,7 +33,10 @@ def validate_mapping_coercions(
         if src_logical == tgt_logical:
             continue
         lossy = is_lossy_coercion(src_type, tgt_type)
-        severity = "block" if lossy and float(m.get("confidence", 0)) < 0.85 else "warn"
+        if type_locked:
+            severity = "block"
+        else:
+            severity = "block" if lossy and float(m.get("confidence", 0)) < 0.85 else "warn"
         issues.append({
             "source": src,
             "target": tgt,

@@ -191,6 +191,7 @@ async def map_columns_route(body: MapColumnsRequest):
         use_llm=body.use_llm,
         source_samples=body.source_samples or None,
         validation_mode=body.validation_mode,
+        schema_policy=getattr(body, "schema_policy", "manual_review"),
     )
     nested_fields: list[dict[str, str]] = []
     try:
