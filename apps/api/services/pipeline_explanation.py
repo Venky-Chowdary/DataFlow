@@ -88,6 +88,12 @@ def build_pipeline_explanation(
             for note in plan_notes[:5]:
                 lines.append(f"  • {note}")
 
+    warnings = destination_summary.get("warnings") if destination_summary else None
+    if warnings:
+        lines.append("Data-quality / pipeline warnings:")
+        for w in warnings[:5]:
+            lines.append(f"  • {w}")
+
     if error:
         lines.append(f"Error: {error}")
 
