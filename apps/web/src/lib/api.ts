@@ -1024,6 +1024,7 @@ export async function runUniversalTransfer(options: {
   destUsername?: string;
   destPassword?: string;
   destConnectionString?: string;
+  destOutputPath?: string;
   destWarehouse?: string;
   destAuthSource?: string;
   skipPreflight?: boolean;
@@ -1067,6 +1068,7 @@ export async function runUniversalTransfer(options: {
   if (options.destUsername) formData.append("dest_username", options.destUsername);
   if (options.destPassword) formData.append("dest_password", options.destPassword);
   if (options.destConnectionString) formData.append("dest_connection_string", options.destConnectionString);
+  if (options.destOutputPath) formData.append("dest_output_path", options.destOutputPath);
   if (options.destWarehouse) formData.append("dest_warehouse", options.destWarehouse);
   if (options.destAuthSource) formData.append("dest_auth_source", options.destAuthSource);
   if (options.mappings?.length) {

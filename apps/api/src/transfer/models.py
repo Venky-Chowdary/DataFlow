@@ -27,6 +27,10 @@ class EndpointConfig:
     auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
+    # For file_export destinations: a server-local path to write the export file.
+    # If empty, the file is written to the configured exports directory and a
+    # download URL is returned.
+    output_path: str = ""
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -52,11 +56,13 @@ class EndpointConfig:
             auth_source=d.get("auth_source", ""),
             api_key=d.get("api_key", ""),
             service_account=d.get("service_account", ""),
+            output_path=(d.get("output_path") or "").strip(),
             extra={k: v for k, v in d.items() if k not in {
                 "format", "type", "db_type", "connector_id", "host", "port",
                 "database", "schema", "table", "table_name", "collection",
                 "collection_name", "username", "password", "connection_string",
                 "warehouse", "ssl", "auth_mode", "auth_role", "auth_source", "api_key", "service_account",
+                "output_path",
             }},
         )
 
@@ -124,6 +130,7 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "auth_source": ep.auth_source,
         "api_key": ep.api_key,
         "service_account": ep.service_account,
+        "output_path": ep.output_path,
     }
 
 

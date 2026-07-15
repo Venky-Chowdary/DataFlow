@@ -439,6 +439,7 @@ async def run_universal_transfer(
     dest_username: str = Form(""),
     dest_password: str = Form(""),
     dest_connection_string: str = Form(""),
+    dest_output_path: str = Form(""),
     dest_warehouse: str = Form(""),
     dest_auth_source: str = Form(""),
     source_connector_id: Optional[str] = Form(None),
@@ -519,6 +520,7 @@ async def run_universal_transfer(
         username=dest_username,
         password=dest_password,
         connection_string=dest_connection_string,
+        output_path=dest_output_path,
         warehouse=dest_warehouse,
         auth_source=dest_auth_source,
     )
