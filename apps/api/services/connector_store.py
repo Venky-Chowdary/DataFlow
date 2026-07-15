@@ -23,6 +23,18 @@ STORE_PATH = data_dir() / "connectors.json"
 
 logger = logging.getLogger(__name__)
 
+
+def _store_path() -> Path:
+    """Return the effective file store path.
+
+    ``DATAFLOW_CONNECTOR_STORE`` overrides the default so deployments can mount
+    a persistent volume at a known location.
+    """
+    env = os.getenv("DATAFLOW_CONNECTOR_STORE", "").strip()
+    if env:
+        return Path(env)
+    return STORE_PATH
+
 _backend_choice: str | None = None
 
 
@@ -163,10 +175,11 @@ def _load_all() -> list[SavedConnector]:
         except Exception as exc:
             logger.warning("MongoDB connector load failed, falling back to file: %s", exc)
 
-    if not STORE_PATH.exists():
+    store_path = _store_path()
+    if not store_path.exists():
         return _seed_defaults() if _seed_enabled() else []
     try:
-        raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(store_path.read_text(encoding="utf-8"))
         items = [SavedConnector.from_dict(c) for c in raw.get("connectors", [])]
     except Exception:
         return _seed_defaults() if _seed_enabled() else []
@@ -176,7 +189,8 @@ def _load_all() -> list[SavedConnector]:
 
 
 def _save_all(connectors: list[SavedConnector]) -> None:
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    store_path = _store_path()
+    store_path.parent.mkdir(parents=True, exist_ok=True)
     payload = []
     for c in connectors:
         d = c.to_dict()
@@ -185,10 +199,11 @@ def _save_all(connectors: list[SavedConnector]) -> None:
         if d.get("connection_string"):
             d["connection_string"] = encrypt_secret(d["connection_string"])
         payload.append(d)
-    STORE_PATH.write_text(
-        json.dumps({"connectors": payload}, indent=2),
-        encoding="utf-8",
-    )
+    text = json.dumps({"connectors": payload}, indent=2)
+    # Atomic write so a crash mid-write cannot leave a half-written file.
+    tmp = store_path.with_suffix(store_path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(store_path)
 
 
 def _seed_enabled() -> bool:
