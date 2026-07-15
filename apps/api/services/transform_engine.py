@@ -29,21 +29,35 @@ _DATE_LIKE_RE = re.compile(
 
 DATE_PATTERNS = (
     "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+    "%Y%m%d",
     "%m/%d/%Y",
     "%d/%m/%Y",
-    "%Y/%m/%d",
+    "%m/%d/%y",
+    "%d/%m/%y",
     "%m-%d-%Y",
     "%d-%m-%Y",
-    "%Y%m%d",
+    "%m-%d-%y",
+    "%d-%m-%y",
+    "%m.%d.%Y",
     "%d.%m.%Y",
-    "%Y.%m.%d",
+    "%m.%d.%y",
+    "%d.%m.%y",
     "%d-%b-%Y",
+    "%d-%b-%y",
     "%d-%B-%Y",
+    "%d-%B-%y",
     "%b %d, %Y",
+    "%b %d, %y",
     "%B %d, %Y",
+    "%B %d, %y",
     "%d %b %Y",
+    "%d %b %y",
     "%d %B %Y",
+    "%d %B %y",
     "%Y-%b-%d",
+    "%y-%b-%d",
 )
 
 # Additional patterns that represent a full date but may contain time.
@@ -62,13 +76,25 @@ DATE_WITH_TIME_PATTERNS = (
     "%Y/%m/%d %H:%M:%S",
     "%m/%d/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M:%S",
+    "%m/%d/%y %H:%M:%S",
+    "%d/%m/%y %H:%M:%S",
     "%m-%d-%Y %H:%M:%S",
     "%d-%m-%Y %H:%M:%S",
+    "%m-%d-%y %H:%M:%S",
+    "%d-%m-%y %H:%M:%S",
+    "%m.%d.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M:%S",
+    "%m.%d.%y %H:%M:%S",
+    "%d.%m.%y %H:%M:%S",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d %I:%M:%S %p",
     "%Y-%m-%d %I:%M %p",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m-%d-%Y %I:%M %p",
     "%d-%b-%Y %H:%M:%S",
+    "%d-%b-%y %H:%M:%S",
     "%d-%B-%Y %H:%M:%S",
+    "%d-%B-%y %H:%M:%S",
 )
 
 DATETIME_PATTERNS = (
@@ -76,19 +102,31 @@ DATETIME_PATTERNS = (
     "%Y-%m-%d %H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%dT%H:%M:%SZ",
-    "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S.%f%z",
     "%Y/%m/%d %H:%M:%S",
     "%m/%d/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M:%S",
+    "%m/%d/%y %H:%M:%S",
+    "%d/%m/%y %H:%M:%S",
     "%m-%d-%Y %H:%M:%S",
     "%d-%m-%Y %H:%M:%S",
+    "%m-%d-%y %H:%M:%S",
+    "%d-%m-%y %H:%M:%S",
+    "%m.%d.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M:%S",
+    "%m.%d.%y %H:%M:%S",
+    "%d.%m.%y %H:%M:%S",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d %I:%M:%S %p",
     "%Y-%m-%d %I:%M %p",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m-%d-%Y %I:%M %p",
     "%d-%b-%Y %H:%M:%S",
+    "%d-%b-%y %H:%M:%S",
     "%d-%B-%Y %H:%M:%S",
+    "%d-%B-%y %H:%M:%S",
 )
 
 # Values that are unambiguously empty/missing for non-string types.
@@ -140,12 +178,12 @@ def _to_utc_z(dt: datetime) -> str:
 def _detect_dayfirst(text: str) -> bool | None:
     """Return True for day-first ordering, False for month-first, or None if ambiguous.
 
-    Looks at the first two numeric fields of slash/dash-delimited dates.  A value
-    like 31/12/2024 is unambiguously day-first; 12/31/2024 is month-first.  When
-    both fields are <= 12 we keep the default (month-first) to stay compatible
-    with existing data.
+    Looks at the first two numeric fields of slash/dash/dot-delimited dates.
+    A value like 31/12/2024 or 31.12.2024 is unambiguously day-first;
+    12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 we keep
+    the default (month-first) to stay compatible with existing data.
     """
-    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?:[ T].*)?$", text)
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text)
     if not m:
         return None
     first, second = int(m.group(1)), int(m.group(2))
@@ -157,11 +195,17 @@ def _detect_dayfirst(text: str) -> bool | None:
 
 
 def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
-    """Move the most likely day/month ordering patterns to the front."""
+    """Move the most likely day/month ordering patterns to the front.
+
+    Year-first patterns only use 4-digit years (`%Y`).  Two-digit year-last
+    patterns (`%m/%d/%y`, `%d/%m/%y`, etc.) are grouped with their leading
+    month/day letter so that day-first vs month-first disambiguation works
+    correctly and two-digit years cannot be mistaken for the first field.
+    """
     dayfirst = _detect_dayfirst(text)
     if dayfirst is None:
         return list(patterns)
-    year_first = [p for p in patterns if p.startswith(("%Y", "%y"))]
+    year_first = [p for p in patterns if p.startswith("%Y")]
     day_first = [p for p in patterns if p.startswith("%d")]
     month_first = [p for p in patterns if p.startswith("%m")]
     if dayfirst:

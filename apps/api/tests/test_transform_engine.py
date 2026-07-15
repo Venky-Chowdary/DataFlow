@@ -1,5 +1,7 @@
 """Transform engine unit tests."""
 
+import pytest
+
 from services.transform_engine import apply_transform, dry_run_sample, infer_transform
 
 
@@ -94,4 +96,45 @@ def test_unknown_transform_fails_closed():
     val, err = apply_transform("hello", "bogus_transform")
     assert val is None
     assert "Unknown transform" in err
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("12/31/2024", "2024-12-31"),
+        ("12-31-2024", "2024-12-31"),
+        ("12.31.2024", "2024-12-31"),
+        ("12/31/24", "2024-12-31"),
+        ("12-31-24", "2024-12-31"),
+        ("31/12/2024", "2024-12-31"),
+        ("31-12-2024", "2024-12-31"),
+        ("31.12.2024", "2024-12-31"),
+        ("31/12/24", "2024-12-31"),
+        ("31-12-24", "2024-12-31"),
+        ("2024/12/31", "2024-12-31"),
+        ("2024-12-31", "2024-12-31"),
+        ("2024.12.31", "2024-12-31"),
+    ],
+)
+def test_apply_date_handles_various_separators_and_two_digit_years(text, expected):
+    val, err = apply_transform(text, "date")
+    assert err is None, f"{text!r} failed: {err}"
+    assert val == expected, f"{text!r} -> {val!r}, expected {expected!r}"
+
+
+def test_apply_datetime_with_mixed_format_and_two_digit_year():
+    val, err = apply_transform("12-31-24 14:30:00", "datetime")
+    assert err is None
+    assert val == "2024-12-31T14:30:00Z"
+
+
+def test_apply_date_reconciles_same_value_across_formats():
+    """Different source string formats for the same day must normalize identically."""
+    values = []
+    for text in ["12/31/2024", "12-31-2024", "31-12-2024", "2024-12-31", "2024/12/31", "12.31.2024", "31.12.2024", "12-31-24", "31-12-24"]:
+        val, err = apply_transform(text, "date")
+        assert err is None
+        values.append(val)
+    assert len(set(values)) == 1
+    assert values[0] == "2024-12-31"
 
