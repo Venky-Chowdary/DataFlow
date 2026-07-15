@@ -8,7 +8,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import date as _date, datetime as _datetime, time as _time, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 from services.transform_engine import _DATE_LIKE_RE, _parse_date, _parse_datetime, apply_transform
 
@@ -39,6 +39,51 @@ def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:
     return None
 
 
+def _iter_fingerprints(
+    rows: Iterable[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+):
+    """Yield (row_key, fingerprint) tuples for each row without materializing the full list."""
+    if columns is not None:
+        cols = columns
+        for row in rows:
+            if isinstance(row, dict):
+                rec: dict[str, Any] = {c: row.get(c) for c in cols}
+            else:
+                rec = {c: row[i] if i < len(row) else None for i, c in enumerate(cols)}
+            parts = [
+                f"{c.lower()}={normalize_cell(rec.get(c))}"
+                for c in sorted(cols, key=lambda x: x.lower())
+            ]
+            fingerprint = "\x1f".join(parts)
+            row_key = normalize_cell(_get_case_insensitive(rec, sort_key)) if sort_key else ""
+            yield (row_key, fingerprint)
+    else:
+        for row in rows:
+            if isinstance(row, dict):
+                rec = {k: row.get(k) for k in sorted(row.keys())}
+                parts = [
+                    f"{k.lower()}={normalize_cell(v)}"
+                    for k, v in sorted(rec.items(), key=lambda item: item[0].lower())
+                ]
+                fingerprint = "\x1f".join(parts)
+                row_key = normalize_cell(_get_case_insensitive(row, sort_key)) if sort_key else ""
+            else:
+                fingerprint = "|".join(sorted(normalize_cell(v) for v in row))
+                row_key = ""
+            yield (row_key, fingerprint)
+
+
+def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
+    fingerprints.sort(key=lambda x: (x[0], x[1]))
+    h = hashlib.sha256()
+    for _, fp in fingerprints:
+        h.update(fp.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def canonical_checksum(
     rows: list[Any],
     columns: list[str] | None = None,
@@ -55,46 +100,27 @@ def canonical_checksum(
     """
     if not rows:
         return hashlib.sha256(b"").hexdigest()[:16]
+    return _hash_fingerprints(list(_iter_fingerprints(rows, columns, sort_key=sort_key)))
 
+
+def canonical_checksum_from_iter(
+    rows: Iterable[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+    limit: int = 0,
+) -> str:
+    """Streaming variant of canonical_checksum with optional sample limit.
+
+    Reads rows lazily, collects fingerprints, and hashes them after sorting.
+    A limit of 0 means process all rows.
+    """
     fingerprints: list[tuple[str, str]] = []
-    if columns is not None:
-        cols = columns
-        for row in rows:
-            if isinstance(row, dict):
-                rec: dict[str, Any] = {c: row.get(c) for c in cols}
-            else:
-                rec = {c: row[i] if i < len(row) else None for i, c in enumerate(cols)}
-            # Sort column names so the fingerprint is order-independent while
-            # preserving column identity (swapped columns cannot collide).
-            # Lowercase the label to avoid false mismatches across engines that
-            # return upper- or mixed-case column names for the same semantic field.
-            parts = [
-                f"{c.lower()}={normalize_cell(rec.get(c))}"
-                for c in sorted(cols, key=lambda x: x.lower())
-            ]
-            fingerprint = "\x1f".join(parts)
-            row_key = normalize_cell(_get_case_insensitive(rec, sort_key)) if sort_key else ""
-            fingerprints.append((row_key, fingerprint))
-    else:
-        for row in rows:
-            if isinstance(row, dict):
-                rec = {k: row.get(k) for k in sorted(row.keys())}
-                parts = [
-                    f"{k.lower()}={normalize_cell(v)}"
-                    for k, v in sorted(rec.items(), key=lambda item: item[0].lower())
-                ]
-                fingerprint = "\x1f".join(parts)
-                row_key = normalize_cell(_get_case_insensitive(row, sort_key)) if sort_key else ""
-            else:
-                fingerprint = "|".join(sorted(normalize_cell(v) for v in row))
-                row_key = ""
-            fingerprints.append((row_key, fingerprint))
-
-    fingerprints.sort(key=lambda x: (x[0], x[1]))
-    h = hashlib.sha256()
-    for _, fp in fingerprints:
-        h.update(fp.encode("utf-8"))
-    return h.hexdigest()[:16]
+    for i, (row_key, fp) in enumerate(_iter_fingerprints(rows, columns, sort_key=sort_key)):
+        if limit and i >= limit:
+            break
+        fingerprints.append((row_key, fp))
+    return _hash_fingerprints(fingerprints)
 
 
 def checksum_rows(rows: list[Any], columns: list[str] | None = None) -> str:
@@ -214,6 +240,16 @@ def reconcile(
     )
 
 
+def _iter_fetchmany(cur, batch_size: int = 5000):
+    """Yield rows from a DBAPI cursor without loading the full result set."""
+    while True:
+        rows = cur.fetchmany(batch_size)
+        if not rows:
+            break
+        for row in rows:
+            yield row
+
+
 def verify_postgres_table(
     *,
     host: str,
@@ -226,9 +262,9 @@ def verify_postgres_table(
     ssl: bool,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     try:
-        import psycopg2
         from connectors.postgresql_conn import get_connection
 
         conn = get_connection(
@@ -243,12 +279,12 @@ def verify_postgres_table(
         with conn.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{table_name}"')
             count = int(cur.fetchone()[0])
-            cur.execute(f'SELECT * FROM "{schema}"."{table_name}" ORDER BY 1 LIMIT 5000')
-            rows = cur.fetchall()
+            cur.execute(f'SELECT * FROM "{schema}"."{table_name}"')
             names = [d[0] for d in cur.description] if cur.description else []
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
         conn.close()
-        columns = names or target_columns or []
-        return count, checksum_rows(rows, columns)
+        return count, checksum
     except Exception:
         return -1, ""
 
@@ -264,6 +300,7 @@ def verify_snowflake_table(
     warehouse: str,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     try:
         from connectors.snowflake_conn import get_connection, normalize_account
@@ -285,12 +322,12 @@ def verify_snowflake_table(
                     pass
             cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
             count = int(cur.fetchone()[0])
-            cur.execute(f'SELECT * FROM "{table_name}" ORDER BY 1 LIMIT 5000')
-            rows = cur.fetchall()
+            cur.execute(f'SELECT * FROM "{table_name}"')
             names = [d[0] for d in cur.description] if cur.description else []
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
         conn.close()
-        columns = names or target_columns or []
-        return count, checksum_rows(rows, columns)
+        return count, checksum
     except Exception:
         return -1, ""
 
@@ -306,6 +343,7 @@ def verify_mysql_table(
     ssl: bool,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     try:
         from connectors.mysql_conn import get_connection
@@ -318,12 +356,12 @@ def verify_mysql_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{table_name}`")
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM `{table_name}` ORDER BY 1 LIMIT 5000")
-            rows = cur.fetchall()
+            cur.execute(f"SELECT * FROM `{table_name}`")
             names = [d[0] for d in cur.description] if cur.description else []
+            columns = names or target_columns or []
+            checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
         conn.close()
-        columns = names or target_columns or []
-        return count, checksum_rows(rows, columns)
+        return count, checksum
     except Exception:
         return -1, ""
 
@@ -335,6 +373,7 @@ def verify_bigquery_table(
     connection_string: str,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     try:
         from connectors.bigquery_conn import get_client
@@ -343,11 +382,18 @@ def verify_bigquery_table(
         table_id = f"{project_id}.{dataset_id}.{table_name}"
         table = client.get_table(table_id)
         count = table.num_rows or 0
-        rows = list(client.list_rows(table_id, max_results=5000))
         field_names = [field.name for field in table.schema] if table.schema else []
-        row_values = [list(row.values()) if hasattr(row, "values") else list(row) for row in rows]
         columns = field_names or target_columns or []
-        return int(count), checksum_rows(row_values, columns)
+
+        def _row_iter():
+            yielded = 0
+            for row in client.list_rows(table_id):
+                if limit and yielded >= limit:
+                    break
+                yield list(row.values()) if hasattr(row, "values") else list(row)
+                yielded += 1
+
+        return int(count), canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
     except Exception:
         return -1, ""
 
@@ -407,6 +453,7 @@ def verify_s3_object(
     connection_string: str,
     ssl: bool,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile an S3 object by downloading and parsing its contents."""
     try:
@@ -426,7 +473,7 @@ def verify_s3_object(
         body = obj["Body"].read()
         rows, headers = _rows_from_object_bytes(body, key, target_columns)
         columns = headers or target_columns or []
-        return len(rows), checksum_rows(rows, columns)
+        return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
     except Exception:
         return -1, ""
 
@@ -439,6 +486,7 @@ def verify_gcs_blob(
     port: int,
     connection_string: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile a GCS blob by downloading and parsing its contents."""
     try:
@@ -454,7 +502,7 @@ def verify_gcs_blob(
         body = blob.download_as_bytes()
         rows, headers = _rows_from_object_bytes(body, key, target_columns)
         columns = headers or target_columns or []
-        return len(rows), checksum_rows(rows, columns)
+        return len(rows), canonical_checksum_from_iter(rows, columns, limit=limit)
     except Exception:
         return -1, ""
 
@@ -465,6 +513,7 @@ def verify_sqlite_table(
     database: str,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile a SQLite target by reading the local file."""
     try:
@@ -477,12 +526,12 @@ def verify_sqlite_table(
         cur = conn.cursor()
         cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
         count = cur.fetchone()[0]
-        cur.execute(f'SELECT * FROM "{table_name}" LIMIT 5000')
-        rows = cur.fetchall()
+        cur.execute(f'SELECT * FROM "{table_name}"')
         names = [d[0] for d in cur.description] if cur.description else []
-        conn.close()
         columns = names or target_columns or []
-        return int(count), checksum_rows(rows, columns)
+        checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+        conn.close()
+        return int(count), checksum
     except Exception:
         return -1, ""
 
@@ -493,6 +542,7 @@ def verify_duckdb_table(
     database: str,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile a DuckDB target by reading the local file."""
     try:
@@ -503,11 +553,12 @@ def verify_duckdb_table(
             return -1, ""
         conn = duckdb.connect(str(path))
         count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-        rows = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 5000').fetchall()
-        names = [d[0] for d in conn.description] if conn.description else []
-        conn.close()
+        cur = conn.execute(f'SELECT * FROM "{table_name}"')
+        names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
-        return int(count), checksum_rows(rows, columns)
+        checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
+        conn.close()
+        return int(count), checksum
     except Exception:
         return -1, ""
 
@@ -518,6 +569,7 @@ def verify_mongodb_collection(
     database: str,
     table_name: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
@@ -529,10 +581,21 @@ def verify_mongodb_collection(
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
-        rows = list(coll.find({}).limit(5000))
+
+        def _doc_iter():
+            yielded = 0
+            for doc in coll.find({}):
+                if limit and yielded >= limit:
+                    break
+                yield doc
+                yielded += 1
+
+        columns = target_columns or sorted(
+            set(k for doc in coll.find({}).limit(100) for k in doc.keys())
+        )
+        checksum = canonical_checksum_from_iter(_doc_iter(), columns, limit=limit)
         client.close()
-        columns = target_columns or sorted(set(k for doc in rows for k in doc.keys()))
-        return int(count), checksum_rows(rows, columns)
+        return int(count), checksum
     except Exception:
         return -1, ""
 
@@ -545,6 +608,7 @@ def verify_dynamodb_table(
     username: str = "local",
     password: str = "local",
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile a DynamoDB target by Scan count and item fingerprint."""
     try:
@@ -565,13 +629,18 @@ def verify_dynamodb_table(
         ))
 
         deserializer = TypeDeserializer()
-        rows: list[dict[str, Any]] = []
-        for page in paginator.paginate(TableName=table_name, Limit=5000):
-            for item in page.get("Items", []):
-                rows.append({k: deserializer.deserialize(v) for k, v in item.items()})
 
-        columns = target_columns or sorted(set(k for r in rows for k in r.keys()))
-        return int(count), checksum_rows(rows, columns)
+        def _item_iter():
+            yielded = 0
+            for page in paginator.paginate(TableName=table_name):
+                for item in page.get("Items", []):
+                    if limit and yielded >= limit:
+                        break
+                    yield {k: deserializer.deserialize(v) for k, v in item.items()}
+                    yielded += 1
+
+        columns = target_columns or []
+        return int(count), canonical_checksum_from_iter(_item_iter(), columns, limit=limit)
     except Exception:
         return -1, ""
 
@@ -585,6 +654,7 @@ def verify_target(
     fallback_rows: int,
     fallback_checksum: str,
     target_columns: list[str] | None = None,
+    limit: int = 0,
 ) -> tuple[int, str]:
     if db_type == "mongodb":
         count, chk = verify_mongodb_collection(
@@ -592,6 +662,7 @@ def verify_target(
             database=dest.get("database", ""),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "dynamodb":
         from connectors.aws_common import resolve_endpoint_url
@@ -604,6 +675,7 @@ def verify_target(
             username=dest.get("username", "local"),
             password=dest.get("password", "local"),
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "sqlite":
         count, chk = verify_sqlite_table(
@@ -611,6 +683,7 @@ def verify_target(
             database=dest.get("database", ""),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "duckdb":
         count, chk = verify_duckdb_table(
@@ -618,6 +691,7 @@ def verify_target(
             database=dest.get("database", ""),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "postgresql":
         count, chk = verify_postgres_table(
@@ -631,6 +705,7 @@ def verify_target(
             ssl=dest.get("ssl", True),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "snowflake":
         count, chk = verify_snowflake_table(
@@ -643,6 +718,7 @@ def verify_target(
             warehouse=dest.get("warehouse", ""),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "mysql":
         count, chk = verify_mysql_table(
@@ -655,6 +731,7 @@ def verify_target(
             ssl=dest.get("ssl", False),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
@@ -663,6 +740,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             table_name=table_name,
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "s3":
         count, chk = verify_s3_object(
@@ -675,6 +753,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             ssl=bool(dest.get("ssl", False)),
             target_columns=target_columns,
+            limit=limit,
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -684,6 +763,7 @@ def verify_target(
             port=int(dest.get("port", 0)),
             connection_string=dest.get("connection_string", ""),
             target_columns=target_columns,
+            limit=limit,
         )
     else:
         count, chk = -1, ""

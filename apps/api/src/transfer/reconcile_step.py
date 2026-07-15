@@ -113,6 +113,8 @@ def run_reconciliation(
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
+    # Strict/maximum modes verify the whole target table; balanced samples 5000 rows.
+    checksum_limit = 0 if validation_mode in ("strict", "maximum") else 5000
     target_rows, target_checksum = verify_target(
         db_type,
         cfg,
@@ -121,6 +123,7 @@ def run_reconciliation(
         fallback_rows=-1,
         fallback_checksum="",
         target_columns=target_cols,
+        limit=checksum_limit,
     )
 
     strict_checksum = validation_mode in ("strict", "maximum")
