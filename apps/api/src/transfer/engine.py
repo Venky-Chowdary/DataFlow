@@ -639,14 +639,15 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
                 explanation=explanation,
             )
-            try:
-                samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
-                schedule_training_on_transfer(
-                    request.source_filename or dest_summary.get("table", "transfer"),
-                    columns, len(records), samples,
-                )
-            except Exception:
-                pass
+            if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
+                try:
+                    samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
+                    schedule_training_on_transfer(
+                        request.source_filename or dest_summary.get("table", "transfer"),
+                        columns, len(records), samples,
+                    )
+                except Exception:
+                    pass
 
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,

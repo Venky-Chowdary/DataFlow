@@ -18,10 +18,12 @@ from .type_mapper import ddl_type, normalize_inferred
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
+    from services.parallel_chunks import OrderedChunkRunner
     from services.resilience import adaptive_chunk_size
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
+    from src.services.parallel_chunks import OrderedChunkRunner
     from src.services.resilience import adaptive_chunk_size
 
 _api_root = Path(__file__).resolve().parents[2]
@@ -367,11 +369,25 @@ def stream_file_to_database(
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
         from src.services.data_quality import run_integrity_audit  # noqa: E402
 
-    for batch in batch_iter:
+    max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
+    if dest_type == "sqlite":
+        max_workers = 1
+
+    def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         if not batch:
-            continue
-        chunk_idx += 1
+            return {
+                "batch_written": 0,
+                "last_checksum": "",
+                "dest_summary": {},
+                "fingerprints": [],
+                "rejected": 0,
+                "warnings": [],
+                "rejected_details": [],
+                "batch_rows": 0,
+            }
         headers, data_rows = records_to_matrix(batch, columns)
+        local_warnings: list[str] = []
 
         # Per-batch data-quality / anomaly gate.
         if batch_quality_enabled:
@@ -383,11 +399,11 @@ def stream_file_to_database(
                 validation_mode=validation_mode,
             )
             if audit.issues:
-                warning_samples.extend(audit.issues[:10])
+                local_warnings.extend(audit.issues[:10])
             if audit.warnings:
-                warning_samples.extend(audit.warnings[:10])
+                local_warnings.extend(audit.warnings[:10])
             if not audit.passed:
-                raise ValueError(f"Batch {chunk_idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+                raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
 
         # Compute source fingerprints from the mapped batch without materializing
         # the whole file.  This replaces the final FileParser.parse() pass.
@@ -400,8 +416,7 @@ def stream_file_to_database(
             error_policy="quarantine",
             preserve_case=True,
         )
-        if mapped_rows:
-            fp_accumulator.add_many(row_fingerprints(mapped_rows, target_cols))
+        fingerprints = row_fingerprints(mapped_rows, target_cols) if mapped_rows else []
 
         write_op = partial(
             _write_batch,
@@ -413,29 +428,70 @@ def stream_file_to_database(
             data_rows,
             mappings,
             column_types,
-            create_table=(chunk_idx == 1),
-            on_checkpoint=on_checkpoint,
-            chunk_idx=chunk_idx,
+            create_table=(idx == first_index),
+            on_checkpoint=None,
+            chunk_idx=idx,
             total_chunks=chunks,
-            rows_so_far=written,
+            rows_so_far=0,
             write_mode=write_mode,
             conflict_columns=pk_target_cols,
             backfill_new_fields=backfill_new_fields,
         )
-        batch_written, last_checksum, dest_summary = with_retry(write_op, budget=retry)
-        written += batch_written
-        rejected_total += int(dest_summary.get("rejected_rows", 0) or 0)
-        warning_samples.extend(dest_summary.get("warnings", []) or [])
-        rejected_details.extend(dest_summary.get("rejected_details", []) or [])
+        batch_written, last_checksum, dest_summary = with_retry(
+            write_op,
+            budget=RetryBudget(
+                max_attempts=retry.max_attempts,
+                base_delay_seconds=retry.base_delay_seconds,
+                max_delay_seconds=retry.max_delay_seconds,
+                exponential_base=retry.exponential_base,
+                jitter=retry.jitter,
+            ),
+        )
+        return {
+            "batch_written": batch_written,
+            "last_checksum": last_checksum,
+            "dest_summary": dest_summary,
+            "fingerprints": fingerprints,
+            "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
+            "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
+            "rejected_details": (dest_summary.get("rejected_details") or [])[:200],
+            "batch_rows": len(data_rows),
+        }
 
-        checkpoint.chunk_index = chunk_idx
+    first_index = chunk_idx + 1
+    batch_enum = enumerate(batch_iter, start=first_index)
+
+    def _apply_file_result(idx: int, result: dict[str, Any]) -> None:
+        nonlocal written, rejected_total, last_checksum
+        if result["fingerprints"]:
+            fp_accumulator.add_many(result["fingerprints"])
+        written += result["batch_written"]
+        rejected_total += result["rejected"]
+        warning_samples.extend(result["warnings"])
+        rejected_details.extend(result["rejected_details"])
+        last_checksum = result["last_checksum"] or last_checksum
+
+        checkpoint.chunk_index = idx
         checkpoint.rows_processed = written
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         checkpoint.status = "running"
         checkpoint_service.save(checkpoint)
         if on_checkpoint:
-            on_checkpoint(chunk_idx, chunks, written, checkpoint.to_dict())
+            on_checkpoint(idx, chunks, written, checkpoint.to_dict())
+
+    try:
+        first_idx, first_batch = next(batch_enum)
+    except StopIteration:
+        raise ValueError("No records found in file")
+
+    # Process the first batch synchronously so DDL (table/index creation) is
+    # committed before any parallel workers try to insert into the new table.
+    _apply_file_result(first_idx, _process_file_chunk(first_idx, first_batch))
+
+    with OrderedChunkRunner(max_workers=max_workers) as runner:
+        for idx, result in runner.run(batch_enum, _process_file_chunk):
+            _apply_file_result(idx, result)
 
     if written == 0:
         raise ValueError("No records found in file")
