@@ -29,6 +29,9 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "hubspot": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -147,6 +150,9 @@ def default_port(driver_type: str) -> int:
         "hubspot": 443,
         "stripe": 443,
         "rest_api": 443,
+        "influxdb": 8086,
+        "neo4j": 7474,
+        "couchbase": 8093,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -328,6 +334,9 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "hubspot": "requests",
     "stripe": "requests",
     "rest_api": "requests",
+    "influxdb": "requests",
+    "neo4j": "requests",
+    "couchbase": "requests",
     "csv": None,
     "tsv": None,
     "json": None,

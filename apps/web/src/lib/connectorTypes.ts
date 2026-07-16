@@ -7,7 +7,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "sqlite", "generic_sql", "sftp", "email",
-  "salesforce", "hubspot", "stripe", "rest_api",
+  "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -87,6 +87,9 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   sftp: { host: "", port: 22 },
   email: { host: "", port: 587 },
   rest_api: { host: "", port: 443 },
+  influxdb: { host: "localhost", port: 8086 },
+  neo4j: { host: "localhost", port: 7474 },
+  couchbase: { host: "localhost", port: 8093 },
 };
 
 /** Map marketplace catalog id → connectable type used by API/forms (strict) */
@@ -132,6 +135,9 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("sftp") || id.includes("ssh") || id.includes("scp")) return "sftp";
   if (id.includes("email") || id.includes("smtp")) return "email";
   if (id.includes("sqlite")) return "sqlite";
+  if (id.includes("influxdb")) return "influxdb";
+  if (id.includes("neo4j")) return "neo4j";
+  if (id.includes("couchbase")) return "couchbase";
 
   // Generic SQL fallback — any SQL engine with a SQLAlchemy dialect is routed through generic_sql.
   if (isGenericSql(id)) {

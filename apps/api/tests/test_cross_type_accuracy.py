@@ -56,6 +56,9 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "hubspot": ("connectors.hubspot", "test_hubspot"),
         "stripe": ("connectors.stripe", "test_stripe"),
         "rest_api": ("connectors.rest_api", "test_connection"),
+        "influxdb": ("connectors.influxdb", "test_connection"),
+        "neo4j": ("connectors.neo4j", "test_connection"),
+        "couchbase": ("connectors.couchbase", "test_connection"),
     }
     if driver == "mongodb":
         import pymongo  # noqa: F401
@@ -82,6 +85,9 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "hubspot": "connectors.hubspot",
         "stripe": "connectors.stripe",
         "rest_api": "connectors.rest_api",
+        "influxdb": "connectors.influxdb",
+        "neo4j": "connectors.neo4j",
+        "couchbase": "connectors.couchbase",
     }
     writers = {
         "postgresql": "connectors.postgresql_writer",
@@ -103,6 +109,9 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "hubspot": "connectors.saas_common",
         "stripe": "connectors.saas_common",
         "rest_api": "connectors.saas_common",
+        "influxdb": "connectors.saas_common",
+        "neo4j": "connectors.saas_common",
+        "couchbase": "connectors.saas_common",
     }
     if readers.get(driver):
         assert importlib.import_module(readers[driver])

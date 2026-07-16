@@ -153,6 +153,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml"].includes(resolved);
   const isAzure = resolved === "adls";
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
+  const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
 
   const authModes: AuthModeConfig[] = [];
 
@@ -252,6 +253,18 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Container / filesystem", { placeholder: "my-container" }),
       text("username", "Account name", { optional: true, hint: "Optional when using connection string." }),
       password("password", "Account key", { optional: true, hint: "Optional when using connection string." })
+    );
+  } else if (isNoSqlSource) {
+    const dbLabel = resolved === "influxdb" ? "Database / bucket" : resolved === "couchbase" ? "Bucket" : "Database";
+    const tableLabel = resolved === "influxdb" ? "Measurement" : resolved === "neo4j" ? "Node label (optional)" : "Scope / collection (optional)";
+    userPassFields.push(
+      text("host", "Host", { placeholder: host || "localhost" }),
+      number("port", "Port", { placeholder: String(port || 0) }),
+      text("database", dbLabel, { placeholder: "mydb" }),
+      text("username", "Username"),
+      password("password", "Password"),
+      text("table", tableLabel, { optional: true }),
+      checkbox("ssl", "Use HTTPS / TLS")
     );
   }
 

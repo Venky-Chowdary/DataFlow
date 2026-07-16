@@ -145,6 +145,27 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         writer="connectors.saas_common",
         writer_fn="write_not_supported",
     ),
+    "influxdb": ConnectorModules(
+        probe=("connectors.influxdb", "test_connection"),
+        reader="connectors.influxdb",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
+    "neo4j": ConnectorModules(
+        probe=("connectors.neo4j", "test_connection"),
+        reader="connectors.neo4j",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
+    "couchbase": ConnectorModules(
+        probe=("connectors.couchbase", "test_connection"),
+        reader="connectors.couchbase",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
 }
 
 

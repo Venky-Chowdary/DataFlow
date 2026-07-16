@@ -38,7 +38,7 @@ def test_all_live_catalog_ids_resolve_to_driver(live_catalog_ids: list[str]):
             "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
             "dynamodb", "s3", "gcs", "adls", "redis", "elasticsearch", "sqlite",
             "sftp", "email",
-            "salesforce", "hubspot", "stripe", "rest_api",
+            "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
             "generic_sql", "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
             "avro", "orc", "xml",
         ), f"{cid} -> {driver} is not a known driver"
