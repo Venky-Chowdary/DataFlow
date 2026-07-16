@@ -15,6 +15,27 @@ from .models import TransferRequest
 logger = logging.getLogger(__name__)
 
 
+def _notify_failure(request: TransferRequest, job_id: str, error: str, records_transferred: int = 0) -> None:
+    """Fire workspace notifications for an exception-level transfer failure."""
+    try:
+        from services.notification_service import build_job_payload, notify_workspace
+
+        payload = build_job_payload(
+            job_id=job_id,
+            status="failed",
+            source=request.source.kind or "unknown",
+            destination=request.destination.kind or "unknown",
+            records_transferred=records_transferred,
+            rejected_rows=0,
+            error=error,
+            retry_url=f"/api/v1/connectors/jobs/{job_id}/resume",
+            workspace_id=request.workspace_id or "",
+        )
+        notify_workspace(request.workspace_id or "", payload)
+    except Exception:
+        logger.exception("Failed to send job failure notification")
+
+
 def _run_transfer(
     job_id: str,
     request: TransferRequest,
@@ -40,6 +61,7 @@ def _run_transfer(
             error=str(exc),
             message=str(exc),
         )
+        _notify_failure(request, job_id, str(exc))
 
 
 def run_transfer_async(job_id: str, request: TransferRequest, resume: bool = False, resume_from_job_id: str | None = None) -> None:
