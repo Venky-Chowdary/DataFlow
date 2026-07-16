@@ -173,6 +173,35 @@ def enforce_production_config() -> None:
         sys.exit(1)
 
 
+def public_url() -> str:
+    """Public API base URL used for retry/resume links in notifications."""
+    explicit = os.getenv("DATAFLOW_PUBLIC_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    if is_railway():
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if domain:
+            return f"https://{domain}"
+    return ""
+
+
+def web_url() -> str:
+    """Public web UI base URL used for clickable job links."""
+    explicit = os.getenv("DATAFLOW_WEB_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    web_domain = os.getenv("DATAFLOW_WEB_DOMAIN", "").strip()
+    if web_domain:
+        if web_domain.startswith("http"):
+            return web_domain.rstrip("/")
+        return f"https://{web_domain}"
+    if is_railway():
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+        if domain:
+            return f"https://{domain}"
+    return ""
+
+
 def apply_railway_defaults() -> None:
     """Set sensible defaults when running on Railway."""
     if not is_railway():

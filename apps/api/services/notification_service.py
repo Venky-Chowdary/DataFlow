@@ -208,6 +208,28 @@ def notify_workspace(workspace_id: str, payload: dict[str, Any]) -> list[dict[st
     return results
 
 
+def log_job_notifications(job_id: str, results: list[dict[str, Any]]) -> bool:
+    """Persist per-channel delivery results on the job record for the UI."""
+    if not results:
+        return False
+    try:
+        from services.mongodb_service import get_mongodb_service
+        from datetime import datetime, timezone
+        from bson import ObjectId
+
+        mongo = get_mongodb_service()
+        db = mongo.get_database()
+        collection = db["transfer_jobs"]
+        collection.update_one(
+            {"_id": ObjectId(job_id)},
+            {"$set": {"notifications": results, "updated_at": datetime.now(timezone.utc)}},
+        )
+        return True
+    except Exception:
+        logger.exception("Failed to persist notification log for job=%s", job_id)
+        return False
+
+
 def build_job_payload(
     *,
     job_id: str,
@@ -220,9 +242,14 @@ def build_job_payload(
     retry_url: str,
     workspace_id: str = "",
     base_url: str = "",
+    web_url: str = "",
 ) -> dict[str, Any]:
     color = "28a745" if status in ("completed", "success") else "ffc107" if status in ("partial", "failed_with_quarantine") else "dc3545"
     title = f"DataFlow transfer {status}: {source} → {destination}"
+    api_base = (base_url or "").rstrip("/")
+    web_base = (web_url or "").rstrip("/")
+    absolute_retry_url = f"{api_base}/api/v1/connectors/jobs/{job_id}/resume" if api_base else retry_url
+    job_url = f"{web_base}/jobs/{job_id}" if web_base else ""
     text_lines = [
         f"Job ID: {job_id}",
         f"Status: {status}",
@@ -232,8 +259,10 @@ def build_job_payload(
         text_lines.append(f"Rejected/quarantined rows: {rejected_rows:,}")
     if error:
         text_lines.append(f"Error: {error}")
-    if retry_url:
-        text_lines.append(f"Retry/resume: {retry_url}")
+    if job_url:
+        text_lines.append(f"Job details: {job_url}")
+    if absolute_retry_url:
+        text_lines.append(f"Retry/resume: {absolute_retry_url}")
     return {
         "title": title,
         "text": "\n".join(text_lines),
@@ -243,5 +272,6 @@ def build_job_payload(
         "records_transferred": records_transferred,
         "rejected_rows": rejected_rows,
         "error": error,
-        "retry_url": retry_url,
+        "retry_url": absolute_retry_url,
+        "job_url": job_url,
     }

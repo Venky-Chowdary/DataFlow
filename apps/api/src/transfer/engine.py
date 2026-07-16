@@ -478,7 +478,8 @@ class UniversalTransferEngine:
         if result.success and not rejected:
             return
         try:
-            from services.notification_service import build_job_payload, notify_workspace
+            from services.notification_service import build_job_payload, log_job_notifications, notify_workspace
+            from services.platform_config import public_url, web_url
 
             status = "failed"
             if result.success and rejected:
@@ -495,8 +496,11 @@ class UniversalTransferEngine:
                 error=result.error or "",
                 retry_url=f"/api/v1/connectors/jobs/{result.job_id}/resume",
                 workspace_id=request.workspace_id or "",
+                base_url=public_url(),
+                web_url=web_url(),
             )
-            notify_workspace(request.workspace_id or "", payload)
+            results = notify_workspace(request.workspace_id or "", payload)
+            log_job_notifications(result.job_id, results)
         except Exception:
             # Notifications must never fail a transfer.
             pass

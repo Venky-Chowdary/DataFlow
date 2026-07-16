@@ -397,6 +397,21 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       </div>
                     )}
 
+                    {liveJob.notifications && liveJob.notifications.length > 0 && (
+                      <div className="df2-jobs-v3-notifications">
+                        <h3>Notifications</h3>
+                        <ul>
+                          {liveJob.notifications.map((n, i) => (
+                            <li key={`${n.channel_id}-${i}`} className={n.ok ? "ok" : "failed"}>
+                              <DtIcon name={n.ok ? "check" : "alert"} size={14} />
+                              <span>{n.kind}</span>
+                              {n.ok ? <span className="status">Sent</span> : <span className="status failed">Failed{n.error ? `: ${n.error}` : ""}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
                     {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0) && (
                       <div className="df2-jobs-v3-actions">
                         <QuarantinePanel jobId={selected._id} rejectedRows={liveJob.rejected_rows} />

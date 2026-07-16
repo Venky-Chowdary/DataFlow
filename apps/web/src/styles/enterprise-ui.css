@@ -550,6 +550,55 @@
   overflow: hidden;
 }
 
+.df2-jobs-v3-alert,
+.df2-jobs-v3-log,
+.df2-jobs-v3-notifications {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--df-border, #e5e7eb);
+  background: #f8fafc;
+}
+
+.df2-jobs-v3-alert.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.df2-jobs-v3-log h3,
+.df2-jobs-v3-notifications h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.df2-jobs-v3-notifications ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.df2-jobs-v3-notifications li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.df2-jobs-v3-notifications li .status {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--df-success, #16a34a);
+}
+
+.df2-jobs-v3-notifications li.failed .status {
+  color: var(--df-danger, #dc2626);
+}
+
 @media (max-width: 900px) {
   .df2-page-jobs .df2-jobs-v3-layout {
     grid-template-columns: 1fr;

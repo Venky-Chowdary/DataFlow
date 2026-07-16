@@ -58,6 +58,15 @@ export interface JobPhase {
   message?: string;
 }
 
+export interface JobNotificationResult {
+  channel_id: string;
+  kind: "slack" | "teams" | "email" | "servicenow" | "webhook";
+  ok?: boolean;
+  error?: string;
+  status?: number;
+  body?: string;
+}
+
 export interface JobProgress extends TransferJob {
   progress_pct: number;
   phase?: string;
@@ -68,6 +77,7 @@ export interface JobProgress extends TransferJob {
   destination_summary?: Record<string, unknown>;
   preflight?: PreflightResult;
   phases?: JobPhase[];
+  notifications?: JobNotificationResult[];
 }
 
 export interface CsvValidationReport {
