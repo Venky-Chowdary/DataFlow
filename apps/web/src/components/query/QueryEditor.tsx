@@ -153,8 +153,30 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
   return null;
 }
 
+const SQL_SNIPPETS = [
+  { label: "SELECT *", text: "SELECT * FROM table_name" },
+  { label: "SELECT columns", text: "SELECT column1, column2 FROM table_name" },
+  { label: "WHERE", text: "WHERE column = 'value'" },
+  { label: "AND", text: "AND column = 'value'" },
+  { label: "JOIN", text: "JOIN other_table ON table_name.id = other_table.id" },
+  { label: "LEFT JOIN", text: "LEFT JOIN other_table ON table_name.id = other_table.id" },
+  { label: "GROUP BY", text: "GROUP BY column" },
+  { label: "ORDER BY", text: "ORDER BY column DESC" },
+  { label: "LIMIT", text: "LIMIT 100" },
+  { label: "WITH CTE", text: "WITH cte AS (\n  SELECT * FROM table_name\n)\nSELECT * FROM cte" },
+];
+
+const MONGO_SNIPPETS = [
+  { label: "Find filter", text: '{"status": "active"}' },
+  { label: "Aggregate pipeline", text: '[\n  {"$match": {"status": "active"}},\n  {"$limit": 100}\n]' },
+  { label: "Group aggregate", text: '[\n  {"$group": {"_id": "$field", "count": {"$sum": 1}}}\n]' },
+  { label: "Range filter", text: '{"created_at": {"$gte": "2024-01-01", "$lte": "2024-12-31"}}' },
+  { label: "Projection", text: '[\n  {"$project": {"_id": 0, "name": 1, "status": 1}}\n]' },
+];
+
 export function QueryEditor({ value, onChange, connectorType, placeholder, disabled, height = "18rem" }: QueryEditorProps) {
   const [lang, setLang] = useState<QueryLanguage>(() => guessLanguage(connectorType));
+  const [cursor, setCursor] = useState({ start: 0, end: 0 });
 
   useEffect(() => {
     setLang(guessLanguage(connectorType));
@@ -176,6 +198,37 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
       return code.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string));
     }
     return Prism.highlight(code, grammar, grammarName);
+  };
+
+  const isMongoLike = lang === "json" || lang === "javascript";
+  const snippets = isMongoLike ? MONGO_SNIPPETS : SQL_SNIPPETS;
+
+  useEffect(() => {
+    const handleSelection = () => {
+      const textarea = document.querySelector(".df2-query-editor-textarea") as HTMLTextAreaElement | null;
+      if (textarea && document.activeElement === textarea) {
+        setCursor({ start: textarea.selectionStart ?? 0, end: textarea.selectionEnd ?? 0 });
+      }
+    };
+    document.addEventListener("selectionchange", handleSelection);
+    return () => document.removeEventListener("selectionchange", handleSelection);
+  }, []);
+
+  const insertSnippet = (text: string) => {
+    const { start, end } = cursor;
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const prefix = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n") && !before.endsWith("(") ? " " : "";
+    const next = before + prefix + text + after;
+    onChange(next);
+    const newCursor = start + prefix.length + text.length;
+    window.setTimeout(() => {
+      const textarea = document.querySelector(".df2-query-editor-textarea") as HTMLTextAreaElement | null;
+      if (textarea) {
+        textarea.focus();
+        textarea.setSelectionRange(newCursor, newCursor);
+      }
+    }, 0);
   };
 
   return (
@@ -214,6 +267,23 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
           insertSpaces
         />
       </div>
+
+      <div className="df2-query-editor-snippets">
+        <span className="df2-query-editor-snippets-label">Insert:</span>
+        {snippets.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            className="df2-query-editor-snippet"
+            onClick={() => insertSnippet(s.text)}
+            disabled={disabled}
+            title={s.text}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
       {isInvalid && (
         <div className="df2-query-editor-error">
           <span aria-hidden>⚠</span> {error}

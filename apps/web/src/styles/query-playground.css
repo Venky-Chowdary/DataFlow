@@ -267,6 +267,44 @@
   border-radius: 0 0 10px 10px;
 }
 
+.df2-query-editor-snippets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--df-border, #e2e8f0);
+  background: var(--df-surface-2, #f8fafc);
+  font-size: 12px;
+}
+
+.df2-query-editor-snippets-label {
+  color: var(--df-text-secondary, #475569);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.df2-query-editor-snippet {
+  padding: 4px 8px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 6px;
+  background: var(--df-surface, #ffffff);
+  color: var(--df-text-primary, #0f172a);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 150ms ease;
+}
+
+.df2-query-editor-snippet:hover:not(:disabled) {
+  background: var(--df-surface-3, #e2e8f0);
+}
+
+.df2-query-editor-snippet:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Prism token colors that respect the existing palette. */
 .token.comment,
 .token.prolog,
