@@ -270,6 +270,26 @@ export function SettingsPage() {
     [auditEvents],
   );
 
+  const downloadAuditCsv = () => {
+    const headers = ["id", "time", "actor", "action", "resource", "level"];
+    const rows = filteredLogs.map((log) => [
+      log.id,
+      log.time,
+      log.actor,
+      log.action,
+      log.resource,
+      log.level,
+    ]);
+    const csv = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dataflow-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <PageShell wide className="df2-page-settings" title="Settings">
       <PageFrame className="df2-settings-workspace">
@@ -690,6 +710,14 @@ export function SettingsPage() {
                     <h2>Audit logs</h2>
                     <p>Configuration changes, transfers, connector tests, and MCP activity.</p>
                   </div>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-secondary df2-btn-sm"
+                    onClick={downloadAuditCsv}
+                    disabled={filteredLogs.length === 0}
+                  >
+                    <DtIcon name="download" size={14} /> Export CSV
+                  </button>
                 </div>
                 <div className="df2-settings-section-body">
                   <FilterTabs
