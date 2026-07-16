@@ -184,8 +184,65 @@ def benchmark_s3(rows: int = 1_000_000) -> ScaleResult:
     )
 
 
+def benchmark_sqlite(rows: int = 100_000, *, db_path: str | None = None) -> ScaleResult:
+    """Local, credential-free baseline benchmark using SQLite."""
+    import os
+    import sqlite3
+    import tempfile
+
+    target = "sqlite"
+    path = db_path or tempfile.mktemp(suffix=".db")
+    content = generate_csv(rows)
+    try:
+        result = _run_transfer(
+            target_label=target,
+            dest_format="sqlite",
+            dest_kwargs={"connection_string": path},
+            table_or_key="dataflow_bench",
+            rows=rows,
+        )
+        conn = sqlite3.connect(path)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM dataflow_bench").fetchone()[0]
+            result.destination_summary["row_count"] = count
+            result.destination_summary["verified"] = count == rows
+        finally:
+            conn.close()
+        return result
+    finally:
+        if os.path.exists(path) and db_path is None:
+            os.unlink(path)
+
+
+def run_local_benchmark(rows: int = 100_000, *, db_path: str | None = None) -> dict[str, Any]:
+    """Run the credential-free local benchmark and return a standardized report."""
+    import os
+
+    os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+    os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    result = benchmark_sqlite(rows, db_path=db_path)
+    return {
+        "target": result.target,
+        "rows": result.rows,
+        "success": result.success,
+        "elapsed_seconds": result.elapsed_seconds,
+        "records_per_second": result.records_per_second,
+        "peak_memory_bytes": result.peak_memory_bytes,
+        "peak_memory_mb": round(result.peak_memory_bytes / (1024 * 1024), 1),
+        "destination_summary": result.destination_summary,
+        "error": result.error,
+        "timestamp": _now(),
+    }
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 def run_all(rows: int = 1_000_000) -> list[ScaleResult]:
     return [
+        benchmark_sqlite(rows),
         benchmark_snowflake(rows),
         benchmark_bigquery(rows),
         benchmark_s3(rows),

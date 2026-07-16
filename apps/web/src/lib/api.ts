@@ -1572,6 +1572,27 @@ export type ByokKey = {
   updated_at: string;
 };
 
+export type BenchmarkReport = {
+  target: string;
+  rows: number;
+  success: boolean;
+  elapsed_seconds: number;
+  records_per_second: number;
+  peak_memory_bytes: number;
+  peak_memory_mb: number;
+  destination_summary: Record<string, unknown>;
+  error: string;
+  timestamp: string;
+  competitors: {
+    product: string;
+    typical_rps: number;
+    memory_mb: number;
+    resume_from_checkpoint: boolean;
+    observed_max_rows: number;
+    notes: string;
+  }[];
+};
+
 export type SecurityPosture = {
   tenant_id: string | null;
   workspace_id: string | null;
@@ -1651,4 +1672,26 @@ export async function createByokKey(body: { label: string; provider: ByokKey["pr
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create BYOK key"));
   return res.json();
+}
+
+export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows, format: "json" }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed"));
+  return res.json();
+}
+
+export async function downloadBenchmarkReport(rows = 100_000): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows, format: "md" }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not download benchmark report"));
+  return res.blob();
 }

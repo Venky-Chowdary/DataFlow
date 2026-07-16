@@ -1507,6 +1507,8 @@ body {
 .df2-badge-run { background: #eff6ff; color: #2563eb; }
 .df2-badge-muted { background: #f1f5f9; color: #64748b; }
 .df2-badge-beta { background: #fffbeb; color: #d97706; }
+.df2-badge-success { background: #ecfdf5; color: #059669; }
+.df2-badge-warning { background: #fffbeb; color: #d97706; }
 
 .df2-badge {
   display: inline-flex;

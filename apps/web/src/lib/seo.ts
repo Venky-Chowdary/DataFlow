@@ -101,6 +101,14 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
       "DataFlow documentation, data transfer architecture, ETL documentation, preflight gates, data migration guide",
     robots: "noindex",
   },
+  benchmarks: {
+    title: "Benchmarks",
+    description:
+      "Reproducible scale proofs — DataFlow throughput, memory, and correctness vs Fivetran, Airbyte, and Stitch baselines.",
+    keywords:
+      "DataFlow benchmark, ETL throughput, data transfer performance, Fivetran vs Airbyte, rows per second",
+    robots: "noindex",
+  },
 };
 
 export function resolveSiteUrl(): string {

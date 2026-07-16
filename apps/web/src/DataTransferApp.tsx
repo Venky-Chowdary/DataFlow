@@ -26,6 +26,7 @@ import { McpPage } from "./pages/McpPage";
 import { QueryPage } from "./pages/QueryPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { DocsPage } from "./pages/DocsPage";
+import { BenchmarksPage } from "./pages/BenchmarksPage";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { metaForLogin, metaForScreen } from "./lib/seo";
@@ -43,6 +44,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
   { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress" },
   { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code" },
   { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works" },
+  { id: "benchmarks", label: "Benchmarks", icon: "speed", desc: "Scale proofs vs Fivetran & Airbyte" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security & team" },
 ];
 
@@ -495,6 +497,11 @@ function AppShell({
               {screen === "docs" && (
                 <PageErrorBoundary label="Docs">
                   <DocsPage />
+                </PageErrorBoundary>
+              )}
+              {screen === "benchmarks" && (
+                <PageErrorBoundary label="Benchmarks">
+                  <BenchmarksPage />
                 </PageErrorBoundary>
               )}
               {screen === "settings" && (

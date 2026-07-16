@@ -57,6 +57,9 @@ const PAGE_ALIASES: Record<string, Screen> = {
   docs: "docs",
   documentation: "docs",
   help: "docs",
+  benchmark: "benchmarks",
+  benchmarks: "benchmarks",
+  performance: "benchmarks",
 };
 
 function matchesQuery(value: string | undefined | null, q: string): boolean {
