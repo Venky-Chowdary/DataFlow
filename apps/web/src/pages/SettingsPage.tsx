@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
@@ -7,7 +7,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
-import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
@@ -60,23 +60,20 @@ export function SettingsPage() {
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState("Production key");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
-  const [security, setSecurity] = useState<Record<string, boolean>>({
-    "Encryption at rest": true,
-    "Audit logging": true,
-    "PII detection": true,
-    "IP allowlisting": false,
-    "Session timeout (8h)": true,
-    "MFA required for admins": false,
-  });
+  const [posture, setPosture] = useState<SecurityPosture | null>(null);
+  const [postureLoading, setPostureLoading] = useState(false);
 
-  const toggleSecurity = (title: string) => {
-    const enabled = !security[title];
-    setSecurity((prev) => ({ ...prev, [title]: enabled }));
-    toast({
-      title: enabled ? `${title} enabled` : `${title} disabled`,
-      tone: enabled ? "success" : "info",
-    });
-  };
+  const loadPosture = useCallback(() => {
+    setPostureLoading(true);
+    fetchSecurityPosture()
+      .then(setPosture)
+      .catch(() => setPosture(null))
+      .finally(() => setPostureLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (tab === "security") loadPosture();
+  }, [tab, loadPosture]);
 
   useEffect(() => {
     fetchModelCapabilities().then(setModelCapabilities).catch(() => setModelCapabilities(null));
@@ -366,36 +363,88 @@ export function SettingsPage() {
                     <h2>Security & compliance</h2>
                     <p>Platform-wide controls for data protection and access governance.</p>
                   </div>
-                  <span className="df2-badge df2-badge-live">SOC 2 ready</span>
+                  <span className={`df2-badge ${posture?.environment === "production" ? "df2-badge-live" : "df2-badge-muted"}`}>
+                    {posture?.environment === "production" ? "Production" : "Development"}
+                  </span>
                 </div>
                 <div className="df2-settings-section-body">
-                  <div className="df2-settings-policy-grid">
-                    {[
-                      { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts." },
-                      { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access." },
-                      { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review." },
-                      { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges." },
-                      { title: "Session timeout (8h)", desc: "Automatically sign out idle workspace sessions." },
-                      { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles." },
-                    ].map((item) => (
-                      <div key={item.title} className="df2-settings-policy-row">
-                        <div>
-                          <h3>{item.title}</h3>
-                          <p>{item.desc}</p>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={security[item.title]}
-                          aria-label={`Toggle ${item.title}`}
-                          className={`df2-switch ${security[item.title] ? "on" : ""}`}
-                          onClick={() => toggleSecurity(item.title)}
-                        >
-                          <span className="df2-switch-thumb" />
-                        </button>
+                  {postureLoading && <p className="df2-cell-meta">Loading security posture…</p>}
+                  {!postureLoading && posture && (
+                    <>
+                      <div className="df2-settings-section-head" style={{ marginBottom: 12 }}>
+                        <h3>Posture</h3>
                       </div>
-                    ))}
-                  </div>
+                      <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>
+                        {[
+                          { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest },
+                          { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging },
+                          { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection },
+                          { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges.", on: posture.ip_allowlist_enabled },
+                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Automatically sign out idle workspace sessions.", on: posture.session_timeout_hours > 0 },
+                          { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles.", on: posture.mfa_required },
+                        ].map((item) => (
+                          <div key={item.title} className="df2-settings-policy-row">
+                            <div>
+                              <h3>{item.title}</h3>
+                              <p>{item.desc}</p>
+                            </div>
+                            <span className={`df2-badge ${item.on ? "df2-badge-live" : "df2-badge-muted"}`}>
+                              {item.on ? "Enabled" : "Disabled"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="df2-settings-section-head" style={{ marginBottom: 12 }}>
+                        <h3>Compliance roadmap</h3>
+                      </div>
+                      <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>
+                        {posture.compliance.map((c) => (
+                          <div key={c.framework} className="df2-settings-policy-row">
+                            <div>
+                              <h3>{c.framework}</h3>
+                              <p>{c.evidence}</p>
+                            </div>
+                            <span className={`df2-badge ${c.status === "ready" ? "df2-badge-live" : c.status === "in_progress" ? "df2-badge-warn" : "df2-badge-muted"}`}>
+                              {c.status === "ready" ? "Ready" : c.status === "in_progress" ? "In progress" : "Available"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="df2-settings-section-head" style={{ marginBottom: 12 }}>
+                        <h3>BYOK / key management</h3>
+                      </div>
+                      <div className="df2-settings-policy-grid">
+                        <div className="df2-settings-policy-row">
+                          <div>
+                            <h3>Bring-your-own-key</h3>
+                            <p>Customer-managed encryption keys for tenant data.</p>
+                          </div>
+                          <span className={`df2-badge ${posture.byok.configured ? "df2-badge-live" : "df2-badge-muted"}`}>
+                            {posture.byok.configured ? `Active (${posture.byok.active_count} key${posture.byok.active_count === 1 ? "" : "s"})` : "Not configured"}
+                          </span>
+                        </div>
+                        <div className="df2-settings-policy-row">
+                          <div>
+                            <h3>Data region</h3>
+                            <p>Primary region for job data and connector credentials.</p>
+                          </div>
+                          <span className="df2-badge df2-badge-live">{posture.data_region}</span>
+                        </div>
+                        <div className="df2-settings-policy-row">
+                          <div>
+                            <h3>TLS</h3>
+                            <p>Minimum TLS version for API and MCP traffic.</p>
+                          </div>
+                          <span className="df2-badge df2-badge-live">{posture.tls_version}</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  {!postureLoading && !posture && (
+                    <EmptyState compact icon="shield" title="Security posture unavailable" description="Could not load posture from the backend." />
+                  )}
                 </div>
               </section>
             )}
