@@ -2,6 +2,7 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { Connector } from "../../lib/types";
 import { DtIcon } from "../DtIcon";
 import { inferTopologyRole } from "../../lib/topologyUtils";
+import { Button } from "./Button";
 
 interface ConnectorCardProps {
   connector: Connector;
@@ -37,7 +38,7 @@ export function ConnectorCard({
   return (
     <article
       id={`connector-card-${c.id}`}
-      className={`df2-connector-card ${selected ? "selected" : ""} ${highlighted ? "highlighted" : ""} ${healthy ? "" : "error"}`}
+      className={`df2-connector-card df2-card-interactive ${selected ? "selected" : ""} ${highlighted ? "highlighted" : ""} ${healthy ? "" : "error"}`}
       onClick={onSelect}
       onKeyDown={(e) => {
         if (onSelect && (e.key === "Enter" || e.key === " ")) {
@@ -77,38 +78,35 @@ export function ConnectorCard({
       </p>
 
       <div className="df2-connector-card-actions" onClick={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          className="df2-btn df2-btn-ghost df2-btn-sm"
-          disabled={testing}
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={testing}
+          loadingLabel="Testing…"
           onClick={onTest}
+          leadingIcon={<DtIcon name="activity" size={14} />}
         >
-          {testing ? (
-            <>
-              <span className="df2-inline-spinner" aria-hidden />
-              Testing…
-            </>
-          ) : (
-            <>
-              <DtIcon name="activity" size={14} />
-              Test
-            </>
-          )}
-        </button>
-        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onEdit}>
-          <DtIcon name="settings" size={14} />
+          Test
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onEdit}
+          leadingIcon={<DtIcon name="settings" size={14} />}
+        >
           Edit
-        </button>
-        <button
-          type="button"
-          className="df2-btn df2-btn-ghost df2-btn-sm df2-btn-danger df2-connector-delete-btn"
+        </Button>
+        <Button
+          size="sm"
+          variant="danger"
+          className="df2-connector-delete-btn"
           onClick={onDelete}
           aria-label={`Delete ${c.name}`}
           title={`Delete ${c.name}`}
+          leadingIcon={<DtIcon name="x" size={14} />}
         >
-          <DtIcon name="x" size={14} />
           Delete
-        </button>
+        </Button>
       </div>
     </article>
   );

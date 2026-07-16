@@ -1,6 +1,7 @@
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
+import { Button } from "./Button";
 
 interface PipelineCardProps {
   schedule: PipelineSchedule;
@@ -43,6 +44,7 @@ export function PipelineCard({
       id={`pipeline-card-${sched.id}`}
       className={[
         "df2-pipe-card",
+        "df2-card-interactive",
         sched.enabled ? "is-active" : "is-paused",
         highlighted ? "is-highlighted" : "",
       ].filter(Boolean).join(" ")}
@@ -86,23 +88,24 @@ export function PipelineCard({
       </div>
 
       <div className="df2-pipe-card-actions">
-        <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" disabled={running} onClick={onRun}>
-          {running ? (
-            <>
-              <span className="df2-inline-spinner" aria-hidden />
-              Running…
-            </>
-          ) : (
-            <>
-              <DtIcon name="activity" size={14} />
-              Run now
-            </>
-          )}
-        </button>
-        <button type="button" className="df2-btn df2-btn-sm df2-btn-danger" onClick={onDelete}>
-          <DtIcon name="trash" size={14} />
+        <Button
+          size="sm"
+          variant="primary"
+          loading={running}
+          loadingLabel="Running…"
+          onClick={onRun}
+          leadingIcon={<DtIcon name="activity" size={14} />}
+        >
+          Run now
+        </Button>
+        <Button
+          size="sm"
+          variant="danger"
+          onClick={onDelete}
+          leadingIcon={<DtIcon name="trash" size={14} />}
+        >
           Delete
-        </button>
+        </Button>
       </div>
     </article>
   );

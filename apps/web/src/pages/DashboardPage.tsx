@@ -66,14 +66,36 @@ export function DashboardPage({
       wide
       className="df2-page-overview-enterprise"
       title="Overview"
+      actions={
+        <>
+          {onOpenConnectors && (
+            <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenConnectors}>
+              <DtIcon name="connectors" size={14} /> Connectors
+            </button>
+          )}
+          <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onNewTransfer}>
+            <DtIcon name="plus" size={14} /> New transfer
+          </button>
+        </>
+      }
     >
       <PageFrame className="df2-overview-page df2-overview-enterprise">
         <PageMetricsRow
           metrics={[
-            { label: "Rows moved", value: totalRecords.toLocaleString(), tone: "teal", icon: "trend", sub: "7-day total" },
+            { label: "Rows moved", value: totalRecords.toLocaleString(), tone: "teal", icon: "trend", sub: "Completed jobs" },
             { label: "Success rate", value: successRate != null ? `${successRate}%` : "—", tone: "green", icon: "check", sub: jobs.length ? `${completed.length} completed` : "No jobs yet" },
             { label: "Connections", value: connectors.length, tone: healthyConnectors < connectors.length ? "red" : undefined, icon: "connectors", sub: `${healthyConnectors} healthy` },
-            { label: "Active routes", value: routeCount, tone: "teal", icon: "activity", sub: enabledPipelines ? `${enabledPipelines} pipelines` : "No schedules" },
+            {
+              label: "Transfer-ready",
+              value: catalogStats?.transfer_live ?? catalogStats?.live ?? "—",
+              tone: "teal",
+              icon: "activity",
+              sub: catalogStats?.total
+                ? `${catalogStats.total} catalog · ${enabledPipelines} pipelines`
+                : enabledPipelines
+                  ? `${enabledPipelines} pipelines`
+                  : "Loading catalog…",
+            },
           ]}
         />
 

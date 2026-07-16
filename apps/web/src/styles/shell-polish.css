@@ -788,50 +788,13 @@ select.df2-select {
   color: #0f766e !important;
 }
 
-/* ─── Toast polish ─── */
-.dt-toast-host {
-  z-index: 10000;
-}
-
-.dt-toast {
-  animation: df2-toast-in 0.28s cubic-bezier(0.22, 1, 0.36, 1);
-  border: 1px solid var(--df-border, #e2e8f0);
-  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.12);
-}
-
-@keyframes df2-toast-in {
-  from {
-    opacity: 0;
-    transform: translateX(24px) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0) scale(1);
-  }
-}
-
+/* ─── Toast polish — z-index/animation owned by enterprise-ui.css ─── */
 .dt-toast-title {
   color: var(--df-text-primary, #0f172a) !important;
 }
 
 .dt-toast-message {
   color: var(--df-text-secondary, #64748b) !important;
-}
-
-.dt-toast--success {
-  border-left: 3px solid #22c55e;
-}
-
-.dt-toast--error {
-  border-left: 3px solid #ef4444;
-}
-
-.dt-toast--warning {
-  border-left: 3px solid #f59e0b;
-}
-
-.dt-toast--info {
-  border-left: 3px solid #0ea5e9;
 }
 
 .df2-hub-node:hover {

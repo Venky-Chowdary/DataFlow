@@ -33,7 +33,7 @@ export function LandingHeroVisual() {
             <defs>
               <linearGradient id="lp-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
                 <stop offset="0%" stopColor="#14b8a6" />
-                <stop offset="100%" stopColor="#6366f1" />
+                <stop offset="100%" stopColor="#0d9488" />
               </linearGradient>
             </defs>
             <path className="lp-flow-path lp-flow-path--a" d="M 72 70 C 120 70, 140 45, 200 70" />
@@ -46,7 +46,7 @@ export function LandingHeroVisual() {
             <circle className="lp-flow-packet lp-flow-packet--2" r="4" fill="#14b8a6">
               <animateMotion dur="2.8s" repeatCount="indefinite" begin="0.6s" path="M 72 90 C 120 90, 140 115, 200 90" />
             </circle>
-            <circle className="lp-flow-packet lp-flow-packet--3" r="4" fill="#6366f1">
+            <circle className="lp-flow-packet lp-flow-packet--3" r="4" fill="#2dd4bf">
               <animateMotion dur="2.2s" repeatCount="indefinite" begin="1.2s" path="M 200 70 C 260 70, 280 45, 328 70" />
             </circle>
             <circle className="lp-flow-packet lp-flow-packet--4" r="3" fill="#5eead4">

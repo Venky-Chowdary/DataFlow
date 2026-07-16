@@ -3,6 +3,7 @@ import { ConnectorCatalogPanel } from "../components/ConnectorCatalogPanel";
 import { ConnectionWorkbench, CONNECTION_TABS } from "../components/ConnectionWorkbench";
 import { EmptyState } from "../components/EmptyState";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -154,7 +155,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
           searchPlaceholder="Search saved connections…"
           filters={
-            <>
+            <div className="df2-toolbar-filters df2-toolbar-filter-stack">
               <FilterTabs
                 ariaLabel="Connector views"
                 value={tab}
@@ -188,24 +189,30 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                   ]}
                 />
               )}
-            </>
+            </div>
           }
           actions={
             <>
               {connectors.length > 0 && tab === "connections" && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm"
+                <Button
+                  size="sm"
+                  loading={testingAll}
+                  loadingLabel="Testing…"
                   disabled={testingAll}
                   onClick={() => void handleTestAll()}
+                  leadingIcon={<DtIcon name="activity" size={14} />}
                 >
-                  <DtIcon name="activity" size={14} />
-                  {testingAll ? "Testing…" : "Test all"}
-                </button>
+                  Test all
+                </Button>
               )}
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => onAdd()}>
-                <DtIcon name="plus" size={14} /> New connection
-              </button>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => onAdd()}
+                leadingIcon={<DtIcon name="plus" size={14} />}
+              >
+                New connection
+              </Button>
             </>
           }
         />

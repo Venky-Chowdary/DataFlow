@@ -8,8 +8,6 @@ import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTil
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageInsightStrip } from "../components/ui/PageInsightStrip";
-import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
@@ -1576,34 +1574,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     return () => window.clearInterval(timer);
   }, [step, transferring, activeJobId, result]);
 
-  const transferInsightTone =
-    transferring || activeJobId
-      ? "live"
-      : preflight && !preflight.passed
-        ? "warn"
-        : preflight?.passed
-          ? "ok"
-          : "info";
-  const transferInsightPill = transferring ? "Running" : STEPS[step - 1]?.label ?? `Step ${step}`;
-  const transferInsightMessage =
-    transferring || activeJobId
-      ? "Migration in progress — batch throughput and reconciliation stream to Job Theater."
-      : step === STEP_SOURCE
-        ? "Connect a file, database, or cloud object store as your source."
-        : step === STEP_DESTINATION
-          ? "Choose destination engine, connector, and sync policy before mapping."
-          : step === STEP_MAP
-          ? `${columnMappings.length || analysis?.columns.length || 0} columns mapped — review semantic matches against destination schema.`
-          : step === STEP_VALIDATE
-              ? preflight?.passed
-                ? "All preflight gates passed — ready to execute."
-                : preflight
-                  ? "Preflight reported issues — resolve before running."
-                  : "Run eight preflight gates before writing data."
-              : canExecute
-                ? "Execute the governed transfer with checksum proof."
-                : "Complete prior steps to unlock execution.";
-
   return (
     <PageShell
       wide
@@ -1613,26 +1583,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       description="Source → Destination → Map → Validate → Run"
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
-      <PageInsightStrip
-        tone={transferInsightTone}
-        pill={transferInsightPill}
-        message={transferInsightMessage}
-      />
-      <PageMetricsRow
-        compact
-        columns={4}
-        metrics={[
-          { label: "Step", value: `${step}/5`, icon: "transfer" },
-          { label: "Columns", value: columnMappings.length || analysis?.columns.length || "—", icon: "sparkle" },
-          {
-            label: "Preflight",
-            value: preflight?.passed ? "Passed" : preflight ? "Issues" : "Pending",
-            tone: preflight?.passed ? "green" : preflight ? "red" : undefined,
-            icon: "gate",
-          },
-          { label: "Source rows", value: parsed?.row_count != null ? parsed.row_count.toLocaleString() : "—", icon: "trend" },
-        ]}
-      />
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
@@ -2402,7 +2352,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_VALIDATE && (
-        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-split df2-validate-dashboard-host">
           <ValidateDashboard
             preflight={preflight}
             running={preflighting}

@@ -7,10 +7,10 @@ import "./styles/app-styles.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <PageErrorBoundary label="DataFlow">
-      <ToastProvider>
+    <ToastProvider>
+      <PageErrorBoundary label="DataFlow">
         <DataTransferApp />
-      </ToastProvider>
-    </PageErrorBoundary>
+      </PageErrorBoundary>
+    </ToastProvider>
   </React.StrictMode>
 );

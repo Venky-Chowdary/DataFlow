@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
-import { ButtonLoader, SectionLoader } from "../components/LoadingState";
+import { SectionLoader } from "../components/LoadingState";
+import { Button } from "../components/ui/Button";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
 import { CadenceTiles } from "../components/ui/CadenceTiles";
 import { EmptyState } from "../components/EmptyState";
@@ -189,14 +190,14 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
             ) : undefined
           }
           actions={
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm df2-btn-primary"
+            <Button
+              size="sm"
+              variant={showForm ? "secondary" : "primary"}
               onClick={() => setShowForm((v) => !v)}
+              leadingIcon={<DtIcon name={showForm ? "x" : "plus"} size={14} />}
             >
-              <DtIcon name="plus" size={14} />
               {showForm ? "Cancel" : "New pipeline"}
-            </button>
+            </Button>
           }
         />
       )}
@@ -247,9 +248,15 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
               <CadenceTiles value={interval} onChange={setInterval} />
             </div>
             <div className="df2-card-footer df2-card-footer--form">
-              <button type="submit" className="df2-btn df2-btn-primary" disabled={saving || connectors.length < 2}>
-                {saving ? <ButtonLoader label="Saving…" /> : "Save pipeline"}
-              </button>
+              <Button
+                type="submit"
+                variant="primary"
+                loading={saving}
+                loadingLabel="Saving…"
+                disabled={saving || connectors.length < 2}
+              >
+                Save pipeline
+              </Button>
             </div>
         </PageSection>
         </form>
@@ -266,9 +273,9 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
             title="No scheduled pipelines"
             description="Create a recurring sync to keep source and destination in step."
             action={
-              <button type="button" className="df2-btn df2-btn-primary" onClick={() => setShowForm(true)}>
+              <Button variant="primary" onClick={() => setShowForm(true)}>
                 Create pipeline
-              </button>
+              </Button>
             }
           />
         ) : filteredSchedules.length === 0 ? (

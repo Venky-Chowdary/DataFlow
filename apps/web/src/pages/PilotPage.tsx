@@ -188,7 +188,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       <PageFrame className="df2-pilot-workspace df2-pilot-v2">
         <div className="df2-pilot-status-bar" role="status">
           <div className="df2-pilot-status-brand">
-            <strong>Data Pilot</strong>
             <span className={`df2-pilot-status-pill ${pilotStatusClass}`.trim()}>
               <span className="df2-pilot-status-dot" aria-hidden />
               {pilotInsightPill}

@@ -26,8 +26,8 @@
 @import "./docs-page.css";
 @import "./query-playground.css";
 @import "./benchmarks.css";
-/* Canonical final layer — replaces page-redesign-v3, enterprise-final,
-   ui-density, ui-stability, enterprise-ui-v4, jobs-page-redesign, polish overlays */
+/* Canonical final layer — do not add enterprise-ui-vN / enterprise-primitives siblings.
+   Extend enterprise-ui.css or tokens.css only. */
 @import "./enterprise-ui.css";
 @import "./transfer-studio-refresh.css";
 

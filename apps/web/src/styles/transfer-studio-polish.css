@@ -733,6 +733,11 @@
   background: #ecfdf5;
 }
 
+.df2-validate-rail-panel.live {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+
 .df2-validate-rail-panel.blocked {
   border-color: #fde68a;
   background: #fffbeb;
@@ -820,12 +825,10 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  position: sticky;
-  bottom: 0;
+  position: relative;
   padding-top: 12px;
   background: #fafbfc;
   border-top: 1px solid #e2e8f0;
-  z-index: 1;
 }
 
 .df2-validate-rail-actions > button:first-child {

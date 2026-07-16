@@ -1,5 +1,5 @@
 import { DtIcon } from "../DtIcon";
-import { ButtonLoader } from "../LoadingState";
+import { Button } from "../ui/Button";
 import type { PreflightResult } from "../../lib/types";
 
 interface ValidateActionsRailProps {
@@ -49,9 +49,13 @@ export function ValidateActionsRail({
             <DtIcon name="transfer" size={18} />
             <strong>Transfer started</strong>
             <p>Job queued — {transferLaunch.rows.toLocaleString()} rows.</p>
-            <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenJobTheater}>
-              <DtIcon name="activity" size={14} />Open live progress
-            </button>
+            <Button
+              variant="primary"
+              onClick={onOpenJobTheater}
+              leadingIcon={<DtIcon name="activity" size={14} />}
+            >
+              Open live progress
+            </Button>
           </div>
         ) : null}
 
@@ -89,11 +93,11 @@ export function ValidateActionsRail({
                     </span>
                     <span className="df2-validate-rail-metric">
                       <small>Semantic</small>
-                      <strong>{preflight.proof_bundle.semantic_mapping_score.toFixed(2)}</strong>
+                      <strong>{preflight.proof_bundle.semantic_mapping_score?.toFixed(2) ?? "—"}</strong>
                     </span>
                     <span className="df2-validate-rail-metric">
                       <small>Compliance</small>
-                      <strong>{preflight.proof_bundle.compliance.risk_score.toFixed(2)}</strong>
+                      <strong>{preflight.proof_bundle.compliance?.risk_score?.toFixed(2) ?? "—"}</strong>
                     </span>
                   </div>
                 )}
@@ -127,49 +131,58 @@ export function ValidateActionsRail({
       </div>
 
       <div className="df2-validate-rail-actions">
-        <button type="button" className="df2-btn" onClick={onBack}>
-          <DtIcon name="chevron-left" size={16} />Back
-        </button>
+        <Button onClick={onBack} leadingIcon={<DtIcon name="chevron-left" size={16} />}>
+          Back
+        </Button>
 
         {!preflight && !preflighting && (
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onRunPreflight}>
-            <DtIcon name="gate" size={16} />Run preflight
-          </button>
+          <Button
+            variant="primary"
+            onClick={onRunPreflight}
+            leadingIcon={<DtIcon name="gate" size={16} />}
+          >
+            Run preflight
+          </Button>
         )}
 
         {blocked && (
-          <button type="button" className="df2-btn" onClick={onRunPreflight} disabled={preflighting}>
-            <DtIcon name="gate" size={16} />Re-run
-          </button>
+          <Button
+            onClick={onRunPreflight}
+            loading={preflighting}
+            leadingIcon={<DtIcon name="gate" size={16} />}
+          >
+            Re-run
+          </Button>
         )}
 
         {blocked && mappingBlocked && mappingReviewCount > 0 && (
-          <button type="button" className="df2-btn df2-btn-primary" onClick={onApproveMappings}>
-            <DtIcon name="check" size={16} />Approve mappings
-          </button>
+          <Button
+            variant="primary"
+            onClick={onApproveMappings}
+            leadingIcon={<DtIcon name="check" size={16} />}
+          >
+            Approve mappings
+          </Button>
         )}
 
         {preflight && !transferLaunch && (
-          <button
-            type="button"
-            className="df2-btn df2-btn-primary"
+          <Button
+            variant="primary"
             onClick={onExecute}
+            loading={transferring}
+            loadingLabel="Starting…"
             disabled={transferring || !passed}
-            title={!passed ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}` : undefined}
+            title={
+              !passed
+                ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
+                : undefined
+            }
+            leadingIcon={<DtIcon name="arrow-right" size={16} />}
           >
-            {transferring ? (
-              <ButtonLoader label="Starting…" />
-            ) : (
-              <>
-                <DtIcon name="arrow-right" size={16} />
-                <span>
-                  {passed
-                    ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
-                    : "Execute (blocked)"}
-                </span>
-              </>
-            )}
-          </button>
+            {passed
+              ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
+              : "Execute (blocked)"}
+          </Button>
         )}
 
         {blocked && firstBlockerMessage && (

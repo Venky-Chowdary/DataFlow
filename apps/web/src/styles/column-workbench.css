@@ -63,7 +63,9 @@
 }
 
 .df2-transfer-studio-shell:has(.is-map-step) .df2-page-metrics-row,
-.df2-transfer-studio-shell.is-map-step-active .df2-page-metrics-row {
+.df2-transfer-studio-shell.is-map-step-active .df2-page-metrics-row,
+.df2-transfer-studio-shell:has(.is-map-step) .df2-stats,
+.df2-transfer-studio-shell.is-map-step-active .df2-stats {
   flex-shrink: 0;
   margin-bottom: 0;
 }
