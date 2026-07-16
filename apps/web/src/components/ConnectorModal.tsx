@@ -117,6 +117,7 @@ export function ConnectorModal({
   const [authSource, setAuthSource] = useState(editing?.auth_source ?? "");
   const [apiKey, setApiKey] = useState(editing?.api_key ?? "");
   const [serviceAccount, setServiceAccount] = useState(editing?.service_account ?? "");
+  const [privateKey, setPrivateKey] = useState(editing?.private_key ?? "");
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
   const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
@@ -211,6 +212,7 @@ export function ConnectorModal({
     setAuthSource("");
     setApiKey("");
     setServiceAccount("");
+    setPrivateKey("");
     setSsl(false);
     setAuthMode(inferAuthMode(null, nextType));
     setTestResult(null);
@@ -351,9 +353,15 @@ export function ConnectorModal({
     if (authMode === "user_pass") {
       payload.username = username || undefined;
       payload.password = password || undefined;
+      if (isSftp && privateKey.trim()) {
+        payload.private_key = privateKey || undefined;
+      }
     }
     if (authMode === "connection_string" || authMode === "file_path") {
       payload.connection_string = connectionString || undefined;
+      if (isSftp && privateKey.trim()) {
+        payload.private_key = privateKey || undefined;
+      }
     }
     if (authMode === "service_account") {
       payload.service_account = serviceAccount || undefined;
@@ -396,6 +404,7 @@ export function ConnectorModal({
         auth_role: isSnowflake ? authRole : undefined,
         auth_mode: authMode,
         auth_source: isMongo ? authSource : undefined,
+        private_key: isSftp && privateKey.trim() ? privateKey : undefined,
         ssl,
       });
       setTestResult(result);
@@ -726,6 +735,24 @@ export function ConnectorModal({
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                     />
+                  </div>
+                </div>
+              )}
+
+              {isSftp && (showUserPass || showConnectionString) && (
+                <div className="df2-form-row" style={{ marginTop: 8 }}>
+                  <div className="df2-field">
+                    <label className="df2-label">SSH private key (optional)</label>
+                    <textarea
+                      className="df2-input"
+                      rows={4}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY----- ..."
+                      value={privateKey}
+                      onChange={(e) => setPrivateKey(e.target.value)}
+                    />
+                    <p className="df2-field-note df2-label-hint">
+                      Paste the private key text. If provided, password is optional.
+                    </p>
                   </div>
                 </div>
               )}
