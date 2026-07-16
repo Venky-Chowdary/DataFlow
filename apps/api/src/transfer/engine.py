@@ -65,7 +65,12 @@ from .file_stream import (
     stream_file_to_database,
 )
 from .cdc_transfer import run_cdc_database_transfer
-from .stream import peek_stream_source, stream_database_transfer, supports_streaming
+from .stream import (
+    peek_stream_source,
+    stream_database_transfer,
+    stream_scd2_mirror_transfer,
+    supports_streaming,
+)
 from .type_mapper import build_column_types, default_mappings
 try:
     from .contract_engine import enforce_or_create_contract, finalize_contract
@@ -1219,9 +1224,19 @@ class UniversalTransferEngine:
             stream_contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = (stream_contract.sync_mode if stream_contract else request.sync_mode).lower()
             if effective_sync in ("full_refresh_mirror", "mirror", "scd2"):
-                raise NotImplementedError(
-                    f"{effective_sync} is not supported for streaming database-to-database transfers; "
-                    "use a file source or a non-streaming database source."
+                rows_written, ddl_log, dest_summary, _ = stream_scd2_mirror_transfer(
+                    request.source,
+                    request.destination,
+                    mappings,
+                    schema,
+                    on_checkpoint=throttled_checkpoint,
+                    sync_mode=request.sync_mode,
+                    stream_contracts=request.stream_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=request.backfill_new_fields,
+                    validation_mode=request.validation_mode,
                 )
             if effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
