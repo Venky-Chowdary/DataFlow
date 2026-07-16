@@ -717,6 +717,8 @@ export async function testConnection(payload: {
   api_key?: string;
   service_account?: string;
   private_key?: string;
+  endpoint_url?: string;
+  path_style?: boolean;
 }): Promise<{ success: boolean; message: string }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
@@ -745,6 +747,8 @@ export async function saveConnector(payload: {
   api_key?: string;
   service_account?: string;
   private_key?: string;
+  endpoint_url?: string;
+  path_style?: boolean;
 }): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
   const res = await apiFetch(`${API_BASE}/connectors/saved`, {
@@ -787,6 +791,8 @@ export async function updateConnector(
     api_key?: string;
     service_account?: string;
     private_key?: string;
+    endpoint_url?: string;
+    path_style?: boolean;
   },
 ): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };

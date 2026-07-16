@@ -60,6 +60,8 @@ class ConnectorConfig(BaseModel):
     auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
     api_key: Optional[str] = Field(default=None, description="API key")
     service_account: Optional[str] = Field(default=None, description="Service account JSON")
+    endpoint_url: Optional[str] = Field(default=None, description="Custom S3/S3-compatible endpoint URL")
+    path_style: bool = Field(default=False, description="Force S3 path-style addressing")
     options: dict = Field(default_factory=dict, description="Additional options")
     auth_source: Optional[str] = None
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
@@ -94,6 +96,8 @@ class TestConnectionRequest(BaseModel):
     auth_role: Optional[str] = ""
     api_key: Optional[str] = None
     service_account: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    path_style: Optional[bool] = False
     auth_source: Optional[str] = None
 
 
@@ -205,6 +209,8 @@ async def test_connection(request: TestConnectionRequest):
             "role": request.auth_role or "",
             "api_key": request.api_key or "",
             "service_account": request.service_account or "",
+            "endpoint_url": request.endpoint_url or "",
+            "path_style": bool(request.path_style),
             "auth_source": request.auth_source or "",
         }
         ok, msg = run_probe(driver, cfg)
@@ -243,6 +249,8 @@ async def create_connector(
         "role": config.role or "both",
         "api_key": config.api_key,
         "service_account": config.service_account,
+        "endpoint_url": config.endpoint_url,
+        "path_style": config.path_style,
         "options": config.options,
         "workspace_id": workspace_id,
         "status": "configured",

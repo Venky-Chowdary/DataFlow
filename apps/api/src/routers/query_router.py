@@ -256,6 +256,8 @@ def _export_to_connector(
         auth_source=dest_connector.auth_source,
         api_key=dest_connector.api_key,
         service_account=dest_connector.service_account,
+        endpoint_url=getattr(dest_connector, "endpoint_url", ""),
+        path_style=getattr(dest_connector, "path_style", False),
     )
 
     mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]

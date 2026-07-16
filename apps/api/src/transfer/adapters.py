@@ -207,6 +207,8 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         "api_key": endpoint.api_key,
         "service_account": endpoint.service_account,
         "private_key": endpoint.private_key,
+        "endpoint_url": endpoint.endpoint_url,
+        "path_style": endpoint.path_style,
     }
     # Keep "role" as the canonical key used by Snowflake connector functions.
     cfg["role"] = endpoint.auth_role or cfg.get("role", "")
@@ -232,6 +234,8 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
             "api_key": conn_dict.get("api_key") or cfg["api_key"],
             "service_account": conn_dict.get("service_account") or cfg["service_account"],
             "private_key": conn_dict.get("private_key") or cfg["private_key"],
+            "endpoint_url": conn_dict.get("endpoint_url") or cfg["endpoint_url"],
+            "path_style": conn_dict.get("path_style") or cfg["path_style"],
             "role": conn_dict.get("role") or cfg["role"],
         })
     return cfg
@@ -261,6 +265,8 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
                 "api_key": getattr(conn, "api_key", ""),
                 "service_account": getattr(conn, "service_account", ""),
                 "private_key": getattr(conn, "private_key", ""),
+                "endpoint_url": getattr(conn, "endpoint_url", ""),
+                "path_style": getattr(conn, "path_style", False),
                 "role": getattr(conn, "auth_role", ""),
             }
     except Exception:
@@ -655,6 +661,8 @@ def write_destination_database(
         "auth_source": cfg.get("auth_source", ""),
         "service_account": cfg.get("service_account", ""),
         "api_key": cfg.get("api_key", ""),
+        "endpoint_url": cfg.get("endpoint_url", ""),
+        "path_style": cfg.get("path_style", False),
         "role": cfg.get("role", ""),
         "table_name": table_name,
         "headers": headers,

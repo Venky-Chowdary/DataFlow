@@ -58,6 +58,8 @@ class SavedConnector:
     api_key: str = ""
     service_account: str = ""
     private_key: str = ""
+    endpoint_url: str = ""
+    path_style: bool = False
     auth_source: str = ""
     workspace_id: str = ""
     last_tested_at: str | None = None
@@ -92,6 +94,8 @@ class SavedConnector:
             api_key=data.get("api_key", ""),
             service_account=data.get("service_account", ""),
             private_key=decrypt_secret(data.get("private_key", "") or ""),
+            endpoint_url=data.get("endpoint_url", ""),
+            path_style=bool(data.get("path_style", False)),
             auth_source=data.get("auth_source", ""),
             workspace_id=data.get("workspace_id", ""),
             last_tested_at=data.get("last_tested_at"),
@@ -322,6 +326,8 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         api_key=data.get("api_key", ""),
         service_account=data.get("service_account", ""),
         private_key=data.get("private_key", ""),
+        endpoint_url=data.get("endpoint_url", ""),
+        path_style=bool(data.get("path_style", False)),
         auth_source=data.get("auth_source", ""),
         workspace_id=data.get("workspace_id", ""),
     )
@@ -428,6 +434,8 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
     if d.get("private_key"):
         d["private_key"] = "****"
     d.setdefault("workspace_id", "")
+    d.setdefault("endpoint_url", "")
+    d.setdefault("path_style", False)
     return d
 
 

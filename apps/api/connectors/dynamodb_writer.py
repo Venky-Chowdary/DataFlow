@@ -83,6 +83,7 @@ def write_mapped_rows(
     create_table: bool = True,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    endpoint_url: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
     del schema, ssl, error_policy, backfill_new_fields
@@ -93,6 +94,7 @@ def write_mapped_rows(
         "username": username,
         "password": password,
         "connection_string": connection_string,
+        "endpoint_url": endpoint_url,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}

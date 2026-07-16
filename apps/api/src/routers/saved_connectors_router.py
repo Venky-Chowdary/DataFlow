@@ -53,6 +53,8 @@ class ConnectorSaveDTO(BaseModel):
     api_key: str = ""
     service_account: str = ""
     private_key: str = ""
+    endpoint_url: str = ""
+    path_style: bool = False
     auth_source: str = ""
 
 

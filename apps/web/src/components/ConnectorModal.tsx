@@ -118,6 +118,8 @@ export function ConnectorModal({
   const [apiKey, setApiKey] = useState(editing?.api_key ?? "");
   const [serviceAccount, setServiceAccount] = useState(editing?.service_account ?? "");
   const [privateKey, setPrivateKey] = useState(editing?.private_key ?? "");
+  const [endpointUrl, setEndpointUrl] = useState(editing?.endpoint_url ?? "");
+  const [pathStyle, setPathStyle] = useState(editing?.path_style ?? false);
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
   const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
@@ -213,6 +215,8 @@ export function ConnectorModal({
     setApiKey("");
     setServiceAccount("");
     setPrivateKey("");
+    setEndpointUrl("");
+    setPathStyle(false);
     setSsl(false);
     setAuthMode(inferAuthMode(null, nextType));
     setTestResult(null);
@@ -369,9 +373,15 @@ export function ConnectorModal({
     if (authMode === "api_key") {
       payload.api_key = apiKey || undefined;
     }
-    if (authMode === "aws_keys") {
+    if (authMode === "aws_keys" || isS3 || isDynamo) {
       payload.username = username || undefined;
       payload.password = password || undefined;
+      if (endpointUrl.trim()) {
+        payload.endpoint_url = endpointUrl || undefined;
+      }
+      if (isS3 && pathStyle) {
+        payload.path_style = pathStyle;
+      }
     }
     if (isSnowflake) {
       payload.warehouse = warehouse || undefined;
@@ -405,6 +415,8 @@ export function ConnectorModal({
         auth_mode: authMode,
         auth_source: isMongo ? authSource : undefined,
         private_key: isSftp && privateKey.trim() ? privateKey : undefined,
+        endpoint_url: (isS3 || isDynamo) && endpointUrl.trim() ? endpointUrl : undefined,
+        path_style: isS3 && pathStyle ? pathStyle : undefined,
         ssl,
       });
       setTestResult(result);
@@ -780,6 +792,35 @@ export function ConnectorModal({
                       onChange={(e) => setPassword(e.target.value)}
                     />
                   </div>
+                </div>
+              )}
+
+              {(isS3 || isDynamo) && showAwsKeys && (
+                <div className="df2-form-row" style={{ marginTop: 8 }}>
+                  <div className="df2-field">
+                    <label className="df2-label">Custom endpoint URL (optional)</label>
+                    <input
+                      className="df2-input"
+                      placeholder="https://s3.wasabisys.com or http://localhost:9000"
+                      value={endpointUrl}
+                      onChange={(e) => setEndpointUrl(e.target.value)}
+                    />
+                    <p className="df2-field-note df2-label-hint">
+                      For MinIO, LocalStack, Wasabi, and other S3-compatible stores.
+                    </p>
+                  </div>
+                  {isS3 && (
+                    <div className="df2-field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <label className="df2-checkbox" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={pathStyle}
+                          onChange={(e) => setPathStyle(e.target.checked)}
+                        />
+                        <span>Use path-style addressing</span>
+                      </label>
+                    </div>
+                  )}
                 </div>
               )}
 

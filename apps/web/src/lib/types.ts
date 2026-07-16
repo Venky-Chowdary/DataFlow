@@ -26,6 +26,8 @@ export interface Connector {
   api_key?: string;
   service_account?: string;
   private_key?: string;
+  endpoint_url?: string;
+  path_style?: boolean;
   created_at: string;
   last_test_ok?: boolean;
 }

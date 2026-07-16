@@ -35,6 +35,10 @@ class EndpointConfig:
     output_path: str = ""
     # Cloud/data region for the endpoint (e.g. us-east-1, eu-west-1).
     region: str = ""
+    # S3 / S3-compatible custom endpoint, e.g. http://minio:9000.
+    endpoint_url: str = ""
+    # Force path-style addressing for S3-compatible stores (MinIO, LocalStack, Wasabi).
+    path_style: bool = False
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -63,12 +67,14 @@ class EndpointConfig:
             private_key=d.get("private_key", d.get("ssh_private_key", "")),
             output_path=(d.get("output_path") or "").strip(),
             region=d.get("region", ""),
+            endpoint_url=(d.get("endpoint_url") or "").strip(),
+            path_style=bool(d.get("path_style", False)),
             extra={k: v for k, v in d.items() if k not in {
                 "format", "type", "db_type", "connector_id", "host", "port",
                 "database", "schema", "table", "table_name", "collection",
                 "collection_name", "username", "password", "connection_string",
                 "warehouse", "ssl", "auth_mode", "auth_role", "auth_source", "api_key", "service_account",
-                "private_key", "ssh_private_key", "output_path", "region",
+                "private_key", "ssh_private_key", "output_path", "region", "endpoint_url", "path_style",
             }},
         )
 
@@ -141,6 +147,8 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "private_key": ep.private_key,
         "output_path": ep.output_path,
         "region": ep.region,
+        "endpoint_url": ep.endpoint_url,
+        "path_style": ep.path_style,
     }
 
 
