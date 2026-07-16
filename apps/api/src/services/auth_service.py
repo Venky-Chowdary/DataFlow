@@ -6,23 +6,34 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from typing import Any, Optional
 
 from services.platform_config import is_production
 
-_AUTH_SECRET = os.getenv("DATAFLOW_AUTH_SECRET", "dev-change-me-before-production")
+_REAUTH_SECRET = os.getenv("DATAFLOW_AUTH_SECRET", "dev-change-me-before-production")
 _REQUIRE_AUTH = os.getenv("DATAFLOW_REQUIRE_AUTH", "1" if is_production() else "0").lower() in ("1", "true", "yes")
 _TOKEN_TTL_SEC = int(os.getenv("DATAFLOW_TOKEN_TTL_SEC", "86400"))
 _ALLOW_DEV_USER = os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
 
-# SHA-256 of "password123" for test@gmail.com (dev/staging only)
+# bcrypt hash of "password123" for test@gmail.com (dev/staging only, never production)
 _DEV_USER = {
     "email": "test@gmail.com",
-    "password_hash": "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f",
+    "password_hash": "$2b$12$II.e7tCoYPLs2Pv8/dWEVeOMl3GOwsiUnSteHd6Twq3juXLiLsO9e",
     "name": "Test User",
     "role": "Workspace tester",
 }
+
+# Legacy unsalted SHA-256 hashes are exactly 64 hex characters.
+_LEGACY_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _token_secret() -> str:
+    """Return the signing secret after validating it is not the dev default in production."""
+    if is_production() and _REAUTH_SECRET in ("", "dev-change-me-before-production"):
+        raise RuntimeError("DATAFLOW_AUTH_SECRET must be set to a strong random value in production")
+    return _REAUTH_SECRET
 
 
 def auth_required() -> bool:
@@ -53,14 +64,35 @@ def _load_users() -> list[dict[str, str]]:
 
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    """Hash a password with bcrypt (adaptive, salted, slow)."""
+    import bcrypt
+
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+
+
+def _legacy_verify(password: str, password_hash: str) -> bool:
+    """Verify a legacy unsalted SHA-256 hash."""
+    expected = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(password_hash, expected)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against either a bcrypt or legacy SHA-256 hash."""
+    if not password_hash:
+        return False
+    if _LEGACY_SHA256_RE.match(password_hash):
+        return _legacy_verify(password, password_hash)
+    try:
+        import bcrypt
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
     normalized = email.strip().lower()
-    digest = hash_password(password)
     for user in _load_users():
-        if user.get("email", "").strip().lower() == normalized and user.get("password_hash") == digest:
+        if user.get("email", "").strip().lower() == normalized and verify_password(password, user.get("password_hash", "")):
             return {
                 "email": user["email"],
                 "name": user.get("name", user["email"]),
@@ -72,7 +104,7 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
 def create_token(email: str) -> tuple[str, int]:
     expires = int(time.time()) + _TOKEN_TTL_SEC
     payload = f"{email.strip().lower()}:{expires}"
-    sig = hmac.new(_AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}", expires
 
 
@@ -99,7 +131,7 @@ def verify_token(token: str) -> Optional[str]:
     if expires < int(time.time()):
         return None
     payload = f"{email}:{expires_s}"
-    expected = hmac.new(_AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    expected = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, sig):
         return None
     return email

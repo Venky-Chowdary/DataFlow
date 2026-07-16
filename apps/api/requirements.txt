@@ -43,6 +43,7 @@ xmltodict>=0.13.0
 
 # Security
 cryptography>=42.0.0
+bcrypt>=4.1.0
 
 # Cloud SDKs
 azure-storage-blob>=12.19.0
