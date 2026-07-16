@@ -91,6 +91,10 @@ class QueryExecuteRequest(BaseModel):
 class QueryExportRequest(QueryExecuteRequest):
     format: str = Field("csv", description="csv, json, jsonl, tsv, excel, parquet")
     output_path: str = Field("", description="Optional server-local path; empty uses exports folder")
+    destination_connector_id: str = Field("", description="Optional saved connector to write results to instead of a file")
+    destination: str = Field("", description="Target table, collection, or object name for destination_connector_id")
+    sync_mode: str = Field("append", description="append, upsert, or overwrite (only used when writing to a connector)")
+    conflict_columns: list[str] = Field(default_factory=list, description="Columns to use for upsert conflict resolution")
 
 
 class QueryResult(BaseModel):
@@ -122,6 +126,13 @@ def _check_workspace_read(request: Request, workspace_id: str | None):
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
 
+def _check_workspace_write(request: Request, workspace_id: str | None):
+    from services.team_store import can_write_workspace
+    actor = _actor(request)
+    if workspace_id and not can_write_workspace(workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace write access denied")
+
+
 @router.post("/execute", response_model=QueryResult)
 async def query_execute(
     body: QueryExecuteRequest,
@@ -151,7 +162,7 @@ async def query_export(
     request: Request,
     x_workspace_id: str | None = Header(None, alias="X-Workspace-Id"),
 ):
-    """Run a query and export the results to a downloadable file."""
+    """Run a query and export the results to a file or a destination connector."""
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
@@ -161,6 +172,9 @@ async def query_export(
     rows, columns, schema, _ = _run_query(connector, body)
     if not rows:
         return QueryExportResult(success=True, row_count=0, format=body.format)
+
+    if body.destination_connector_id:
+        return _export_to_connector(body, rows, columns, schema, workspace_id, request)
 
     try:
         from src.transfer.adapters import write_destination_file
@@ -203,6 +217,74 @@ async def query_export(
         )
     except Exception as e:
         return QueryExportResult(success=False, error=str(e), format=body.format)
+
+
+def _export_to_connector(
+    body: QueryExportRequest,
+    rows: list[dict],
+    columns: list[str],
+    schema: dict[str, str],
+    workspace_id: str,
+    request: Request,
+) -> QueryExportResult:
+    """Write query results to a saved database, warehouse, or object-store connector."""
+    _check_workspace_write(request, workspace_id)
+    dest_connector = connector_store.get_connector(body.destination_connector_id, workspace_id=workspace_id)
+    if not dest_connector:
+        raise HTTPException(status_code=404, detail="Destination connector not found")
+
+    from src.transfer.adapters import write_destination_database
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(
+        kind="database",
+        format=dest_connector.type,
+        connector_id=dest_connector.id,
+        host=dest_connector.host,
+        port=dest_connector.port,
+        database=dest_connector.database,
+        schema=dest_connector.schema or "public",
+        table=body.destination or "query_export",
+        collection=body.destination or "query_export",
+        username=dest_connector.username,
+        password=dest_connector.password,
+        connection_string=dest_connector.connection_string,
+        warehouse=dest_connector.warehouse,
+        ssl=dest_connector.ssl,
+        auth_mode=dest_connector.auth_mode,
+        auth_role=dest_connector.auth_role,
+        auth_source=dest_connector.auth_source,
+        api_key=dest_connector.api_key,
+        service_account=dest_connector.service_account,
+    )
+
+    mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    write_mode = body.sync_mode.lower()
+    if write_mode not in ("insert", "upsert", "replace"):
+        write_mode = "insert"
+    if write_mode == "overwrite":
+        write_mode = "replace"
+
+    try:
+        rows_written, ddl_log, dest_summary = write_destination_database(
+            dest,
+            records=rows,
+            columns=columns,
+            schema=schema,
+            mappings=mappings,
+            write_mode=write_mode,
+            conflict_columns=body.conflict_columns,
+        )
+        return QueryExportResult(
+            success=True,
+            row_count=rows_written,
+            format=dest_connector.type,
+            path=body.destination or "",
+            filename=body.destination or "",
+            download_url=dest_summary.get("download_url", ""),
+        )
+    except Exception as e:
+        return QueryExportResult(success=False, error=str(e), format=dest_connector.type)
 
 
 def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequest):

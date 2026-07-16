@@ -1442,6 +1442,10 @@ export async function exportQuery(payload: {
   limit?: number;
   format: string;
   output_path?: string;
+  destination_connector_id?: string;
+  destination?: string;
+  sync_mode?: string;
+  conflict_columns?: string[];
 }): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {
     method: "POST",

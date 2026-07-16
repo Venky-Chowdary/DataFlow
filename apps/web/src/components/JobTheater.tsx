@@ -5,6 +5,7 @@ import { Spinner } from "./LoadingState";
 import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
 import { streamJobProgress } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
+import { QuarantinePanel } from "./transfer/QuarantinePanel";
 
 interface JobTheaterProps {
   jobId: string;
@@ -450,8 +451,9 @@ export function JobTheaterView({
           <DtIcon name="alert" size={18} />
           <div>
             <strong>{rejectedRows.toLocaleString()} rows rejected</strong>
-            <p>Review rejected details in the event log.</p>
+            <p>Review rejected details below and export them for remediation.</p>
           </div>
+          <QuarantinePanel jobId={jobId} rejectedRows={rejectedRows} />
         </div>
       )}
 

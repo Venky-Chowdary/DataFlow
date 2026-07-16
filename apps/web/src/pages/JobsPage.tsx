@@ -12,6 +12,7 @@ import { useToast } from "../components/Toast";
 import { fetchJob, retryJob } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
+import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
@@ -393,6 +394,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       <div className="df2-jobs-v3-alert error">
                         <DtIcon name="alert" size={16} />
                         <p>{liveJob.error}</p>
+                      </div>
+                    )}
+
+                    {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0) && (
+                      <div className="df2-jobs-v3-actions">
+                        <QuarantinePanel jobId={selected._id} rejectedRows={liveJob.rejected_rows} />
                       </div>
                     )}
 

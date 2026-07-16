@@ -57,6 +57,22 @@
   flex-wrap: wrap;
 }
 
+.df2-query-export-destination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-query-export-destination .df2-field {
+  margin-bottom: 0;
+}
+
+.df2-query-export-destination .df2-field label {
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
 .df2-query-export-bar .df2-input-sm {
   min-width: 120px;
 }

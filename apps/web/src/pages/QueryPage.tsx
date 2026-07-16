@@ -26,6 +26,9 @@ export function QueryPage({ connectors }: QueryPageProps) {
   const [limit, setLimit] = useState(1000);
   const [exportFormat, setExportFormat] = useState("csv");
   const [outputPath, setOutputPath] = useState("");
+  const [destConnectorId, setDestConnectorId] = useState("");
+  const [destTarget, setDestTarget] = useState("");
+  const [destSyncMode, setDestSyncMode] = useState("append");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [exportResult, setExportResult] = useState<QueryExportResult | null>(null);
@@ -79,6 +82,9 @@ export function QueryPage({ connectors }: QueryPageProps) {
         limit,
         format: exportFormat,
         output_path: outputPath,
+        destination_connector_id: destConnectorId || undefined,
+        destination: destTarget || undefined,
+        sync_mode: destSyncMode,
       });
       setExportResult(data);
       if (data.success) {
@@ -157,17 +163,46 @@ export function QueryPage({ connectors }: QueryPageProps) {
                 <p className="df2-card-sub">{result.row_count.toLocaleString()} rows · {result.columns.length} columns {result.truncated && "· truncated"}</p>
               </div>
               <div className="df2-query-export-bar">
-                <select className="df2-input df2-input-sm" value={exportFormat} onChange={(e) => setExportFormat(e.target.value)}>
-                  {FORMATS.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
-                </select>
-                <input
-                  className="df2-input df2-input-sm"
-                  value={outputPath}
-                  onChange={(e) => setOutputPath(e.target.value)}
-                  placeholder="Output path (optional)"
-                />
+                <div className="df2-query-export-destination">
+                  <ConnectorSelect
+                    id="query-destination-connector"
+                    label="Destination (optional)"
+                    value={destConnectorId}
+                    onChange={setDestConnectorId}
+                    connectors={connectors}
+                    placeholder="File export"
+                  />
+                  {destConnectorId && (
+                    <>
+                      <input
+                        className="df2-input df2-input-sm"
+                        value={destTarget}
+                        onChange={(e) => setDestTarget(e.target.value)}
+                        placeholder="Table / collection / object name"
+                      />
+                      <select className="df2-input df2-input-sm" value={destSyncMode} onChange={(e) => setDestSyncMode(e.target.value)}>
+                        <option value="append">Append</option>
+                        <option value="upsert">Upsert</option>
+                        <option value="overwrite">Overwrite</option>
+                      </select>
+                    </>
+                  )}
+                </div>
+                {!destConnectorId && (
+                  <>
+                    <select className="df2-input df2-input-sm" value={exportFormat} onChange={(e) => setExportFormat(e.target.value)}>
+                      {FORMATS.map((f) => <option key={f} value={f}>{f.toUpperCase()}</option>)}
+                    </select>
+                    <input
+                      className="df2-input df2-input-sm"
+                      value={outputPath}
+                      onChange={(e) => setOutputPath(e.target.value)}
+                      placeholder="Output path (optional)"
+                    />
+                  </>
+                )}
                 <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" disabled={loading} onClick={() => void runExport()}>
-                  <DtIcon name="download" size={14} /> Export
+                  <DtIcon name="download" size={14} /> {destConnectorId ? "Write to connector" : "Export file"}
                 </button>
               </div>
             </div>
@@ -197,15 +232,17 @@ export function QueryPage({ connectors }: QueryPageProps) {
           </div>
         )}
 
-        {exportResult?.success && exportResult.download_url && (
+        {exportResult?.success && (
           <div className="df2-query-export-notice df2-alert df2-alert-success" role="alert">
             <DtIcon name="check" size={16} />
             <div>
-              <strong>Export ready</strong>
-              <p>{(exportResult.row_count ?? 0).toLocaleString()} rows exported as {exportResult.format?.toUpperCase()}.</p>
-              <a className="df2-btn df2-btn-primary df2-btn-sm" href={exportResult.download_url} download={exportResult.filename}>
-                <DtIcon name="download" size={14} /> Download {exportResult.filename}
-              </a>
+              <strong>{exportResult.download_url ? "Export ready" : "Export complete"}</strong>
+              <p>{(exportResult.row_count ?? 0).toLocaleString()} rows {exportResult.download_url ? `exported as ${exportResult.format?.toUpperCase()}` : `written to ${exportResult.format}${exportResult.filename ? ` · ${exportResult.filename}` : ""}`}.</p>
+              {exportResult.download_url && (
+                <a className="df2-btn df2-btn-primary df2-btn-sm" href={exportResult.download_url} download={exportResult.filename}>
+                  <DtIcon name="download" size={14} /> Download {exportResult.filename}
+                </a>
+              )}
             </div>
           </div>
         )}
