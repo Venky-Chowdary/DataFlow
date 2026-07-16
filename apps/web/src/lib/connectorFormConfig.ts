@@ -1,6 +1,7 @@
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
 import {
   getConnectorDefaults,
+  getRestApiDefaultObject,
   isAwsConnector,
   isGcpConnector,
   isGenericSql,
@@ -149,8 +150,10 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isEmail = resolved === "email";
   const isSQLite = resolved === "sqlite";
   const isDuckDB = resolved === "duckdb";
-  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved);
+  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml"].includes(resolved);
   const isAzure = resolved === "adls";
+  const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
+  const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
 
   const authModes: AuthModeConfig[] = [];
 
@@ -250,6 +253,18 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Container / filesystem", { placeholder: "my-container" }),
       text("username", "Account name", { optional: true, hint: "Optional when using connection string." }),
       password("password", "Account key", { optional: true, hint: "Optional when using connection string." })
+    );
+  } else if (isNoSqlSource) {
+    const dbLabel = resolved === "influxdb" ? "Database / bucket" : resolved === "couchbase" ? "Bucket" : "Database";
+    const tableLabel = resolved === "influxdb" ? "Measurement" : resolved === "neo4j" ? "Node label (optional)" : "Scope / collection (optional)";
+    userPassFields.push(
+      text("host", "Host", { placeholder: host || "localhost" }),
+      number("port", "Port", { placeholder: String(port || 0) }),
+      text("database", dbLabel, { placeholder: "mydb" }),
+      text("username", "Username"),
+      password("password", "Password"),
+      text("table", tableLabel, { optional: true }),
+      checkbox("ssl", "Use HTTPS / TLS")
     );
   }
 
@@ -381,7 +396,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     }
   }
 
-  // API key mode (Elasticsearch + generic APIs)
+  // API key mode (Elasticsearch + SaaS APIs)
   const apiFields: FormField[] = [];
   if (isElastic) {
     apiFields.push(
@@ -394,6 +409,35 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       }),
       checkbox("ssl", "Use HTTPS / TLS")
     );
+  }
+  if (isSaaS) {
+    const defaultObject: Record<string, string> = {
+      salesforce: "Account",
+      hubspot: "contacts",
+      stripe: "customers",
+      rest_api: getRestApiDefaultObject(type),
+    };
+    const placeholder = host || resolved;
+    const objectHint = `Default object/table used when none is specified: ${defaultObject[resolved] || ""}.`;
+    apiFields.push(
+      text("host", "Host / instance URL", { optional: true, placeholder }),
+      text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
+      textarea("apiKey", resolved === "stripe" ? "Secret key" : "API token", {
+        rows: 2,
+        placeholder: resolved === "stripe" ? "sk_..." : "Paste access token",
+        hint: `Paste the ${resolved === "stripe" ? "Stripe secret key" : resolved + " access token"}. ${objectHint}`,
+      })
+    );
+    if (resolved === "rest_api") {
+      apiFields.push(
+        textarea("connection_string", "Advanced config (JSON, optional)", {
+          rows: 2,
+          optional: true,
+          placeholder: '{"pagination_type":"cursor","data_path":"data","cursor_param":"after"}',
+          hint: "Override pagination, data path, auth header, or query parameters as JSON.",
+        })
+      );
+    }
   }
 
   // Build auth modes for each connector
@@ -469,7 +513,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   if (apiFields.length) {
     authModes.push(
       auth("api_key", "API key", apiFields, (values) => {
-        if (!fmt(values, "host")) return "Host is required.";
+        if (!isSaaS && !fmt(values, "host")) return "Host is required.";
         if (!fmt(values, "apiKey")) return "API key is required.";
         return null;
       })
@@ -512,6 +556,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
   return "user_pass";

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from functools import lru_cache
-from typing import Any
+from pathlib import Path
+from typing import Any, FrozenSet
 
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
 _DRIVER_CAPS: dict[str, dict[str, bool]] = {
@@ -23,6 +25,13 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
+    "salesforce": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "hubspot": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -34,6 +43,9 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "ndjson": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "excel": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "parquet": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "avro": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "orc": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "xml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
 }
 
 # Catalog marketplace id → driver / format type
@@ -73,6 +85,15 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "neon": "postgresql",
     "timescaledb": "postgresql",
     "cockroachdb": "postgresql",
+    "alibaba_oss": "s3",
+    "alibaba_cloud_object_storage": "s3",
+    "azure_cosmos_db": "mongodb",
+    "google_biglake": "bigquery",
+    "amazon_emr": "generic_sql",
+    "cloudera_data_platform": "generic_sql",
+    "sap_bw_4hana": "generic_sql",
+    "motherduck": "generic_sql",
+    "firebase_realtime_db": "rest_api",
     "jsonl": "jsonl",
     "ndjson": "ndjson",
     "sftp": "sftp",
@@ -87,6 +108,7 @@ SUGGESTED_SOURCES = [
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
+    "salesforce", "hubspot", "stripe",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
@@ -124,6 +146,13 @@ def default_port(driver_type: str) -> int:
         "generic_sql": 0,
         "sftp": 22,
         "email": 587,
+        "salesforce": 443,
+        "hubspot": 443,
+        "stripe": 443,
+        "rest_api": 443,
+        "influxdb": 8086,
+        "neo4j": 7474,
+        "couchbase": 8093,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -140,6 +169,13 @@ def resolve_driver_type(catalog_id: str) -> str:
         return cid
     if cid in _FILE_CAPS:
         return cid
+
+    # Generic REST source driver for SaaS/API catalog entries that don't have a
+    # dedicated native connector yet. This must run before the generic SQL substring
+    # fallback so connectors like athenahealth or oracle_hcm (which contain SQL
+    # engine substrings) are routed to the API driver instead of generic SQL.
+    if cid in _saas_catalog_ids():
+        return "rest_api"
 
     # Generic SQL fallback handles any SQL engine with a SQLAlchemy dialect.
     def _valid(driver: str) -> bool:
@@ -251,6 +287,25 @@ def resolve_driver_type(catalog_id: str) -> str:
     return base
 
 
+@lru_cache(maxsize=1)
+def _saas_catalog_ids() -> FrozenSet[str]:
+    """Catalog IDs that are SaaS/API connectors and can use the generic REST driver."""
+    try:
+        path = Path(__file__).resolve().parents[2] / "data" / "connector_catalog.json"
+        with open(path, encoding="utf-8") as f:
+            catalog = json.load(f)
+        return frozenset(
+            c["id"].lower().strip()
+            for c in catalog.get("connectors", [])
+            if c.get("category") in ("saas", "api", "finance", "marketing", "healthcare", "logistics")
+            and c.get("id", "").lower().strip() not in CATALOG_ID_ALIASES
+            and c.get("id", "").lower().strip() not in _DRIVER_CAPS
+            and c.get("id", "").lower().strip() not in _FILE_CAPS
+        )
+    except Exception:
+        return frozenset()
+
+
 def _sqlalchemy_available() -> bool:
     try:
         return importlib.util.find_spec("sqlalchemy") is not None
@@ -275,6 +330,13 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "sqlite": "sqlite3",
     "sftp": "paramiko",
     "email": None,
+    "salesforce": "requests",
+    "hubspot": "requests",
+    "stripe": "requests",
+    "rest_api": "requests",
+    "influxdb": "requests",
+    "neo4j": "requests",
+    "couchbase": "requests",
     "csv": None,
     "tsv": None,
     "json": None,
@@ -282,6 +344,9 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "ndjson": None,
     "excel": "openpyxl",
     "parquet": "pyarrow",
+    "avro": "fastavro",
+    "orc": "pyarrow",
+    "xml": "xmltodict",
 }
 
 
@@ -403,6 +468,11 @@ def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[st
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 
+def _source_only_ready(caps: dict[str, bool]) -> bool:
+    """True for connectors that are read-only sources (SaaS APIs, etc.)."""
+    return bool(caps.get("source_only") and caps.get("read"))
+
+
 def transfer_ready(caps: dict[str, bool]) -> bool:
     """True when connector supports production read+write transfer."""
     if caps.get("file_source"):
@@ -413,11 +483,11 @@ def transfer_ready(caps: dict[str, bool]) -> bool:
 
 
 def connect_only(caps: dict[str, bool]) -> bool:
-    return bool(caps.get("test") and not transfer_ready(caps))
+    return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps)))
 
 
 def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
-    if transfer_ready(caps):
+    if transfer_ready(caps) or _source_only_ready(caps):
         return "live"
     if connect_only(caps):
         return "connect_only"
@@ -433,6 +503,8 @@ def capability_label(caps: dict[str, bool]) -> str:
         if caps.get("file_source"):
             return "File transfer"
         return "Full transfer"
+    if _source_only_ready(caps):
+        return "Source only"
     if connect_only(caps):
         return "Connection test only"
     return "Roadmap"
@@ -456,18 +528,14 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     driver = resolve_driver_type(catalog_id)
     caps = get_capabilities(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
-    eff = "live" if ready else (
-        "connect_only" if connect_only(caps) else effective_status(caps, entry.get("status", "planned"))
-    )
+    eff = effective_status(caps, entry.get("status", "planned"))
     out = dict(entry)
     out["driver_type"] = driver
     out["capabilities"] = caps
     out["effective_status"] = eff
     out["transfer_ready"] = ready
     out["connect_only"] = connect_only(caps) and not ready
-    out["capability_label"] = capability_label(caps) if ready else (
-        "Connection test only" if connect_only(caps) else "Roadmap"
-    )
+    out["capability_label"] = capability_label(caps)
     return out
 
 

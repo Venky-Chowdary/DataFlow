@@ -38,6 +38,8 @@ ijson>=3.2.0
 openpyxl>=3.1.0
 paramiko>=3.4.0
 pyarrow>=14.0.0
+fastavro>=1.9.0
+xmltodict>=0.13.0
 
 # Security
 cryptography>=42.0.0

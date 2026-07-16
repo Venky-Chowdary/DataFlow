@@ -15,7 +15,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from src.services.catalog_service import search_catalog  # noqa: E402
-from src.transfer.connector_capabilities import default_port, get_capabilities, resolve_driver_type, source_ready  # noqa: E402
+from src.transfer.connector_capabilities import default_port, dest_ready, get_capabilities, resolve_driver_type, source_ready  # noqa: E402
 from src.transfer.registry import validate_transfer  # noqa: E402
 
 
@@ -38,7 +38,9 @@ def test_all_live_catalog_ids_resolve_to_driver(live_catalog_ids: list[str]):
             "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
             "dynamodb", "s3", "gcs", "adls", "redis", "elasticsearch", "sqlite",
             "sftp", "email",
+            "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
             "generic_sql", "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+            "avro", "orc", "xml",
         ), f"{cid} -> {driver} is not a known driver"
 
 
@@ -51,36 +53,37 @@ def test_all_live_catalog_ids_have_default_port(live_catalog_ids: list[str]):
 
 def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: list[str]):
     db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
-    source_ids = [cid for cid in db_ids if source_ready(get_capabilities(resolve_driver_type(cid)))]
+    source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
+    dest_ids = [cid for cid in db_ids if dest_ready(get_capabilities(resolve_driver_type(cid)))]
     for src in source_ids:
-        for dst in db_ids:
+        for dst in dest_ids:
             ok, msg = validate_transfer("database", src, "database", dst)
             assert ok, f"database/{src} -> database/{dst}: {msg}"
 
 
 def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[str]):
     file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
-    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
-    )]
+    dest_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
+    ) and dest_ready(get_capabilities(resolve_driver_type(cid)))]
     for fid in file_ids:
-        for did in db_ids:
+        for did in dest_ids:
             ok, msg = validate_transfer("file", fid, "database", did)
             assert ok, f"file/{fid} -> database/{did}: {msg}"
 
 
 def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: list[str]):
     file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
     db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
-    source_ids = [cid for cid in db_ids if source_ready(get_capabilities(resolve_driver_type(cid)))]
+    source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     for sid in source_ids:
         for fid in file_ids:
             ok, msg = validate_transfer("database", sid, "file_export", fid)

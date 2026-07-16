@@ -178,6 +178,10 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "amazon_athena": "awsathena+rest",
     "synapse": "mssql+pyodbc",
     "azure_synapse": "mssql+pyodbc",
+    "amazon_emr": "hive",
+    "cloudera_data_platform": "impala",
+    "sap_bw_4hana": "hana",
+    "motherduck": "duckdb",
 }
 
 _DEFAULT_PORT_MAP: dict[str, int] = {
@@ -267,6 +271,10 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
     "amazon_athena": 443,
     "synapse": 1433,
     "azure_synapse": 1433,
+    "amazon_emr": 10000,
+    "cloudera_data_platform": 21000,
+    "sap_bw_4hana": 30015,
+    "motherduck": 0,
 }
 
 
@@ -310,6 +318,13 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 
     if not db_type:
         raise ValueError("A database type or connection_string is required")
+
+    # MotherDuck is DuckDB cloud: the database token/DB is addressed as md:<database>.
+    if db_type == "motherduck":
+        database = (cfg.get("database") or "").strip() or "my_db"
+        if not database.startswith("md:"):
+            database = f"md:{database}"
+        return f"duckdb:///{database}"
 
     drivername = _drivername(db_type)
 

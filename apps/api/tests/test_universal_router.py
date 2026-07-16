@@ -29,6 +29,6 @@ def test_file_csv_to_json_export_convert():
 
 
 def test_unsupported_route_has_alternatives():
-    r = analyze_route("file", "parquet", "file_export", "xml")
+    r = analyze_route("file", "csv", "file_export", "protobuf")
     assert r["supported"] is False
     assert isinstance(r.get("alternatives"), list)

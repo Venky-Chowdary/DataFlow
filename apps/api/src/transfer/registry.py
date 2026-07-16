@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"]
-LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson"]
+LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"]
+LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml"]
 
 # Live drivers are discovered at import time; object stores and warehouses count
 # as database destinations, while the listed file formats are file targets.
-_FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"}
+_FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"}
 
 def _live_db_drivers(live_fn_name: str = "transfer_live_driver_types") -> list[str]:
     try:
@@ -67,8 +67,39 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
                 return resolve_driver_type(fmt)
             except Exception:
                 return fmt
+
+    def _source_only_supported(fmt: str) -> bool:
+        try:
+            from .connector_capabilities import get_capabilities, _source_only_ready
+            caps = get_capabilities(fmt, fmt)
+            return _source_only_ready(caps)
+        except Exception:
+            return False
+
+    def _dest_supported(fmt: str) -> bool:
+        # Source-only SaaS can only feed database destinations, not file formats
+        # masquerading as database dests.
+        if fmt.lower() in _FILE_FORMATS:
+            return False
+        if fmt in LIVE_DEST_DATABASES:
+            return True
+        try:
+            from .connector_capabilities import dest_ready, get_capabilities
+            caps = get_capabilities(fmt, fmt)
+            return dest_ready(caps)
+        except Exception:
+            return False
+
     src_fmt = _resolve(source_format)
     dst_fmt = _resolve(dest_format)
+
+    # Source-only SaaS connectors can feed any live destination.
+    if source_kind == "database" and _source_only_supported(src_fmt):
+        if dest_kind == "database" and _dest_supported(dst_fmt):
+            return True, "supported"
+        if dest_kind == "file_export" and dst_fmt.lower() in LIVE_DEST_FILE_FORMATS:
+            return True, "supported"
+
     key = (source_kind, src_fmt.lower(), dest_kind, dst_fmt.lower())
     if key in LIVE_MATRIX:
         return True, "supported"
@@ -90,7 +121,15 @@ def _live_catalog_ids() -> list[str]:
 
 
 def get_capabilities() -> dict:
-    from .connector_capabilities import manifest_summary, transfer_live_driver_types
+    from .connector_capabilities import (
+        _source_only_ready,
+        dest_ready,
+        get_capabilities as _caps,
+        manifest_summary,
+        resolve_driver_type,
+        source_ready,
+        transfer_live_driver_types,
+    )
 
     combos = []
     for sk, sf, dk, df in sorted(LIVE_MATRIX):
@@ -107,14 +146,50 @@ def get_capabilities() -> dict:
             "operation": op,
             "status": "live",
         })
+    # Add source-only SaaS routes (source → database / file_export) so the UI can
+    # advertise and validate them without bloating the seedable route matrix.
+    for src in _source_only_driver_types():
+        for dst in LIVE_DEST_DATABASES:
+            combos.append({
+                "source_kind": "database",
+                "source_format": src,
+                "dest_kind": "database",
+                "dest_format": dst,
+                "operation": "migration",
+                "status": "live",
+            })
+        for dst_fmt in LIVE_DEST_FILE_FORMATS:
+            combos.append({
+                "source_kind": "database",
+                "source_format": src,
+                "dest_kind": "file_export",
+                "dest_format": dst_fmt,
+                "operation": "dump",
+                "status": "live",
+            })
+
     summary = manifest_summary()
     live_catalog = _live_catalog_ids()
+
+    source_dbs = []
+    dest_dbs = []
+    for cid in live_catalog:
+        driver = resolve_driver_type(cid)
+        if driver in _FILE_FORMATS:
+            # File formats live in source_formats / destination_file_formats.
+            continue
+        caps = _caps(driver, cid)
+        if source_ready(caps) or _source_only_ready(caps):
+            source_dbs.append(cid)
+        if dest_ready(caps):
+            dest_dbs.append(cid)
+
     return {
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
-        "destination_databases": live_catalog,
+        "destination_databases": dest_dbs,
         "destination_file_formats": LIVE_DEST_FILE_FORMATS,
-        "source_databases": live_catalog,
+        "source_databases": source_dbs,
         "transfer_live_drivers": transfer_live_driver_types(),
         "transfer_live_count": summary["transfer_live_count"],
         "connect_only_count": summary["connect_only_count"],
@@ -127,3 +202,11 @@ def get_capabilities() -> dict:
             "Catalog roadmap entries require driver implementation before production use."
         ),
     }
+
+
+def _source_only_driver_types() -> list[str]:
+    try:
+        from .connector_capabilities import _DRIVER_CAPS, _source_only_ready
+    except Exception:
+        return []
+    return sorted(k for k, v in _DRIVER_CAPS.items() if _source_only_ready(v))

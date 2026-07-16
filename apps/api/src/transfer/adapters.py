@@ -183,7 +183,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         0 if fmt == "generic_sql" else
         22 if fmt == "sftp" else
         587 if fmt == "email" else
-        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls") else 5432
+        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase") else 5432
     )
     default_schema = (
         "PUBLIC" if fmt == "snowflake" else
@@ -193,7 +193,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     cfg = {
         "host": endpoint.host or "localhost",
         "port": endpoint.port or default_port,
-        "database": endpoint.database if fmt in ("generic_sql", "sftp", "email") else (endpoint.database or endpoint.host or ""),
+        "database": endpoint.database if fmt in ("generic_sql", "sftp", "email", "rest_api") else (endpoint.database or endpoint.host or ""),
         "schema": endpoint.schema or default_schema,
         "username": endpoint.username,
         "password": endpoint.password,
@@ -609,6 +609,19 @@ def read_source_database(
         schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
+    if db_type in ("salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase"):
+        from connectors.saas_common import ReadBatch
+
+        mod = __import__(f"connectors.{db_type}", fromlist=["read_object"])
+        read_fn = getattr(mod, "read_object")
+        sobject = endpoint.table or endpoint.database or endpoint.collection or ""
+        batch: ReadBatch = read_fn(cfg=cfg, object=sobject, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, sobject or db_type)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
     if db_type == "email":
         raise ValueError("Email cannot be a transfer source; configure it as a destination only.")
 
@@ -961,6 +974,9 @@ def write_destination_file(
             "tsv" if fmt == "tsv"
             else "xlsx" if fmt == "excel"
             else "parquet" if fmt == "parquet"
+            else "avro" if fmt == "avro"
+            else "orc" if fmt == "orc"
+            else "xml" if fmt == "xml"
             else fmt if fmt in ("csv", "jsonl")
             else "json"
         )

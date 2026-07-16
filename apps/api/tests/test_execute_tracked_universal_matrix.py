@@ -159,6 +159,34 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
         buf = BytesIO()
         pd.DataFrame(df_data).to_excel(buf, engine="openpyxl", index=False)
         return (buf.getvalue(), "data.xlsx")
+    if fmt == "avro":
+        import fastavro
+        buf = BytesIO()
+        schema = fastavro.parse_schema({
+            "type": "record",
+            "name": "DataFlowRow",
+            "fields": [
+                {"name": "id", "type": ["null", "string"]},
+                {"name": "amount", "type": ["null", "string"]},
+            ],
+        })
+        fastavro.writer(buf, schema, list(RECORDS))
+        return (buf.getvalue(), "data.avro")
+    if fmt == "orc":
+        pytest.importorskip("pandas")
+        import pyarrow as pa
+        import pyarrow.orc as orc
+        buf = BytesIO()
+        table = pa.table(df_data)
+        orc.write_table(table, buf)
+        return (buf.getvalue(), "data.orc")
+    if fmt == "xml":
+        return (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<records><record><id>1</id><amount>1000.00</amount></record>'
+            b'<record><id>2</id><amount>2000.50</amount></record></records>',
+            "data.xml",
+        )
     raise ValueError(f"Unsupported file format: {fmt}")
 
 
