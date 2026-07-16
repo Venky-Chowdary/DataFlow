@@ -45,7 +45,8 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
   if (resolved === "adls") return "connection_string";
   if (resolved === "databricks" || resolved === "athena") return "connection_string";
-  if (resolved === "sftp" || resolved === "email") return "connection_string";
+  if (resolved === "sftp") return "connection_string";
+  if (resolved === "email") return conn?.connection_string ? "connection_string" : "user_pass";
   if (resolved === "mongodb" && conn?.username) return "user_pass";
   return "user_pass";
 }
@@ -66,10 +67,10 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
   const gcp = isGcpConnector(type);
   const azure = type === "adls";
   const sftpOrEmail = type === "sftp" || type === "email";
-  const connectionStringOnly = ["databricks", "athena", "email"].includes(type);
+  const connectionStringOnly = ["databricks", "athena"].includes(type);
 
   const options: { value: AuthMode; label: string }[] = [];
-  if ((sqlish || genericSql || mongo || snowflake || elastic || azure || type === "sftp") && !connectionStringOnly) {
+  if ((sqlish || genericSql || mongo || snowflake || elastic || azure || type === "sftp" || type === "email") && !connectionStringOnly) {
     options.push({ value: "user_pass", label: "Username & password" });
   }
   if (sqlish || genericSql || mongo || snowflake || azure || sftpOrEmail) {
@@ -321,6 +322,10 @@ export function ConnectorModal({
         setFieldError("Remote file path is required. Provide it as the SFTP URL or the path field.");
         return false;
       }
+      if (type === "email" && !database.trim()) {
+        setFieldError("At least one recipient (To) is required.");
+        return false;
+      }
       if (["s3", "dynamodb"].includes(type)) {
         if (isS3 ? !database.trim() : !database.trim()) {
           setFieldError(isS3 ? "Bucket name is required." : "Table name is required.");
@@ -351,7 +356,7 @@ export function ConnectorModal({
       ssl,
       auth_mode: authMode,
       auth_role: isSnowflake ? authRole : undefined,
-      auth_source: isMongo ? authSource : undefined,
+      auth_source: isMongo || isEmail ? authSource : undefined,
     };
 
     if (authMode === "user_pass") {
@@ -413,7 +418,7 @@ export function ConnectorModal({
         warehouse: isSnowflake ? warehouse : undefined,
         auth_role: isSnowflake ? authRole : undefined,
         auth_mode: authMode,
-        auth_source: isMongo ? authSource : undefined,
+        auth_source: isMongo || isEmail ? authSource : undefined,
         private_key: isSftp && privateKey.trim() ? privateKey : undefined,
         endpoint_url: (isS3 || isDynamo) && endpointUrl.trim() ? endpointUrl : undefined,
         path_style: isS3 && pathStyle ? pathStyle : undefined,
@@ -712,13 +717,13 @@ export function ConnectorModal({
                 </div>
               )}
 
-              {isMongo && (showConnectionString || showUserPass) && (
+              {(isMongo || isEmail) && (showConnectionString || showUserPass) && (
                 <div className="df2-form-row" style={{ marginTop: 8 }}>
                   <div className="df2-field">
-                    <label className="df2-label">Auth source</label>
+                    <label className="df2-label">{isEmail ? "From address" : "Auth source"}</label>
                     <input
                       className="df2-input"
-                      placeholder="e.g. admin"
+                      placeholder={isEmail ? "noreply@dataflow.com" : "e.g. admin"}
                       value={authSource}
                       onChange={(e) => setAuthSource(e.target.value)}
                     />
@@ -729,7 +734,7 @@ export function ConnectorModal({
               {showUserPass && (
                 <div className="df2-form-row">
                   <div className="df2-field">
-                    <label className="df2-label">Username</label>
+                    <label className="df2-label">{isEmail ? "SMTP username" : "Username"}</label>
                     <input
                       className="df2-input"
                       autoComplete="off"
@@ -738,7 +743,7 @@ export function ConnectorModal({
                     />
                   </div>
                   <div className="df2-field">
-                    <label className="df2-label">Password</label>
+                    <label className="df2-label">{isEmail ? "SMTP password" : "Password"}</label>
                     <input
                       type="password"
                       className="df2-input"

@@ -116,8 +116,18 @@ def _parse_email_config(
         if not cfg.to_addrs:
             cfg.to_addrs = _normalize_addr(database)
 
+    # auth_source carries an explicit From address for user-pass connectors.
+    from_override = _kwargs.get("auth_source") or ""
+    if from_override:
+        cfg.from_addr = from_override.strip()
+
     if not cfg.from_addr:
         cfg.from_addr = cfg.username or "dataflow@example.com"
+
+    # ssl flag forces TLS/STARTTLS when True and disables it when False.
+    ssl_flag = _kwargs.get("ssl")
+    if ssl_flag is not None:
+        cfg.use_tls = bool(ssl_flag)
     if not cfg.subject or table_name:
         cfg.subject = (cfg.subject or "DataFlow export") if not table_name else f"DataFlow export: {table_name}"
 
