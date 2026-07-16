@@ -15,7 +15,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from src.services.catalog_service import search_catalog  # noqa: E402
-from src.transfer.connector_capabilities import default_port, resolve_driver_type  # noqa: E402
+from src.transfer.connector_capabilities import default_port, get_capabilities, resolve_driver_type, source_ready  # noqa: E402
 from src.transfer.registry import validate_transfer  # noqa: E402
 
 
@@ -37,6 +37,7 @@ def test_all_live_catalog_ids_resolve_to_driver(live_catalog_ids: list[str]):
         assert driver in (
             "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
             "dynamodb", "s3", "gcs", "adls", "redis", "elasticsearch", "sqlite",
+            "sftp", "email",
             "generic_sql", "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
         ), f"{cid} -> {driver} is not a known driver"
 
@@ -52,7 +53,8 @@ def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: lis
     db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
         "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
     )]
-    for src in db_ids:
+    source_ids = [cid for cid in db_ids if source_ready(get_capabilities(resolve_driver_type(cid)))]
+    for src in source_ids:
         for dst in db_ids:
             ok, msg = validate_transfer("database", src, "database", dst)
             assert ok, f"database/{src} -> database/{dst}: {msg}"
@@ -78,7 +80,8 @@ def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: l
     db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
         "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
     )]
-    for sid in db_ids:
+    source_ids = [cid for cid in db_ids if source_ready(get_capabilities(resolve_driver_type(cid)))]
+    for sid in source_ids:
         for fid in file_ids:
             ok, msg = validate_transfer("database", sid, "file_export", fid)
             assert ok, f"database/{sid} -> file_export/{fid}: {msg}"

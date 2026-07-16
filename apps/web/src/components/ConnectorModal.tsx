@@ -45,6 +45,7 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
   if (resolved === "adls") return "connection_string";
   if (resolved === "databricks" || resolved === "athena") return "connection_string";
+  if (resolved === "sftp" || resolved === "email") return "connection_string";
   if (resolved === "mongodb" && conn?.username) return "user_pass";
   return "user_pass";
 }
@@ -64,14 +65,15 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
   const awsStore = ["s3", "dynamodb"].includes(type);
   const gcp = isGcpConnector(type);
   const azure = type === "adls";
-  const connectionStringOnly = ["databricks", "athena"].includes(type);
+  const sftpOrEmail = type === "sftp" || type === "email";
+  const connectionStringOnly = ["databricks", "athena", "email"].includes(type);
 
   const options: { value: AuthMode; label: string }[] = [];
-  if ((sqlish || genericSql || mongo || snowflake || elastic || azure) && !connectionStringOnly) {
+  if ((sqlish || genericSql || mongo || snowflake || elastic || azure || type === "sftp") && !connectionStringOnly) {
     options.push({ value: "user_pass", label: "Username & password" });
   }
-  if (sqlish || genericSql || mongo || snowflake || azure) {
-    options.push({ value: "connection_string", label: "Connection string" });
+  if (sqlish || genericSql || mongo || snowflake || azure || sftpOrEmail) {
+    options.push({ value: "connection_string", label: type === "email" ? "SMTP URL" : type === "sftp" ? "SFTP URL" : "Connection string" });
   }
   if (gcp) {
     options.push({ value: "service_account", label: "Service account JSON / path" });
@@ -119,8 +121,26 @@ export function ConnectorModal({
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
   const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
   const isMongo = resolvedType === "mongodb";
+  const isSftp = resolvedType === "sftp";
+  const isEmail = resolvedType === "email";
 
-  // Parse a pasted MongoDB URI into host/port/user/pass/database/ssl.
+  // Parse a pasted SFTP or SMTP URI into host/port/user/pass/path.
+  useEffect(() => {
+    if ((isSftp || isEmail) && authMode === "connection_string" && connectionString.trim()) {
+      try {
+        const url = new URL(connectionString);
+        if (url.hostname) setHost(url.hostname);
+        if (url.port) setPort(parseInt(url.port, 10));
+        if (url.username) setUsername(decodeURIComponent(url.username));
+        if (url.password) setPassword(decodeURIComponent(url.password));
+        const path = url.pathname.replace(/^\//, "").split("?")[0];
+        if (path && !database) setDatabase(path);
+      } catch {
+        // Leave raw connection string for the backend to parse.
+      }
+    }
+  }, [isSftp, isEmail, authMode, connectionString, database]);
+
   useEffect(() => {
     if (isMongo && authMode === "connection_string" && connectionString.trim()) {
       try {
@@ -291,6 +311,10 @@ export function ConnectorModal({
         setFieldError("Container is required.");
         return false;
       }
+      if (type === "sftp" && !database.trim() && !connectionString.trim()) {
+        setFieldError("Remote file path is required. Provide it as the SFTP URL or the path field.");
+        return false;
+      }
       if (["s3", "dynamodb"].includes(type)) {
         if (isS3 ? !database.trim() : !database.trim()) {
           setFieldError(isS3 ? "Bucket name is required." : "Table name is required.");
@@ -425,8 +449,10 @@ export function ConnectorModal({
     if (isAzure) return "Storage account";
     if (isElastic) return "Host";
     if (isSnowflake) return "Account host";
+    if (isSftp) return "SFTP host";
+    if (isEmail) return "SMTP host";
     return "Host";
-  }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic, isSnowflake]);
+  }, [isAwsKeyed, isS3, isGcp, isBigQuery, isAzure, isElastic, isSnowflake, isSftp, isEmail]);
 
   const databaseLabel = useMemo(() => {
     if (isFileFormat(type)) return "Filename / pattern";
@@ -439,6 +465,8 @@ export function ConnectorModal({
     if (isRedis) return "Database index";
     if (["sqlite", "duckdb"].includes(type)) return "Database file / :memory:";
     if (type === "databricks" || type === "athena") return "Catalog (optional)";
+    if (type === "sftp") return "Remote path / directory";
+    if (type === "email") return "Recipients (comma-separated)";
     return "Database";
   }, [isS3, isGcs, isDynamo, isBigQuery, isGcp, isAzure, isElastic, isRedis, type]);
 

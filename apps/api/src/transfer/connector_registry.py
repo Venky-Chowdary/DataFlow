@@ -105,6 +105,18 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="read_table_batch",
         writer="connectors.sqlite_writer",
     ),
+    "sftp": ConnectorModules(
+        probe=("connectors.sftp", "test_sftp"),
+        reader="connectors.sftp_reader",
+        reader_fn="read_object",
+        writer="connectors.sftp_writer",
+    ),
+    "email": ConnectorModules(
+        probe=("connectors.email", "test_email"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.email",
+    ),
 }
 
 
@@ -114,7 +126,7 @@ def registered_driver_types() -> list[str]:
 
 def assert_registry_matches_capabilities() -> None:
     """Raise if capability manifest and module registry diverge."""
-    cap_drivers = {k for k, v in _DRIVER_CAPS.items() if v.get("read") and v.get("write")}
+    cap_drivers = {k for k, v in _DRIVER_CAPS.items() if (v.get("read") and v.get("write")) or (v.get("dest_only") and v.get("write"))}
     reg_drivers = set(CONNECTOR_MODULES.keys())
     missing = cap_drivers - reg_drivers
     extra = reg_drivers - cap_drivers
@@ -167,6 +179,18 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     # Invalid URI / connection string
     if re.search(r"invalid uri|invalid connection string|could not parse|malformed|not a valid uri|bad connection string", text):
         return "The connection string format is invalid. Check the URL, credentials, and query parameters."
+
+    # SFTP-specific
+    if driver in ("sftp",) and re.search(r"authentication|auth|login|credential|password|key|private key", text):
+        return "SFTP authentication failed. Check username, password, private key, host, and port."
+    if driver in ("sftp",) and re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found|no such", text):
+        return "SFTP path not found. Check the remote directory and file path."
+
+    # Email-specific
+    if driver in ("email",) and re.search(r"authentication|auth|login|credential|password|username", text):
+        return "SMTP authentication failed. Check host, port, username, password, and that the account allows SMTP."
+    if driver in ("email",) and re.search(r"recipient|to address|to:|invalid address|address", text):
+        return "Email recipient is invalid or rejected. Check the 'to' addresses in the SMTP URL or database field."
 
     # File / path issues
     if re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found", text):

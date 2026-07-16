@@ -9,9 +9,9 @@ LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "nd
 # as database destinations, while the listed file formats are file targets.
 _FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"}
 
-def _live_db_drivers() -> list[str]:
+def _live_db_drivers(live_fn_name: str = "transfer_live_driver_types") -> list[str]:
     try:
-        from .connector_capabilities import transfer_live_driver_types
+        from .connector_capabilities import transfer_live_driver_types, source_live_driver_types, dest_live_driver_types
     except ImportError:
         # Support loading this file directly (e.g. test_registry.py)
         import importlib.util
@@ -22,10 +22,18 @@ def _live_db_drivers() -> list[str]:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         transfer_live_driver_types = mod.transfer_live_driver_types
-    return sorted(d for d in transfer_live_driver_types() if d not in _FILE_FORMATS)
+        source_live_driver_types = getattr(mod, "source_live_driver_types", transfer_live_driver_types)
+        dest_live_driver_types = getattr(mod, "dest_live_driver_types", transfer_live_driver_types)
+    if live_fn_name == "source":
+        live_fn = source_live_driver_types
+    elif live_fn_name == "dest":
+        live_fn = dest_live_driver_types
+    else:
+        live_fn = transfer_live_driver_types
+    return sorted(d for d in live_fn() if d not in _FILE_FORMATS)
 
-LIVE_DEST_DATABASES = _live_db_drivers()
-LIVE_SOURCE_DATABASES = _live_db_drivers()
+LIVE_DEST_DATABASES = _live_db_drivers("dest")
+LIVE_SOURCE_DATABASES = _live_db_drivers("source")
 
 # (source_kind, source_format, dest_kind, dest_format) -> live
 LIVE_MATRIX: set[tuple[str, str, str, str]] = set()

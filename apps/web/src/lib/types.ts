@@ -286,6 +286,8 @@ export const CONNECTOR_CATALOG = [
   { id: "gcs", label: "Google Cloud Storage", port: 443 },
   { id: "azure_blob", label: "Azure Blob", port: 443 },
   { id: "adls", label: "Azure Data Lake", port: 443 },
+  { id: "sftp", label: "SFTP", port: 22 },
+  { id: "email", label: "Email (SMTP)", port: 587 },
   // Streaming
   { id: "kafka", label: "Apache Kafka", port: 9092 },
   { id: "kinesis", label: "Amazon Kinesis", port: 443 },

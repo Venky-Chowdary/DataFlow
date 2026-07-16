@@ -94,6 +94,10 @@ for _param in EMULATOR_CASES:
 
 def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> EndpointConfig:
     """Return a database EndpointConfig for a live driver with a unique table/key."""
+    # SFTP and email require external network services; the universal matrix test
+    # cannot stand up a real server here, so these routes are skipped.
+    if driver in {"sftp", "email"}:
+        pytest.skip(f"No local emulator for {driver}")
     if driver == "generic_sql":
         db_path = tmp_path / f"duckdb_{role}_{suffix}.duckdb"
         return EndpointConfig(
