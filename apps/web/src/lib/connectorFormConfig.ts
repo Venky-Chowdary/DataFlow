@@ -151,6 +151,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isDuckDB = resolved === "duckdb";
   const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved);
   const isAzure = resolved === "adls";
+  const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved);
 
   const authModes: AuthModeConfig[] = [];
 
@@ -381,7 +382,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     }
   }
 
-  // API key mode (Elasticsearch + generic APIs)
+  // API key mode (Elasticsearch + SaaS APIs)
   const apiFields: FormField[] = [];
   if (isElastic) {
     apiFields.push(
@@ -393,6 +394,24 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         hint: "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
       }),
       checkbox("ssl", "Use HTTPS / TLS")
+    );
+  }
+  if (isSaaS) {
+    const defaultObject: Record<string, string> = {
+      salesforce: "Account",
+      hubspot: "contacts",
+      stripe: "customers",
+    };
+    const placeholder = host || resolved;
+    const objectHint = `Default object/table used when none is specified: ${defaultObject[resolved]}.`;
+    apiFields.push(
+      text("host", "Host / instance URL", { optional: true, placeholder }),
+      text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
+      textarea("apiKey", resolved === "stripe" ? "Secret key" : "API token", {
+        rows: 2,
+        placeholder: resolved === "stripe" ? "sk_..." : "Paste access token",
+        hint: `Paste the ${resolved === "stripe" ? "Stripe secret key" : resolved + " access token"}. ${objectHint}`,
+      })
     );
   }
 
@@ -469,7 +488,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   if (apiFields.length) {
     authModes.push(
       auth("api_key", "API key", apiFields, (values) => {
-        if (!fmt(values, "host")) return "Host is required.";
+        if (!isSaaS && !fmt(values, "host")) return "Host is required.";
         if (!fmt(values, "apiKey")) return "API key is required.";
         return null;
       })
@@ -512,6 +531,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (["salesforce", "hubspot", "stripe"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
   return "user_pass";

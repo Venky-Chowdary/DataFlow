@@ -31,7 +31,11 @@ ALL_DESTINATIONS = sorted(set(LIVE_DEST_DATABASES))
 @pytest.mark.parametrize("driver", ALL_DB_DRIVERS)
 def test_every_db_driver_has_probe_read_write(driver: str):
     caps = get_capabilities(driver)
-    assert caps.get("test") and transfer_ready(caps), driver
+    assert caps.get("test"), driver
+    if caps.get("source_only"):
+        assert caps.get("read"), driver
+    else:
+        assert transfer_ready(caps), driver
 
     probes = {
         "postgresql": ("connectors.postgresql", "test_postgresql"),
@@ -48,6 +52,9 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "sqlite": ("connectors.sqlite", "test_sqlite"),
         "sftp": ("connectors.sftp", "test_sftp"),
         "email": ("connectors.email", "test_email"),
+        "salesforce": ("connectors.salesforce", "test_salesforce"),
+        "hubspot": ("connectors.hubspot", "test_hubspot"),
+        "stripe": ("connectors.stripe", "test_stripe"),
     }
     if driver == "mongodb":
         import pymongo  # noqa: F401
@@ -70,6 +77,9 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "elasticsearch": "connectors.elasticsearch_reader",
         "sqlite": "connectors.sqlite_reader",
         "sftp": "connectors.sftp_reader",
+        "salesforce": "connectors.salesforce",
+        "hubspot": "connectors.hubspot",
+        "stripe": "connectors.stripe",
     }
     writers = {
         "postgresql": "connectors.postgresql_writer",
@@ -87,10 +97,17 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "sqlite": "connectors.sqlite_writer",
         "sftp": "connectors.sftp_writer",
         "email": "connectors.email",
+        "salesforce": "connectors.saas_common",
+        "hubspot": "connectors.saas_common",
+        "stripe": "connectors.saas_common",
     }
     if readers.get(driver):
         assert importlib.import_module(readers[driver])
-    assert callable(importlib.import_module(writers[driver]).write_mapped_rows)
+    writer_mod = importlib.import_module(writers[driver])
+    if caps.get("source_only"):
+        assert callable(getattr(writer_mod, "write_not_supported"))
+    else:
+        assert callable(writer_mod.write_mapped_rows)
 
 
 @pytest.mark.parametrize("src_fmt", ALL_FILE_FORMATS)

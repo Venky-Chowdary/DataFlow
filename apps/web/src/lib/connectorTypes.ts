@@ -7,6 +7,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "sqlite", "generic_sql", "sftp", "email",
+  "salesforce", "hubspot", "stripe",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -70,6 +71,9 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   elasticsearch: { host: "localhost", port: 9200 },
   sqlite: { host: "", port: 0 },
   generic_sql: { host: "localhost", port: 0 },
+  salesforce: { host: "login.salesforce.com", port: 443 },
+  hubspot: { host: "api.hubapi.com", port: 443 },
+  stripe: { host: "api.stripe.com", port: 443 },
   csv: { host: "", port: 0 },
   tsv: { host: "", port: 0 },
   json: { host: "", port: 0 },

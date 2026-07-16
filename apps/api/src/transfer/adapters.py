@@ -183,7 +183,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         0 if fmt == "generic_sql" else
         22 if fmt == "sftp" else
         587 if fmt == "email" else
-        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls") else 5432
+        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe") else 5432
     )
     default_schema = (
         "PUBLIC" if fmt == "snowflake" else
@@ -605,6 +605,19 @@ def read_source_database(
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, endpoint.table or endpoint.database or endpoint.connection_string)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
+    if db_type in ("salesforce", "hubspot", "stripe"):
+        from connectors.saas_common import ReadBatch
+
+        mod = __import__(f"connectors.{db_type}", fromlist=["read_object"])
+        read_fn = getattr(mod, "read_object")
+        sobject = endpoint.table or endpoint.database or endpoint.collection or ""
+        batch: ReadBatch = read_fn(cfg=cfg, object=sobject, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, sobject or db_type)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema

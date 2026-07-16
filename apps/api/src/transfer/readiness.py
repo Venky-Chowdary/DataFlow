@@ -30,6 +30,9 @@ _DRIVER_PACKAGES: dict[str, list[str]] = {
     "parquet": ["pyarrow"],
     "sftp": ["paramiko"],
     "email": [],
+    "salesforce": ["requests"],
+    "hubspot": ["requests"],
+    "stripe": ["requests"],
 }
 
 

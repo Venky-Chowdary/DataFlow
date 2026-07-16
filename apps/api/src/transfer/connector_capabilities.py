@@ -23,6 +23,9 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
+    "salesforce": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "hubspot": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -87,6 +90,7 @@ SUGGESTED_SOURCES = [
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
+    "salesforce", "hubspot", "stripe",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
@@ -124,6 +128,9 @@ def default_port(driver_type: str) -> int:
         "generic_sql": 0,
         "sftp": 22,
         "email": 587,
+        "salesforce": 443,
+        "hubspot": 443,
+        "stripe": 443,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -275,6 +282,9 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "sqlite": "sqlite3",
     "sftp": "paramiko",
     "email": None,
+    "salesforce": "requests",
+    "hubspot": "requests",
+    "stripe": "requests",
     "csv": None,
     "tsv": None,
     "json": None,
@@ -403,6 +413,11 @@ def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[st
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 
+def _source_only_ready(caps: dict[str, bool]) -> bool:
+    """True for connectors that are read-only sources (SaaS APIs, etc.)."""
+    return bool(caps.get("source_only") and caps.get("read"))
+
+
 def transfer_ready(caps: dict[str, bool]) -> bool:
     """True when connector supports production read+write transfer."""
     if caps.get("file_source"):
@@ -413,11 +428,11 @@ def transfer_ready(caps: dict[str, bool]) -> bool:
 
 
 def connect_only(caps: dict[str, bool]) -> bool:
-    return bool(caps.get("test") and not transfer_ready(caps))
+    return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps)))
 
 
 def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
-    if transfer_ready(caps):
+    if transfer_ready(caps) or _source_only_ready(caps):
         return "live"
     if connect_only(caps):
         return "connect_only"
@@ -433,6 +448,8 @@ def capability_label(caps: dict[str, bool]) -> str:
         if caps.get("file_source"):
             return "File transfer"
         return "Full transfer"
+    if _source_only_ready(caps):
+        return "Source only"
     if connect_only(caps):
         return "Connection test only"
     return "Roadmap"
@@ -456,18 +473,14 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     driver = resolve_driver_type(catalog_id)
     caps = get_capabilities(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
-    eff = "live" if ready else (
-        "connect_only" if connect_only(caps) else effective_status(caps, entry.get("status", "planned"))
-    )
+    eff = effective_status(caps, entry.get("status", "planned"))
     out = dict(entry)
     out["driver_type"] = driver
     out["capabilities"] = caps
     out["effective_status"] = eff
     out["transfer_ready"] = ready
     out["connect_only"] = connect_only(caps) and not ready
-    out["capability_label"] = capability_label(caps) if ready else (
-        "Connection test only" if connect_only(caps) else "Roadmap"
-    )
+    out["capability_label"] = capability_label(caps)
     return out
 
 

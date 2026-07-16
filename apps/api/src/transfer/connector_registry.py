@@ -117,6 +117,27 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="",
         writer="connectors.email",
     ),
+    "salesforce": ConnectorModules(
+        probe=("connectors.salesforce", "test_salesforce"),
+        reader="connectors.salesforce",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
+    "hubspot": ConnectorModules(
+        probe=("connectors.hubspot", "test_hubspot"),
+        reader="connectors.hubspot",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
+    "stripe": ConnectorModules(
+        probe=("connectors.stripe", "test_stripe"),
+        reader="connectors.stripe",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
 }
 
 
@@ -126,7 +147,7 @@ def registered_driver_types() -> list[str]:
 
 def assert_registry_matches_capabilities() -> None:
     """Raise if capability manifest and module registry diverge."""
-    cap_drivers = {k for k, v in _DRIVER_CAPS.items() if (v.get("read") and v.get("write")) or (v.get("dest_only") and v.get("write"))}
+    cap_drivers = {k for k, v in _DRIVER_CAPS.items() if (v.get("read") and v.get("write")) or (v.get("dest_only") and v.get("write")) or v.get("source_only")}
     reg_drivers = set(CONNECTOR_MODULES.keys())
     missing = cap_drivers - reg_drivers
     extra = reg_drivers - cap_drivers
@@ -141,6 +162,8 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
+        if driver in ("salesforce", "hubspot", "stripe"):
+            return f"{driver.title()} authentication failed. Check the API token/key, required scopes, and that the token is active."
         if driver == "mongodb":
             return (
                 "Authentication failed. Check the username/password and the Auth source field. "

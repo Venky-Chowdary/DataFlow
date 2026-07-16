@@ -42,6 +42,7 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   if (conn?.connection_string) return "connection_string";
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (["salesforce", "hubspot", "stripe"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
   if (resolved === "adls" && conn?.connection_string) return "connection_string";
   if (resolved === "sftp" && conn?.connection_string) return "connection_string";
