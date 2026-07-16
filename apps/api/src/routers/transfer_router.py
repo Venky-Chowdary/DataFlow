@@ -15,6 +15,43 @@ from services.team_store import can_write_workspace
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
 
+def _destination_data_region(endpoint) -> str | None:
+    """Infer the cloud region for S3-compatible destinations from host/endpoint."""
+    if endpoint.format not in ("s3", "dynamodb"):
+        return None
+    from connectors.aws_common import resolve_region
+
+    cfg = {
+        "host": endpoint.host or "",
+        "connection_string": endpoint.connection_string or "",
+        "endpoint_url": endpoint.endpoint_url or "",
+    }
+    region = resolve_region(cfg)
+    return region if region and region not in ("us-east-1", "") else None
+
+
+def _residency_check(request, endpoint, allowed_region: str):
+    """Fail closed when the destination region conflicts with the workspace region.
+
+    Only enforced when the tenant has a non-default region or when
+    DATAFLOW_RESIDENCY_STRICT is enabled.
+    """
+    if not allowed_region:
+        return
+    tenant_region = getattr(request.state, "data_region", "") or os.getenv("DATAFLOW_DEFAULT_REGION", "us-east-1")
+    strict = os.getenv("DATAFLOW_RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
+    if not strict and (not tenant_region or tenant_region == "us-east-1"):
+        return
+    dest_region = _destination_data_region(endpoint)
+    if not dest_region:
+        return
+    if dest_region != allowed_region:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Data residency violation: destination region '{dest_region}' does not match workspace region '{allowed_region}'.",
+        )
+
+
 def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
@@ -589,6 +626,8 @@ async def run_universal_transfer(
                 request_obj.stream_contracts = parsed
         except Exception:
             pass
+
+    _residency_check(request, destination, region)
 
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request_obj)
