@@ -483,12 +483,13 @@ class MemoryMongoDBService:
             self._jobs.values(),
             key=lambda j: j.get("created_at") or "",
             reverse=True,
-        )[:limit]
+        )
         if workspace_id is not None:
             allowed = {workspace_id, "", None}
             if workspace_id == "":
                 allowed = {"", None}
             items = [j for j in items if j.get("workspace_id") in allowed]
+        items = items[:limit]
         out = []
         for rec in items:
             job = dict(rec)

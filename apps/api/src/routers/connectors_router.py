@@ -570,6 +570,62 @@ async def stream_transfer_job(job_id: str, request: Request):
     )
 
 
+@router.get("/jobs/{job_id}/quarantine")
+async def get_job_quarantine(job_id: str, request: Request):
+    """Return quarantined rows for a job with their rejection reasons."""
+    mongo = get_mongodb_service()
+    job = mongo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _can_access_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+
+    details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    return {
+        "job_id": job_id,
+        "rejected_rows": int(job.get("rejected_rows") or 0),
+        "quarantine": details,
+    }
+
+
+@router.post("/jobs/{job_id}/quarantine/export")
+async def export_job_quarantine(job_id: str, request: Request):
+    """Export quarantined rows to a CSV in the exports folder and return a download URL."""
+    import uuid
+    from pathlib import Path
+
+    mongo = get_mongodb_service()
+    job = mongo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _can_access_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+
+    details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    if not details:
+        return {"success": True, "row_count": 0, "download_url": "", "filename": ""}
+
+    from services.format_converter import convert_rows
+
+    headers = ["row", "column", "value", "reason"]
+    rows = [[str(d.get("row", "")), str(d.get("column", "")), str(d.get("value", "")), str(d.get("reason", ""))] for d in details]
+    content, _ = convert_rows(headers, rows, source_format="csv", target_format="csv")
+
+    api_root = Path(__file__).resolve().parents[2]
+    export_dir = api_root / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"quarantine_{job_id}_{uuid.uuid4().hex[:8]}.csv"
+    export_path = export_dir / filename
+    export_path.write_bytes(content)
+
+    return {
+        "success": True,
+        "row_count": len(details),
+        "download_url": f"/api/v1/transfer/download/{filename}",
+        "filename": filename,
+    }
+
+
 @router.get("/{connector_id}")
 async def get_connector(connector_id: str):
     """Get a specific connector"""

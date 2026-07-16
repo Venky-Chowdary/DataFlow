@@ -620,6 +620,7 @@ async def run_universal_transfer(
         "peak_memory_bytes": result.peak_memory_bytes,
         "source": result.source_summary,
         "destination": result.destination_summary,
+        "destination_summary": result.destination_summary,
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
         "validation_plan": result.validation_plan,

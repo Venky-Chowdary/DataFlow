@@ -185,6 +185,7 @@ export interface TransferResult {
     checksum?: string;
     driver?: string;
     rejected_rows?: number;
+    rejected_details?: { row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[];
     warnings?: string[];
     error_policy?: string;
     filename?: string;

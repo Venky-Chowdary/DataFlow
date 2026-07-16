@@ -51,7 +51,9 @@ except Exception:  # pragma: no cover
 
 from connectors.writer_common import (
     CHUNK_SIZE,
+    _rejected_row_count,
     build_mapped_rows,
+    build_mapped_rows_with_details,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -79,6 +81,7 @@ class WriteResult:
     error: str | None = None
     driver: str = "sqlalchemy"
     rejected_rows: int = 0
+    rejected_details: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -275,6 +278,20 @@ def _default_port(db_type: str) -> int:
     return _DEFAULT_PORT_MAP.get(db_type, 0)
 
 
+def _normalize_sqlite_url(url: str) -> str:
+    """Ensure absolute SQLite file paths use four leading slashes.
+
+    SQLAlchemy interprets ``sqlite:///path`` as relative and
+    ``sqlite:////absolute/path`` as absolute. Users often supply the former for
+    absolute paths, so this normalizes only when the path component is absolute.
+    """
+    if url.startswith("sqlite:///") and not url.startswith("sqlite:////"):
+        path = url[len("sqlite:///"):]
+        if path and (path.startswith("/") or (len(path) > 1 and path[1] == ":")):
+            return f"sqlite:////{path}"
+    return url
+
+
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
@@ -282,11 +299,13 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
 
     if connection_string:
         if connection_string.startswith("duckdb:") or connection_string.startswith("sqlite:"):
+            if connection_string.startswith("sqlite:"):
+                return _normalize_sqlite_url(connection_string)
             return connection_string
         if db_type == "duckdb":
             return f"duckdb:////{connection_string}" if connection_string.startswith("/") else f"duckdb:///{connection_string}"
         if db_type == "sqlite":
-            return f"sqlite:///{connection_string}"
+            return _normalize_sqlite_url(f"sqlite:///{connection_string}")
         return connection_string
 
     if not db_type:
@@ -1371,7 +1390,7 @@ def write_mapped_rows(
     }
 
     policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors = build_mapped_rows(
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
@@ -1391,7 +1410,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_rows=len(data_rows) - len(mapped_rows),
+            rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+            rejected_details=rejected_details,
             warnings=transform_errors,
         )
 
@@ -1483,7 +1503,8 @@ def write_mapped_rows(
             target_schema=schema or database,
             checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
-            rejected_rows=len(data_rows) - len(mapped_rows),
+            rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+            rejected_details=rejected_details,
             warnings=transform_errors,
         )
     except Exception as exc:
@@ -1495,7 +1516,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=str(exc),
-            rejected_rows=len(data_rows) - len(mapped_rows),
+            rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+            rejected_details=rejected_details,
             warnings=transform_errors,
         )
     finally:

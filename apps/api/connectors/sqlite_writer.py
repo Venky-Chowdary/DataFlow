@@ -12,7 +12,9 @@ from typing import Any, Callable
 
 from connectors.writer_common import (
     CHUNK_SIZE,
+    _rejected_row_count,
     build_mapped_rows,
+    build_mapped_rows_with_details,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -33,6 +35,7 @@ class WriteResult:
     error: str | None = None
     driver: str = "sqlite3"
     rejected_rows: int = 0
+    rejected_details: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -159,7 +162,7 @@ def write_mapped_rows(
     transform_errors: list[str] = []
 
     try:
-        mapped_rows, transform_errors = build_mapped_rows(
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
@@ -175,7 +178,7 @@ def write_mapped_rows(
             for row in mapped_rows
         ]
 
-        rejected_rows = len(data_rows) - len(mapped_rows)
+        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
                 ok=False,
@@ -186,6 +189,7 @@ def write_mapped_rows(
                 chunks_completed=0,
                 error=f"Transform errors: {'; '.join(transform_errors[:3])}",
                 rejected_rows=rejected_rows,
+                rejected_details=rejected_details,
                 warnings=transform_errors,
             )
 
@@ -241,7 +245,8 @@ def write_mapped_rows(
                 # verifier can match them exactly (e.g. booleans become 0/1 integers).
                 checksum=row_checksum(converted_rows, target_cols),
                 chunks_completed=chunks,
-                rejected_rows=len(data_rows) - written,
+                rejected_rows=max(rejected_rows, len(data_rows) - written),
+                rejected_details=rejected_details,
                 warnings=transform_errors,
             )
         finally:
@@ -250,4 +255,5 @@ def write_mapped_rows(
         return WriteResult(
             ok=False, rows_written=written, table_name=table_name, target_schema=schema or "main",
             checksum="", chunks_completed=chunks, error=str(exc),
+            rejected_details=rejected_details if 'rejected_details' in locals() else [],
         )

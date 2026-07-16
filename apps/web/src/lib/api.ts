@@ -1397,3 +1397,21 @@ export async function exportQuery(payload: {
   if (!res.ok) throw new Error(await parseApiError(res, "Export failed"));
   return res.json();
 }
+
+export interface QuarantineInfo {
+  job_id: string;
+  rejected_rows: number;
+  quarantine: { row?: number; column?: string; value?: string; reason?: string }[];
+}
+
+export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load quarantine"));
+  return res.json();
+}
+
+export async function exportJobQuarantine(jobId: string): Promise<{ success: boolean; row_count?: number; download_url?: string; filename?: string }> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/export`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export quarantine"));
+  return res.json();
+}

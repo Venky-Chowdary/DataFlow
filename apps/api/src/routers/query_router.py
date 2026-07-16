@@ -17,6 +17,51 @@ router = APIRouter(prefix="/query", tags=["query"])
 _MAX_ROWS = 10_000
 _READ_ONLY_SQL_PATTERN = re.compile(r"^\s*SELECT\s+", re.IGNORECASE)
 
+_MONGODB_WRITE_STAGES = {"$out", "$merge"}
+
+
+def _is_read_only_sql(raw_query: str) -> bool:
+    """Reject anything that is not a plain SELECT and block destructive SQL."""
+    import sqlparse
+    from sqlparse.sql import TokenList
+    from sqlparse.tokens import DML, Keyword
+
+    parsed = sqlparse.parse(raw_query.strip())
+    if not parsed or len(parsed) != 1:
+        return False
+
+    stmt = parsed[0]
+    if stmt.get_type() != "SELECT":
+        return False
+
+    def _walk_tokens(token):
+        yield token
+        if isinstance(token, TokenList):
+            for child in token.tokens:
+                yield from _walk_tokens(child)
+
+    for token in _walk_tokens(stmt):
+        if token.ttype and token.ttype in Keyword:
+            kw = token.value.upper()
+            if kw in {
+                "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+                "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
+                "COPY", "INTO", "WITH",
+            }:
+                return False
+    return True
+
+
+def _validate_mongodb_aggregate(pipeline: list[dict]) -> None:
+    for stage in pipeline:
+        if isinstance(stage, dict):
+            for key in stage:
+                if key in _MONGODB_WRITE_STAGES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"MongoDB aggregation stage '{key}' is not allowed in the query playground",
+                    )
+
 
 class QueryExecuteRequest(BaseModel):
     connector_id: str = Field(..., description="Saved connector id to query")
@@ -169,6 +214,7 @@ def _run_mongodb_query(connector, body):
             if isinstance(parsed, dict):
                 query_filter = parsed
             elif isinstance(parsed, list):
+                _validate_mongodb_aggregate(parsed)
                 cursor = coll.aggregate(parsed[:_MAX_ROWS])
                 rows = list(cursor)
                 return _normalize_rows(rows)
@@ -213,8 +259,8 @@ def _run_sql_query(connector, body):
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
-    if not _READ_ONLY_SQL_PATTERN.match(raw_query):
-        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed in the playground")
+    if not _is_read_only_sql(raw_query):
+        raise HTTPException(status_code=400, detail="Only plain SELECT queries are allowed in the playground")
 
     from connectors.generic_sql import get_sqlalchemy_engine
 
@@ -233,15 +279,16 @@ def _run_sql_query(connector, body):
     engine = get_sqlalchemy_engine(cfg)
 
     # Append a safe limit unless the user already supplied one.
-    upper = raw_query.upper()
+    clean_query = raw_query.rstrip(";")
+    upper = clean_query.upper()
     if " LIMIT " not in upper and " FETCH FIRST " not in upper and " TOP " not in upper:
-        raw_query = f"{raw_query.rstrip(';')} LIMIT {body.limit}"
+        clean_query = f"{clean_query} LIMIT {body.limit}"
 
     try:
         from sqlalchemy import text
 
         with engine.connect() as conn:
-            result = conn.execute(text(raw_query))
+            result = conn.execute(text(clean_query))
             columns = list(result.keys())
             rows = []
             for i, row in enumerate(result):

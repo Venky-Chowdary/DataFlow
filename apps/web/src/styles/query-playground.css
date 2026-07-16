@@ -109,3 +109,16 @@
 .df2-query-export-notice .df2-btn {
   margin-top: 8px;
 }
+
+.df2-quarantine-value {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-job-log-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
