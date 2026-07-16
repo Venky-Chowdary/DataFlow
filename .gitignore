@@ -24,6 +24,7 @@ apps/api/data/schema_registry_schemas.json
 apps/api/data/schema_registry_lineage.json
 apps/api/data/sync_cursors.json
 apps/api/data/jobs.json
+apps/api/data/object_spill/
 apps/api/exports/
 apps/api/test
 .devin-files/

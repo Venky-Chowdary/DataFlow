@@ -58,7 +58,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
+    "s3", "gcs", "adls", "sftp", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
 })
 
 
@@ -747,10 +747,34 @@ def stream_database_transfer(
     if src_type == "s3" and not src_cfg.get("database"):
         raise ValueError("S3 source requires bucket name in the database field")
 
-    if src_type in ("s3", "gcs"):
-        from connectors.object_read_cache import clear_object_cache
+    if src_type in ("s3", "gcs", "adls", "sftp"):
+        from services.object_streaming import download_for_object_store, download_object, stream_spilled_file_to_database
 
-        clear_object_cache()
+        bucket = source.database or src_cfg.get("database", "")
+        key = table
+        if src_type in ("s3", "gcs") and not bucket:
+            raise ValueError(f"{src_type.upper()} source requires bucket name in the database field")
+        cache_key = f"{src_type}:{bucket}:{key}"
+        path = download_object(
+            cache_key,
+            lambda p: download_for_object_store(src_type, p, src_cfg, bucket, key),
+        )
+        return stream_spilled_file_to_database(
+            path=path,
+            filename=key,
+            destination=destination,
+            mappings=mappings,
+            schema=schema,
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service,
+            retry_budget=retry_budget,
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            source_filter=source_filter,
+        )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
