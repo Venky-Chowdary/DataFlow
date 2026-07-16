@@ -2,11 +2,10 @@
  * DataFlow — Universal Data Platform
  */
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
-import { SectionLoader } from "./components/LoadingState";
 import { useToast } from "./components/Toast";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
@@ -17,24 +16,22 @@ import { resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
 import { LandingPage } from "./pages/LandingPage";
+import { DashboardPage } from "./pages/DashboardPage";
+import { PilotPage } from "./pages/PilotPage";
+import { TransferPage } from "./pages/TransferPage";
+import { ConnectorsPage } from "./pages/ConnectorsPage";
+import { SchedulesPage } from "./pages/SchedulesPage";
+import { JobsPage } from "./pages/JobsPage";
+import { McpPage } from "./pages/McpPage";
+import { QueryPage } from "./pages/QueryPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { DocsPage } from "./pages/DocsPage";
+import { AICopilot } from "./components/AICopilot";
+import { ConnectorModal } from "./components/ConnectorModal";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 import { usePageMeta } from "./lib/usePageMeta";
 import { readAppHash, writeAppHash } from "./lib/appNavigation";
 import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
-
-
-const DashboardPage = lazy(() => import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
-const PilotPage = lazy(() => import("./pages/PilotPage").then((m) => ({ default: m.PilotPage })));
-const TransferPage = lazy(() => import("./pages/TransferPage").then((m) => ({ default: m.TransferPage })));
-const ConnectorsPage = lazy(() => import("./pages/ConnectorsPage").then((m) => ({ default: m.ConnectorsPage })));
-const SchedulesPage = lazy(() => import("./pages/SchedulesPage").then((m) => ({ default: m.SchedulesPage })));
-const JobsPage = lazy(() => import("./pages/JobsPage").then((m) => ({ default: m.JobsPage })));
-const McpPage = lazy(() => import("./pages/McpPage").then((m) => ({ default: m.McpPage })));
-const QueryPage = lazy(() => import("./pages/QueryPage").then((m) => ({ default: m.QueryPage })));
-const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
-const DocsPage = lazy(() => import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })));
-const AICopilot = lazy(() => import("./components/AICopilot").then((m) => ({ default: m.AICopilot })));
-const ConnectorModal = lazy(() => import("./components/ConnectorModal").then((m) => ({ default: m.ConnectorModal })));
 
 const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology" },
@@ -415,14 +412,7 @@ function AppShell({
           } ${bootLoading ? "is-booting" : ""} ${firstScreenPaint ? "is-first-screen" : ""}`}
         >
           <div className="df2-screen-panel">
-            <Suspense
-              fallback={(
-                <div className="df2-route-suspense">
-                  <SectionLoader title="Loading workspace…" hint="Preparing this view." />
-                </div>
-              )}
-            >
-              {screen === "dashboard" && (
+            {screen === "dashboard" && (
                 <PageErrorBoundary label="Overview">
                   <DashboardPage
                     connectors={connectors}
@@ -512,7 +502,6 @@ function AppShell({
                   <SettingsPage />
                 </PageErrorBoundary>
               )}
-            </Suspense>
           </div>
         </div>
         </div>
@@ -520,15 +509,12 @@ function AppShell({
 
       {showCopilotRail && (
         <aside className="df2-copilot-rail" aria-label="Data Pilot">
-          <Suspense fallback={<SectionLoader title="Loading Pilot…" size="md" />}>
-            <AICopilot variant="rail" onNavigate={setScreen} onClose={() => setCopilotOpen(false)} />
-          </Suspense>
+          <AICopilot variant="rail" onNavigate={setScreen} onClose={() => setCopilotOpen(false)} />
         </aside>
       )}
 
       {showModal && (
-        <Suspense fallback={null}>
-          <ConnectorModal
+        <ConnectorModal
           initialType={modalType}
           editing={editingConnector}
           onClose={() => { setShowModal(false); setEditingConnector(null); }}
@@ -538,8 +524,7 @@ function AppShell({
             setScreen("connectors");
             toast({ title: "Connection saved", message: "Visible in My connections.", tone: "success" });
           }}
-          />
-        </Suspense>
+        />
       )}
 
       {screen !== "pilot" && !copilotOpen && (

@@ -48,6 +48,12 @@
   align-items: flex-start;
   flex-wrap: wrap;
   gap: 12px;
+  justify-content: flex-start;
+}
+
+.df2-query-results .df2-card-head > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .df2-query-export-bar {
@@ -55,6 +61,16 @@
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .df2-query-export-bar {
+    justify-content: flex-start;
+    width: 100%;
+  }
 }
 
 .df2-query-export-destination {
@@ -150,6 +166,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
   padding: 8px 12px;
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-2, #f8fafc);
@@ -215,6 +232,30 @@
 .df2-query-editor-pre code {
   background: transparent !important;
   font-family: inherit !important;
+}
+
+.df2-query-editor-shell[data-invalid="true"] .df2-query-editor-wrap {
+  border: 1px solid var(--df-danger, #dc2626);
+  border-radius: 0 0 10px 10px;
+  background: var(--df-danger-bg, #fef2f2);
+}
+
+.df2-query-editor-textarea--error {
+  color: var(--df-danger, #dc2626) !important;
+  caret-color: var(--df-danger, #dc2626) !important;
+}
+
+.df2-query-editor-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--df-danger, #dc2626);
+  background: var(--df-danger-bg, #fef2f2);
+  border-top: 1px solid var(--df-danger-bg, #fee2e2);
+  border-radius: 0 0 10px 10px;
 }
 
 /* Prism token colors that respect the existing palette. */

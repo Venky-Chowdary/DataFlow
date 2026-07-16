@@ -73,6 +73,15 @@ const PRISM_GRAMMAR: Record<QueryLanguage, string> = {
   javascript: "javascript",
 };
 
+const SQL_SAFE_START = new Set([
+  "SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES",
+]);
+
+const SQL_DESTRUCTIVE = new Set([
+  "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE",
+  "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE", "COPY", "LOAD",
+]);
+
 export interface QueryEditorProps {
   value: string;
   onChange: (value: string) => void;
@@ -80,6 +89,68 @@ export interface QueryEditorProps {
   placeholder?: string;
   disabled?: boolean;
   height?: string;
+}
+
+function guessLanguage(connectorType?: string): QueryLanguage {
+  if (!connectorType) return "sql";
+  const t = connectorType.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return CONNECTOR_LANGUAGE[t] || (t.includes("mongo") ? "json" : "sql");
+}
+
+function stripSqlComments(query: string): string {
+  return query
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ");
+}
+
+function firstSqlWord(query: string): string | null {
+  const cleaned = stripSqlComments(query);
+  const match = cleaned.match(/\b([A-Z][A-Z0-9_]*)\b/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function hasDestructiveSql(query: string): boolean {
+  const words = stripSqlComments(query).match(/\b[A-Z][A-Z0-9_]*\b/gi) || [];
+  return words.some((w) => SQL_DESTRUCTIVE.has(w.toUpperCase()));
+}
+
+function validateQuery(language: QueryLanguage, code: string): string | null {
+  const trimmed = code.trim();
+  if (!trimmed) return null;
+
+  // JSON mode: must parse as a JSON object or array.
+  if (language === "json") {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed === null || typeof parsed !== "object") {
+        return "MongoDB/JSON mode expects an object filter or an aggregate pipeline array.";
+      }
+      return null;
+    } catch (e) {
+      return `Invalid JSON: ${(e as Error).message}`;
+    }
+  }
+
+  // JavaScript mode: must be syntactically valid JS (not executed).
+  if (language === "javascript") {
+    try {
+      // eslint-disable-next-line no-new-func
+      new Function(trimmed);
+      return null;
+    } catch (e) {
+      return `Invalid JavaScript syntax: ${(e as Error).message}`;
+    }
+  }
+
+  // SQL dialects: allow only read/metadata queries.
+  const first = firstSqlWord(trimmed);
+  if (!first || !SQL_SAFE_START.has(first)) {
+    return "SQL mode only supports read/metadata queries (SELECT, WITH, EXPLAIN, SHOW, DESCRIBE, ANALYZE, PRAGMA, VALUES).";
+  }
+  if (hasDestructiveSql(trimmed)) {
+    return "Destructive keywords (INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, etc.) are not allowed in the playground.";
+  }
+  return null;
 }
 
 export function QueryEditor({ value, onChange, connectorType, placeholder, disabled, height = "18rem" }: QueryEditorProps) {
@@ -97,6 +168,8 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
 
   const label = useMemo(() => LANGUAGE_OPTIONS.find((o) => o.value === lang)?.label ?? "SQL", [lang]);
   const hint = useMemo(() => LANGUAGE_OPTIONS.find((o) => o.value === lang)?.hint ?? "", [lang]);
+  const error = useMemo(() => validateQuery(lang, value), [lang, value]);
+  const isInvalid = Boolean(error);
 
   const highlight = (code: string) => {
     if (!grammar) {
@@ -106,7 +179,7 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
   };
 
   return (
-    <div className="df2-query-editor-shell" style={{ minHeight: height }}>
+    <div className="df2-query-editor-shell" style={{ minHeight: height }} data-invalid={isInvalid}>
       <div className="df2-query-editor-langbar">
         <span className="df2-query-editor-lang-label">Syntax</span>
         <select
@@ -133,20 +206,19 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
           highlight={highlight}
           padding={16}
           className="df2-query-editor"
-          textareaClassName="df2-query-editor-textarea"
-          preClassName="df2-query-editor-pre"
+          textareaClassName={`df2-query-editor-textarea ${isInvalid ? "df2-query-editor-textarea--error" : ""}`}
+          preClassName={`df2-query-editor-pre language-${grammarName}`}
           placeholder={placeholder}
           disabled={disabled}
           tabSize={2}
           insertSpaces
         />
       </div>
+      {isInvalid && (
+        <div className="df2-query-editor-error">
+          <span aria-hidden>⚠</span> {error}
+        </div>
+      )}
     </div>
   );
-}
-
-function guessLanguage(connectorType?: string): QueryLanguage {
-  if (!connectorType) return "sql";
-  const t = connectorType.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return CONNECTOR_LANGUAGE[t] || (t.includes("mongo") ? "json" : "sql");
 }
