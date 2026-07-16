@@ -206,6 +206,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         "auth_source": endpoint.auth_source,
         "api_key": endpoint.api_key,
         "service_account": endpoint.service_account,
+        "private_key": endpoint.private_key,
     }
     # Keep "role" as the canonical key used by Snowflake connector functions.
     cfg["role"] = endpoint.auth_role or cfg.get("role", "")
@@ -230,6 +231,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
             "auth_source": conn_dict.get("auth_source") or cfg["auth_source"],
             "api_key": conn_dict.get("api_key") or cfg["api_key"],
             "service_account": conn_dict.get("service_account") or cfg["service_account"],
+            "private_key": conn_dict.get("private_key") or cfg["private_key"],
             "role": conn_dict.get("role") or cfg["role"],
         })
     return cfg
@@ -258,6 +260,7 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
                 "auth_source": getattr(conn, "auth_source", ""),
                 "api_key": getattr(conn, "api_key", ""),
                 "service_account": getattr(conn, "service_account", ""),
+                "private_key": getattr(conn, "private_key", ""),
                 "role": getattr(conn, "auth_role", ""),
             }
     except Exception:

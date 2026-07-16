@@ -752,6 +752,7 @@ async def transfer_data(
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
     mappings_json: str = Form(""),
+    data_region: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
@@ -778,7 +779,12 @@ async def transfer_data(
             except Exception:
                 source_filter = {}
 
-        request = TransferRequest(
+        region = (
+            data_region.strip()
+            or getattr(request.state, "data_region", "")
+            or "us-east-1"
+        )
+        request_obj = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
             destination=EndpointConfig(
                 kind="database",
@@ -806,6 +812,7 @@ async def transfer_data(
             priority_direction=priority_direction,
             limit=int(limit) if limit.isdigit() else 0,
             workspace_id=workspace_id,
+            data_region=region,
             backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         )
         if stream_contracts_json.strip():
@@ -813,7 +820,7 @@ async def transfer_data(
                 import json as _json
                 parsed = _json.loads(stream_contracts_json)
                 if isinstance(parsed, list):
-                    request.stream_contracts = parsed
+                    request_obj.stream_contracts = parsed
             except Exception:
                 pass
         if mappings_json.strip():
@@ -821,24 +828,24 @@ async def transfer_data(
                 import json as _json
                 parsed = _json.loads(mappings_json)
                 if isinstance(parsed, list):
-                    request.mappings = parsed
+                    request_obj.mappings = parsed
             except Exception:
                 pass
         engine = get_transfer_engine()
-        job_id = engine._create_pending_job(request)
+        job_id = engine._create_pending_job(request_obj)
 
         if async_mode.lower() in ("true", "1", "yes"):
-            background_tasks.add_task(run_transfer_async, job_id, request)
+            background_tasks.add_task(run_transfer_async, job_id, request_obj)
             return {
                 "success": True,
                 "async": True,
                 "job_id": job_id,
                 "status": "running",
-                "operation": request.operation,
+                "operation": request_obj.operation,
                 "source": {"type": "file", "filename": file.filename, "file_type": src_fmt},
             }
 
-        result = engine.execute_tracked(request, job_id)
+        result = engine.execute_tracked(request_obj, job_id)
         if not result.success:
             raise HTTPException(status_code=422, detail={"error": result.error, "job_id": result.job_id})
 

@@ -34,6 +34,7 @@ def parse_sftp_config(
     table: str = "",
     service_account: str = "",
     api_key: str = "",
+    private_key: str = "",
     **_kwargs: Any,
 ) -> SFTPConfig:
     """Merge explicit fields with an sftp:// URI."""
@@ -61,8 +62,8 @@ def parse_sftp_config(
     if password:
         cfg.password = password.strip()
 
-    # private key can ride service_account (file path or key text) or api_key
-    cfg.private_key = (service_account or api_key or "").strip()
+    # private key can be explicit, ride service_account (file path/key text) or api_key
+    cfg.private_key = (private_key or service_account or api_key or "").strip()
 
     # If table/filename is provided separately, append it to the directory path.
     if table and database:
@@ -127,6 +128,7 @@ def test_sftp(
     table: str = "",
     service_account: str = "",
     api_key: str = "",
+    private_key: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
     """Verify SFTP connectivity and optional directory access."""
@@ -141,6 +143,7 @@ def test_sftp(
             table=table,
             service_account=service_account,
             api_key=api_key,
+            private_key=private_key,
         )
         if not cfg.host:
             return False, "SFTP host is required. Use an sftp:// URL or the host/port fields."

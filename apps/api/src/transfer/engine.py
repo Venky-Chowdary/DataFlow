@@ -1722,6 +1722,7 @@ class UniversalTransferEngine:
             "phase": "queued",
             "message": "Transfer queued",
             "workspace_id": request.workspace_id or "",
+            "data_region": request.data_region or "",
             "transfer_request": transfer_request_to_dict(request),
             "retry_of": None,
         })

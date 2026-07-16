@@ -41,6 +41,7 @@ from .routers.workspace_router import router as workspace_router
 from .routers.contracts_router import router as contracts_router
 from .routers.query_router import router as query_router
 from .middleware.auth_middleware import AuthMiddleware
+from .middleware.tenant_middleware import TenantMiddleware
 
 logger = logging.getLogger("dataflow.api")
 
@@ -165,6 +166,7 @@ app.add_middleware(
 )
 
 app.add_middleware(AuthMiddleware)
+app.add_middleware(TenantMiddleware)
 
 
 @app.middleware("http")

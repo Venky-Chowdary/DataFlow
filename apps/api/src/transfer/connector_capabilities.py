@@ -75,6 +75,10 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "cockroachdb": "postgresql",
     "jsonl": "jsonl",
     "ndjson": "ndjson",
+    "sftp": "sftp",
+    "ssh": "sftp",
+    "email": "email",
+    "smtp": "email",
 }
 
 # Suggested lists — only connectors users can configure today
@@ -82,6 +86,7 @@ SUGGESTED_SOURCES = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
+    "sftp",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
@@ -91,11 +96,13 @@ TRANSFER_READY_CATALOG_IDS = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+    "sftp", "email",
 })
 
 SUGGESTED_DESTINATIONS = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
+    "sftp", "email",
 ]
 
 

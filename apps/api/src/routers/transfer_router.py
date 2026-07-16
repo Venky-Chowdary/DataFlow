@@ -466,6 +466,7 @@ async def run_universal_transfer(
     limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
+    data_region: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
@@ -535,7 +536,12 @@ async def run_universal_transfer(
         except Exception:
             source_filter = {}
 
-    request = TransferRequest(
+    region = (
+        data_region.strip()
+        or getattr(request.state, "data_region", "")
+        or "us-east-1"
+    )
+    request_obj = TransferRequest(
         source=source,
         destination=destination,
         skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
@@ -549,6 +555,7 @@ async def run_universal_transfer(
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,
         workspace_id=workspace_id,
+        data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
     if plan_id and plan_id.strip():
@@ -557,13 +564,13 @@ async def run_universal_transfer(
 
         try:
             payload = build_run_payload(plan_id.strip())
-            request.mappings = payload["mappings"]
+            request_obj.mappings = payload["mappings"]
             if not mappings_json.strip():
-                request.column_types = payload.get("column_types") or {}
+                request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
-            request.sync_mode = policies.get("sync_mode", request.sync_mode)
-            request.schema_policy = policies.get("schema_policy", request.schema_policy)
-            request.validation_mode = policies.get("validation_mode", request.validation_mode)
+            request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
+            request_obj.schema_policy = policies.get("schema_policy", request_obj.schema_policy)
+            request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip():
@@ -571,7 +578,7 @@ async def run_universal_transfer(
             import json as _json
             parsed = _json.loads(mappings_json)
             if isinstance(parsed, list):
-                request.mappings = parsed
+                request_obj.mappings = parsed
         except Exception:
             pass
     if stream_contracts_json.strip():
@@ -579,29 +586,29 @@ async def run_universal_transfer(
             import json as _json
             parsed = _json.loads(stream_contracts_json)
             if isinstance(parsed, list):
-                request.stream_contracts = parsed
+                request_obj.stream_contracts = parsed
         except Exception:
             pass
 
     engine = get_transfer_engine()
-    job_id = engine._create_pending_job(request)
+    job_id = engine._create_pending_job(request_obj)
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_store import attach_job
         attach_job(plan_id.strip(), job_id, status="running")
 
     if async_mode.lower() in ("true", "1", "yes"):
-        background_tasks.add_task(run_transfer_async, job_id, request)
+        background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
             "status": "running",
-            "operation": request.operation,
+            "operation": request_obj.operation,
             "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
         }
 
-    result = engine.execute_tracked(request, job_id)
+    result = engine.execute_tracked(request_obj, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={
             "error": result.error,

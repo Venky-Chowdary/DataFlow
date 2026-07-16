@@ -27,10 +27,14 @@ class EndpointConfig:
     auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
+    # SSH/SFTP private key content, PEM text, or base64-encoded key.
+    private_key: str = ""
     # For file_export destinations: a server-local path to write the export file.
     # If empty, the file is written to the configured exports directory and a
     # download URL is returned.
     output_path: str = ""
+    # Cloud/data region for the endpoint (e.g. us-east-1, eu-west-1).
+    region: str = ""
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -56,13 +60,15 @@ class EndpointConfig:
             auth_source=d.get("auth_source", ""),
             api_key=d.get("api_key", ""),
             service_account=d.get("service_account", ""),
+            private_key=d.get("private_key", d.get("ssh_private_key", "")),
             output_path=(d.get("output_path") or "").strip(),
+            region=d.get("region", ""),
             extra={k: v for k, v in d.items() if k not in {
                 "format", "type", "db_type", "connector_id", "host", "port",
                 "database", "schema", "table", "table_name", "collection",
                 "collection_name", "username", "password", "connection_string",
                 "warehouse", "ssl", "auth_mode", "auth_role", "auth_source", "api_key", "service_account",
-                "output_path",
+                "private_key", "ssh_private_key", "output_path", "region",
             }},
         )
 
@@ -91,6 +97,8 @@ class TransferRequest:
     limit: int = 0  # 0 means no limit
     # Workspace isolation: transfers and their jobs can be scoped to a workspace.
     workspace_id: str = ""
+    # Data residency / region tag for the job.
+    data_region: str = ""
     stream_contracts: list[dict] = field(default_factory=list)
     contract_id: str = ""
     enforce_contract: bool = True
@@ -130,7 +138,9 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "auth_source": ep.auth_source,
         "api_key": ep.api_key,
         "service_account": ep.service_account,
+        "private_key": ep.private_key,
         "output_path": ep.output_path,
+        "region": ep.region,
     }
 
 
@@ -151,6 +161,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "priority_direction": request.priority_direction,
         "limit": request.limit,
         "workspace_id": request.workspace_id,
+        "data_region": request.data_region,
         "stream_contracts": request.stream_contracts,
         "contract_id": request.contract_id,
         "enforce_contract": request.enforce_contract,
@@ -178,6 +189,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         priority_direction=(data.get("priority_direction") or "desc").lower(),
         limit=int(data.get("limit") or 0),
         workspace_id=(data.get("workspace_id") or "").strip(),
+        data_region=(data.get("data_region") or "").strip(),
         stream_contracts=data.get("stream_contracts") or [],
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),

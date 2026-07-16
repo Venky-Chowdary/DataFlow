@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.byok_key_manager import create_key, get_key, list_keys, rotate_key
 from services.team_store import (
     add_workspace_member,
     can_admin_workspace,
@@ -17,6 +18,17 @@ from services.team_store import (
     list_workspace_members,
     list_workspaces_for_user,
     remove_workspace_member,
+)
+from services.tenant_store import (
+    Tenant,
+    create_tenant,
+    delete_tenant,
+    get_tenant,
+    get_tenant_by_domain,
+    get_tenant_for_workspace,
+    list_tenants,
+    tenant_region,
+    update_tenant,
 )
 
 router = APIRouter(prefix="/workspace", tags=["Workspace"])
@@ -35,6 +47,35 @@ class WorkspaceSettingsBody(BaseModel):
     org_name: str | None = Field(default=None, max_length=128)
     timezone: str | None = Field(default=None, max_length=64)
     retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class TenantCreateBody(BaseModel):
+    workspace_id: str = Field(default="", max_length=128)
+    name: str = Field(default="", max_length=128)
+    custom_domain: str = Field(default="", max_length=253)
+    data_region: str = Field(default="", max_length=32)
+    byok_key_id: str = Field(default="", max_length=128)
+    security_contact_email: str = Field(default="", max_length=128)
+    mfa_required: bool = Field(default=False)
+    session_timeout_hours: int = Field(default=8, ge=1, le=24)
+    ip_allowlist: list[str] = Field(default_factory=list)
+
+
+class TenantUpdateBody(BaseModel):
+    name: str | None = Field(default=None, max_length=128)
+    custom_domain: str | None = Field(default=None, max_length=253)
+    data_region: str | None = Field(default=None, max_length=32)
+    byok_key_id: str | None = Field(default=None, max_length=128)
+    security_contact_email: str | None = Field(default=None, max_length=128)
+    mfa_required: bool | None = Field(default=None)
+    session_timeout_hours: int | None = Field(default=None, ge=1, le=24)
+    ip_allowlist: list[str] | None = Field(default=None)
+
+
+class BYOKKeyCreateBody(BaseModel):
+    label: str = Field(default="", max_length=128)
+    provider: str = Field(default="local", pattern="^(local|wrapped|aws_kms|azure_keyvault|gcp_kms)$")
+    key_material: str = Field(default="", max_length=4096)
 
 
 class SsoConfigBody(BaseModel):
@@ -369,3 +410,171 @@ async def test_notification(channel_id: str, request: Request):
     )
     result = send_to_channel(channel, payload)
     return {"success": result.get("ok"), "detail": result}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tenant / enterprise SaaS settings
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _resolve_request_tenant(request: Request, workspace_id: str | None = None):
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if tenant_id:
+        return get_tenant(tenant_id)
+    ws = workspace_id or request.headers.get("x-workspace-id", "") or getattr(request.state, "tenant_workspace_id", "")
+    return get_tenant_for_workspace(ws) if ws else None
+
+
+@router.get("/tenant")
+async def get_current_tenant(request: Request):
+    tenant = _resolve_request_tenant(request)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="No tenant configured for this workspace or domain")
+    return tenant.to_dict()
+
+
+@router.get("/tenants")
+async def get_all_tenants():
+    return {"tenants": [t.to_dict() for t in list_tenants()]}
+
+
+@router.post("/tenant")
+async def post_tenant(body: TenantCreateBody, request: Request):
+    actor = _actor(request)
+    if body.workspace_id and not can_admin_workspace(body.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace admin required to create a tenant")
+    try:
+        tenant = create_tenant(
+            workspace_id=body.workspace_id,
+            name=body.name,
+            custom_domain=body.custom_domain,
+            data_region=body.data_region,
+            byok_key_id=body.byok_key_id,
+            security_contact_email=body.security_contact_email,
+            mfa_required=body.mfa_required,
+            session_timeout_hours=body.session_timeout_hours,
+            ip_allowlist=body.ip_allowlist,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return tenant.to_dict()
+
+
+@router.patch("/tenant/{tenant_id}")
+async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
+    tenant = get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    actor = _actor(request)
+    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace admin required")
+    try:
+        updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=500, detail="Update failed")
+    return updated.to_dict()
+
+
+@router.delete("/tenant/{tenant_id}")
+async def delete_tenant_route(tenant_id: str, request: Request):
+    tenant = get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    actor = _actor(request)
+    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace admin required")
+    if not delete_tenant(tenant_id):
+        raise HTTPException(status_code=500, detail="Delete failed")
+    return {"ok": True}
+
+
+@router.get("/tenant/byok-keys")
+async def get_tenant_byok_keys(request: Request):
+    tenant = _resolve_request_tenant(request)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="No tenant configured")
+    return {"keys": [k.to_dict() for k in list_keys(tenant.id)]}
+
+
+@router.post("/tenant/byok-keys")
+async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
+    tenant = _resolve_request_tenant(request)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="No tenant configured")
+    actor = _actor(request)
+    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace admin required")
+    try:
+        key = create_key(
+            tenant_id=tenant.id,
+            label=body.label,
+            provider=body.provider,
+            key_material=body.key_material or None,
+        )
+        # Link the new active key to the tenant if none is configured.
+        if not tenant.byok_key_id:
+            update_tenant(tenant.id, byok_key_id=key.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return key.to_dict()
+
+
+@router.post("/tenant/byok-keys/{key_id}/rotate")
+async def rotate_tenant_byok_key(key_id: str, request: Request):
+    tenant = _resolve_request_tenant(request)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="No tenant configured")
+    actor = _actor(request)
+    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace admin required")
+    key = get_key(key_id)
+    if not key or key.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Key not found")
+    new_key = rotate_key(tenant.id, label=f"Rotated from {key.id[:8]}")
+    update_tenant(tenant.id, byok_key_id=new_key.id)
+    return new_key.to_dict()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Security posture / compliance metadata
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
+    from services.byok_key_manager import key_status_summary
+    from services.platform_config import is_production
+
+    region = tenant.data_region if tenant else "us-east-1"
+    byok = key_status_summary(tenant.id) if tenant else {"configured": False}
+    return {
+        "tenant_id": tenant.id if tenant else None,
+        "workspace_id": tenant.workspace_id if tenant else None,
+        "custom_domain": tenant.custom_domain if tenant else None,
+        "data_region": region,
+        "environment": "production" if is_production() else "development",
+        "encryption_at_rest": True,
+        "byok": byok,
+        "audit_logging": True,
+        "pii_detection": True,
+        "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
+        "mfa_required": tenant.mfa_required if tenant else False,
+        "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
+        "tls_version": "1.3",
+        "compliance": [
+            {"framework": "SOC 2 Type II", "status": "in_progress", "evidence": "Annual audit scheduled; controls documented"},
+            {"framework": "GDPR", "status": "ready", "evidence": "Data residency, right-to-delete, and audit logs available"},
+            {"framework": "HIPAA", "status": "available", "evidence": "BYOK, encryption at rest, and audit controls supported"},
+        ],
+        "attestations": [
+            {"name": "Penetration testing", "last_completed": None, "next_due": None},
+            {"name": "Vulnerability scanning", "status": "continuous"},
+        ],
+    }
+
+
+@router.get("/security/posture")
+async def get_security_posture(request: Request):
+    tenant = _resolve_request_tenant(request)
+    return _security_posture(tenant)
