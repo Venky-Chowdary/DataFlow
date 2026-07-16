@@ -52,6 +52,9 @@ class ConnectorSaveDTO(BaseModel):
     auth_role: str = ""
     api_key: str = ""
     service_account: str = ""
+    private_key: str = ""
+    endpoint_url: str = ""
+    path_style: bool = False
     auth_source: str = ""
 
 
@@ -150,6 +153,8 @@ def update_saved_connector(
         raise HTTPException(status_code=404, detail="Connector not found")
     if data.get("password") in ("", "****"):
         data["password"] = existing.password
+    if data.get("private_key") in ("", "****"):
+        data["private_key"] = existing.private_key
     data["workspace_id"] = existing.workspace_id or workspace_id
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
@@ -216,6 +221,7 @@ def test_saved_connector(
         "role": conn.auth_role or "",
         "api_key": conn.api_key or "",
         "service_account": conn.service_account or "",
+        "private_key": conn.private_key or "",
         "auth_source": conn.auth_source or "",
     }
     ok, message = run_probe(conn.type or "", cfg)

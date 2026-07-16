@@ -18,7 +18,9 @@ if str(_SRC) not in sys.path:
 from transfer.connector_capabilities import (  # noqa: E402
     _DRIVER_CAPS,
     _FILE_CAPS,
+    dest_ready,
     get_capabilities,
+    source_ready,
     transfer_live_driver_types,
     transfer_ready,
 )
@@ -42,8 +44,7 @@ def test_transfer_live_drivers_have_full_caps():
     for driver in transfer_live_driver_types():
         caps = get_capabilities(driver)
         assert transfer_ready(caps), f"{driver} should be transfer-ready"
-        if driver in _DRIVER_CAPS:
-            assert caps.get("read") and caps.get("write") and caps.get("test")
+        assert caps.get("test"), f"{driver} must support test/probe"
 
 
 def test_registry_includes_all_db_drivers():
@@ -51,8 +52,10 @@ def test_registry_includes_all_db_drivers():
         caps = get_capabilities(driver)
         if not transfer_ready(caps):
             continue
-        assert driver in LIVE_SOURCE_DATABASES, driver
-        assert driver in LIVE_DEST_DATABASES, driver
+        if source_ready(caps):
+            assert driver in LIVE_SOURCE_DATABASES, driver
+        if dest_ready(caps):
+            assert driver in LIVE_DEST_DATABASES, driver
 
 
 def test_file_formats_in_registry():

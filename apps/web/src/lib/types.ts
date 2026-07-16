@@ -3,7 +3,7 @@ export const API_BASE =
   import.meta.env.VITE_API_BASE ||
   "/api/v1";
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs" | "benchmarks";
 
 export interface Connector {
   id: string;
@@ -25,8 +25,21 @@ export interface Connector {
   auth_source?: string;
   api_key?: string;
   service_account?: string;
+  private_key?: string;
+  endpoint_url?: string;
+  path_style?: boolean;
   created_at: string;
   last_test_ok?: boolean;
+}
+
+export interface TransferCheckpoint {
+  chunk_index?: number;
+  chunk_total?: number;
+  rows_processed?: number;
+  offset?: number;
+  cursor_value?: unknown;
+  cursor_column?: string;
+  status?: string;
 }
 
 export interface TransferJob {
@@ -47,6 +60,8 @@ export interface TransferJob {
   error?: string;
   chunk_current?: number;
   chunk_total?: number;
+  checkpoint?: TransferCheckpoint;
+  retry_of?: string;
   updated_at?: string;
   started_at?: string;
   completed_at?: string;
@@ -56,6 +71,15 @@ export interface JobPhase {
   name: string;
   status: "pending" | "active" | "done" | "failed" | "skipped";
   message?: string;
+}
+
+export interface JobNotificationResult {
+  channel_id: string;
+  kind: "slack" | "teams" | "email" | "servicenow" | "webhook";
+  ok?: boolean;
+  error?: string;
+  status?: number;
+  body?: string;
 }
 
 export interface JobProgress extends TransferJob {
@@ -68,6 +92,7 @@ export interface JobProgress extends TransferJob {
   destination_summary?: Record<string, unknown>;
   preflight?: PreflightResult;
   phases?: JobPhase[];
+  notifications?: JobNotificationResult[];
 }
 
 export interface CsvValidationReport {
@@ -185,6 +210,7 @@ export interface TransferResult {
     checksum?: string;
     driver?: string;
     rejected_rows?: number;
+    rejected_details?: { row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[];
     warnings?: string[];
     error_policy?: string;
     filename?: string;
@@ -285,6 +311,8 @@ export const CONNECTOR_CATALOG = [
   { id: "gcs", label: "Google Cloud Storage", port: 443 },
   { id: "azure_blob", label: "Azure Blob", port: 443 },
   { id: "adls", label: "Azure Data Lake", port: 443 },
+  { id: "sftp", label: "SFTP", port: 22 },
+  { id: "email", label: "Email (SMTP)", port: 587 },
   // Streaming
   { id: "kafka", label: "Apache Kafka", port: 9092 },
   { id: "kinesis", label: "Amazon Kinesis", port: 443 },

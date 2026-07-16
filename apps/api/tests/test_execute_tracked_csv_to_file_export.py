@@ -56,3 +56,28 @@ def test_csv_to_jsonl_export():
 
 def test_csv_to_csv_export():
     _run_export("csv", "csv", "text/csv")
+
+
+def test_csv_to_csv_export_with_output_path():
+    out_path = "exports/test_output_path.csv"
+    out_file = Path(_API_ROOT) / out_path
+    csv_content = b"id,name\n1,alice\n2,bob\n"
+    try:
+        request = TransferRequest(
+            source=EndpointConfig(kind="file", format="csv"),
+            destination=EndpointConfig(kind="file_export", format="csv", output_path=out_path),
+            source_filename="users.csv",
+            source_content=csv_content,
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=True,
+        )
+        engine = UniversalTransferEngine()
+        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+        assert result.success is True, result.error
+        assert result.records_transferred == 2
+        assert out_file.exists(), result.destination_summary
+        assert out_file.read_text().startswith("id,name")
+        assert result.destination_summary.get("filename") == "test_output_path.csv"
+    finally:
+        if out_file.exists():
+            out_file.unlink()

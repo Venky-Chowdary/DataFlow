@@ -205,6 +205,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [destUsername, setDestUsername] = useState("");
   const [destPassword, setDestPassword] = useState("");
   const [destConnectionString, setDestConnectionString] = useState("");
+  const [destOutputPath, setDestOutputPath] = useState("");
   const [destWarehouse, setDestWarehouse] = useState("");
   const [transferring, setTransferring] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -404,7 +405,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     name: file?.name ?? sourceStreamName,
     source: buildSourceEndpoint(),
     destination: destKindMode === "file_export"
-      ? { kind: "file_export", format: exportFormat, database: targetDb }
+      ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
       : buildDestinationEndpoint(),
     source_columns: currentSourceColumns,
     source_schema: currentSourceSchema,
@@ -450,6 +451,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     destUsername,
     destPassword,
     destConnectionString,
+    destOutputPath,
     destWarehouse,
     targetCollection,
   ]);
@@ -692,7 +694,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setPlanLoading(true);
     try {
       const destination = destKindMode === "file_export"
-        ? { kind: "file_export", format: exportFormat, database: targetDb }
+        ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
         : buildDestinationEndpoint();
       const source = buildSourceEndpoint();
 
@@ -1347,6 +1349,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         destUsername: !connectorId ? destUsername || undefined : undefined,
         destPassword: !connectorId ? destPassword || undefined : undefined,
         destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
+        destOutputPath: destKindMode === "file_export" ? destOutputPath || undefined : undefined,
         destWarehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
         destAuthSource: selectedDestConnector?.auth_source,
         skipPreflight: !enforcePreflight,
@@ -1975,19 +1978,33 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           </div>
 
           {destKindMode === "file_export" ? (
-            <div className="df2-field">
-              <label className="df2-label">Export Format</label>
-              <FilterTabs
-                ariaLabel="Export format"
-                className="df2-filter-tabs--field"
-                value={exportFormat}
-                onChange={(format) => {
-                  setExportFormat(format);
-                  setTransferPlan(null);
-                }}
-                items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-              />
-            </div>
+            <>
+              <div className="df2-field">
+                <label className="df2-label">Export Format</label>
+                <FilterTabs
+                  ariaLabel="Export format"
+                  className="df2-filter-tabs--field"
+                  value={exportFormat}
+                  onChange={(format) => {
+                    setExportFormat(format);
+                    setTransferPlan(null);
+                  }}
+                  items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
+                />
+              </div>
+              <div className="df2-field">
+                <label className="df2-label">Output path (optional)</label>
+                <input
+                  className="df2-input"
+                  value={destOutputPath}
+                  onChange={(e) => setDestOutputPath(e.target.value)}
+                  placeholder="exports/my-export.csv — leave empty for server exports folder"
+                />
+                <p className="df2-label-hint">
+                  Leave empty to generate a downloadable file in the server exports folder.
+                </p>
+              </div>
+            </>
           ) : (
             <>
           <DestinationPicker

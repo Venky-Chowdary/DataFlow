@@ -105,6 +105,18 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="read_table_batch",
         writer="connectors.sqlite_writer",
     ),
+    "sftp": ConnectorModules(
+        probe=("connectors.sftp", "test_sftp"),
+        reader="connectors.sftp_reader",
+        reader_fn="read_object",
+        writer="connectors.sftp_writer",
+    ),
+    "email": ConnectorModules(
+        probe=("connectors.email", "test_email"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.email",
+    ),
 }
 
 
@@ -114,7 +126,7 @@ def registered_driver_types() -> list[str]:
 
 def assert_registry_matches_capabilities() -> None:
     """Raise if capability manifest and module registry diverge."""
-    cap_drivers = {k for k, v in _DRIVER_CAPS.items() if v.get("read") and v.get("write")}
+    cap_drivers = {k for k, v in _DRIVER_CAPS.items() if (v.get("read") and v.get("write")) or (v.get("dest_only") and v.get("write"))}
     reg_drivers = set(CONNECTOR_MODULES.keys())
     missing = cap_drivers - reg_drivers
     extra = reg_drivers - cap_drivers
@@ -168,6 +180,18 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if re.search(r"invalid uri|invalid connection string|could not parse|malformed|not a valid uri|bad connection string", text):
         return "The connection string format is invalid. Check the URL, credentials, and query parameters."
 
+    # SFTP-specific
+    if driver in ("sftp",) and re.search(r"authentication|auth|login|credential|password|key|private key", text):
+        return "SFTP authentication failed. Check username, password, private key, host, and port."
+    if driver in ("sftp",) and re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found|no such", text):
+        return "SFTP path not found. Check the remote directory and file path."
+
+    # Email-specific
+    if driver in ("email",) and re.search(r"authentication|auth|login|credential|password|username", text):
+        return "SMTP authentication failed. Check host, port, username, password, and that the account allows SMTP."
+    if driver in ("email",) and re.search(r"recipient|to address|to:|invalid address|address", text):
+        return "Email recipient is invalid or rejected. Check the 'to' addresses in the SMTP URL or database field."
+
     # File / path issues
     if re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found", text):
         return "File or path not found. Check the file path and that the volume is mounted."
@@ -203,6 +227,33 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     # Resource / table not found
     if re.search(r"table|resource|not found|does not exist|unknown database", text):
         return "Destination or resource not found. Check the database, schema, table, bucket, or index name."
+
+    # Redshift, RDS, cloud Postgres/MySQL share the same auth/host families as their base drivers.
+    if driver in ("redshift", "mariadb"):
+        if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
+            return "Authentication failed. Check username, password, database, and that the user can log in from this host."
+        if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known", text):
+            return "Host not found. Check the host/address and that it is reachable from the network."
+        if re.search(r"connection refused|errno 111|network is unreachable|cannot assign|no route|host is down|conn refused", text):
+            return "Cannot reach the host on the specified port. Check the host, port, and firewall/security group."
+
+    # Azure Blob / ADLS
+    if driver == "adls":
+        if re.search(r"authentication|auth|login|credential|account_key|signature|invalid|unauthorized|access denied|permission", text):
+            return "Azure authentication failed. Check the storage account name, account key, or service principal JSON and permissions."
+        if re.search(r"container|filesystem|not found|does not exist|resource not found", text):
+            return "Container not found. Check the container or filesystem name, or DataFlow will create it during the transfer."
+
+    # GCS
+    if driver == "gcs":
+        if re.search(r"authentication|auth|credential|service_account|invalid_grant|unauthorized|access denied|permission|forbidden", text):
+            return "GCS authentication failed. Check the service account JSON, project ID, and Storage permissions."
+        if re.search(r"bucket|not found|does not exist|no such bucket", text):
+            return "GCS bucket not found. Check the bucket name and permissions."
+
+    # SFTP-specific (path issues)
+    if driver == "sftp" and re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found|no such", text):
+        return "SFTP path not found. Check the remote directory and file path."
 
     # Fallback: keep the raw message but prefix it clearly.
     return f"Connection failed: {raw}"

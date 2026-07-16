@@ -1,8 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { readJobEventLog } from "../../lib/jobEventLog";
+import { fetchJobQuarantine, exportJobQuarantine } from "../../lib/api";
 import type { TransferResult } from "../../lib/types";
+import { useToast } from "../Toast";
 
 interface TransferResultDashboardProps {
   result: TransferResult;
@@ -30,12 +32,45 @@ export function TransferResultDashboard({
   onViewJobs,
   onSchedule,
 }: TransferResultDashboardProps) {
+  const { toast } = useToast();
   const ds = result.destination_summary;
   const rec = result.records_transferred ?? 0;
   const rejected = ds?.rejected_rows ?? result.reconciliation?.rejected_rows ?? 0;
+  const [showQuarantine, setShowQuarantine] = useState(false);
+  const [quarantineLoading, setQuarantineLoading] = useState(false);
+  const [quarantine, setQuarantine] = useState<{ row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[]>(ds?.rejected_details || []);
   const sourceRows = result.reconciliation?.source_rows ?? rec;
   const targetRows = result.reconciliation?.target_rows ?? rec;
   const passed = result.reconciliation?.passed ?? result.success;
+
+  const loadQuarantine = async () => {
+    if (!result.job_id) return;
+    setQuarantineLoading(true);
+    try {
+      const data = await fetchJobQuarantine(result.job_id);
+      setQuarantine(data.quarantine);
+      setShowQuarantine(true);
+    } catch (e) {
+      toast({ title: "Could not load quarantine", message: (e as Error).message, tone: "error" });
+    } finally {
+      setQuarantineLoading(false);
+    }
+  };
+
+  const downloadQuarantine = async () => {
+    if (!result.job_id) return;
+    try {
+      const data = await exportJobQuarantine(result.job_id);
+      if (data.download_url) {
+        const a = document.createElement("a");
+        a.href = data.download_url;
+        a.download = data.filename || `quarantine-${result.job_id}.csv`;
+        a.click();
+      }
+    } catch (e) {
+      toast({ title: "Could not export quarantine", message: (e as Error).message, tone: "error" });
+    }
+  };
 
   const eventLog = useMemo(() => {
     if (result.event_log?.length) return result.event_log;
@@ -163,9 +198,63 @@ export function TransferResultDashboard({
                 <DtIcon name="download" size={14} /> Download export
               </a>
             )}
+            {rejected > 0 && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => void loadQuarantine()}
+                disabled={quarantineLoading}
+              >
+                <DtIcon name="warning" size={14} /> {quarantineLoading ? "Loading…" : "View quarantine"}
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {showQuarantine && rejected > 0 && (
+        <section className="df2-job-log-panel is-result is-open" aria-label="Quarantine">
+          <header className="df2-job-log-panel-head">
+            <div className="df2-job-log-panel-title">
+              <DtIcon name="warning" size={14} />
+              <strong>Quarantine</strong>
+              <span className="df2-job-log-count">{quarantine.length} rows</span>
+            </div>
+            <div className="df2-job-log-actions">
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void downloadQuarantine()}>
+                <DtIcon name="download" size={14} /> Export CSV
+              </button>
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setShowQuarantine(false)}>Close</button>
+            </div>
+          </header>
+          <div className="df2-job-log-panel-body" role="log">
+            {quarantine.length === 0 ? (
+              <div className="df2-job-log-empty">No quarantined rows recorded.</div>
+            ) : (
+              <table className="df2-query-table">
+                <thead>
+                  <tr>
+                    <th>Row</th>
+                    <th>Column</th>
+                    <th>Value</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {quarantine.map((q, i) => (
+                    <tr key={i}>
+                      <td>{q.row ?? "—"}</td>
+                      <td>{q.column ?? "—"}</td>
+                      <td className="df2-quarantine-value">{q.value ?? "—"}</td>
+                      <td>{q.reason ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
         <header className="df2-job-log-panel-head">

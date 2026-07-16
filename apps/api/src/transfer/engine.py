@@ -469,7 +469,41 @@ class UniversalTransferEngine:
         result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
         result.destination_summary["records_per_second"] = result.records_per_second
         result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+        self._notify_job_status(request, result)
         return result
+
+    def _notify_job_status(self, request: TransferRequest, result: TransferResult) -> None:
+        """Fire workspace notifications for failed or partially-quarantined jobs."""
+        rejected = result.destination_summary.get("rejected_rows", 0) or 0
+        if result.success and not rejected:
+            return
+        try:
+            from services.notification_service import build_job_payload, log_job_notifications, notify_workspace
+            from services.platform_config import public_url, web_url
+
+            status = "failed"
+            if result.success and rejected:
+                status = "failed_with_quarantine"
+            elif result.success:
+                status = "completed"
+            payload = build_job_payload(
+                job_id=result.job_id,
+                status=status,
+                source=request.source.kind or "unknown",
+                destination=request.destination.kind or "unknown",
+                records_transferred=result.records_transferred or 0,
+                rejected_rows=int(rejected),
+                error=result.error or "",
+                retry_url=f"/api/v1/connectors/jobs/{result.job_id}/resume",
+                workspace_id=request.workspace_id or "",
+                base_url=public_url(),
+                web_url=web_url(),
+            )
+            results = notify_workspace(request.workspace_id or "", payload)
+            log_job_notifications(result.job_id, results)
+        except Exception:
+            # Notifications must never fail a transfer.
+            pass
 
     def _execute_tracked_core(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         mongo = get_mongodb_service()
@@ -828,17 +862,31 @@ class UniversalTransferEngine:
                     budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                 )
                 rows_written = len(records)
-                export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")
-                os.makedirs(export_dir, exist_ok=True)
                 ext = os.path.splitext(export_name)[1].lstrip(".") or (request.destination.format or "json")
                 unique_name = f"export_{job_id}.{ext}"
-                export_path = os.path.join(export_dir, unique_name)
-                with open(export_path, "wb") as f:
-                    f.write(export_bytes)
-                dest_summary["filename"] = unique_name
-                dest_summary["path"] = export_path
-                dest_summary["download_url"] = f"/api/v1/transfer/download/{unique_name}"
-                ddl_log.append(f"Exported {rows_written} rows to {unique_name}")
+
+                output_path = request.destination.output_path.strip() if request.destination.output_path else ""
+                if output_path:
+                    export_path = os.path.abspath(output_path)
+                    if not export_path.startswith(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))):
+                        mongo.update_job_status(job_id, "failed", error="File export path must be inside the application workspace", phase="failed")
+                        return TransferResult(success=False, error="File export path must be inside the application workspace", job_id=job_id)
+                    os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
+                    with open(export_path, "wb") as f:
+                        f.write(export_bytes)
+                    dest_summary["filename"] = os.path.basename(export_path)
+                    dest_summary["path"] = export_path
+                    dest_summary["download_url"] = f"/api/v1/transfer/download/{os.path.basename(export_path)}"
+                else:
+                    export_dir = os.path.join(os.path.dirname(__file__), "..", "..", "exports")
+                    os.makedirs(export_dir, exist_ok=True)
+                    export_path = os.path.join(export_dir, unique_name)
+                    with open(export_path, "wb") as f:
+                        f.write(export_bytes)
+                    dest_summary["filename"] = unique_name
+                    dest_summary["path"] = export_path
+                    dest_summary["download_url"] = f"/api/v1/transfer/download/{unique_name}"
+                ddl_log.append(f"Exported {rows_written} rows to {dest_summary['filename']}")
             else:
                 mongo.update_job_status(job_id, "failed", error=f"Unknown destination: {request.destination.kind}", phase="failed")
                 return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}", job_id=job_id)
@@ -1677,6 +1725,8 @@ class UniversalTransferEngine:
             "progress_pct": 0,
             "phase": "queued",
             "message": "Transfer queued",
+            "workspace_id": request.workspace_id or "",
+            "data_region": request.data_region or "",
             "transfer_request": transfer_request_to_dict(request),
             "retry_of": None,
         })

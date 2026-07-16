@@ -24,13 +24,14 @@ from transfer.registry import LIVE_DEST_DATABASES, LIVE_SOURCE_DATABASES, LIVE_S
 
 ALL_DB_DRIVERS = sorted(_DRIVER_CAPS.keys())
 ALL_FILE_FORMATS = sorted(k for k, v in _FILE_CAPS.items() if transfer_ready(v))
+ALL_SOURCES = sorted(set(LIVE_SOURCE_DATABASES))
 ALL_DESTINATIONS = sorted(set(LIVE_DEST_DATABASES))
 
 
 @pytest.mark.parametrize("driver", ALL_DB_DRIVERS)
 def test_every_db_driver_has_probe_read_write(driver: str):
     caps = get_capabilities(driver)
-    assert caps.get("test") and caps.get("read") and caps.get("write"), driver
+    assert caps.get("test") and transfer_ready(caps), driver
 
     probes = {
         "postgresql": ("connectors.postgresql", "test_postgresql"),
@@ -45,6 +46,8 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "redis": ("connectors.redis_kv", "test_redis"),
         "elasticsearch": ("connectors.elasticsearch", "test_elasticsearch"),
         "sqlite": ("connectors.sqlite", "test_sqlite"),
+        "sftp": ("connectors.sftp", "test_sftp"),
+        "email": ("connectors.email", "test_email"),
     }
     if driver == "mongodb":
         import pymongo  # noqa: F401
@@ -66,6 +69,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "redis": "connectors.redis_reader",
         "elasticsearch": "connectors.elasticsearch_reader",
         "sqlite": "connectors.sqlite_reader",
+        "sftp": "connectors.sftp_reader",
     }
     writers = {
         "postgresql": "connectors.postgresql_writer",
@@ -81,8 +85,11 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "redis": "connectors.redis_writer",
         "elasticsearch": "connectors.elasticsearch_writer",
         "sqlite": "connectors.sqlite_writer",
+        "sftp": "connectors.sftp_writer",
+        "email": "connectors.email",
     }
-    assert importlib.import_module(readers[driver])
+    if readers.get(driver):
+        assert importlib.import_module(readers[driver])
     assert callable(importlib.import_module(writers[driver]).write_mapped_rows)
 
 
@@ -93,7 +100,7 @@ def test_file_to_db_route_live(src_fmt: str, dest: str):
     assert ok, msg
 
 
-@pytest.mark.parametrize("src", ALL_DESTINATIONS)
+@pytest.mark.parametrize("src", ALL_SOURCES)
 @pytest.mark.parametrize("dest", ALL_DESTINATIONS)
 def test_db_to_db_route_live(src: str, dest: str):
     ok, msg = validate_transfer("database", src, "database", dest)

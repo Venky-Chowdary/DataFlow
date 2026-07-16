@@ -9,9 +9,10 @@ import { PageShell } from "../components/ui/PageShell";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
-import { fetchJob, retryJob } from "../lib/api";
+import { fetchJob, retryJob, resumeJob } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
+import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
@@ -56,6 +57,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
 
@@ -149,6 +151,26 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
       setRetrying(false);
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
+
+  const handleResume = useCallback(async () => {
+    if (!selectedId || !liveJob?.checkpoint) return;
+    setResuming(true);
+    try {
+      const result = await resumeJob(selectedId);
+      toast({ title: "Resume started", message: `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`, tone: "success" });
+      onRefresh?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Resume failed";
+      if (msg.includes("File uploads") || msg.includes("Transfer Studio")) {
+        toast({ title: "Re-upload required", message: msg, tone: "warning" });
+        onStartTransfer?.();
+      } else {
+        toast({ title: "Resume failed", message: msg, tone: "error" });
+      }
+    } finally {
+      setResuming(false);
+    }
+  }, [selectedId, liveJob?.checkpoint, onRefresh, onStartTransfer, toast]);
 
 
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
@@ -396,15 +418,46 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       </div>
                     )}
 
+                    {liveJob.notifications && liveJob.notifications.length > 0 && (
+                      <div className="df2-jobs-v3-notifications">
+                        <h3>Notifications</h3>
+                        <ul>
+                          {liveJob.notifications.map((n, i) => (
+                            <li key={`${n.channel_id}-${i}`} className={n.ok ? "ok" : "failed"}>
+                              <DtIcon name={n.ok ? "check" : "alert"} size={14} />
+                              <span>{n.kind}</span>
+                              {n.ok ? <span className="status">Sent</span> : <span className="status failed">Failed{n.error ? `: ${n.error}` : ""}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0) && (
+                      <div className="df2-jobs-v3-actions">
+                        <QuarantinePanel jobId={selected._id} rejectedRows={liveJob.rejected_rows} />
+                      </div>
+                    )}
+
                     {selected.status === "failed" && (
                       <div className="df2-jobs-v3-actions">
+                        {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && (
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-primary"
+                            onClick={() => void handleResume()}
+                            disabled={resuming}
+                          >
+                            {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
+                          </button>
+                        )}
                         <button
                           type="button"
-                          className="df2-btn df2-btn-primary"
+                          className={liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 ? "df2-btn" : "df2-btn df2-btn-primary"}
                           onClick={() => void handleRetry()}
                           disabled={retrying}
                         >
-                          {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry migration</>}
+                          {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry from start</>}
                         </button>
                         {onStartTransfer && (
                           <button type="button" className="df2-btn" onClick={onStartTransfer}>

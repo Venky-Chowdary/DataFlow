@@ -28,6 +28,8 @@ _DRIVER_PACKAGES: dict[str, list[str]] = {
     "ndjson": [],
     "excel": ["openpyxl"],
     "parquet": ["pyarrow"],
+    "sftp": ["paramiko"],
+    "email": [],
 }
 
 

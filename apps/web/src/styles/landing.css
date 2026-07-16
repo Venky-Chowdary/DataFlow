@@ -1547,3 +1547,264 @@
     padding: 32px 24px 28px;
   }
 }
+
+/* ─── Enterprise trust logo strip ─── */
+.lp-trust {
+  padding: 32px clamp(16px, 4vw, 40px);
+  text-align: center;
+  background: #fff;
+  border-top: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.lp-trust-eyebrow {
+  margin: 0 0 18px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.lp-trust-logos {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: clamp(24px, 4vw, 56px);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.lp-trust-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #475569;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.lp-trust-logo-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #14b8a6, #6366f1);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* ─── Competitor comparison ─── */
+.lp-compare-wrap {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.lp-compare-table {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.4fr) 120px 120px 120px;
+  gap: 1px;
+  background: #e2e8f0;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.04);
+}
+
+.lp-compare-row {
+  display: contents;
+}
+
+.lp-compare-header > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 12px;
+  background: #f1f5f9;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #475569;
+}
+
+.lp-compare-row > span {
+  display: flex;
+  align-items: center;
+  padding: 16px 14px;
+  background: #fff;
+  font-size: 14px;
+}
+
+.lp-compare-feature {
+  font-weight: 500;
+  color: #0f172a;
+}
+
+.lp-compare-cell {
+  justify-content: center;
+  color: #475569;
+}
+
+.lp-compare-cell--dataflow {
+  background: #f0fdfa !important;
+  color: #0f766e;
+  font-weight: 600;
+}
+
+.lp-compare-brand--dataflow {
+  color: #0f766e !important;
+}
+
+.lp-compare-yes {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #0f766e;
+}
+
+.lp-compare-yes svg {
+  color: #14b8a6;
+}
+
+.lp-compare-no {
+  color: #94a3b8;
+}
+
+.lp-compare-partial {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lp-compare-disclaimer {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: #64748b;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .lp-compare-table {
+    grid-template-columns: 1fr 90px 90px 90px;
+  }
+  .lp-compare-row > span {
+    padding: 12px 8px;
+    font-size: 12px;
+  }
+}
+
+/* ─── Trust badges ─── */
+.lp-trust-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.lp-trust-card {
+  padding: 28px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.03);
+}
+
+.lp-trust-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 16px;
+  border-radius: 12px;
+  background: #f0fdfa;
+  color: #0f766e;
+}
+
+.lp-trust-card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.lp-trust-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #64748b;
+}
+
+@media (max-width: 900px) {
+  .lp-trust-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-trust-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Testimonials ─── */
+.lp-testimonial-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.lp-testimonial-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 28px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.03);
+}
+
+.lp-testimonial-card footer {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.lp-testimonial-card footer strong {
+  display: block;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.lp-testimonial-card footer span {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.lp-testimonial-quote {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.6;
+  color: #334155;
+}
+
+@media (max-width: 900px) {
+  .lp-testimonial-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-testimonial-grid {
+    grid-template-columns: 1fr;
+  }
+}

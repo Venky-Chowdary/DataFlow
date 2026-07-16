@@ -57,6 +57,9 @@ class SavedConnector:
     auth_role: str = ""
     api_key: str = ""
     service_account: str = ""
+    private_key: str = ""
+    endpoint_url: str = ""
+    path_style: bool = False
     auth_source: str = ""
     workspace_id: str = ""
     last_tested_at: str | None = None
@@ -90,6 +93,9 @@ class SavedConnector:
             auth_role=data.get("auth_role", ""),
             api_key=data.get("api_key", ""),
             service_account=data.get("service_account", ""),
+            private_key=decrypt_secret(data.get("private_key", "") or ""),
+            endpoint_url=data.get("endpoint_url", ""),
+            path_style=bool(data.get("path_style", False)),
             auth_source=data.get("auth_source", ""),
             workspace_id=data.get("workspace_id", ""),
             last_tested_at=data.get("last_tested_at"),
@@ -156,6 +162,8 @@ def _connector_to_doc(c: SavedConnector) -> dict[str, Any]:
         d["password"] = encrypt_secret(d["password"])
     if d.get("connection_string"):
         d["connection_string"] = encrypt_secret(d["connection_string"])
+    if d.get("private_key"):
+        d["private_key"] = encrypt_secret(d["private_key"])
     return d
 
 
@@ -200,6 +208,8 @@ def _save_all(connectors: list[SavedConnector]) -> None:
             d["password"] = encrypt_secret(d["password"])
         if d.get("connection_string"):
             d["connection_string"] = encrypt_secret(d["connection_string"])
+        if d.get("private_key"):
+            d["private_key"] = encrypt_secret(d["private_key"])
         payload.append(d)
     text = json.dumps({"connectors": payload}, indent=2)
     # Atomic write so a crash mid-write cannot leave a half-written file.
@@ -315,6 +325,9 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         auth_role=data.get("auth_role", ""),
         api_key=data.get("api_key", ""),
         service_account=data.get("service_account", ""),
+        private_key=data.get("private_key", ""),
+        endpoint_url=data.get("endpoint_url", ""),
+        path_style=bool(data.get("path_style", False)),
         auth_source=data.get("auth_source", ""),
         workspace_id=data.get("workspace_id", ""),
     )
@@ -418,7 +431,11 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
         d["api_key"] = "****"
     if d.get("service_account"):
         d["service_account"] = "****"
+    if d.get("private_key"):
+        d["private_key"] = "****"
     d.setdefault("workspace_id", "")
+    d.setdefault("endpoint_url", "")
+    d.setdefault("path_style", False)
     return d
 
 

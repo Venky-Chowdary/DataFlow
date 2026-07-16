@@ -84,6 +84,24 @@ def transform_error_policy_for_validation_mode(validation_mode: str | None) -> s
     return transform_error_policy()
 
 
+def _rejected_row_count(
+    data_rows: list[list[str]],
+    mapped_rows: list[tuple],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+) -> int:
+    """Return the number of rows that were rejected or quarantined.
+
+    For ``fail`` the dropped rows are ``len(data_rows) - len(mapped_rows)``.
+    For ``quarantine``/``coerce_null`` the rows are preserved with a NULL bad cell,
+    so the count is the number of distinct source row numbers with at least one
+    rejected cell.
+    """
+    if policy in {"quarantine", "coerce_null"}:
+        return len({d["row"] for d in rejected_details})
+    return len(data_rows) - len(mapped_rows)
+
+
 def build_mapped_rows(
     *,
     headers: list[str],
@@ -96,12 +114,38 @@ def build_mapped_rows(
     preserve_case: bool = False,
 ) -> tuple[list[tuple], list[str]]:
     """Returns mapped rows and any transform errors (first 10)."""
+    mapped, errors, _ = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=error_policy,
+        dest_types=dest_types,
+        preserve_case=preserve_case,
+    )
+    return mapped, errors
+
+
+def build_mapped_rows_with_details(
+    *,
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    target_cols: list[str],
+    column_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    dest_types: dict[str, str] | None = None,
+    preserve_case: bool = False,
+) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
+    """Returns mapped rows, error messages, and structured rejected-row details."""
     column_types = column_types or {}
     policy = transform_error_policy(error_policy)
     source_indices = {h: i for i, h in enumerate(headers)}
     sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
+    rejected_details: list[dict[str, Any]] = []
 
     mapping_infos = []
     for m in mappings:
@@ -129,6 +173,15 @@ def build_mapped_rows(
             converted, err = apply_transform(val, transform)
             if err:
                 row_has_error = True
+                detail = {
+                    "row": row_number,
+                    "column": src_name,
+                    "target": tgt_name,
+                    "value": str(val) if val is not None else "",
+                    "reason": err,
+                    "policy": policy,
+                }
+                rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
                 if policy in {"coerce_null", "quarantine"}:
@@ -144,7 +197,7 @@ def build_mapped_rows(
             continue
         mapped.append(tuple(out))
 
-    return mapped, errors
+    return mapped, errors, rejected_details
 
 
 def resolve_target_columns(

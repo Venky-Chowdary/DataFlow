@@ -45,6 +45,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     keywords: "data transfer wizard, column mapping, preflight gates, CSV upload, database write",
     robots: "noindex",
   },
+  query: {
+    title: "Query Playground",
+    description:
+      "Run safe, read-only SQL and MongoDB queries against saved connectors and export results to CSV, JSON, or Excel.",
+    keywords: "SQL query playground, MongoDB query, ad-hoc query, data export, connector query",
+    robots: "noindex",
+  },
   pilot: {
     title: "Data Pilot",
     description:
@@ -92,6 +99,14 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
       "How DataFlow moves, maps, and validates any data — architecture, preflight rules, connector coverage, and security.",
     keywords:
       "DataFlow documentation, data transfer architecture, ETL documentation, preflight gates, data migration guide",
+    robots: "noindex",
+  },
+  benchmarks: {
+    title: "Benchmarks",
+    description:
+      "Reproducible scale proofs — DataFlow throughput, memory, and correctness vs Fivetran, Airbyte, and Stitch baselines.",
+    keywords:
+      "DataFlow benchmark, ETL throughput, data transfer performance, Fivetran vs Airbyte, rows per second",
     robots: "noindex",
   },
 };

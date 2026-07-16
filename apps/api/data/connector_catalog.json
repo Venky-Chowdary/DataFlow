@@ -1461,9 +1461,16 @@
     {
       "id": "sftp",
       "name": "SFTP",
+      "category": "file",
+      "status": "planned",
+      "description": "SFTP file source and destination"
+    },
+    {
+      "id": "email",
+      "name": "Email",
       "category": "api",
       "status": "planned",
-      "description": "SFTP integration adapter"
+      "description": "Email destination with CSV/JSON attachment"
     },
     {
       "id": "ftp",

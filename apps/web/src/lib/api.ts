@@ -501,6 +501,27 @@ export async function retryJob(jobId: string): Promise<{ job_id: string; retry_o
   throw lastError instanceof Error ? lastError : new Error("Retry failed");
 }
 
+export async function resumeJob(jobId: string): Promise<{ job_id: string; status: string }> {
+  const urls = [
+    `${API_BASE}/connectors/jobs/${jobId}/resume`,
+    `${API_BASE}/jobs/${jobId}/resume`,
+  ];
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      const res = await apiFetch(url, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Resume failed");
+      }
+      return data as { job_id: string; status: string };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Resume failed");
+}
+
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
 export function streamJobProgress(
   jobId: string,
@@ -695,6 +716,9 @@ export async function testConnection(payload: {
   auth_source?: string;
   api_key?: string;
   service_account?: string;
+  private_key?: string;
+  endpoint_url?: string;
+  path_style?: boolean;
 }): Promise<{ success: boolean; message: string }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
@@ -722,6 +746,9 @@ export async function saveConnector(payload: {
   auth_source?: string;
   api_key?: string;
   service_account?: string;
+  private_key?: string;
+  endpoint_url?: string;
+  path_style?: boolean;
 }): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
   const res = await apiFetch(`${API_BASE}/connectors/saved`, {
@@ -763,6 +790,9 @@ export async function updateConnector(
     auth_role?: string;
     api_key?: string;
     service_account?: string;
+    private_key?: string;
+    endpoint_url?: string;
+    path_style?: boolean;
   },
 ): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
@@ -1024,6 +1054,7 @@ export async function runUniversalTransfer(options: {
   destUsername?: string;
   destPassword?: string;
   destConnectionString?: string;
+  destOutputPath?: string;
   destWarehouse?: string;
   destAuthSource?: string;
   skipPreflight?: boolean;
@@ -1067,6 +1098,7 @@ export async function runUniversalTransfer(options: {
   if (options.destUsername) formData.append("dest_username", options.destUsername);
   if (options.destPassword) formData.append("dest_password", options.destPassword);
   if (options.destConnectionString) formData.append("dest_connection_string", options.destConnectionString);
+  if (options.destOutputPath) formData.append("dest_output_path", options.destOutputPath);
   if (options.destWarehouse) formData.append("dest_warehouse", options.destWarehouse);
   if (options.destAuthSource) formData.append("dest_auth_source", options.destAuthSource);
   if (options.mappings?.length) {
@@ -1328,6 +1360,60 @@ export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
 }
 
+export type Workspace = {
+  id: string;
+  name: string;
+  created_at: string;
+  created_by: string;
+};
+
+export type WorkspaceMember = {
+  workspace_id: string;
+  email: string;
+  role: "owner" | "editor" | "viewer";
+  added_at: string;
+  added_by: string;
+};
+
+export async function fetchWorkspaces(): Promise<Workspace[]> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
+  const data = await res.json();
+  return data.workspaces ?? [];
+}
+
+export async function createWorkspace(name: string): Promise<Workspace> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create workspace"));
+  return res.json();
+}
+
+export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load members"));
+  const data = await res.json();
+  return data.members ?? [];
+}
+
+export async function addWorkspaceMember(workspaceId: string, email: string, role: string): Promise<WorkspaceMember> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to add member"));
+  return res.json();
+}
+
+export async function removeWorkspaceMember(workspaceId: string, email: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove member"));
+}
+
 export async function loginWorkspace(email: string, password: string): Promise<{
   token: string;
   expires_at: number;
@@ -1342,4 +1428,270 @@ export async function loginWorkspace(email: string, password: string): Promise<{
     throw new Error(await parseApiError(res, "Sign-in failed"));
   }
   return res.json();
+}
+
+export interface QueryResult {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  column_schema: Record<string, string>;
+  row_count: number;
+  truncated: boolean;
+}
+
+export interface QueryExportResult {
+  success: boolean;
+  filename?: string;
+  download_url?: string;
+  path?: string;
+  row_count?: number;
+  format?: string;
+  error?: string;
+}
+
+export async function executeQuery(payload: {
+  connector_id: string;
+  query: string;
+  database?: string;
+  collection?: string;
+  limit?: number;
+}): Promise<QueryResult> {
+  const res = await apiFetch(`${API_BASE}/query/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Query failed"));
+  return res.json();
+}
+
+export async function exportQuery(payload: {
+  connector_id: string;
+  query: string;
+  database?: string;
+  collection?: string;
+  limit?: number;
+  format: string;
+  output_path?: string;
+  destination_connector_id?: string;
+  destination?: string;
+  sync_mode?: string;
+  conflict_columns?: string[];
+}): Promise<QueryExportResult> {
+  const res = await apiFetch(`${API_BASE}/query/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Export failed"));
+  return res.json();
+}
+
+export interface QuarantineInfo {
+  job_id: string;
+  rejected_rows: number;
+  quarantine: { row?: number; column?: string; value?: string; reason?: string }[];
+}
+
+export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load quarantine"));
+  return res.json();
+}
+
+export async function exportJobQuarantine(jobId: string): Promise<{ success: boolean; row_count?: number; download_url?: string; filename?: string }> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/export`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export quarantine"));
+  return res.json();
+}
+
+export interface NotificationChannel {
+  id: string;
+  workspace_id: string;
+  kind: "slack" | "teams" | "email" | "servicenow" | "webhook";
+  label: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+}
+
+export async function fetchNotificationChannels(workspaceId?: string): Promise<{ channels: NotificationChannel[] }> {
+  const params = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
+  const res = await apiFetch(`${API_BASE}/workspace/notifications${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load channels"));
+  return res.json();
+}
+
+export async function createNotificationChannel(channel: Omit<NotificationChannel, "id" | "created_at" | "updated_at" | "created_by">): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications`, { method: "POST", body: JSON.stringify(channel) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not create channel"));
+  return res.json();
+}
+
+export async function updateNotificationChannel(id: string, updates: Partial<NotificationChannel>): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}`, { method: "PATCH", body: JSON.stringify(updates) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not update channel"));
+  return res.json();
+}
+
+export async function deleteNotificationChannel(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not delete channel"));
+}
+
+export async function testNotificationChannel(id: string): Promise<{ success: boolean; detail: unknown }> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}/test`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Test failed"));
+  return res.json();
+}
+
+export type Tenant = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  custom_domain: string;
+  data_region: string;
+  byok_key_id: string;
+  security_contact_email: string;
+  mfa_required: boolean;
+  session_timeout_hours: number;
+  ip_allowlist: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ByokKey = {
+  id: string;
+  tenant_id: string;
+  label: string;
+  provider: "local" | "wrapped" | "aws_kms" | "azure_keyvault" | "gcp_kms";
+  key_reference: string;
+  status: "active" | "rotated" | "revoked";
+  created_at: string;
+  updated_at: string;
+};
+
+export type BenchmarkReport = {
+  target: string;
+  rows: number;
+  success: boolean;
+  elapsed_seconds: number;
+  records_per_second: number;
+  peak_memory_bytes: number;
+  peak_memory_mb: number;
+  destination_summary: Record<string, unknown>;
+  error: string;
+  timestamp: string;
+  competitors: {
+    product: string;
+    typical_rps: number;
+    memory_mb: number;
+    resume_from_checkpoint: boolean;
+    observed_max_rows: number;
+    notes: string;
+  }[];
+};
+
+export type SecurityPosture = {
+  tenant_id: string | null;
+  workspace_id: string | null;
+  custom_domain: string | null;
+  data_region: string;
+  environment: "production" | "development";
+  encryption_at_rest: boolean;
+  byok: {
+    configured: boolean;
+    active_count: number;
+    total_count: number;
+    providers: string[];
+    rotated: boolean;
+  };
+  audit_logging: boolean;
+  pii_detection: boolean;
+  ip_allowlist_enabled: boolean;
+  mfa_required: boolean;
+  session_timeout_hours: number;
+  tls_version: string;
+  compliance: Array<{ framework: string; status: string; evidence: string }>;
+  attestations: Array<{ name: string; last_completed?: string | null; next_due?: string | null; status?: string }>;
+};
+
+export async function fetchTenant(): Promise<Tenant | null> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "updated_at">): Promise<Tenant> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));
+  return res.json();
+}
+
+export async function updateTenant(
+  tenantId: string,
+  body: Partial<Omit<Tenant, "id" | "created_at" | "updated_at">>,
+): Promise<Tenant> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/${tenantId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not update tenant"));
+  return res.json();
+}
+
+export async function downloadSecurityReport(): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/security/report`);
+  if (!res.ok) throw new Error("Could not download compliance report");
+  return res.blob();
+}
+
+export async function fetchSecurityPosture(): Promise<SecurityPosture> {
+  const res = await apiFetch(`${API_BASE}/workspace/security/posture`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load security posture"));
+  return res.json();
+}
+
+export async function fetchByokKeys(): Promise<{ keys: ByokKey[] }> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load BYOK keys"));
+  return res.json();
+}
+
+export async function createByokKey(body: { label: string; provider: ByokKey["provider"]; key_material?: string }): Promise<ByokKey> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not create BYOK key"));
+  return res.json();
+}
+
+export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows, format: "json" }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed"));
+  return res.json();
+}
+
+export async function downloadBenchmarkReport(rows = 100_000): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows, format: "md" }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not download benchmark report"));
+  return res.blob();
 }

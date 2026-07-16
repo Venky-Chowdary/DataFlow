@@ -60,6 +60,8 @@ class ConnectorConfig(BaseModel):
     auth_role: Optional[str] = Field(default=None, description="Snowflake / database role")
     api_key: Optional[str] = Field(default=None, description="API key")
     service_account: Optional[str] = Field(default=None, description="Service account JSON")
+    endpoint_url: Optional[str] = Field(default=None, description="Custom S3/S3-compatible endpoint URL")
+    path_style: bool = Field(default=False, description="Force S3 path-style addressing")
     options: dict = Field(default_factory=dict, description="Additional options")
     auth_source: Optional[str] = None
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
@@ -94,6 +96,8 @@ class TestConnectionRequest(BaseModel):
     auth_role: Optional[str] = ""
     api_key: Optional[str] = None
     service_account: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    path_style: Optional[bool] = False
     auth_source: Optional[str] = None
 
 
@@ -205,6 +209,8 @@ async def test_connection(request: TestConnectionRequest):
             "role": request.auth_role or "",
             "api_key": request.api_key or "",
             "service_account": request.service_account or "",
+            "endpoint_url": request.endpoint_url or "",
+            "path_style": bool(request.path_style),
             "auth_source": request.auth_source or "",
         }
         ok, msg = run_probe(driver, cfg)
@@ -243,6 +249,8 @@ async def create_connector(
         "role": config.role or "both",
         "api_key": config.api_key,
         "service_account": config.service_account,
+        "endpoint_url": config.endpoint_url,
+        "path_style": config.path_style,
         "options": config.options,
         "workspace_id": workspace_id,
         "status": "configured",
@@ -368,18 +376,30 @@ async def list_connectors(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _can_access_job(request: Request, job: dict) -> bool:
+    """True if the actor may see or mutate this job."""
+    workspace_id = job.get("workspace_id") or ""
+    if not workspace_id:
+        return True
+    return can_read_workspace(workspace_id, _actor_email(request))
+
+
 @router.get("/jobs")
-async def list_transfer_jobs():
-    """List recent transfer jobs.
+async def list_transfer_jobs(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """List recent transfer jobs scoped to a workspace.
 
     Degrades gracefully when the job store is unavailable: returns an empty
     list flagged ``degraded`` (HTTP 200) so Job Theater still renders instead
     of erroring. The ``/health`` endpoint continues to report the outage, so
     the infrastructure problem is not hidden.
     """
+    workspace_id = _resolve_workspace(request, workspace_id)
     try:
         mongo = get_mongodb_service()
-        jobs = mongo.list_jobs()
+        jobs = mongo.list_jobs(workspace_id=workspace_id)
         return {"jobs": jobs, "count": len(jobs), "degraded": False}
     except (PyMongoError, ConnectionError) as e:
         return {
@@ -394,15 +414,15 @@ async def list_transfer_jobs():
 
 
 @router.get("/jobs/{job_id}")
-async def get_transfer_job(job_id: str):
+async def get_transfer_job(job_id: str, request: Request):
     """Get a specific transfer job"""
     try:
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
-        
-        if not job:
+
+        if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
-        
+
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if job.get(key) and hasattr(job[key], "isoformat"):
                 job[key] = job[key].isoformat()
@@ -414,7 +434,7 @@ async def get_transfer_job(job_id: str):
 
 
 @router.post("/jobs/{job_id}/retry")
-async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
+async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Re-run a failed database migration using stored job configuration."""
     try:
         from ..transfer.background import run_transfer_async
@@ -423,7 +443,7 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
 
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
-        if not job:
+        if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
 
         payload = job.get("transfer_request")
@@ -459,7 +479,7 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks):
 
 
 @router.post("/jobs/{job_id}/resume")
-async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks):
+async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Resume a failed or paused transfer from its last durable checkpoint."""
     try:
         from ..transfer.background import run_transfer_async
@@ -467,7 +487,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks):
 
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
-        if not job:
+        if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
 
         payload = job.get("transfer_request")
@@ -499,12 +519,12 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks):
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_transfer_job(job_id: str):
+async def cancel_transfer_job(job_id: str, request: Request):
     """Request cancellation of a running/pending transfer job."""
     try:
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
-        if not job:
+        if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
         if job.get("status") in ("completed", "failed", "cancelled"):
             return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
@@ -522,8 +542,19 @@ async def cancel_transfer_job(job_id: str):
 
 
 @router.get("/jobs/{job_id}/stream")
-async def stream_transfer_job(job_id: str):
+async def stream_transfer_job(job_id: str, request: Request):
     """Server-sent events for live transfer job progress."""
+
+    # Pre-check workspace access before entering the stream loop.
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job or not _can_access_job(request, job):
+            raise HTTPException(status_code=404, detail="Job not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     async def event_generator():
         mongo = get_mongodb_service()
@@ -545,6 +576,62 @@ async def stream_transfer_job(job_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/jobs/{job_id}/quarantine")
+async def get_job_quarantine(job_id: str, request: Request):
+    """Return quarantined rows for a job with their rejection reasons."""
+    mongo = get_mongodb_service()
+    job = mongo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _can_access_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+
+    details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    return {
+        "job_id": job_id,
+        "rejected_rows": int(job.get("rejected_rows") or 0),
+        "quarantine": details,
+    }
+
+
+@router.post("/jobs/{job_id}/quarantine/export")
+async def export_job_quarantine(job_id: str, request: Request):
+    """Export quarantined rows to a CSV in the exports folder and return a download URL."""
+    import uuid
+    from pathlib import Path
+
+    mongo = get_mongodb_service()
+    job = mongo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _can_access_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+
+    details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    if not details:
+        return {"success": True, "row_count": 0, "download_url": "", "filename": ""}
+
+    from services.format_converter import convert_rows
+
+    headers = ["row", "column", "value", "reason"]
+    rows = [[str(d.get("row", "")), str(d.get("column", "")), str(d.get("value", "")), str(d.get("reason", ""))] for d in details]
+    content, _ = convert_rows(headers, rows, source_format="csv", target_format="csv")
+
+    api_root = Path(__file__).resolve().parents[2]
+    export_dir = api_root / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"quarantine_{job_id}_{uuid.uuid4().hex[:8]}.csv"
+    export_path = export_dir / filename
+    export_path.write_bytes(content)
+
+    return {
+        "success": True,
+        "row_count": len(details),
+        "download_url": f"/api/v1/transfer/download/{filename}",
+        "filename": filename,
+    }
 
 
 @router.get("/{connector_id}")
@@ -673,12 +760,17 @@ async def transfer_data(
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
     mappings_json: str = Form(""),
+    data_region: str = Form(""),
+    request: Request = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Universal file transfer — delegates to UniversalTransferEngine."""
     try:
         from ..transfer.engine import get_transfer_engine
         from ..transfer.models import EndpointConfig, TransferRequest
         from ..transfer.background import run_transfer_async
+
+        workspace_id = _require_write_workspace(request, workspace_id)
 
         content = await file.read()
         src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
@@ -695,7 +787,12 @@ async def transfer_data(
             except Exception:
                 source_filter = {}
 
-        request = TransferRequest(
+        region = (
+            data_region.strip()
+            or getattr(request.state, "data_region", "")
+            or "us-east-1"
+        )
+        request_obj = TransferRequest(
             source=EndpointConfig(kind="file", format=src_fmt),
             destination=EndpointConfig(
                 kind="database",
@@ -722,6 +819,8 @@ async def transfer_data(
             priority_column=priority_column,
             priority_direction=priority_direction,
             limit=int(limit) if limit.isdigit() else 0,
+            workspace_id=workspace_id,
+            data_region=region,
             backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         )
         if stream_contracts_json.strip():
@@ -729,7 +828,7 @@ async def transfer_data(
                 import json as _json
                 parsed = _json.loads(stream_contracts_json)
                 if isinstance(parsed, list):
-                    request.stream_contracts = parsed
+                    request_obj.stream_contracts = parsed
             except Exception:
                 pass
         if mappings_json.strip():
@@ -737,24 +836,24 @@ async def transfer_data(
                 import json as _json
                 parsed = _json.loads(mappings_json)
                 if isinstance(parsed, list):
-                    request.mappings = parsed
+                    request_obj.mappings = parsed
             except Exception:
                 pass
         engine = get_transfer_engine()
-        job_id = engine._create_pending_job(request)
+        job_id = engine._create_pending_job(request_obj)
 
         if async_mode.lower() in ("true", "1", "yes"):
-            background_tasks.add_task(run_transfer_async, job_id, request)
+            background_tasks.add_task(run_transfer_async, job_id, request_obj)
             return {
                 "success": True,
                 "async": True,
                 "job_id": job_id,
                 "status": "running",
-                "operation": request.operation,
+                "operation": request_obj.operation,
                 "source": {"type": "file", "filename": file.filename, "file_type": src_fmt},
             }
 
-        result = engine.execute_tracked(request, job_id)
+        result = engine.execute_tracked(request_obj, job_id)
         if not result.success:
             raise HTTPException(status_code=422, detail={"error": result.error, "job_id": result.job_id})
 

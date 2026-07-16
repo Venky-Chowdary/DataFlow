@@ -15,7 +15,7 @@ def aws_credentials(cfg: dict[str, Any]) -> tuple[str, str, str]:
 
 def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
     """Custom endpoint for DynamoDB Local or private AWS-compatible stacks."""
-    explicit = (cfg.get("connection_string") or cfg.get("endpoint_url") or "").strip()
+    explicit = (cfg.get("endpoint_url") or cfg.get("connection_string") or "").strip()
     if explicit.startswith("http://") or explicit.startswith("https://"):
         return explicit.rstrip("/")
     host = (cfg.get("host") or "").strip()
@@ -66,6 +66,7 @@ def resolve_region(cfg: dict[str, Any]) -> str:
 
 def boto3_client(service: str, cfg: dict[str, Any]):
     import boto3
+    from botocore.config import Config
 
     region = resolve_region(cfg)
     access_key = (cfg.get("username") or "").strip() or "local"
@@ -78,4 +79,6 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     }
     if endpoint_url:
         kwargs["endpoint_url"] = endpoint_url
+    if cfg.get("path_style") and service == "s3":
+        kwargs["config"] = Config(s3={"addressing_style": "path"})
     return boto3.client(service, **kwargs)

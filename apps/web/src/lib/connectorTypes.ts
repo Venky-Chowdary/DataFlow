@@ -6,7 +6,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
-  "sqlite", "generic_sql",
+  "sqlite", "generic_sql", "sftp", "email",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -77,6 +77,8 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   ndjson: { host: "", port: 0 },
   excel: { host: "", port: 0 },
   parquet: { host: "", port: 0 },
+  sftp: { host: "", port: 22 },
+  email: { host: "", port: 587 },
 };
 
 /** Map marketplace catalog id → connectable type used by API/forms (strict) */
@@ -116,6 +118,8 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("excel") || id.endsWith(".xlsx")) return "excel";
   if (id.includes("json")) return "json";
   if (id.includes("csv") || id.includes("tsv")) return "csv";
+  if (id.includes("sftp") || id.includes("ssh") || id.includes("scp")) return "sftp";
+  if (id.includes("email") || id.includes("smtp")) return "email";
   if (id.includes("sqlite")) return "sqlite";
 
   // Generic SQL fallback — any SQL engine with a SQLAlchemy dialect is routed through generic_sql.

@@ -5,12 +5,62 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
+from services.team_store import can_write_workspace
+
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
+
+
+def _destination_data_region(endpoint) -> str | None:
+    """Infer the cloud region for S3-compatible destinations from host/endpoint."""
+    if endpoint.format not in ("s3", "dynamodb"):
+        return None
+    from connectors.aws_common import resolve_region
+
+    cfg = {
+        "host": endpoint.host or "",
+        "connection_string": endpoint.connection_string or "",
+        "endpoint_url": endpoint.endpoint_url or "",
+    }
+    region = resolve_region(cfg)
+    return region if region and region not in ("us-east-1", "") else None
+
+
+def _residency_check(request, endpoint, allowed_region: str):
+    """Fail closed when the destination region conflicts with the workspace region.
+
+    Only enforced when the tenant has a non-default region or when
+    DATAFLOW_RESIDENCY_STRICT is enabled.
+    """
+    if not allowed_region:
+        return
+    tenant_region = getattr(request.state, "data_region", "") or os.getenv("DATAFLOW_DEFAULT_REGION", "us-east-1")
+    strict = os.getenv("DATAFLOW_RESIDENCY_STRICT", "").lower() in ("1", "true", "yes")
+    if not strict and (not tenant_region or tenant_region == "us-east-1"):
+        return
+    dest_region = _destination_data_region(endpoint)
+    if not dest_region:
+        return
+    if dest_region != allowed_region:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Data residency violation: destination region '{dest_region}' does not match workspace region '{allowed_region}'.",
+        )
+
+
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
+
+
+def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
+    workspace_id = (x_workspace_id or "").strip()
+    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return workspace_id
 
 
 class EndpointDTO(BaseModel):
@@ -426,6 +476,7 @@ async def run_universal_transfer(
     dest_username: str = Form(""),
     dest_password: str = Form(""),
     dest_connection_string: str = Form(""),
+    dest_output_path: str = Form(""),
     dest_warehouse: str = Form(""),
     dest_auth_source: str = Form(""),
     source_connector_id: Optional[str] = Form(None),
@@ -452,6 +503,9 @@ async def run_universal_transfer(
     limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
     stream_contracts_json: str = Form(""),
+    data_region: str = Form(""),
+    request: Request = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """
     Execute universal transfer: file/db → db/file/warehouse.
@@ -460,6 +514,8 @@ async def run_universal_transfer(
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
     from ..transfer.background import run_transfer_async
+
+    workspace_id = _resolve_write_workspace(request, workspace_id)
 
     src_fmt = source_format
     if source_kind == "file" and file:
@@ -502,6 +558,7 @@ async def run_universal_transfer(
         username=dest_username,
         password=dest_password,
         connection_string=dest_connection_string,
+        output_path=dest_output_path,
         warehouse=dest_warehouse,
         auth_source=dest_auth_source,
     )
@@ -516,7 +573,12 @@ async def run_universal_transfer(
         except Exception:
             source_filter = {}
 
-    request = TransferRequest(
+    region = (
+        data_region.strip()
+        or getattr(request.state, "data_region", "")
+        or "us-east-1"
+    )
+    request_obj = TransferRequest(
         source=source,
         destination=destination,
         skip_preflight=skip_preflight.lower() in ("true", "1", "yes"),
@@ -529,6 +591,8 @@ async def run_universal_transfer(
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,
+        workspace_id=workspace_id,
+        data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
     if plan_id and plan_id.strip():
@@ -537,13 +601,13 @@ async def run_universal_transfer(
 
         try:
             payload = build_run_payload(plan_id.strip())
-            request.mappings = payload["mappings"]
+            request_obj.mappings = payload["mappings"]
             if not mappings_json.strip():
-                request.column_types = payload.get("column_types") or {}
+                request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
-            request.sync_mode = policies.get("sync_mode", request.sync_mode)
-            request.schema_policy = policies.get("schema_policy", request.schema_policy)
-            request.validation_mode = policies.get("validation_mode", request.validation_mode)
+            request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
+            request_obj.schema_policy = policies.get("schema_policy", request_obj.schema_policy)
+            request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip():
@@ -551,7 +615,7 @@ async def run_universal_transfer(
             import json as _json
             parsed = _json.loads(mappings_json)
             if isinstance(parsed, list):
-                request.mappings = parsed
+                request_obj.mappings = parsed
         except Exception:
             pass
     if stream_contracts_json.strip():
@@ -559,29 +623,31 @@ async def run_universal_transfer(
             import json as _json
             parsed = _json.loads(stream_contracts_json)
             if isinstance(parsed, list):
-                request.stream_contracts = parsed
+                request_obj.stream_contracts = parsed
         except Exception:
             pass
 
+    _residency_check(request, destination, region)
+
     engine = get_transfer_engine()
-    job_id = engine._create_pending_job(request)
+    job_id = engine._create_pending_job(request_obj)
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_store import attach_job
         attach_job(plan_id.strip(), job_id, status="running")
 
     if async_mode.lower() in ("true", "1", "yes"):
-        background_tasks.add_task(run_transfer_async, job_id, request)
+        background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
             "status": "running",
-            "operation": request.operation,
+            "operation": request_obj.operation,
             "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
         }
 
-    result = engine.execute_tracked(request, job_id)
+    result = engine.execute_tracked(request_obj, job_id)
     if not result.success:
         raise HTTPException(status_code=422, detail={
             "error": result.error,
@@ -600,6 +666,7 @@ async def run_universal_transfer(
         "peak_memory_bytes": result.peak_memory_bytes,
         "source": result.source_summary,
         "destination": result.destination_summary,
+        "destination_summary": result.destination_summary,
         "ddl_executed": result.ddl_executed,
         "columns": result.columns,
         "validation_plan": result.validation_plan,

@@ -57,8 +57,10 @@ def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_nam
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
+    rejected_details = list(getattr(result, "rejected_details", []) or [])
     return {
         "rejected_rows": rejected,
+        "rejected_details": rejected_details[:200],
         "warnings": warnings[:10],
         "error_policy": "quarantine" if rejected else "none",
     }
@@ -179,6 +181,8 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         5439 if fmt == "redshift" else
         0 if fmt == "sqlite" else
         0 if fmt == "generic_sql" else
+        22 if fmt == "sftp" else
+        587 if fmt == "email" else
         443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls") else 5432
     )
     default_schema = (
@@ -189,7 +193,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     cfg = {
         "host": endpoint.host or "localhost",
         "port": endpoint.port or default_port,
-        "database": endpoint.database if fmt == "generic_sql" else (endpoint.database or endpoint.host or ""),
+        "database": endpoint.database if fmt in ("generic_sql", "sftp", "email") else (endpoint.database or endpoint.host or ""),
         "schema": endpoint.schema or default_schema,
         "username": endpoint.username,
         "password": endpoint.password,
@@ -202,6 +206,9 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
         "auth_source": endpoint.auth_source,
         "api_key": endpoint.api_key,
         "service_account": endpoint.service_account,
+        "private_key": endpoint.private_key,
+        "endpoint_url": endpoint.endpoint_url,
+        "path_style": endpoint.path_style,
     }
     # Keep "role" as the canonical key used by Snowflake connector functions.
     cfg["role"] = endpoint.auth_role or cfg.get("role", "")
@@ -226,6 +233,9 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
             "auth_source": conn_dict.get("auth_source") or cfg["auth_source"],
             "api_key": conn_dict.get("api_key") or cfg["api_key"],
             "service_account": conn_dict.get("service_account") or cfg["service_account"],
+            "private_key": conn_dict.get("private_key") or cfg["private_key"],
+            "endpoint_url": conn_dict.get("endpoint_url") or cfg["endpoint_url"],
+            "path_style": conn_dict.get("path_style") or cfg["path_style"],
             "role": conn_dict.get("role") or cfg["role"],
         })
     return cfg
@@ -254,6 +264,9 @@ def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
                 "auth_source": getattr(conn, "auth_source", ""),
                 "api_key": getattr(conn, "api_key", ""),
                 "service_account": getattr(conn, "service_account", ""),
+                "private_key": getattr(conn, "private_key", ""),
+                "endpoint_url": getattr(conn, "endpoint_url", ""),
+                "path_style": getattr(conn, "path_style", False),
                 "role": getattr(conn, "auth_role", ""),
             }
     except Exception:
@@ -578,6 +591,27 @@ def read_source_database(
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
         return records, batch.headers, schema
 
+    if db_type == "sftp":
+        from connectors.sftp_reader import read_object
+
+        if not endpoint.table and not endpoint.connection_string and not endpoint.database:
+            raise ValueError("SFTP source requires a remote file path (connection_string, database, or table field)")
+        batch = read_object(
+            cfg=cfg,
+            bucket=endpoint.database,
+            key=endpoint.table,
+            offset=0,
+            limit=limit,
+        )
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, endpoint.table or endpoint.database or endpoint.connection_string)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
+    if db_type == "email":
+        raise ValueError("Email cannot be a transfer source; configure it as a destination only.")
+
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
@@ -614,6 +648,8 @@ def write_destination_database(
             5439 if db_type == "redshift" else
             5432 if db_type == "postgresql" else
             3306 if db_type == "mysql" else
+            22 if db_type == "sftp" else
+            587 if db_type == "email" else
             0 if db_type == "generic_sql" else 443
         ),
         "database": cfg["database"],
@@ -625,6 +661,8 @@ def write_destination_database(
         "auth_source": cfg.get("auth_source", ""),
         "service_account": cfg.get("service_account", ""),
         "api_key": cfg.get("api_key", ""),
+        "endpoint_url": cfg.get("endpoint_url", ""),
+        "path_style": cfg.get("path_style", False),
         "role": cfg.get("role", ""),
         "table_name": table_name,
         "headers": headers,
@@ -831,6 +869,36 @@ def write_destination_database(
             "type": "generic_sql", "driver": result.driver,
             "schema": result.target_schema, "table": result.table_name,
             "checksum": result.checksum, **_writer_diagnostics(result),
+        }
+
+    if db_type == "sftp":
+        from connectors.sftp_writer import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"SFTP FIELD {col}")
+        if not common.get("table_name") and not endpoint.connection_string and not endpoint.database:
+            raise ValueError("SFTP destination requires a remote file path (connection_string, database, or table field)")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "SFTP write failed")
+        ddl_log.insert(0, f"PUT sftp://{cfg.get('host', '')}/{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "sftp", "host": cfg.get("host", ""), "path": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "email":
+        from connectors.email import write_mapped_rows
+        for col in columns:
+            ddl_log.append(f"EMAIL FIELD {col}")
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Email send failed")
+        ddl_log.insert(0, f"EMAIL {result.table_name} via {cfg.get('host', '')}")
+        return result.rows_written, ddl_log, {
+            "type": "email", "host": cfg.get("host", ""), "subject": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
         }
 
     raise ValueError(f"Database destination '{db_type}' write not implemented")

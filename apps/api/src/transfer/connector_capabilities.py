@@ -21,6 +21,8 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
+    "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -73,6 +75,10 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "cockroachdb": "postgresql",
     "jsonl": "jsonl",
     "ndjson": "ndjson",
+    "sftp": "sftp",
+    "ssh": "sftp",
+    "email": "email",
+    "smtp": "email",
 }
 
 # Suggested lists — only connectors users can configure today
@@ -80,6 +86,7 @@ SUGGESTED_SOURCES = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
+    "sftp",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
@@ -89,11 +96,13 @@ TRANSFER_READY_CATALOG_IDS = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+    "sftp", "email",
 })
 
 SUGGESTED_DESTINATIONS = [
     "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
+    "sftp", "email",
 ]
 
 
@@ -113,6 +122,8 @@ def default_port(driver_type: str) -> int:
         "redshift": 5439,
         "sqlite": 0,
         "generic_sql": 0,
+        "sftp": 22,
+        "email": 587,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -262,6 +273,8 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "snowflake": "snowflake.connector",
     "bigquery": "google.cloud.bigquery",
     "sqlite": "sqlite3",
+    "sftp": "paramiko",
+    "email": None,
     "csv": None,
     "tsv": None,
     "json": None,
@@ -394,6 +407,8 @@ def transfer_ready(caps: dict[str, bool]) -> bool:
     """True when connector supports production read+write transfer."""
     if caps.get("file_source"):
         return True
+    if caps.get("dest_only") and caps.get("write"):
+        return True
     return bool(caps.get("read") and caps.get("write"))
 
 
@@ -413,6 +428,8 @@ def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
 
 def capability_label(caps: dict[str, bool]) -> str:
     if transfer_ready(caps):
+        if caps.get("dest_only"):
+            return "Destination only"
         if caps.get("file_source"):
             return "File transfer"
         return "Full transfer"
@@ -454,10 +471,40 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def source_ready(caps: dict[str, bool]) -> bool:
+    """True when connector can act as a transfer source."""
+    if caps.get("file_source"):
+        return True
+    return bool(caps.get("read") and caps.get("write") and not caps.get("dest_only"))
+
+
+def dest_ready(caps: dict[str, bool]) -> bool:
+    """True when connector can act as a transfer destination."""
+    if caps.get("file_export"):
+        return True
+    return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")))
+
+
 def transfer_live_driver_types() -> list[str]:
     live = []
     for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
         if transfer_ready(caps):
+            live.append(k)
+    return sorted(set(live))
+
+
+def source_live_driver_types() -> list[str]:
+    live = []
+    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
+        if source_ready(caps):
+            live.append(k)
+    return sorted(set(live))
+
+
+def dest_live_driver_types() -> list[str]:
+    live = []
+    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
+        if dest_ready(caps):
             live.append(k)
     return sorted(set(live))
 
