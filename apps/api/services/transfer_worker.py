@@ -144,7 +144,7 @@ def dispatch_file_to_database(
             set_phase(job_id, WorkflowPhase.FAILED, str(exc))
             job_store.set_workflow_phase(job_id, "failed")
 
-    run_in_background(_run)
+    run_in_background(_run, job_id)
 
 
 def dispatch_file_to_postgres(
@@ -172,4 +172,4 @@ def dispatch_simulated(job_id: str, total_rows: int) -> None:
         set_phase(job_id, WorkflowPhase.FAILED, "Unsupported operation path")
         job_store.set_workflow_phase(job_id, "failed")
 
-    run_in_background(_run)
+    run_in_background(_run, job_id)

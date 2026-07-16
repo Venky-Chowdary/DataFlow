@@ -113,11 +113,16 @@ async def lifespan(app: FastAPI):
         print(f"[!] RAG initialization warning: {e}")
 
     try:
+        from services.transfer_scheduler import start as start_transfer_scheduler
+
+        start_transfer_scheduler()
+
         from .transfer.background import run_transfer_async
         from .transfer.models import transfer_request_from_dict
         from .services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
+        resumed = 0
         for job in mongo.list_jobs(limit=200):
             if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
                 payload = job["transfer_request"]
@@ -125,8 +130,9 @@ async def lifespan(app: FastAPI):
                     mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
                     continue
                 request = transfer_request_from_dict(payload)
-                asyncio.create_task(asyncio.to_thread(run_transfer_async, job["_id"], request, resume=True))
-        print("[+] Orphaned job resume scan complete")
+                run_transfer_async(job["_id"], request, resume=True)
+                resumed += 1
+        print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
     except Exception as e:
         print(f"[!] Orphaned job resume warning: {e}")
 
