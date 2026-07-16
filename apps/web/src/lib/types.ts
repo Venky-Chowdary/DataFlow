@@ -29,6 +29,16 @@ export interface Connector {
   last_test_ok?: boolean;
 }
 
+export interface TransferCheckpoint {
+  chunk_index?: number;
+  chunk_total?: number;
+  rows_processed?: number;
+  offset?: number;
+  cursor_value?: unknown;
+  cursor_column?: string;
+  status?: string;
+}
+
 export interface TransferJob {
   _id: string;
   source_type: string;
@@ -47,6 +57,8 @@ export interface TransferJob {
   error?: string;
   chunk_current?: number;
   chunk_total?: number;
+  checkpoint?: TransferCheckpoint;
+  retry_of?: string;
   updated_at?: string;
   started_at?: string;
   completed_at?: string;

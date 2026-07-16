@@ -501,6 +501,27 @@ export async function retryJob(jobId: string): Promise<{ job_id: string; retry_o
   throw lastError instanceof Error ? lastError : new Error("Retry failed");
 }
 
+export async function resumeJob(jobId: string): Promise<{ job_id: string; status: string }> {
+  const urls = [
+    `${API_BASE}/connectors/jobs/${jobId}/resume`,
+    `${API_BASE}/jobs/${jobId}/resume`,
+  ];
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      const res = await apiFetch(url, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Resume failed");
+      }
+      return data as { job_id: string; status: string };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Resume failed");
+}
+
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
 export function streamJobProgress(
   jobId: string,
