@@ -122,3 +122,127 @@
   gap: 8px;
   align-items: center;
 }
+
+.df2-query-editor-shell {
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--df-surface, #ffffff);
+}
+
+.df2-query-editor-langbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  background: var(--df-surface-2, #f8fafc);
+}
+
+.df2-query-editor-lang-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-query-editor-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-query-editor-wrap {
+  position: relative;
+  min-height: 16rem;
+  background: var(--df-surface, #ffffff);
+}
+
+.df2-query-editor-wrap[data-disabled="true"] {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.df2-query-editor,
+.df2-query-editor-textarea,
+.df2-query-editor-pre {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace) !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
+  tab-size: 2;
+  min-height: 16rem;
+}
+
+.df2-query-editor-textarea,
+.df2-query-editor-pre {
+  margin: 0 !important;
+  border: none !important;
+  outline: none !important;
+  background: transparent !important;
+  white-space: pre !important;
+  overflow: auto !important;
+  min-height: 16rem !important;
+}
+
+.df2-query-editor-textarea {
+  color: transparent;
+  caret-color: var(--df-text-primary, #0f172a);
+  resize: vertical;
+}
+
+.df2-query-editor-pre {
+  pointer-events: none;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-query-editor-pre code {
+  background: transparent !important;
+  font-family: inherit !important;
+}
+
+/* Prism token colors that respect the existing palette. */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #94a3b8;
+}
+
+.token.punctuation {
+  color: #475569;
+}
+
+.token.keyword,
+.token.operator {
+  color: #7c3aed;
+  font-weight: 600;
+}
+
+.token.string,
+.token.char,
+.token.attr-value {
+  color: #059669;
+}
+
+.token.number,
+.token.boolean {
+  color: #dc2626;
+}
+
+.token.function,
+.token.class-name {
+  color: #2563eb;
+}
+
+.token.tag,
+.token.property {
+  color: #0891b2;
+}
+
+.token.selector,
+.token.entity,
+.token.url,
+.token.attr-name {
+  color: #9333ea;
+}

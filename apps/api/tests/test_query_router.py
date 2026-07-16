@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.routers.query_router import _is_read_only_sql, _validate_mongodb_aggregate
+from src.routers.query_router import _is_safe_sql, _validate_mongodb_aggregate
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -106,13 +106,18 @@ def test_query_export_csv(test_client, tmp_path, monkeypatch):
     assert data["download_url"].startswith("/api/v1/transfer/download/")
 
 
-def test_read_only_sql_guard():
-    assert _is_read_only_sql("SELECT * FROM users") is True
-    assert _is_read_only_sql("SELECT * FROM users;") is True
-    assert _is_read_only_sql("DROP TABLE users") is False
-    assert _is_read_only_sql("WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d") is False
-    assert _is_read_only_sql("SELECT * INTO OUTFILE '/tmp/x' FROM users") is False
-    assert _is_read_only_sql("SELECT * FROM users; DROP TABLE users") is False
+def test_safe_sql_guard():
+    assert _is_safe_sql("SELECT * FROM users") is True
+    assert _is_safe_sql("SELECT * FROM users;") is True
+    assert _is_safe_sql("WITH d AS (SELECT * FROM users) SELECT * FROM d") is True
+    assert _is_safe_sql("EXPLAIN SELECT * FROM users") is True
+    assert _is_safe_sql("SHOW TABLES") is True
+    assert _is_safe_sql("PRAGMA table_info(users)") is True
+    assert _is_safe_sql("DROP TABLE users") is False
+    assert _is_safe_sql("WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d") is False
+    assert _is_safe_sql("SELECT * INTO OUTFILE '/tmp/x' FROM users") is False
+    assert _is_safe_sql("SELECT * FROM users; DROP TABLE users") is False
+    assert _is_safe_sql("INSERT INTO users VALUES (1)") is False
 
 
 def test_aggregate_stage_guard_blocks_writes():

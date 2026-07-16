@@ -20,19 +20,17 @@ _READ_ONLY_SQL_PATTERN = re.compile(r"^\s*SELECT\s+", re.IGNORECASE)
 _MONGODB_WRITE_STAGES = {"$out", "$merge"}
 
 
-def _is_read_only_sql(raw_query: str) -> bool:
-    """Reject anything that is not a plain SELECT and block destructive SQL."""
+def _is_safe_sql(raw_query: str) -> bool:
+    """Allow read and metadata queries; block any destructive or write SQL."""
     import sqlparse
     from sqlparse.sql import TokenList
-    from sqlparse.tokens import DML, Keyword
+    from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
 
     parsed = sqlparse.parse(raw_query.strip())
     if not parsed or len(parsed) != 1:
         return False
 
     stmt = parsed[0]
-    if stmt.get_type() != "SELECT":
-        return False
 
     def _walk_tokens(token):
         yield token
@@ -40,16 +38,35 @@ def _is_read_only_sql(raw_query: str) -> bool:
             for child in token.tokens:
                 yield from _walk_tokens(child)
 
+    destructive = {
+        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+        "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
+        "COPY", "LOAD",
+    }
+    safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
+    first_keyword = None
+
     for token in _walk_tokens(stmt):
-        if token.ttype and token.ttype in Keyword:
-            kw = token.value.upper()
-            if kw in {
-                "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-                "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-                "COPY", "INTO", "WITH",
-            }:
+        if token.ttype in (Whitespace, Newline) or Comment in (token.ttype, getattr(token.ttype, "__class__", None)):
+            continue
+        if token.is_whitespace:
+            continue
+        kw = token.value.upper() if token.value else ""
+        if first_keyword is None and kw in safe_starts:
+            first_keyword = kw
+        if token.ttype in Keyword or (hasattr(token.ttype, "parents") and Keyword in token.ttype.parents):
+            if kw in destructive:
                 return False
-    return True
+            # SELECT ... INTO / WITH ... INTO creates tables; block it.
+            if kw == "INTO" and first_keyword in {"SELECT", "WITH"}:
+                return False
+
+    # If sqlparse reports a concrete DML/DDL statement type that is not SELECT, reject it.
+    stmt_type = (stmt.get_type() or "").upper()
+    if stmt_type and stmt_type not in {"SELECT", "UNKNOWN"}:
+        return False
+
+    return first_keyword in safe_starts
 
 
 def _validate_mongodb_aggregate(pipeline: list[dict]) -> None:
@@ -259,8 +276,8 @@ def _run_sql_query(connector, body):
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
-    if not _is_read_only_sql(raw_query):
-        raise HTTPException(status_code=400, detail="Only plain SELECT queries are allowed in the playground")
+    if not _is_safe_sql(raw_query):
+        raise HTTPException(status_code=400, detail="Only safe read/metadata queries are allowed in the playground")
 
     from connectors.generic_sql import get_sqlalchemy_engine
 
@@ -278,10 +295,16 @@ def _run_sql_query(connector, body):
     }
     engine = get_sqlalchemy_engine(cfg)
 
-    # Append a safe limit unless the user already supplied one.
+    # Append a safe limit unless the user already supplied one or the query is metadata.
     clean_query = raw_query.rstrip(";")
     upper = clean_query.upper()
-    if " LIMIT " not in upper and " FETCH FIRST " not in upper and " TOP " not in upper:
+    append_limit = (
+        not upper.startswith(("SHOW", "DESCRIBE", "EXPLAIN", "ANALYZE", "PRAGMA"))
+        and " LIMIT " not in upper
+        and " FETCH FIRST " not in upper
+        and " TOP " not in upper
+    )
+    if append_limit:
         clean_query = f"{clean_query} LIMIT {body.limit}"
 
     try:

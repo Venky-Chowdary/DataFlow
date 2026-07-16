@@ -8,6 +8,7 @@ import { Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { executeQuery, exportQuery, type QueryResult, type QueryExportResult } from "../lib/api";
 import { Connector } from "../lib/types";
+import { QueryEditor } from "../components/query/QueryEditor";
 
 interface QueryPageProps {
   connectors: Connector[];
@@ -130,15 +131,15 @@ export function QueryPage({ connectors }: QueryPageProps) {
 
           <div className="df2-field">
             <label className="df2-label">Query</label>
-            <textarea
-              className="df2-input df2-query-editor"
-              rows={6}
+            <QueryEditor
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={setQuery}
+              connectorType={selected?.type}
               placeholder={queryPlaceholder}
-              spellCheck={false}
+              disabled={loading}
+              height="18rem"
             />
-            <p className="df2-label-hint">Only SELECT statements are allowed for SQL. MongoDB accepts a JSON filter or an aggregate pipeline array.</p>
+            <p className="df2-label-hint">SQL mode supports SELECT, CTEs (WITH), EXPLAIN, SHOW, and subqueries. MongoDB mode accepts a JSON filter or an aggregate pipeline array.</p>
           </div>
 
           <div className="df2-query-actions">
