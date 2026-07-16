@@ -4,7 +4,7 @@ import { GENERIC_SQL_INFO } from "./genericSqlMap";
 /** Implemented driver types — must match apps/api/src/transfer/connector_capabilities.py */
 export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-  "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+  "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "sqlite", "generic_sql", "sftp", "email",
   "salesforce", "hubspot", "stripe", "rest_api",
@@ -81,6 +81,9 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   ndjson: { host: "", port: 0 },
   excel: { host: "", port: 0 },
   parquet: { host: "", port: 0 },
+  avro: { host: "", port: 0 },
+  orc: { host: "", port: 0 },
+  xml: { host: "", port: 0 },
   sftp: { host: "", port: 22 },
   email: { host: "", port: 587 },
   rest_api: { host: "", port: 443 },
@@ -119,6 +122,9 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (id.includes("minio") || id.includes("wasabi") || id.includes("backblaze") || id.includes("spaces") || id.includes("object_storage") || id.includes("r2") || id.includes("s3_compatible") || id.includes("s3_compatible_storage")) return "s3";
   if (id.includes("s3") || id.includes("aws_s3")) return "s3";
   if (id.includes("parquet")) return "parquet";
+  if (id.includes("avro")) return "avro";
+  if (id.includes("orc")) return "orc";
+  if (id.includes("xml")) return "xml";
   if (id.includes("jsonl") || id.includes("ndjson")) return "jsonl";
   if (id.includes("excel") || id.endsWith(".xlsx")) return "excel";
   if (id.includes("json")) return "json";
@@ -271,7 +277,7 @@ export function isGcpConnector(type: string): boolean {
 }
 
 export function isConfigurableInStudio(type: string): boolean {
-  return !["csv", "tsv", "json", "jsonl", "parquet", "avro", "excel"].includes(type);
+  return !["csv", "tsv", "json", "jsonl", "parquet", "avro", "orc", "xml", "excel"].includes(type);
 }
 
 export const GENERIC_SQL_DRIVERS = [

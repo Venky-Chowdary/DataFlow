@@ -27,6 +27,10 @@ export const GENERIC_SQL_INFO: Record<string, GenericSqlInfo> = {
     "base": "mysql+pymysql",
     "port": 3306
   },
+  "amazon_emr": {
+    "base": "hive",
+    "port": 10000
+  },
   "amazon_rds_mysql": {
     "base": "mysql+pymysql",
     "port": 3306
@@ -98,6 +102,10 @@ export const GENERIC_SQL_INFO: Record<string, GenericSqlInfo> = {
   "clickhouse": {
     "base": "clickhouse+native",
     "port": 9000
+  },
+  "cloudera_data_platform": {
+    "base": "impala",
+    "port": 21000
   },
   "cockroachdb": {
     "base": "postgresql+psycopg2",
@@ -203,6 +211,10 @@ export const GENERIC_SQL_INFO: Record<string, GenericSqlInfo> = {
     "base": "mssql+pyodbc",
     "port": 1433
   },
+  "motherduck": {
+    "base": "duckdb",
+    "port": 0
+  },
   "mssql": {
     "base": "mssql+pyodbc",
     "port": 1433
@@ -274,6 +286,10 @@ export const GENERIC_SQL_INFO: Record<string, GenericSqlInfo> = {
   "sap_ase": {
     "base": "sybase+pyodbc",
     "port": 5000
+  },
+  "sap_bw_4hana": {
+    "base": "hana",
+    "port": 30015
   },
   "sap_hana": {
     "base": "hana",

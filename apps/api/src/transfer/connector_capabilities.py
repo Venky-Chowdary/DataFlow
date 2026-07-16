@@ -40,6 +40,9 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "ndjson": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "excel": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "parquet": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "avro": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "orc": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "xml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
 }
 
 # Catalog marketplace id → driver / format type
@@ -79,6 +82,15 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "neon": "postgresql",
     "timescaledb": "postgresql",
     "cockroachdb": "postgresql",
+    "alibaba_oss": "s3",
+    "alibaba_cloud_object_storage": "s3",
+    "azure_cosmos_db": "mongodb",
+    "google_biglake": "bigquery",
+    "amazon_emr": "generic_sql",
+    "cloudera_data_platform": "generic_sql",
+    "sap_bw_4hana": "generic_sql",
+    "motherduck": "generic_sql",
+    "firebase_realtime_db": "rest_api",
     "jsonl": "jsonl",
     "ndjson": "ndjson",
     "sftp": "sftp",
@@ -151,6 +163,13 @@ def resolve_driver_type(catalog_id: str) -> str:
         return cid
     if cid in _FILE_CAPS:
         return cid
+
+    # Generic REST source driver for SaaS/API catalog entries that don't have a
+    # dedicated native connector yet. This must run before the generic SQL substring
+    # fallback so connectors like athenahealth or oracle_hcm (which contain SQL
+    # engine substrings) are routed to the API driver instead of generic SQL.
+    if cid in _saas_catalog_ids():
+        return "rest_api"
 
     # Generic SQL fallback handles any SQL engine with a SQLAlchemy dialect.
     def _valid(driver: str) -> bool:
@@ -256,12 +275,6 @@ def resolve_driver_type(catalog_id: str) -> str:
     if "csv" in cid or "tsv" in cid:
         return "csv"
 
-    # Generic REST source driver for SaaS/API catalog entries that don't have a
-    # dedicated native connector yet. This lets users configure any REST API with
-    # a base URL, object path, auth token, and pagination style.
-    if cid in _saas_catalog_ids():
-        return "rest_api"
-
     base = cid.replace("___", "_").split("_")[0]
     if base in _DRIVER_CAPS or base in _FILE_CAPS or base == "generic_sql":
         return base
@@ -322,6 +335,9 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "ndjson": None,
     "excel": "openpyxl",
     "parquet": "pyarrow",
+    "avro": "fastavro",
+    "orc": "pyarrow",
+    "xml": "xmltodict",
 }
 
 

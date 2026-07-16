@@ -40,6 +40,7 @@ def test_all_live_catalog_ids_resolve_to_driver(live_catalog_ids: list[str]):
             "sftp", "email",
             "salesforce", "hubspot", "stripe", "rest_api",
             "generic_sql", "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+            "avro", "orc", "xml",
         ), f"{cid} -> {driver} is not a known driver"
 
 
@@ -52,7 +53,7 @@ def test_all_live_catalog_ids_have_default_port(live_catalog_ids: list[str]):
 
 def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: list[str]):
     db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
     source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     dest_ids = [cid for cid in db_ids if dest_ready(get_capabilities(resolve_driver_type(cid)))]
@@ -64,10 +65,10 @@ def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: lis
 
 def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[str]):
     file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
     dest_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     ) and dest_ready(get_capabilities(resolve_driver_type(cid)))]
     for fid in file_ids:
         for did in dest_ids:
@@ -77,10 +78,10 @@ def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[st
 
 def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: list[str]):
     file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
     db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"
+        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
     )]
     source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     for sid in source_ids:

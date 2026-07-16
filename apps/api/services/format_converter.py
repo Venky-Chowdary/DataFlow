@@ -1,20 +1,15 @@
-"""File format conversion — CSV, JSON, JSONL, TSV, Excel, Parquet."""
+"""File format conversion — CSV, JSON, JSONL, TSV, Excel, Parquet, Avro, ORC, XML."""
 
 from __future__ import annotations
 
 import csv
 import io
 import json
+import xml.sax.saxutils as saxutils
 from typing import Any
 
-SUPPORTED_CONVERSIONS: dict[str, set[str]] = {
-    "csv": {"json", "jsonl", "tsv", "excel", "parquet"},
-    "tsv": {"csv", "json", "jsonl", "excel", "parquet"},
-    "json": {"csv", "jsonl", "tsv", "excel", "parquet"},
-    "jsonl": {"csv", "json", "tsv", "excel", "parquet"},
-    "excel": {"csv", "json", "jsonl", "tsv", "parquet"},
-    "parquet": {"csv", "json", "jsonl", "tsv", "excel"},
-}
+_ALL_FORMATS = {"csv", "tsv", "json", "jsonl", "excel", "parquet", "avro", "orc", "xml"}
+SUPPORTED_CONVERSIONS: dict[str, set[str]] = {fmt: _ALL_FORMATS - {fmt} for fmt in _ALL_FORMATS}
 
 
 def can_convert(source_format: str, target_format: str) -> bool:
@@ -68,6 +63,53 @@ def _write_parquet_bytes(headers: list[str], rows: list[list[str]]) -> tuple[byt
     return buf.getvalue(), "application/vnd.apache.parquet"
 
 
+def _write_avro_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes, str]:
+    import fastavro
+    import io
+
+    fields = [{"name": h, "type": ["null", "string"]} for h in headers]
+    schema = {
+        "type": "record",
+        "name": "DataFlowRow",
+        "fields": fields,
+    }
+    objects = _rows_to_objects(headers, rows)
+    parsed = fastavro.parse_schema(schema)
+    buf = io.BytesIO()
+    fastavro.writer(buf, parsed, objects)
+    buf.seek(0)
+    return buf.getvalue(), "application/avro"
+
+
+def _write_orc_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes, str]:
+    import pyarrow as pa
+    import pyarrow.orc as orc
+
+    objects = _rows_to_objects(headers, rows)
+    if not objects:
+        table = pa.table({h: [] for h in headers}, schema=pa.schema([(h, pa.string()) for h in headers]))
+    else:
+        arrays = {h: [str(obj.get(h, "")) for obj in objects] for h in headers}
+        table = pa.table(arrays, schema=pa.schema([(h, pa.string()) for h in headers]))
+    buf = io.BytesIO()
+    orc.write_table(table, buf)
+    buf.seek(0)
+    return buf.getvalue(), "application/vnd.apache.orc"
+
+
+def _write_xml_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes, str]:
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<records>"]
+    for row in rows:
+        lines.append("  <record>")
+        for h, v in zip(headers, row):
+            tag = saxutils.escape(str(h).replace(" ", "_"))
+            value = saxutils.escape(str(v))
+            lines.append(f"    <{tag}>{value}</{tag}>")
+        lines.append("  </record>")
+    lines.append("</records>")
+    return "\n".join(lines).encode("utf-8"), "application/xml"
+
+
 def convert_rows(
     headers: list[str],
     rows: list[list[str]],
@@ -115,6 +157,15 @@ def convert_rows(
 
     if tgt == "parquet":
         return _write_parquet_bytes(headers, rows)
+
+    if tgt == "avro":
+        return _write_avro_bytes(headers, rows)
+
+    if tgt == "orc":
+        return _write_orc_bytes(headers, rows)
+
+    if tgt == "xml":
+        return _write_xml_bytes(headers, rows)
 
     raise ValueError(f"Unsupported target format: {tgt}")
 

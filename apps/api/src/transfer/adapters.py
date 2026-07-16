@@ -974,6 +974,9 @@ def write_destination_file(
             "tsv" if fmt == "tsv"
             else "xlsx" if fmt == "excel"
             else "parquet" if fmt == "parquet"
+            else "avro" if fmt == "avro"
+            else "orc" if fmt == "orc"
+            else "xml" if fmt == "xml"
             else fmt if fmt in ("csv", "jsonl")
             else "json"
         )

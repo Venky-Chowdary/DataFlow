@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"]
-LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson"]
+LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"]
+LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml"]
 
 # Live drivers are discovered at import time; object stores and warehouses count
 # as database destinations, while the listed file formats are file targets.
-_FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"}
+_FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"}
 
 def _live_db_drivers(live_fn_name: str = "transfer_live_driver_types") -> list[str]:
     try:
