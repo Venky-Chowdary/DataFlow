@@ -771,8 +771,8 @@ def stream_database_transfer(
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Chunked writes would overwrite the same key and silently lose data.
     # Force a single chunk so all rows are written once.
-    if dest_type in ("s3", "gcs", "adls") and total_rows:
-        chunk_size = max(1, total_rows)
+    if dest_type in ("s3", "gcs", "adls") and sample_probe.total_rows:
+        chunk_size = max(1, sample_probe.total_rows)
 
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
@@ -849,8 +849,8 @@ def stream_database_transfer(
     warning_samples: list[str] = []
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
-    es_search_after = checkpoint.es_search_after
-    redis_scan_state = checkpoint.redis_scan_state
+    es_search_after = checkpoint.es_search_after or (ddb_cursor if src_type == "elasticsearch" else None)
+    redis_scan_state = checkpoint.redis_scan_state or (ddb_cursor if src_type == "redis" else None)
     keyset_col = checkpoint.cursor_column or (columns[0] if columns and not incremental else "")
     keyset_after = checkpoint.cursor_value
     use_keyset = bool(keyset_col) and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
@@ -867,6 +867,8 @@ def stream_database_transfer(
 
     def _fetch_next_batch(last_batch):
         nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after
+        if total_rows is not None and fetch_offset >= total_rows:
+            return None
         if last_batch is not None and len(last_batch.rows) < chunk_size:
             if (
                 src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")

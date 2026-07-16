@@ -143,9 +143,9 @@ def write_mapped_rows(
             # Text, dates, UUID, binary and other non-numeric types must stay as strings.
             if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
                 return value
-            # Numeric / boolean types: allow JSON scalar parsing where valid.
+            # Numeric / boolean types: emit native JSON scalars (int/float/bool).
             try:
-                return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+                return json.loads(text, parse_constant=lambda v: None)
             except json.JSONDecodeError:
                 return value
         return value

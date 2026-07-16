@@ -77,8 +77,10 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
             return False
 
     def _dest_supported(fmt: str) -> bool:
-        if fmt.lower() in LIVE_DEST_FILE_FORMATS:
-            return True
+        # Source-only SaaS can only feed database destinations, not file formats
+        # masquerading as database dests.
+        if fmt.lower() in _FILE_FORMATS:
+            return False
         if fmt in LIVE_DEST_DATABASES:
             return True
         try:
@@ -173,6 +175,9 @@ def get_capabilities() -> dict:
     dest_dbs = []
     for cid in live_catalog:
         driver = resolve_driver_type(cid)
+        if driver in _FILE_FORMATS:
+            # File formats live in source_formats / destination_file_formats.
+            continue
         caps = _caps(driver, cid)
         if source_ready(caps) or _source_only_ready(caps):
             source_dbs.append(cid)
