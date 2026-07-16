@@ -3,7 +3,7 @@
 Supported destinations:
 - slack   : incoming webhook URL
 - teams   : incoming webhook URL
-- email   : SMTP recipient(s) via app-level or channel-level SMTP
+- email   : platform mailer (SendGrid/Resend/Mailgun) or SMTP
 - servicenow : table REST API endpoint + auth (basic or oauth)
 - webhook : generic HTTP POST to a URL
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.parse
 from typing import Any
 
 from services.notification_store import (
@@ -33,6 +34,70 @@ def _env_smtp() -> dict[str, Any]:
         "use_tls": os.getenv("DATAFLOW_SMTP_USE_TLS", "true").lower() in ("1", "true", "yes"),
         "from": os.getenv("DATAFLOW_SMTP_FROM", "dataflow@localhost"),
     }
+
+
+def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+    try:
+        import urllib.request
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+        return {"ok": True, "status": resp.status, "body": body[:500]}
+    except Exception as exc:
+        logger.warning("HTTP POST to %s failed: %s", url, exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def _send_sendgrid(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str) -> dict[str, Any]:
+    payload = {
+        "personalizations": [{"to": [{"email": r} for r in recipients]}],
+        "from": {"email": from_addr},
+        "subject": subject,
+        "content": [{"type": "text/plain", "value": body}],
+    }
+    result = _http_post(
+        "https://api.sendgrid.com/v3/mail/send",
+        payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    if result.get("ok") and result.get("status") in (200, 202):
+        return {"ok": True}
+    return {"ok": False, "error": result.get("body") or result.get("error") or "SendGrid send failed"}
+
+
+def _send_resend(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str) -> dict[str, Any]:
+    payload = {"from": from_addr, "to": recipients, "subject": subject, "text": body}
+    result = _http_post(
+        "https://api.resend.com/emails",
+        payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    if result.get("ok") and result.get("status") in (200, 201, 202):
+        return {"ok": True}
+    return {"ok": False, "error": result.get("body") or result.get("error") or "Resend send failed"}
+
+
+def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str, domain: str, region: str = "us") -> dict[str, Any]:
+    host = "api.mailgun.net" if region != "eu" else "api.eu.mailgun.net"
+    url = f"https://{host}/v3/{domain}/messages"
+    data = urllib.parse.urlencode({"from": from_addr, "to": ",".join(recipients), "subject": subject, "text": body}).encode("utf-8")
+    import base64
+    credentials = base64.b64encode(f"api:{api_key}".encode()).decode()
+    req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {credentials}"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp_body = resp.read().decode("utf-8", errors="ignore")
+        return {"ok": True, "status": resp.status, "body": resp_body[:500]}
+    except Exception as exc:
+        logger.warning("Mailgun send failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -69,25 +134,6 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
         return {"ok": False, "error": str(exc)}
 
 
-def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
-    try:
-        import urllib.request
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json", **(headers or {})},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
-        return {"ok": True, "status": resp.status, "body": body[:500]}
-    except Exception as exc:
-        logger.warning("HTTP POST to %s failed: %s", url, exc)
-        return {"ok": False, "error": str(exc)}
-
-
 def _send_slack(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
     url = channel.config.get("webhook_url") or channel.config.get("url", "")
     if not url:
@@ -119,6 +165,11 @@ def _send_email(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
         recipients = [r.strip() for r in recipients.split(",") if r.strip()]
     if not recipients:
         return {"ok": False, "error": "Email recipients missing"}
+
+    text = payload.get("text") or _payload_text(payload)
+    subject = payload.get("title", "DataFlow alert")
+
+    # 1. Channel-level explicit custom SMTP takes precedence.
     smtp_cfg = {
         "host": channel.config.get("smtp_host", ""),
         "port": channel.config.get("smtp_port", 0),
@@ -127,8 +178,24 @@ def _send_email(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
         "use_tls": channel.config.get("smtp_use_tls", True),
         "from": channel.config.get("from", ""),
     }
-    text = payload.get("text") or _payload_text(payload)
-    return _smpt_send(recipients, payload.get("title", "DataFlow alert"), text, smtp_cfg)
+    from_addr = smtp_cfg.get("from") or _env_smtp().get("from")
+    if smtp_cfg.get("host"):
+        return _smpt_send(recipients, subject, text, smtp_cfg)
+
+    # 2. Platform-managed transactional email provider (SaaS default).
+    from services.platform_config import email_provider_config
+    provider_cfg = email_provider_config()
+    provider = (channel.config.get("provider") or provider_cfg.get("provider") or "smtp").lower()
+    from_addr = channel.config.get("from") or provider_cfg.get("from") or _env_smtp().get("from")
+    if provider == "sendgrid" and provider_cfg.get("api_key"):
+        return _send_sendgrid(recipients, subject, text, from_addr, provider_cfg["api_key"])
+    if provider == "resend" and provider_cfg.get("api_key"):
+        return _send_resend(recipients, subject, text, from_addr, provider_cfg["api_key"])
+    if provider == "mailgun" and provider_cfg.get("api_key") and provider_cfg.get("domain"):
+        return _send_mailgun(recipients, subject, text, from_addr, provider_cfg["api_key"], provider_cfg["domain"], provider_cfg.get("region", "us"))
+
+    # 3. Legacy / self-managed SMTP fallback.
+    return _smpt_send(recipients, subject, text, smtp_cfg)
 
 
 def _send_servicenow(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:

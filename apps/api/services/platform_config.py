@@ -185,6 +185,31 @@ def public_url() -> str:
     return ""
 
 
+def email_provider_config() -> dict[str, Any]:
+    """Managed transactional email provider config for SaaS notifications.
+
+    Providers: sendgrid, resend, mailgun, smtp (default).
+    If provider is configured and its API key is present, the platform sends
+    email without requiring per-tenant SMTP credentials.
+    """
+    provider = os.getenv("DATAFLOW_EMAIL_PROVIDER", "smtp").lower().strip()
+    cfg: dict[str, Any] = {"provider": provider}
+    if provider == "sendgrid":
+        cfg["api_key"] = os.getenv("SENDGRID_API_KEY", "")
+        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", "dataflow@example.com")
+    elif provider == "resend":
+        cfg["api_key"] = os.getenv("RESEND_API_KEY", "")
+        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", "dataflow@example.com")
+    elif provider == "mailgun":
+        cfg["api_key"] = os.getenv("MAILGUN_API_KEY", "")
+        cfg["domain"] = os.getenv("MAILGUN_DOMAIN", "")
+        cfg["region"] = os.getenv("MAILGUN_REGION", "us")
+        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", "dataflow@example.com")
+    else:
+        cfg["from"] = os.getenv("DATAFLOW_EMAIL_FROM", os.getenv("DATAFLOW_SMTP_FROM", "dataflow@localhost"))
+    return cfg
+
+
 def web_url() -> str:
     """Public web UI base URL used for clickable job links."""
     explicit = os.getenv("DATAFLOW_WEB_URL", "").strip()
