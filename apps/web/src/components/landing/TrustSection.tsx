@@ -2,12 +2,12 @@ import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 import { DtIcon } from "../DtIcon";
 
 const BADGES = [
-  { icon: "shield", title: "Fail-closed by default", body: "Preflight gates block bad loads before rows move, not after." },
-  { icon: "lock", title: "Masked secrets", body: "Connector credentials are encrypted and never echoed to the UI client." },
-  { icon: "users", title: "Workspace RBAC", body: "Owner, editor, and viewer roles keep connectors and jobs scoped to teams." },
-  { icon: "globe", title: "Self-hosted ready", body: "Run on-prem or in your VPC; no data needs to leave your network." },
-  { icon: "server", title: "Audit-ready jobs", body: "Every run, quarantine row, and schema decision is logged for compliance." },
-  { icon: "check", title: "Checksum proof", body: "Post-load reconciliation verifies row counts and content hashes." },
+  { icon: "shield", title: "Tenant isolation", body: "Each enterprise customer gets a dedicated tenant with custom domain, workspace scoping, and per-tenant security posture." },
+  { icon: "lock", title: "BYOK encryption", body: "Customer-managed keys wrap per-purpose data keys. Your credentials are encrypted at rest with your own KMS." },
+  { icon: "server", title: "Data residency", body: "Pin jobs and artifacts to a region. Audit trails stay where you choose — us-east, eu-west, ap-south, and more." },
+  { icon: "globe", title: "Custom-domain SaaS", body: "Deploy as dataflow.yourcompany.com with SSO, IP allowlisting, and dedicated security contacts." },
+  { icon: "server", title: "Audit-ready jobs", body: "Every run, quarantine row, and schema decision is logged for SOC 2, GDPR, and HIPAA review." },
+  { icon: "check", title: "Checksum proof", body: "Post-load reconciliation verifies row counts and content hashes before a job is marked complete." },
 ];
 
 export function TrustSection() {

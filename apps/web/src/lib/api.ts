@@ -1515,3 +1515,104 @@ export async function testNotificationChannel(id: string): Promise<{ success: bo
   if (!res.ok) throw new Error(await parseApiError(res, "Test failed"));
   return res.json();
 }
+
+export type Tenant = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  custom_domain: string;
+  data_region: string;
+  byok_key_id: string;
+  security_contact_email: string;
+  mfa_required: boolean;
+  session_timeout_hours: number;
+  ip_allowlist: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ByokKey = {
+  id: string;
+  tenant_id: string;
+  label: string;
+  provider: "local" | "wrapped" | "aws_kms" | "azure_keyvault" | "gcp_kms";
+  key_reference: string;
+  status: "active" | "rotated" | "revoked";
+  created_at: string;
+  updated_at: string;
+};
+
+export type SecurityPosture = {
+  tenant_id: string | null;
+  workspace_id: string | null;
+  custom_domain: string | null;
+  data_region: string;
+  environment: "production" | "development";
+  encryption_at_rest: boolean;
+  byok: {
+    configured: boolean;
+    active_count: number;
+    total_count: number;
+    providers: string[];
+    rotated: boolean;
+  };
+  audit_logging: boolean;
+  pii_detection: boolean;
+  ip_allowlist_enabled: boolean;
+  mfa_required: boolean;
+  session_timeout_hours: number;
+  tls_version: string;
+  compliance: Array<{ framework: string; status: string; evidence: string }>;
+  attestations: Array<{ name: string; last_completed?: string | null; next_due?: string | null; status?: string }>;
+};
+
+export async function fetchTenant(): Promise<Tenant | null> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "updated_at">): Promise<Tenant> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));
+  return res.json();
+}
+
+export async function updateTenant(
+  tenantId: string,
+  body: Partial<Omit<Tenant, "id" | "created_at" | "updated_at">>,
+): Promise<Tenant> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/${tenantId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not update tenant"));
+  return res.json();
+}
+
+export async function fetchSecurityPosture(): Promise<SecurityPosture> {
+  const res = await apiFetch(`${API_BASE}/workspace/security/posture`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load security posture"));
+  return res.json();
+}
+
+export async function fetchByokKeys(): Promise<{ keys: ByokKey[] }> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load BYOK keys"));
+  return res.json();
+}
+
+export async function createByokKey(body: { label: string; provider: ByokKey["provider"]; key_material?: string }): Promise<ByokKey> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not create BYOK key"));
+  return res.json();
+}

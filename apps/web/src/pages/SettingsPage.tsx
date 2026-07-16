@@ -10,10 +10,12 @@ import { useToast } from "../components/Toast";
 import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
+import { TenantSettings } from "./settings/TenantSettings";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
   { id: "security", label: "Security", desc: "Policies & compliance", icon: "shield" },
+  { id: "enterprise", label: "Enterprise", desc: "Tenant, BYOK, residency", icon: "shield" },
   { id: "auth", label: "SSO", desc: "Identity providers", icon: "gate" },
   { id: "team", label: "Team", desc: "Members & roles", icon: "connectors" },
   { id: "notifications", label: "Notifications", desc: "Alerts & integrations", icon: "bell" },
@@ -439,6 +441,8 @@ export function SettingsPage() {
             {tab === "team" && <TeamSettings />}
 
             {tab === "notifications" && <NotificationSettings />}
+
+            {tab === "enterprise" && <TenantSettings />}
 
             {tab === "models" && (
               <>

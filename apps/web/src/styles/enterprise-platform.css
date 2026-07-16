@@ -1184,10 +1184,53 @@ body {
 }
 
 .df2-form-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   width: 100%;
+}
+
+.df2-form-row > .df2-field,
+.df2-form-row > .df2-field-flex,
+.df2-form-row > .df2-field-md,
+.df2-form-row > .df2-field-sm,
+.df2-form-row > .df2-field-140,
+.df2-form-row > .df2-field-160,
+.df2-form-row > .df2-field-120 {
+  min-width: 0;
+}
+
+.df2-field-flex {
+  flex: 1 1 180px;
+}
+
+.df2-field-md {
+  flex: 1 1 200px;
+  max-width: 320px;
+}
+
+.df2-field-sm {
+  flex: 0 0 120px;
+}
+
+.df2-field-140 {
+  flex: 0 0 140px;
+}
+
+.df2-field-160 {
+  flex: 0 0 160px;
+}
+
+.df2-field-120 {
+  flex: 0 0 120px;
+}
+
+@media (max-width: 640px) {
+  .df2-field-md,
+  .df2-field-flex {
+    flex: 1 1 100%;
+    max-width: none;
+  }
 }
 
 /* ─── Empty states ─── */
