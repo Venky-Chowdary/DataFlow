@@ -1330,6 +1330,60 @@ export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
 }
 
+export type Workspace = {
+  id: string;
+  name: string;
+  created_at: string;
+  created_by: string;
+};
+
+export type WorkspaceMember = {
+  workspace_id: string;
+  email: string;
+  role: "owner" | "editor" | "viewer";
+  added_at: string;
+  added_by: string;
+};
+
+export async function fetchWorkspaces(): Promise<Workspace[]> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
+  const data = await res.json();
+  return data.workspaces ?? [];
+}
+
+export async function createWorkspace(name: string): Promise<Workspace> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create workspace"));
+  return res.json();
+}
+
+export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load members"));
+  const data = await res.json();
+  return data.members ?? [];
+}
+
+export async function addWorkspaceMember(workspaceId: string, email: string, role: string): Promise<WorkspaceMember> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to add member"));
+  return res.json();
+}
+
+export async function removeWorkspaceMember(workspaceId: string, email: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove member"));
+}
+
 export async function loginWorkspace(email: string, password: string): Promise<{
   token: string;
   expires_at: number;
@@ -1413,5 +1467,47 @@ export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo>
 export async function exportJobQuarantine(jobId: string): Promise<{ success: boolean; row_count?: number; download_url?: string; filename?: string }> {
   const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/export`, { method: "POST" });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export quarantine"));
+  return res.json();
+}
+
+export interface NotificationChannel {
+  id: string;
+  workspace_id: string;
+  kind: "slack" | "teams" | "email" | "servicenow" | "webhook";
+  label: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+}
+
+export async function fetchNotificationChannels(workspaceId?: string): Promise<{ channels: NotificationChannel[] }> {
+  const params = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
+  const res = await apiFetch(`${API_BASE}/workspace/notifications${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load channels"));
+  return res.json();
+}
+
+export async function createNotificationChannel(channel: Omit<NotificationChannel, "id" | "created_at" | "updated_at" | "created_by">): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications`, { method: "POST", body: JSON.stringify(channel) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not create channel"));
+  return res.json();
+}
+
+export async function updateNotificationChannel(id: string, updates: Partial<NotificationChannel>): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}`, { method: "PATCH", body: JSON.stringify(updates) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not update channel"));
+  return res.json();
+}
+
+export async function deleteNotificationChannel(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not delete channel"));
+}
+
+export async function testNotificationChannel(id: string): Promise<{ success: boolean; detail: unknown }> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}/test`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Test failed"));
   return res.json();
 }

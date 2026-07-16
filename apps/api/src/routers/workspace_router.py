@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.team_store import (
     add_workspace_member,
     can_admin_workspace,
+    can_read_workspace,
+    can_write_workspace,
     create_workspace,
     get_workspace,
     list_workspace_members,
@@ -256,3 +260,112 @@ async def delete_workspace_member(workspace_id: str, email: str, request: Reques
     ):
         raise HTTPException(status_code=403, detail="Unable to remove member")
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Notification channels (Slack / Teams / Email / ServiceNow / Webhook)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class NotificationChannelCreate(BaseModel):
+    workspace_id: str = Field(default="", max_length=128)
+    kind: str = Field(..., pattern="^(slack|teams|email|servicenow|webhook)$")
+    label: str = Field(default="", max_length=128)
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class NotificationChannelUpdate(BaseModel):
+    label: str | None = Field(default=None, max_length=128)
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+
+
+@router.get("/notifications")
+async def get_notifications(workspace_id: str | None = None, request: Request = None):
+    actor = _actor(request) if request else "anonymous"
+    if workspace_id and not can_read_workspace(workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    from services.notification_store import list_channels
+
+    channels = list_channels(workspace_id=workspace_id or "")
+    return {"channels": [c.to_dict() for c in channels]}
+
+
+@router.post("/notifications")
+async def post_notification(body: NotificationChannelCreate, request: Request):
+    actor = _actor(request)
+    ws_id = body.workspace_id or ""
+    if ws_id and not can_write_workspace(ws_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    from services.notification_store import create_channel
+
+    try:
+        channel = create_channel(
+            workspace_id=ws_id,
+            kind=body.kind,
+            label=body.label,
+            enabled=body.enabled,
+            config=body.config,
+            created_by=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return channel.to_dict()
+
+
+@router.patch("/notifications/{channel_id}")
+async def patch_notification(channel_id: str, body: NotificationChannelUpdate, request: Request):
+    actor = _actor(request)
+    from services.notification_store import get_channel, update_channel
+
+    channel = get_channel(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    updates = body.model_dump(exclude_none=True)
+    updated = update_channel(channel_id, updates=updates)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Update failed")
+    return updated.to_dict()
+
+
+@router.delete("/notifications/{channel_id}")
+async def delete_notification(channel_id: str, request: Request):
+    actor = _actor(request)
+    from services.notification_store import delete_channel, get_channel
+
+    channel = get_channel(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    if not delete_channel(channel_id):
+        raise HTTPException(status_code=500, detail="Delete failed")
+    return {"ok": True}
+
+
+@router.post("/notifications/{channel_id}/test")
+async def test_notification(channel_id: str, request: Request):
+    actor = _actor(request)
+    from services.notification_service import build_job_payload, send_to_channel
+    from services.notification_store import get_channel_decrypted
+
+    channel = get_channel_decrypted(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    payload = build_job_payload(
+        job_id="test",
+        status="completed",
+        source="test_source",
+        destination="test_destination",
+        records_transferred=42,
+        rejected_rows=0,
+        error="",
+        retry_url="",
+    )
+    result = send_to_channel(channel, payload)
+    return {"success": result.get("ok"), "detail": result}

@@ -469,7 +469,37 @@ class UniversalTransferEngine:
         result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
         result.destination_summary["records_per_second"] = result.records_per_second
         result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+        self._notify_job_status(request, result)
         return result
+
+    def _notify_job_status(self, request: TransferRequest, result: TransferResult) -> None:
+        """Fire workspace notifications for failed or partially-quarantined jobs."""
+        rejected = result.destination_summary.get("rejected_rows", 0) or 0
+        if result.success and not rejected:
+            return
+        try:
+            from services.notification_service import build_job_payload, notify_workspace
+
+            status = "failed"
+            if result.success and rejected:
+                status = "failed_with_quarantine"
+            elif result.success:
+                status = "completed"
+            payload = build_job_payload(
+                job_id=result.job_id,
+                status=status,
+                source=request.source.kind or "unknown",
+                destination=request.destination.kind or "unknown",
+                records_transferred=result.records_transferred or 0,
+                rejected_rows=int(rejected),
+                error=result.error or "",
+                retry_url=f"/api/v1/connectors/jobs/{result.job_id}/resume",
+                workspace_id=request.workspace_id or "",
+            )
+            notify_workspace(request.workspace_id or "", payload)
+        except Exception:
+            # Notifications must never fail a transfer.
+            pass
 
     def _execute_tracked_core(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         mongo = get_mongodb_service()

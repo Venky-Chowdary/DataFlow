@@ -8,12 +8,15 @@ import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { NotificationSettings } from "./settings/NotificationSettings";
+import { TeamSettings } from "./settings/TeamSettings";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
   { id: "security", label: "Security", desc: "Policies & compliance", icon: "shield" },
   { id: "auth", label: "SSO", desc: "Identity providers", icon: "gate" },
   { id: "team", label: "Team", desc: "Members & roles", icon: "connectors" },
+  { id: "notifications", label: "Notifications", desc: "Alerts & integrations", icon: "bell" },
   { id: "models", label: "AI Models", desc: "Provider routing", icon: "sparkle" },
   { id: "api", label: "API Keys", desc: "Programmatic access", icon: "zap" },
   { id: "logs", label: "Audit Logs", desc: "Activity trail", icon: "activity" },
@@ -433,23 +436,9 @@ export function SettingsPage() {
               </section>
             )}
 
-            {tab === "team" && (
-              <section className="df2-settings-section">
-                <div className="df2-settings-section-head">
-                  <div>
-                    <h2>Team members</h2>
-                    <p>Manage who can configure connectors, run transfers, and view audit logs.</p>
-                  </div>
-                </div>
-                <div className="df2-settings-section-body">
-                  <EmptyState
-                    icon="connectors"
-                    title="Team management not connected"
-                    description="Member invites and role assignments require an identity provider integration. Connect SSO under the SSO tab to enable team provisioning."
-                  />
-                </div>
-              </section>
-            )}
+            {tab === "team" && <TeamSettings />}
+
+            {tab === "notifications" && <NotificationSettings />}
 
             {tab === "models" && (
               <>
