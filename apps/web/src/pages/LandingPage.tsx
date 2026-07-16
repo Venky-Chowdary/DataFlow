@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { AnimatedCounter } from "../components/landing/AnimatedCounter";
+import { ComparisonSection } from "../components/landing/ComparisonSection";
 import { ConnectorMarquee } from "../components/landing/ConnectorMarquee";
+import { EnterpriseLogoStrip } from "../components/landing/EnterpriseLogoStrip";
 import { LandingHeroVisual } from "../components/landing/LandingHeroVisual";
+import { TestimonialSection } from "../components/landing/TestimonialSection";
+import { TrustSection } from "../components/landing/TrustSection";
 import { DtLogo } from "../components/DtLogo";
 import { DtIcon } from "../components/DtIcon";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
@@ -138,7 +142,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
           <a href="#how" onClick={() => setNavOpen(false)}>How it works</a>
           <a href="#platform" onClick={() => setNavOpen(false)}>Platform</a>
           <a href="#connectors" onClick={() => setNavOpen(false)}>Connectors</a>
-          <a href="#security" onClick={() => setNavOpen(false)}>Security</a>
+          <a href="#compare" onClick={() => setNavOpen(false)}>Compare</a>
+          <a href="#trust" onClick={() => setNavOpen(false)}>Trust</a>
         </nav>
         <div className="lp-nav-actions">
           <button type="button" className="df2-btn df2-btn-ghost" onClick={onEnterApp}>Sign in</button>
@@ -217,6 +222,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
       </div>
 
       <ConnectorMarquee />
+
+      <EnterpriseLogoStrip />
 
       <section className={`lp-section lp-section-how ${howReveal.className}`} id="how" ref={howReveal.ref}>
         <div className="lp-section-head">
@@ -350,6 +357,12 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
         )}
       </section>
 
+      <ComparisonSection />
+
+      <TrustSection />
+
+      <TestimonialSection />
+
       <section className={`lp-section lp-section-alt ${securityReveal.className}`} id="security" ref={securityReveal.ref}>
         <div className="lp-security">
           <div className="lp-security-copy">
@@ -407,7 +420,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
             <a href="#how">How it works</a>
             <a href="#platform">Platform</a>
             <a href="#connectors">Connectors</a>
-            <a href="#security">Security</a>
+            <a href="#compare">Compare</a>
+            <a href="#trust">Trust</a>
           </nav>
         </div>
       </footer>
