@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from functools import lru_cache
-from typing import Any
+from pathlib import Path
+from typing import Any, FrozenSet
 
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
 _DRIVER_CAPS: dict[str, dict[str, bool]] = {
@@ -26,6 +28,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "salesforce": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "hubspot": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -131,6 +134,7 @@ def default_port(driver_type: str) -> int:
         "salesforce": 443,
         "hubspot": 443,
         "stripe": 443,
+        "rest_api": 443,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -252,10 +256,35 @@ def resolve_driver_type(catalog_id: str) -> str:
     if "csv" in cid or "tsv" in cid:
         return "csv"
 
+    # Generic REST source driver for SaaS/API catalog entries that don't have a
+    # dedicated native connector yet. This lets users configure any REST API with
+    # a base URL, object path, auth token, and pagination style.
+    if cid in _saas_catalog_ids():
+        return "rest_api"
+
     base = cid.replace("___", "_").split("_")[0]
     if base in _DRIVER_CAPS or base in _FILE_CAPS or base == "generic_sql":
         return base
     return base
+
+
+@lru_cache(maxsize=1)
+def _saas_catalog_ids() -> FrozenSet[str]:
+    """Catalog IDs that are SaaS/API connectors and can use the generic REST driver."""
+    try:
+        path = Path(__file__).resolve().parents[2] / "data" / "connector_catalog.json"
+        with open(path, encoding="utf-8") as f:
+            catalog = json.load(f)
+        return frozenset(
+            c["id"].lower().strip()
+            for c in catalog.get("connectors", [])
+            if c.get("category") in ("saas", "api", "finance", "marketing", "healthcare", "logistics")
+            and c.get("id", "").lower().strip() not in CATALOG_ID_ALIASES
+            and c.get("id", "").lower().strip() not in _DRIVER_CAPS
+            and c.get("id", "").lower().strip() not in _FILE_CAPS
+        )
+    except Exception:
+        return frozenset()
 
 
 def _sqlalchemy_available() -> bool:
@@ -285,6 +314,7 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "salesforce": "requests",
     "hubspot": "requests",
     "stripe": "requests",
+    "rest_api": "requests",
     "csv": None,
     "tsv": None,
     "json": None,

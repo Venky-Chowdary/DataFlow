@@ -7,7 +7,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "sqlite", "generic_sql", "sftp", "email",
-  "salesforce", "hubspot", "stripe",
+  "salesforce", "hubspot", "stripe", "rest_api",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -83,6 +83,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   parquet: { host: "", port: 0 },
   sftp: { host: "", port: 22 },
   email: { host: "", port: 587 },
+  rest_api: { host: "", port: 443 },
 };
 
 /** Map marketplace catalog id → connectable type used by API/forms (strict) */
@@ -131,7 +132,9 @@ export function resolveCatalogIdToType(catalogId: string): string {
     return id;
   }
 
-  return id.split("_")[0] || id;
+  // Remaining catalog IDs are treated as generic REST API sources. The backend
+  // maps SaaS/API categories to the rest_api driver, so the form exposes URL/object/auth fields.
+  return "rest_api";
 }
 
 export function isGenericSql(id: string): boolean {
@@ -189,8 +192,74 @@ export function getConnectorDefaults(type: string): { host: string; port: number
     }
   }
 
+  // Per-catalog-id REST API defaults take precedence over the generic rest_api driver defaults.
+  const restHost = getRestApiDefaultHost(type);
+  if (restHost) {
+    return { host: restHost, port: 443, label };
+  }
+
   const base = BASE_DEFAULTS[driver] || { host: "localhost", port: 0 };
   return { host: base.host, port: base.port, label };
+}
+
+const REST_API_DEFAULT_HOSTS: Record<string, string> = {
+  zendesk: "https://{subdomain}.zendesk.com/api/v2",
+  freshdesk: "https://{domain}.freshdesk.com/api/v2",
+  intercom: "https://api.intercom.io",
+  notion: "https://api.notion.com/v1",
+  asana: "https://app.asana.com/api/1.0",
+  trello: "https://api.trello.com/1",
+  mondaycom: "https://api.monday.com/v2",
+  jira: "https://{domain}.atlassian.net/rest/api/3",
+  confluence: "https://{domain}.atlassian.net/wiki/rest/api",
+  servicenow: "https://{instance}.service-now.com/api/now",
+  slack: "https://slack.com/api",
+  airtable: "https://api.airtable.com/v0",
+  shopify: "https://{shop}.myshopify.com/admin/api/2024-04",
+  github: "https://api.github.com",
+  gitlab: "https://gitlab.com/api/v4",
+  bitbucket: "https://api.bitbucket.org/2.0",
+  twilio: "https://api.twilio.com/2010-04-01",
+  sendgrid: "https://api.sendgrid.com/v3",
+  mailchimp: "https://{dc}.api.mailchimp.com/3.0",
+  klaviyo: "https://a.klaviyo.com/api",
+};
+
+const REST_API_DEFAULT_OBJECTS: Record<string, string> = {
+  zendesk: "tickets",
+  freshdesk: "tickets",
+  intercom: "contacts",
+  notion: "databases",
+  asana: "projects",
+  trello: "boards",
+  mondaycom: "boards",
+  jira: "search",
+  confluence: "content",
+  servicenow: "table",
+  slack: "conversations.list",
+  airtable: "",
+  shopify: "products",
+  github: "repos",
+  gitlab: "projects",
+  bitbucket: "repositories",
+  twilio: "Messages.json",
+  sendgrid: "stats",
+  mailchimp: "lists",
+  klaviyo: "profiles",
+};
+
+export function getRestApiDefaultHost(type: string): string {
+  const id = type.toLowerCase().trim();
+  if (REST_API_DEFAULT_HOSTS[id]) return REST_API_DEFAULT_HOSTS[id];
+  const base = id.split("_")[0];
+  return REST_API_DEFAULT_HOSTS[base] || "";
+}
+
+export function getRestApiDefaultObject(type: string): string {
+  const id = type.toLowerCase().trim();
+  if (REST_API_DEFAULT_OBJECTS[id]) return REST_API_DEFAULT_OBJECTS[id];
+  const base = id.split("_")[0];
+  return REST_API_DEFAULT_OBJECTS[base] || "";
 }
 
 export function isAwsConnector(type: string): boolean {

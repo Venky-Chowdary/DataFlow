@@ -55,6 +55,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "salesforce": ("connectors.salesforce", "test_salesforce"),
         "hubspot": ("connectors.hubspot", "test_hubspot"),
         "stripe": ("connectors.stripe", "test_stripe"),
+        "rest_api": ("connectors.rest_api", "test_connection"),
     }
     if driver == "mongodb":
         import pymongo  # noqa: F401
@@ -80,6 +81,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "salesforce": "connectors.salesforce",
         "hubspot": "connectors.hubspot",
         "stripe": "connectors.stripe",
+        "rest_api": "connectors.rest_api",
     }
     writers = {
         "postgresql": "connectors.postgresql_writer",
@@ -100,6 +102,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "salesforce": "connectors.saas_common",
         "hubspot": "connectors.saas_common",
         "stripe": "connectors.saas_common",
+        "rest_api": "connectors.saas_common",
     }
     if readers.get(driver):
         assert importlib.import_module(readers[driver])

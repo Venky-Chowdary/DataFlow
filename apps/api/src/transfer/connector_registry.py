@@ -138,6 +138,13 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         writer="connectors.saas_common",
         writer_fn="write_not_supported",
     ),
+    "rest_api": ConnectorModules(
+        probe=("connectors.rest_api", "test_connection"),
+        reader="connectors.rest_api",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
 }
 
 
@@ -162,8 +169,8 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
-        if driver in ("salesforce", "hubspot", "stripe"):
-            return f"{driver.title()} authentication failed. Check the API token/key, required scopes, and that the token is active."
+        if driver in ("salesforce", "hubspot", "stripe", "rest_api"):
+            return "API authentication failed. Check the host/URL, API token/key, required scopes, and that the token is active."
         if driver == "mongodb":
             return (
                 "Authentication failed. Check the username/password and the Auth source field. "

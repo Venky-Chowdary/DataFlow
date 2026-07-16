@@ -1,6 +1,7 @@
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
 import {
   getConnectorDefaults,
+  getRestApiDefaultObject,
   isAwsConnector,
   isGcpConnector,
   isGenericSql,
@@ -151,7 +152,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isDuckDB = resolved === "duckdb";
   const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved);
   const isAzure = resolved === "adls";
-  const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved);
+  const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
 
   const authModes: AuthModeConfig[] = [];
 
@@ -401,9 +402,10 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       salesforce: "Account",
       hubspot: "contacts",
       stripe: "customers",
+      rest_api: getRestApiDefaultObject(type),
     };
     const placeholder = host || resolved;
-    const objectHint = `Default object/table used when none is specified: ${defaultObject[resolved]}.`;
+    const objectHint = `Default object/table used when none is specified: ${defaultObject[resolved] || ""}.`;
     apiFields.push(
       text("host", "Host / instance URL", { optional: true, placeholder }),
       text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
@@ -413,6 +415,16 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         hint: `Paste the ${resolved === "stripe" ? "Stripe secret key" : resolved + " access token"}. ${objectHint}`,
       })
     );
+    if (resolved === "rest_api") {
+      apiFields.push(
+        textarea("connection_string", "Advanced config (JSON, optional)", {
+          rows: 2,
+          optional: true,
+          placeholder: '{"pagination_type":"cursor","data_path":"data","cursor_param":"after"}',
+          hint: "Override pagination, data path, auth header, or query parameters as JSON.",
+        })
+      );
+    }
   }
 
   // Build auth modes for each connector
@@ -531,7 +543,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
-  if (["salesforce", "hubspot", "stripe"].includes(resolved)) return "api_key";
+  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
   return "user_pass";
