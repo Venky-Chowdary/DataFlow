@@ -15,6 +15,13 @@ from services.transfer_scheduler import submit as _submit_transfer
 from .engine import get_transfer_engine
 from .models import TransferRequest
 
+
+def _log_transfer_exception(fut: Any) -> None:
+    try:
+        fut.result()
+    except Exception as exc:
+        logger.exception("Background transfer raised an unhandled exception: %s", exc)
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +84,7 @@ def run_transfer_async(job_id: str, request: TransferRequest, resume: bool = Fal
     The scheduler uses a process-wide thread pool and persists phase/status through
     the job store / MongoDB so in-flight work can be recovered after a restart.
     """
-    return _submit_transfer(
+    future = _submit_transfer(
         job_id,
         _run_transfer,
         job_id,
@@ -85,3 +92,5 @@ def run_transfer_async(job_id: str, request: TransferRequest, resume: bool = Fal
         resume=resume,
         resume_from_job_id=resume_from_job_id,
     )
+    future.add_done_callback(_log_transfer_exception)
+    return future

@@ -20,6 +20,7 @@ from services.platform_config import (
     docs_enabled,
     enforce_production_config,
     is_production,
+    is_railway,
     vector_store_dir,
 )
 from services.health_service import aggregate_health
@@ -162,10 +163,17 @@ app = FastAPI(
 )
 
 _cors_origins = cors_origins()
+# Railway deploys give each service a *.up.railway.app public domain, which is
+# not known until runtime. A permissive regex lets any Railway subdomain through
+# while still honouring credentials. The env var allows an explicit override.
+_cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
+if not _cors_origin_regex and is_railway():
+    _cors_origin_regex = r"https://.*\.up\.railway\.app"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
