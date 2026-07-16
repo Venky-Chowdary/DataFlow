@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -578,3 +579,51 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
 async def get_security_posture(request: Request):
     tenant = _resolve_request_tenant(request)
     return _security_posture(tenant)
+
+
+@router.get("/security/report")
+async def get_security_report(request: Request):
+    """Return a downloadable, human-readable compliance report for the tenant."""
+    tenant = _resolve_request_tenant(request)
+    posture = _security_posture(tenant)
+
+    lines = [
+        "# DataFlow Security & Compliance Report",
+        f"Generated: {datetime.now(timezone.utc).isoformat()}Z",
+        f"Environment: {posture['environment']}",
+        f"Tenant ID: {posture['tenant_id'] or 'default'}",
+        f"Workspace ID: {posture['workspace_id'] or 'default'}",
+        f"Custom domain: {posture['custom_domain'] or 'not configured'}",
+        f"Primary data region: {posture['data_region']}",
+        "",
+        "## Controls",
+        f"- Encryption at rest: {'enabled' if posture['encryption_at_rest'] else 'disabled'}",
+        f"- TLS minimum version: {posture['tls_version']}",
+        f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
+        f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
+        f"- IP allowlisting: {'enabled' if posture['ip_allowlist_enabled'] else 'disabled'}",
+        f"- MFA required for admins: {'yes' if posture['mfa_required'] else 'no'}",
+        f"- Session timeout: {posture['session_timeout_hours']} hours",
+        "",
+        "## Key management",
+        f"- BYOK configured: {'yes' if posture['byok']['configured'] else 'no'}",
+    ]
+    if posture["byok"]["configured"]:
+        lines.append(f"- Active keys: {posture['byok']['active_count']}")
+        lines.append(f"- Providers: {', '.join(posture['byok']['providers'])}")
+        lines.append(f"- Rotation required: {'yes' if posture['byok']['rotated'] else 'no'}")
+    lines.extend(["", "## Compliance roadmap"])
+    for c in posture["compliance"]:
+        lines.append(f"- {c['framework']}: {c['status']} — {c['evidence']}")
+    lines.extend(["", "## Attestations"])
+    for a in posture["attestations"]:
+        status = a.get("status") or ("complete" if a.get("last_completed") else "pending")
+        lines.append(f"- {a['name']}: {status}")
+
+    report = "\n".join(lines)
+    from starlette.responses import PlainTextResponse
+    return PlainTextResponse(
+        report,
+        media_type="text/markdown",
+        headers={"Content-Disposition": 'attachment; filename="dataflow-compliance-report.md"'},
+    )

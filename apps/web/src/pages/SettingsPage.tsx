@@ -7,7 +7,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
-import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
@@ -441,6 +441,24 @@ export function SettingsPage() {
                         </div>
                       </div>
                     </>
+                  )}
+                  {!postureLoading && posture && (
+                    <div className="df2-settings-section-footer">
+                      <button
+                        type="button"
+                        className="df2-btn df2-btn-secondary"
+                        onClick={() => void downloadSecurityReport().then((blob) => {
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = "dataflow-compliance-report.md";
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }).catch((err) => toast({ title: "Download failed", message: err instanceof Error ? err.message : "Could not download report", tone: "error" }))}
+                      >
+                        <DtIcon name="download" size={14} /> Download compliance report
+                      </button>
+                    </div>
                   )}
                   {!postureLoading && !posture && (
                     <EmptyState compact icon="shield" title="Security posture unavailable" description="Could not load posture from the backend." />

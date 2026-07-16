@@ -1616,6 +1616,12 @@ export async function updateTenant(
   return res.json();
 }
 
+export async function downloadSecurityReport(): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/security/report`);
+  if (!res.ok) throw new Error("Could not download compliance report");
+  return res.blob();
+}
+
 export async function fetchSecurityPosture(): Promise<SecurityPosture> {
   const res = await apiFetch(`${API_BASE}/workspace/security/posture`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load security posture"));
