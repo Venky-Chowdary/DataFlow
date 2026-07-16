@@ -1,16 +1,15 @@
 """Change-data-capture transfer runner for database sources.
 
-CDC can operate in two modes:
+Implemented: **query-based CDC**. Polls the source table using a monotonic
+source cursor column (typically ``updated_at`` / ``created_at`` / an incrementing
+version / auto-increment id). Optional soft-delete / tombstone columns are
+honoured so rows flagged as deleted propagate as ``DELETE`` events.
 
-1. **Query-based CDC** (default): polls the source table using a monotonic
-   cursor column (typically ``updated_at`` / ``created_at`` / an incrementing
-   version / auto-increment id). Optional soft-delete / tombstone columns are
-   honoured so rows flagged as deleted propagate as ``DELETE`` events.
-
-2. **PostgreSQL logical decoding** (opt-in): when the source is PostgreSQL and
-   ``use_logical_decoding=True`` is supplied, the engine attempts to consume a
-   ``pgoutput`` replication slot. This provides true INSERT/UPDATE/DELETE
-   capture without requiring a cursor column.
+Not yet implemented: **log-based CDC** (PostgreSQL ``pgoutput`` logical decoding,
+MySQL binlog, SQL Server CDC, Oracle LogMiner, MongoDB Change Streams, etc.).
+Those require replication-slot/binlog/change-stream readers that are not present
+in this codebase, so any UI copy or capability registry that claims WAL/binlog
+CDC is aspirational and must be corrected.
 
 The runner returns the same ``(rows_written, ddl_log, dest_summary, columns)``
 shape as ``stream_database_transfer`` so the engine can use it interchangeably.
@@ -145,54 +144,45 @@ class CdcEngine:
             yield headers, rows
             offset += len(rows)
 
-    def snapshot(self) -> Iterator[ChangeBatch]:
-        """Yield the full source table as a single INSERT-only change batch."""
-        all_rows: list[dict[str, Any]] = []
+    def _yield_batches(self, reader: Iterator[tuple[list[str], list[list[str]]]]) -> Iterator[ChangeBatch]:
+        """Stream batches from a (headers, rows) reader without materializing all rows."""
+        buffer: list[dict[str, Any]] = []
         headers: list[str] = []
-        for h, rows in self._read():
+        emitted = False
+        for h, rows in reader:
             if not headers:
                 headers = h
             for row in rows:
-                all_rows.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
-        if not all_rows:
+                buffer.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
+                if len(buffer) >= self.batch_size:
+                    yield self._split_batch(buffer)
+                    emitted = True
+                    buffer = []
+        if buffer:
+            yield self._split_batch(buffer)
+        elif not emitted:
             yield ChangeBatch()
-            return
-        # Split into chunks
-        for i in range(0, len(all_rows), self.batch_size):
-            chunk = all_rows[i : i + self.batch_size]
-            if self.tombstone_column:
-                inserts = [r for r in chunk if not _is_tombstone_set(r, self.tombstone_column)]
-                deletes = [r for r in chunk if _is_tombstone_set(r, self.tombstone_column)]
-                yield ChangeBatch(inserts=inserts, deletes=[str(r.get(self.primary_key, "")) for r in deletes if r.get(self.primary_key)])
-            else:
-                yield ChangeBatch(inserts=chunk)
+
+    def _split_batch(self, records: list[dict[str, Any]]) -> ChangeBatch:
+        if not self.tombstone_column:
+            return ChangeBatch(inserts=records)
+        inserts = [r for r in records if not _is_tombstone_set(r, self.tombstone_column)]
+        deletes = [
+            str(r.get(self.primary_key, "")) for r in records
+            if _is_tombstone_set(r, self.tombstone_column) and r.get(self.primary_key)
+        ]
+        return ChangeBatch(inserts=inserts, deletes=deletes)
+
+    def snapshot(self) -> Iterator[ChangeBatch]:
+        """Yield the full source table as a single INSERT-only change batch."""
+        yield from self._yield_batches(self._read())
 
     def poll(self) -> Iterator[ChangeBatch]:
         """Yield changes since the last watermark."""
         if not self.watermark:
             yield from self.snapshot()
             return
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for h, rows in self._read(cursor_after=self.watermark):
-            if not headers:
-                headers = h
-            for row in rows:
-                all_rows.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
-        if not all_rows:
-            yield ChangeBatch()
-            return
-        for i in range(0, len(all_rows), self.batch_size):
-            chunk = all_rows[i : i + self.batch_size]
-            if self.tombstone_column:
-                inserts = [r for r in chunk if not _is_tombstone_set(r, self.tombstone_column)]
-                deletes = [r for r in chunk if _is_tombstone_set(r, self.tombstone_column)]
-                yield ChangeBatch(
-                    inserts=inserts,
-                    deletes=[str(r.get(self.primary_key, "")) for r in deletes if r.get(self.primary_key)],
-                )
-            else:
-                yield ChangeBatch(inserts=chunk)
+        yield from self._yield_batches(self._read(cursor_after=self.watermark))
 
 
 def _max_cursor_value(records: list[dict[str, Any]], cursor_field: str, wm_type: WatermarkType) -> str | None:
