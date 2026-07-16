@@ -54,3 +54,27 @@ def test_add_and_remove_member(client):
         f"/api/v1/workspace/workspaces/{ws_id}/members/editor@example.com"
     )
     assert response.status_code == 200
+
+
+def test_security_posture_report(client):
+    ws = client.post("/api/v1/workspace/workspaces", json={"name": "Secure Team"}).json()
+    ws_id = ws["id"]
+    response = client.get(
+        "/api/v1/workspace/security/posture",
+        headers={"X-Workspace-Id": ws_id},
+    )
+    assert response.status_code == 200, response.text
+    posture = response.json()
+    assert posture["environment"] in ("production", "development")
+    assert "encryption_at_rest" in posture
+    assert "byok" in posture
+
+    response = client.get(
+        "/api/v1/workspace/security/report",
+        headers={"X-Workspace-Id": ws_id},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "text/markdown; charset=utf-8"
+    body = response.text
+    assert "DataFlow Security & Compliance Report" in body
+    assert posture["data_region"] in body
