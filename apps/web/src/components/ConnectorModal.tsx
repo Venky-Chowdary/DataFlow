@@ -40,6 +40,7 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   if (conn?.api_key) return "api_key";
   if (conn?.service_account) return "service_account";
   if (conn?.connection_string) return "connection_string";
+  if (resolved === "redis" && conn?.connection_string) return "connection_string";
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
   if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
@@ -73,7 +74,7 @@ function authModeOptions(type: string): { value: AuthMode; label: string }[] {
   if ((sqlish || genericSql || mongo || snowflake || elastic || azure || type === "sftp" || type === "email") && !connectionStringOnly) {
     options.push({ value: "user_pass", label: "Username & password" });
   }
-  if (sqlish || genericSql || mongo || snowflake || azure || sftpOrEmail) {
+  if (sqlish || genericSql || mongo || snowflake || azure || sftpOrEmail || type === "redis") {
     options.push({ value: "connection_string", label: type === "email" ? "SMTP URL" : type === "sftp" ? "SFTP URL" : "Connection string" });
   }
   if (gcp) {
