@@ -61,8 +61,6 @@ def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(defa
     if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
     return workspace_id
-
-
 class EndpointDTO(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
