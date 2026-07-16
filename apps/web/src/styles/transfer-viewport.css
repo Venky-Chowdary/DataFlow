@@ -39,7 +39,8 @@
   display: none;
 }
 
-.df2-transfer-studio-shell.is-transfer-studio-active .df2-page-metrics-row {
+.df2-transfer-studio-shell.is-transfer-studio-active .df2-page-metrics-row,
+.df2-transfer-studio-shell.is-transfer-studio-active .df2-stats {
   display: none;
 }
 

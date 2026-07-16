@@ -40,8 +40,9 @@
 }
 
 .df2-app .df2-card-head {
-  min-height: 56px;
-  align-items: center !important;
+  /* Align with shell lock — do not force 56px centered chrome */
+  min-height: 0;
+  align-items: flex-start !important;
 }
 
 .df2-app .df2-card-body {

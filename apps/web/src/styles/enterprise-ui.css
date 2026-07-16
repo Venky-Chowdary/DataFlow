@@ -1216,8 +1216,10 @@
 
 .df2-transfer-studio-chrome {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-sticky, 20);
   flex-shrink: 0;
+  isolation: isolate;
+  overflow: hidden;
 }
 
 .df2-topbar {
@@ -2123,14 +2125,15 @@
   transform: rotate(90deg);
 }
 
-/* Wizard footers — always visible on source/dest/map */
+/* Wizard footers — flex-pinned siblings of the scroll body (not sticky).
+   Sticky here duplicated the pinned bar and could stack over the steps chrome. */
 .df2-transfer-step-viewport > .df2-wizard-footer,
 .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
 .df2-map-step-panel > .df2-wizard-footer {
   flex: 0 0 auto !important;
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
+  position: relative;
+  bottom: auto;
+  z-index: 1;
   display: flex !important;
   align-items: center;
   justify-content: flex-end;
@@ -3120,3 +3123,157 @@
   padding: 0 12px !important;
   border-radius: 9px !important;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   STACKING SCALE — single authority (fixes toast/modal/popover wars)
+   ═══════════════════════════════════════════════════════════ */
+.df2-topbar {
+  z-index: var(--df-z-topbar, 40) !important;
+}
+
+.df2-sidebar {
+  z-index: var(--df-z-sidebar, 45);
+}
+
+.df2-status-popover {
+  z-index: var(--df-z-popover, 90) !important;
+}
+
+.df2-app .dt-modal-overlay,
+.dt-modal-overlay {
+  z-index: var(--df-z-modal, 1000) !important;
+}
+
+.dt-toast-host {
+  top: calc(var(--df-header-height, 56px) + 12px) !important;
+  right: 16px !important;
+  z-index: var(--df-z-toast, 1100) !important;
+}
+
+.df-app-boot-overlay {
+  z-index: var(--df-z-boot, 1200) !important;
+}
+
+/* Keep-alive screens — preserve Transfer/Query/Pilot/Settings state across nav */
+.df2-screen-keep.is-kept {
+  display: none !important;
+}
+
+.df2-screen-keep.is-active {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.df2-screen-keep.is-active > * {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+/* Login — brand-aligned controls */
+.lp-login-remember input[type="checkbox"] {
+  accent-color: var(--df-brand, #0d9488);
+  width: 16px;
+  height: 16px;
+}
+
+.lp-login-orb--2 {
+  background: rgba(13, 148, 136, 0.12) !important;
+}
+
+/* Overview — keep panel heads from colliding with Manage links */
+.df2-overview-page .df2-glass-panel-head {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.df2-overview-page .df2-overview-text-link {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* Connectors / Jobs — prevent toolbar filter stacks from wrapping into content */
+.df2-page-connectors .df2-toolbar-filter-stack,
+.df2-page-jobs .df2-toolbar-filter-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.df2-connectors-layout,
+.df2-jobs-v3-layout {
+  min-height: 0;
+}
+
+.df2-connectors-list .df2-connector-card.is-selected,
+.df2-job-row.is-active {
+  outline: 2px solid color-mix(in srgb, var(--df-accent, #0d9488) 35%, transparent);
+  outline-offset: -2px;
+}
+
+.df2-jobs-v3-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Query playground — keep editor/results from overlapping */
+.df2-page-query .df2-query-layout,
+.df2-query-page {
+  min-height: 0;
+}
+
+.df2-query-page .df2-query-editor-shell {
+  min-width: 0;
+}
+
+/* Pilot — chat column shouldn't overflow toolbar */
+.df2-page-pilot .df2-pilot-layout,
+.df2-pilot-page {
+  min-height: 0;
+}
+
+/* Settings — tab rail + content without horizontal clash */
+.df2-page-settings .df2-settings-layout {
+  min-height: 0;
+  align-items: start;
+}
+
+.df2-page-settings .df2-settings-nav {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+}
+
+/* Shared toolbar / form size utilities used across pages */
+.df2-toolbar-filter-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.df2-select.df2-select-sm,
+.df2-select-sm {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+
+.df2-input.df2-input-sm,
+.df2-input-sm {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+

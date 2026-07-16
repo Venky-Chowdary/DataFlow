@@ -4,6 +4,7 @@ import { DtIcon } from "../components/DtIcon";
 import { JobTheater } from "../components/JobTheater";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/EmptyState";
+import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { FilterTabs } from "../components/ui/FilterTabs";
@@ -219,9 +220,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
               }
               actions={
                 onRefresh ? (
-                  <button type="button" className="df2-btn df2-btn-sm" onClick={onRefresh}>
-                    <DtIcon name="activity" size={14} /> Refresh
-                  </button>
+                  <Button size="sm" onClick={onRefresh} leadingIcon={<DtIcon name="activity" size={14} />}>
+                    Refresh
+                  </Button>
                 ) : undefined
               }
             />

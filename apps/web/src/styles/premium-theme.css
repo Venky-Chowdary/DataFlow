@@ -215,21 +215,20 @@
   border: 1px solid #99f6e4;
 }
 
+/* Kill gradient text titles — solid ink only */
 .df2-page-title {
-  background: linear-gradient(135deg, #0f172a 0%, #334155 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  background: none !important;
+  -webkit-background-clip: unset !important;
+  -webkit-text-fill-color: unset !important;
+  background-clip: unset !important;
+  color: var(--df-text, #0f172a) !important;
 }
 
-/* ─── Primary button ─── */
-
+/* Prefer solid primary over premium gradient when both fight */
 .df2-btn-primary {
-  background: var(--df-premium-gradient) !important;
-  border: none !important;
-  color: #fff !important;
-  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.3);
-  transition: transform 0.15s var(--df-premium-ease), box-shadow 0.15s !important;
+  background: var(--df-accent, #0d9488) !important;
+  border: 1px solid transparent !important;
+  box-shadow: none;
 }
 
 .df2-btn-primary:hover:not(:disabled) {

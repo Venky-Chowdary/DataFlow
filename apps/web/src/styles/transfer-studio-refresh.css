@@ -695,3 +695,63 @@
   justify-self: end;
   white-space: nowrap;
 }
+
+/* ============================================================
+   TRANSFER STUDIO — overlap fixes (chrome / validate rail)
+   transfer-viewport.css forces .df2-transfer-studio-body to flex
+   column, which ignored polish's grid-template-columns and made
+   ValidateActionsRail stack/clip under the main panel.
+   ============================================================ */
+
+/* Steps + route chrome: stay above step content; kill scale bleed */
+.df2-transfer-studio-chrome {
+  position: relative;
+  z-index: var(--df-z-sticky, 20);
+  flex-shrink: 0;
+  isolation: isolate;
+  overflow: hidden;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.df2-transfer-studio-chrome .df2-wizard-studio .df2-wizard-step.active {
+  transform: none;
+}
+
+.df2-transfer-studio-chrome-row {
+  min-width: 0;
+}
+
+.df2-transfer-studio-chrome .df2-route-bar {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* Validate: restore side-by-side rail (overrides viewport flex column) */
+.df2-transfer-studio-body.is-validate-step {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) clamp(280px, 26vw, 340px) !important;
+  align-items: stretch;
+  gap: var(--df-studio-gap, 12px);
+}
+
+.df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel,
+.df2-transfer-studio-body.is-validate-step .df2-validate-rail {
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: 100%;
+  align-self: stretch;
+}
+
+.df2-transfer-studio-body.is-validate-step .df2-validate-rail {
+  overflow: hidden;
+}
+
+@media (max-width: 1280px) {
+  .df2-transfer-studio-body.is-validate-step {
+    grid-template-columns: 1fr !important;
+  }
+
+  .df2-transfer-studio-body.is-validate-step .df2-validate-rail {
+    max-height: min(42vh, 360px);
+  }
+}

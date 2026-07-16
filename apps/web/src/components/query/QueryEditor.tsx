@@ -1,14 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import Editor from "react-simple-code-editor";
-import Prism from "prismjs";
-// Core SQL grammar covers most relational dialects.
-import "prismjs/components/prism-sql";
-// PL/SQL for Oracle-specific syntax.
-import "prismjs/components/prism-plsql";
-// JSON for MongoDB filters and aggregation arrays.
-import "prismjs/components/prism-json";
-// JavaScript for MongoDB shell-style queries (db.collection.find(...)).
-import "prismjs/components/prism-javascript";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  dialectForLanguage,
+  highlightCode,
+} from "../../lib/queryHighlight";
+
+/**
+ * Powerful dialect-aware query editor for any connector syntax.
+ * Overlay highlighter (no Prism / react-simple-code-editor required).
+ */
 
 export type QueryLanguage =
   | "sql"
@@ -35,7 +34,7 @@ const LANGUAGE_OPTIONS: { value: QueryLanguage; label: string; hint: string }[] 
   { value: "mariadb", label: "MariaDB", hint: "SELECT, WITH, EXPLAIN, SHOW" },
   { value: "tsql", label: "SQL Server (T-SQL)", hint: "SELECT, WITH, EXPLAIN" },
   { value: "plsql", label: "Oracle (PL/SQL)", hint: "SELECT, WITH, EXPLAIN" },
-  { value: "json", label: "MongoDB / JSON", hint: "Filter object or aggregate array" },
+  { value: "json", label: "MongoDB / JSON", hint: "Filter object or aggregate pipeline" },
   { value: "javascript", label: "MongoDB shell (JS)", hint: "db.collection.find(...)" },
 ];
 
@@ -54,23 +53,10 @@ const CONNECTOR_LANGUAGE: Record<string, QueryLanguage> = {
   mongodb: "json",
   cosmos: "json",
   json: "json",
+  duckdb: "sql",
+  clickhouse: "sql",
   csv: "sql",
   excel: "sql",
-};
-
-const PRISM_GRAMMAR: Record<QueryLanguage, string> = {
-  sql: "sql",
-  postgresql: "sql",
-  mysql: "sql",
-  sqlite: "sql",
-  snowflake: "sql",
-  bigquery: "sql",
-  redshift: "sql",
-  mariadb: "sql",
-  tsql: "sql",
-  plsql: "plsql",
-  json: "json",
-  javascript: "javascript",
 };
 
 const SQL_SAFE_START = new Set([
@@ -118,7 +104,6 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
   const trimmed = code.trim();
   if (!trimmed) return null;
 
-  // JSON mode: must parse as a JSON object or array.
   if (language === "json") {
     try {
       const parsed = JSON.parse(trimmed);
@@ -131,7 +116,6 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
     }
   }
 
-  // JavaScript mode: must be syntactically valid JS (not executed).
   if (language === "javascript") {
     try {
       // eslint-disable-next-line no-new-func
@@ -142,7 +126,6 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
     }
   }
 
-  // SQL dialects: allow only read/metadata queries.
   const first = firstSqlWord(trimmed);
   if (!first || !SQL_SAFE_START.has(first)) {
     return "SQL mode only supports read/metadata queries (SELECT, WITH, EXPLAIN, SHOW, DESCRIBE, ANALYZE, PRAGMA, VALUES).";
@@ -155,11 +138,8 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
 
 const SQL_SNIPPETS = [
   { label: "SELECT *", text: "SELECT * FROM table_name" },
-  { label: "SELECT columns", text: "SELECT column1, column2 FROM table_name" },
   { label: "WHERE", text: "WHERE column = 'value'" },
-  { label: "AND", text: "AND column = 'value'" },
-  { label: "JOIN", text: "JOIN other_table ON table_name.id = other_table.id" },
-  { label: "LEFT JOIN", text: "LEFT JOIN other_table ON table_name.id = other_table.id" },
+  { label: "JOIN", text: "JOIN other_table ON a.id = b.id" },
   { label: "GROUP BY", text: "GROUP BY column" },
   { label: "ORDER BY", text: "ORDER BY column DESC" },
   { label: "LIMIT", text: "LIMIT 100" },
@@ -168,71 +148,64 @@ const SQL_SNIPPETS = [
 
 const MONGO_SNIPPETS = [
   { label: "Find filter", text: '{"status": "active"}' },
-  { label: "Aggregate pipeline", text: '[\n  {"$match": {"status": "active"}},\n  {"$limit": 100}\n]' },
-  { label: "Group aggregate", text: '[\n  {"$group": {"_id": "$field", "count": {"$sum": 1}}}\n]' },
-  { label: "Range filter", text: '{"created_at": {"$gte": "2024-01-01", "$lte": "2024-12-31"}}' },
-  { label: "Projection", text: '[\n  {"$project": {"_id": 0, "name": 1, "status": 1}}\n]' },
+  { label: "Aggregate", text: '[\n  {"$match": {"status": "active"}},\n  {"$limit": 100}\n]' },
+  { label: "Group", text: '[\n  {"$group": {"_id": "$field", "count": {"$sum": 1}}}\n]' },
+  { label: "Range", text: '{"created_at": {"$gte": "2024-01-01", "$lte": "2024-12-31"}}' },
 ];
 
 export function QueryEditor({ value, onChange, connectorType, placeholder, disabled, height = "18rem" }: QueryEditorProps) {
   const [lang, setLang] = useState<QueryLanguage>(() => guessLanguage(connectorType));
   const [cursor, setCursor] = useState({ start: 0, end: 0 });
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const preRef = useRef<HTMLPreElement>(null);
+  const gutterRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setLang(guessLanguage(connectorType));
   }, [connectorType]);
 
-  const grammarName = PRISM_GRAMMAR[lang];
-  const grammar = useMemo(() => {
-    const g = (Prism.languages as Record<string, Prism.Grammar | undefined>)[grammarName];
-    return g;
-  }, [grammarName]);
-
   const label = useMemo(() => LANGUAGE_OPTIONS.find((o) => o.value === lang)?.label ?? "SQL", [lang]);
   const hint = useMemo(() => LANGUAGE_OPTIONS.find((o) => o.value === lang)?.hint ?? "", [lang]);
   const error = useMemo(() => validateQuery(lang, value), [lang, value]);
   const isInvalid = Boolean(error);
-
-  const highlight = (code: string) => {
-    if (!grammar) {
-      return code.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string));
-    }
-    return Prism.highlight(code, grammar, grammarName);
-  };
-
+  const dialect = dialectForLanguage(lang);
+  const highlighted = useMemo(() => highlightCode(value, dialect), [value, dialect]);
+  const lineCount = Math.max(1, (value.match(/\n/g)?.length ?? 0) + 1);
   const isMongoLike = lang === "json" || lang === "javascript";
   const snippets = isMongoLike ? MONGO_SNIPPETS : SQL_SNIPPETS;
 
-  useEffect(() => {
-    const handleSelection = () => {
-      const textarea = document.querySelector(".df2-query-editor-textarea") as HTMLTextAreaElement | null;
-      if (textarea && document.activeElement === textarea) {
-        setCursor({ start: textarea.selectionStart ?? 0, end: textarea.selectionEnd ?? 0 });
-      }
-    };
-    document.addEventListener("selectionchange", handleSelection);
-    return () => document.removeEventListener("selectionchange", handleSelection);
-  }, []);
+  const syncScroll = () => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    if (preRef.current) {
+      preRef.current.scrollTop = ta.scrollTop;
+      preRef.current.scrollLeft = ta.scrollLeft;
+    }
+    if (gutterRef.current) {
+      gutterRef.current.scrollTop = ta.scrollTop;
+    }
+  };
 
   const insertSnippet = (text: string) => {
     const { start, end } = cursor;
     const before = value.slice(0, start);
     const after = value.slice(end);
-    const prefix = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n") && !before.endsWith("(") ? " " : "";
+    const prefix = before.length > 0 && !/[(\s\n]$/.test(before) ? " " : "";
     const next = before + prefix + text + after;
     onChange(next);
     const newCursor = start + prefix.length + text.length;
     window.setTimeout(() => {
-      const textarea = document.querySelector(".df2-query-editor-textarea") as HTMLTextAreaElement | null;
-      if (textarea) {
-        textarea.focus();
-        textarea.setSelectionRange(newCursor, newCursor);
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(newCursor, newCursor);
+        setCursor({ start: newCursor, end: newCursor });
       }
     }, 0);
   };
 
   return (
-    <div className="df2-query-editor-shell" style={{ minHeight: height }} data-invalid={isInvalid}>
+    <div className="df2-query-editor-shell" style={{ minHeight: height }} data-invalid={isInvalid} data-dialect={dialect}>
       <div className="df2-query-editor-langbar">
         <span className="df2-query-editor-lang-label">Syntax</span>
         <select
@@ -251,21 +224,43 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
         <span className="df2-query-editor-hint">
           {label} · {hint}
         </span>
+        <span className="df2-query-editor-dialect-pill" title="Active highlighter">
+          {dialect.toUpperCase()}
+        </span>
       </div>
-      <div className="df2-query-editor-wrap" data-disabled={disabled}>
-        <Editor
-          value={value}
-          onValueChange={onChange}
-          highlight={highlight}
-          padding={16}
-          className="df2-query-editor"
-          textareaClassName={`df2-query-editor-textarea ${isInvalid ? "df2-query-editor-textarea--error" : ""}`}
-          preClassName={`df2-query-editor-pre language-${grammarName}`}
-          placeholder={placeholder}
-          disabled={disabled}
-          tabSize={2}
-          insertSpaces
-        />
+
+      <div className="df2-query-editor-wrap df2-query-editor-wrap--powered" data-disabled={disabled}>
+        <div className="df2-query-editor-gutter" ref={gutterRef} aria-hidden>
+          {Array.from({ length: lineCount }, (_, i) => (
+            <span key={i}>{i + 1}</span>
+          ))}
+        </div>
+        <div className="df2-query-editor-code">
+          <pre
+            ref={preRef}
+            className={`df2-query-editor-pre qe-pre qe-pre--${dialect}`}
+            aria-hidden
+            dangerouslySetInnerHTML={{
+              __html: `${highlighted}${(value.endsWith("\n") || !value) ? "\n" : ""}`,
+            }}
+          />
+          <textarea
+            ref={textareaRef}
+            className={`df2-query-editor-textarea ${isInvalid ? "df2-query-editor-textarea--error" : ""}`}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onScroll={syncScroll}
+            onSelect={(e) => {
+              const t = e.currentTarget;
+              setCursor({ start: t.selectionStart ?? 0, end: t.selectionEnd ?? 0 });
+            }}
+            placeholder={placeholder}
+            disabled={disabled}
+            spellCheck={false}
+            aria-label="Query editor"
+            style={{ minHeight: height }}
+          />
+        </div>
       </div>
 
       <div className="df2-query-editor-snippets">
@@ -285,8 +280,8 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
       </div>
 
       {isInvalid && (
-        <div className="df2-query-editor-error">
-          <span aria-hidden>⚠</span> {error}
+        <div className="df2-query-editor-error" role="alert">
+          {error}
         </div>
       )}
     </div>

@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
 import { EmptyState } from "../components/EmptyState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
-import { Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { executeQuery, exportQuery, type QueryResult, type QueryExportResult } from "../lib/api";
 import { Connector } from "../lib/types";
@@ -29,7 +29,8 @@ export function QueryPage({ connectors }: QueryPageProps) {
   const [destConnectorId, setDestConnectorId] = useState("");
   const [destTarget, setDestTarget] = useState("");
   const [destSyncMode, setDestSyncMode] = useState("append");
-  const [loading, setLoading] = useState(false);
+  const [queryLoading, setQueryLoading] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [exportResult, setExportResult] = useState<QueryExportResult | null>(null);
 
@@ -48,7 +49,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
       toast({ title: "Enter a query", tone: "warning" });
       return;
     }
-    setLoading(true);
+    setQueryLoading(true);
     setResult(null);
     setExportResult(null);
     try {
@@ -63,7 +64,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
     } catch (e) {
       toast({ title: "Query failed", message: (e as Error).message, tone: "error" });
     } finally {
-      setLoading(false);
+      setQueryLoading(false);
     }
   };
 
@@ -72,7 +73,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
       toast({ title: "Run a query first", tone: "warning" });
       return;
     }
-    setLoading(true);
+    setExportLoading(true);
     try {
       const data = await exportQuery({
         connector_id: connectorId,
@@ -95,19 +96,21 @@ export function QueryPage({ connectors }: QueryPageProps) {
     } catch (e) {
       toast({ title: "Export failed", message: (e as Error).message, tone: "error" });
     } finally {
-      setLoading(false);
+      setExportLoading(false);
     }
   };
 
   return (
     <PageShell wide className="df2-page-query" title="Query Playground">
       <PageFrame className="df2-query-page">
-        <div className="df2-query-hero">
-          <h1 className="df2-page-title">Query Playground</h1>
-          <p className="df2-page-subtitle">Run safe, read-only SQL or MongoDB queries and export the results.</p>
-        </div>
-
         <div className="df2-query-form df2-card">
+          <div className="df2-card-head">
+            <div>
+              <h2 className="df2-card-title">Run a query</h2>
+              <p className="df2-card-sub">Safe, read-only SQL or MongoDB — export results when ready.</p>
+            </div>
+          </div>
+          <div className="df2-card-body">
           <div className="df2-form-row df2-query-meta">
             <div className="df2-field-flex">
               <ConnectorSelect
@@ -142,16 +145,24 @@ export function QueryPage({ connectors }: QueryPageProps) {
               onChange={setQuery}
               connectorType={selected?.type}
               placeholder={queryPlaceholder}
-              disabled={loading}
+              disabled={queryLoading || exportLoading}
               height="18rem"
             />
             <p className="df2-label-hint">SQL mode supports SELECT, CTEs (WITH), EXPLAIN, SHOW, and subqueries. MongoDB mode accepts a JSON filter or an aggregate pipeline array.</p>
           </div>
 
           <div className="df2-query-actions">
-            <button type="button" className="df2-btn df2-btn-primary" disabled={loading} onClick={() => void runQuery()}>
-              {loading ? <Spinner /> : <DtIcon name="play" size={14} />} Run query
-            </button>
+            <Button
+              variant="primary"
+              loading={queryLoading}
+              loadingLabel="Running…"
+              disabled={exportLoading}
+              onClick={() => void runQuery()}
+              leadingIcon={<DtIcon name="play" size={14} />}
+            >
+              Run query
+            </Button>
+          </div>
           </div>
         </div>
 
@@ -201,9 +212,17 @@ export function QueryPage({ connectors }: QueryPageProps) {
                     />
                   </>
                 )}
-                <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" disabled={loading} onClick={() => void runExport()}>
-                  <DtIcon name="download" size={14} /> {destConnectorId ? "Write to connector" : "Export file"}
-                </button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={exportLoading}
+                  loadingLabel="Exporting…"
+                  disabled={queryLoading}
+                  onClick={() => void runExport()}
+                  leadingIcon={<DtIcon name="download" size={14} />}
+                >
+                  {destConnectorId ? "Write to connector" : "Export file"}
+                </Button>
               </div>
             </div>
 

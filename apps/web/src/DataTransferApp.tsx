@@ -6,7 +6,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
-import { useToast } from "./components/Toast";
+import { ToastProvider, useToast } from "./components/Toast";
+import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
@@ -97,6 +98,19 @@ function AppShell({
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
   const searchRef = useRef<HTMLInputElement>(null);
+  /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
+  const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
+
+  useEffect(() => {
+    setMountedScreens((prev) => {
+      if (prev.has(screen)) return prev;
+      const next = new Set(prev);
+      next.add(screen);
+      return next;
+    });
+  }, [screen]);
+
+  const showScreen = (id: Screen) => (mountedScreens.has(id) ? (screen === id ? "is-active" : "is-kept") : "");
 
   usePageMeta(metaForScreen(screen));
 
@@ -369,21 +383,24 @@ function AppShell({
               onNavigate={setScreen}
             />
             {screen !== "pilot" && (
-              <button
-                type="button"
-                className={`df2-btn df2-btn-ghost ${copilotOpen ? "active" : ""}`}
+              <Button
+                variant="ghost"
+                className={copilotOpen ? "active" : ""}
                 onClick={() => setCopilotOpen((o) => !o)}
                 aria-label="Toggle Data Pilot"
+                leadingIcon={<DtIcon name="sparkle" size={16} />}
               >
-                <DtIcon name="sparkle" size={16} />
                 <span className="df2-topbar-btn-text">Pilot</span>
-              </button>
+              </Button>
             )}
             {screen !== "transfer" && (
-              <button type="button" className="df2-btn df2-btn-primary" onClick={() => setScreen("transfer")}>
-                <DtIcon name="plus" size={16} />
+              <Button
+                variant="primary"
+                onClick={() => setScreen("transfer")}
+                leadingIcon={<DtIcon name="plus" size={16} />}
+              >
                 <span className="df2-topbar-btn-text">New transfer</span>
-              </button>
+              </Button>
             )}
           </div>
         </header>
@@ -414,7 +431,8 @@ function AppShell({
           } ${bootLoading ? "is-booting" : ""} ${firstScreenPaint ? "is-first-screen" : ""}`}
         >
           <div className="df2-screen-panel">
-            {screen === "dashboard" && (
+            {mountedScreens.has("dashboard") && (
+                <div className={`df2-screen-keep ${showScreen("dashboard")}`} hidden={screen !== "dashboard"} aria-hidden={screen !== "dashboard"}>
                 <PageErrorBoundary label="Overview">
                   <DashboardPage
                     connectors={connectors}
@@ -426,13 +444,17 @@ function AppShell({
                     onOpenJobs={() => setScreen("jobs")}
                   />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "pilot" && (
+              {mountedScreens.has("pilot") && (
+                <div className={`df2-screen-keep ${showScreen("pilot")}`} hidden={screen !== "pilot"} aria-hidden={screen !== "pilot"}>
                 <PageErrorBoundary label="Data Pilot">
                   <PilotPage onNavigate={setScreen} />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "transfer" && (
+              {mountedScreens.has("transfer") && (
+                <div className={`df2-screen-keep ${showScreen("transfer")}`} hidden={screen !== "transfer"} aria-hidden={screen !== "transfer"}>
                 <PageErrorBoundary label="Transfer Studio">
                   <TransferPage
                     connectors={connectors}
@@ -444,13 +466,17 @@ function AppShell({
                     }}
                   />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "query" && (
+              {mountedScreens.has("query") && (
+                <div className={`df2-screen-keep ${showScreen("query")}`} hidden={screen !== "query"} aria-hidden={screen !== "query"}>
                 <PageErrorBoundary label="Query Playground">
                   <QueryPage connectors={connectors} />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "connectors" && (
+              {mountedScreens.has("connectors") && (
+                <div className={`df2-screen-keep ${showScreen("connectors")}`} hidden={screen !== "connectors"} aria-hidden={screen !== "connectors"}>
                 <PageErrorBoundary label="Connectors">
                   <ConnectorsPage
                     connectors={connectors}
@@ -466,8 +492,10 @@ function AppShell({
                     }
                   />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "schedules" && (
+              {mountedScreens.has("schedules") && (
+                <div className={`df2-screen-keep ${showScreen("schedules")}`} hidden={screen !== "schedules"} aria-hidden={screen !== "schedules"}>
                 <PageErrorBoundary label="Pipelines">
                   <SchedulesPage
                     connectors={connectors}
@@ -478,8 +506,10 @@ function AppShell({
                     }
                   />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "jobs" && (
+              {mountedScreens.has("jobs") && (
+                <div className={`df2-screen-keep ${showScreen("jobs")}`} hidden={screen !== "jobs"} aria-hidden={screen !== "jobs"}>
                 <PageErrorBoundary label="Job Theater">
                   <JobsPage
                     jobs={jobs}
@@ -488,11 +518,14 @@ function AppShell({
                     initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
                   />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "mcp" && (
+              {mountedScreens.has("mcp") && (
+                <div className={`df2-screen-keep ${showScreen("mcp")}`} hidden={screen !== "mcp"} aria-hidden={screen !== "mcp"}>
                 <PageErrorBoundary label="MCP Server">
                   <McpPage />
                 </PageErrorBoundary>
+                </div>
               )}
               {screen === "docs" && (
                 <PageErrorBoundary label="Docs">
@@ -504,10 +537,12 @@ function AppShell({
                   <BenchmarksPage />
                 </PageErrorBoundary>
               )}
-              {screen === "settings" && (
+              {mountedScreens.has("settings") && (
+                <div className={`df2-screen-keep ${showScreen("settings")}`} hidden={screen !== "settings"} aria-hidden={screen !== "settings"}>
                 <PageErrorBoundary label="Settings">
                   <SettingsPage />
                 </PageErrorBoundary>
+                </div>
               )}
           </div>
         </div>
@@ -566,6 +601,14 @@ function AppShell({
 }
 
 export function DataTransferApp() {
+  return (
+    <ToastProvider>
+      <DataTransferAppInner />
+    </ToastProvider>
+  );
+}
+
+function DataTransferAppInner() {
   const [stage, setStage] = useState<"landing" | "login" | "app">(() => readStoredUser() ? "app" : "landing");
   const [entryScreen, setEntryScreen] = useState<Screen>("dashboard");
   const [userEmail, setUserEmail] = useState(readStoredUser);

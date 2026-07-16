@@ -6011,7 +6011,7 @@ body {
   position: fixed;
   top: 16px;
   right: 16px;
-  z-index: 10000;
+  z-index: var(--df-z-toast, 1100);
   display: flex;
   flex-direction: column;
   gap: 10px;

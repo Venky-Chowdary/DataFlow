@@ -1,26 +1,25 @@
 /**
  * DataFlow design tokens — unified light enterprise theme
+ * Fonts loaded via @fontsource in main.tsx (no Google CSS import).
  */
 
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
-
 :root {
-  --dt-flow-start: #134e4a;
+  --dt-flow-start: #0f3d3a;
   --dt-flow-end: var(--df-teal-500);
   --dt-flow-particle: var(--df-brand);
-  --df-brand: #0f766e;
-  --df-brand-hover: #115e59;
+  --df-brand: #0d9488;
+  --df-brand-hover: #0f766e;
   --df-brand-muted: #f0fdfa;
-  --df-brand-ring: rgba(15, 118, 110, 0.24);
-  --df-accent: #0f766e;
+  --df-brand-ring: rgba(13, 148, 136, 0.28);
+  --df-accent: #0d9488;
   --df-accent-muted: #f0fdfa;
 
-  --df-navy-900: #0f172a;
-  --df-navy-800: #1e293b;
+  --df-navy-900: #0b1220;
+  --df-navy-800: #152033;
   --df-navy-700: #334155;
   --df-steel-500: #334155;
   --df-steel-400: #475569;
-  --df-teal-500: #0f766e;
+  --df-teal-500: #0d9488;
   --df-success: #059669;
   --df-success-bg: #ecfdf5;
   --df-warning: #d97706;
@@ -28,25 +27,33 @@
   --df-danger: #dc2626;
   --df-danger-bg: #fef2f2;
 
-  /* Surfaces */
-  --df-bg-canvas: #f6f7f8;
-  --df-bg-subtle: #eef2f1;
+  /* Surfaces — cool slate canvas, crisp white panels */
+  --df-bg-canvas: #f4f6f8;
+  --df-bg-subtle: #eef1f4;
   --df-surface: #ffffff;
   --df-surface-raised: #ffffff;
-  --df-border: #e5e7eb;
-  --df-border-strong: #d1d5db;
+  --df-border: #e6e9ee;
+  --df-border-strong: #d4d9e0;
 
-  --df-text-primary: #111827;
-  --df-text-secondary: #4b5563;
-  --df-text-tertiary: #9ca3af;
+  --df-text-primary: #0f172a;
+  --df-text-secondary: #475569;
+  --df-text-tertiary: #94a3b8;
   --df-text-muted: #64748b;
   --df-focus-ring: var(--df-brand-ring);
 
-  --df-font-sans: "Inter", system-ui, -apple-system, sans-serif;
-  --df-font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* Platform aliases used by enterprise-platform.css */
+  --df-surface-canvas: var(--df-bg-canvas);
+  --df-surface-panel: var(--df-surface);
+  --df-ink-primary: var(--df-text-primary);
+  --df-ink-secondary: var(--df-text-secondary);
+  --df-line: var(--df-border);
+  --df-page-gutter: 20px;
 
-  --df-header-height: 60px;
-  --df-sidebar-width: 260px;
+  --df-font-sans: "Plus Jakarta Sans", "IBM Plex Sans", Inter, system-ui, -apple-system, sans-serif;
+  --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+
+  --df-header-height: 56px;
+  --df-sidebar-width: 248px;
   --df-content-max: none;
   --df-rail-width: 360px;
   --dt-copilot-rail-width: 360px;
@@ -57,14 +64,18 @@
   --df-radius-xl: 16px;
   --df-radius-card: 12px;
   --df-radius-panel: 12px;
-  --df-radius-tile: 14px;
+  --df-radius-tile: 12px;
 
-  --df-card-pad: 20px;
-  --df-card-head-pad: 16px 20px;
-  --df-card-footer-pad: 16px 20px;
-  --df-grid-gap: 16px;
-  --df-grid-gap-lg: 20px;
-  --df-page-section-gap: 20px;
+  --df-btn-height: 34px;
+  --df-btn-height-sm: 30px;
+  --df-btn-height-lg: 40px;
+
+  --df-card-pad: 16px;
+  --df-card-head-pad: 12px 16px;
+  --df-card-footer-pad: 12px 16px;
+  --df-grid-gap: 14px;
+  --df-grid-gap-lg: 18px;
+  --df-page-section-gap: 16px;
   --df-rail-column: minmax(260px, 320px);
 
   --df-space-1: 4px;
@@ -155,6 +166,27 @@
   --dt-header-height: var(--df-header-height);
   --dt-transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
   --dt-transition-slow: 240ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Stacking — single scale (do not use raw 9999/10000 elsewhere) */
+  --df-z-base: 1;
+  --df-z-sticky: 20;
+  --df-z-topbar: 40;
+  --df-z-sidebar: 45;
+  --df-z-dropdown: 80;
+  --df-z-popover: 90;
+  --df-z-modal: 1000;
+  --df-z-toast: 1100;
+  --df-z-boot: 1200;
+}
+
+html,
+body,
+#root {
+  font-family: var(--df-font-sans);
+  background: var(--df-bg-canvas);
+  color: var(--df-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 @media (prefers-reduced-motion: reduce) {

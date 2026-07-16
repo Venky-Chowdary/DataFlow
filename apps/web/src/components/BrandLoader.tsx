@@ -51,9 +51,9 @@ export function BrandLoader({
         <circle cx="26" cy="10" r="2.5" fill="#A7F3D0" />
         <defs>
           <linearGradient id={gradId} x1="4" y1="4" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-            <stop stopColor="#134E4A" />
+            <stop stopColor="#0F3D3A" />
             <stop offset="0.55" stopColor="#0D9488" />
-            <stop offset="1" stopColor="#6366F1" />
+            <stop offset="1" stopColor="#14B8A6" />
           </linearGradient>
         </defs>
       </svg>

@@ -112,7 +112,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
 
       <header className="lp-login-header">
         <button type="button" className="lp-login-back" onClick={onBack}>
-          <DtIcon name="transfer" size={15} /> Back
+          <DtIcon name="chevron-left" size={15} /> Back
         </button>
       </header>
 
@@ -175,7 +175,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
             </label>
 
             <button type="submit" className="df2-btn df2-btn-primary df2-btn-lg df2-btn-block" disabled={checking}>
-              <DtIcon name="shield" size={16} /> {checking ? "Signing in…" : "Sign in"}
+              {checking ? "Signing in…" : "Sign in"}
             </button>
           </form>
 

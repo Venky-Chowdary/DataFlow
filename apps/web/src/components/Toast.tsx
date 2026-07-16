@@ -34,8 +34,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const toast = useCallback(
     ({ title, message, tone = "info" }: { title: string; message?: string; tone?: ToastTone }) => {
       const id = crypto.randomUUID();
-      setItems((prev) => [...prev.slice(-3), { id, title, message, tone }]);
-      window.setTimeout(() => dismiss(id), tone === "error" ? 7000 : 4200);
+      setItems((prev) => [...prev.slice(-4), { id, title, message, tone }]);
+      window.setTimeout(() => dismiss(id), tone === "error" ? 8000 : 4500);
     },
     [dismiss]
   );
@@ -45,9 +45,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="dt-toast-host" aria-live="polite" aria-relevant="additions">
+      <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false">
         {items.map((t) => (
-          <div key={t.id} className={`dt-toast dt-toast--${t.tone}`} role="status">
+          <div key={t.id} className={`dt-toast dt-toast--${t.tone}`} role={t.tone === "error" ? "alert" : "status"}>
             <span className="dt-toast-icon" aria-hidden>
               <DtIcon name={TONE_ICON[t.tone]} size={18} />
             </span>
@@ -55,7 +55,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <strong className="dt-toast-title">{t.title}</strong>
               {t.message && <span className="dt-toast-message">{t.message}</span>}
             </div>
-            <button type="button" className="dt-toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss">
+            <button type="button" className="dt-toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss notification">
               <DtIcon name="x" size={16} />
             </button>
             <span className={`dt-toast-timer dt-toast-timer--${t.tone}`} aria-hidden />
@@ -68,6 +68,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 export function useToast() {
   const ctx = useContext(ToastContext);
-  if (!ctx) throw new Error("useToast requires ToastProvider");
+  if (!ctx) {
+    // Avoid white-screening the app if provider is missing (HMR / entry mismatch).
+    if (import.meta.env.DEV) {
+      console.warn("useToast called without ToastProvider — toasts are no-ops until provider mounts.");
+    }
+    return {
+      toast: ({ title, message, tone }: { title: string; message?: string; tone?: ToastTone }) => {
+        console.warn("[toast]", tone ?? "info", title, message ?? "");
+      },
+      dismiss: (_id: string) => {},
+    };
+  }
   return ctx;
 }
