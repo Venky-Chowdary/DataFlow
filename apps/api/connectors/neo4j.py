@@ -11,7 +11,7 @@ from typing import Any
 
 import requests
 
-from connectors.saas_common import ReadBatch, base_url, humanize_http_error
+from connectors.saas_common import ReadBatch, humanize_http_error
 
 
 def _url(host: str, port: int, ssl: bool, database: str) -> str:
@@ -120,4 +120,3 @@ def read_object(
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=len(rows))
 
 
-from connectors.saas_common import write_not_supported as write_mapped_rows

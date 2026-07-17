@@ -133,7 +133,6 @@ def build_preflight_proof_bundle(
     # confidence_band) without blocking transfers that have already passed the
     # mapping gate. The average semantic score is reported for UX, not as a hard
     # gate on its own.
-    mode = (validation_mode or "strict").strip().lower()
     effective_threshold = max(0.55, confidence_threshold - 0.3)
     confidences = [float(m.get("confidence", 0)) for m in mappings if m.get("confidence") is not None]
     min_confidence = round(min(confidences) if confidences else 0.0, 3)

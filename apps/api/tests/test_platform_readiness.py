@@ -14,7 +14,9 @@ _SRC = _API_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from connectors.writer_common import transform_error_policy_for_validation_mode  # noqa: E402
+from connectors.writer_common import (
+    transform_error_policy_for_validation_mode,  # noqa: E402
+)
 from transfer.readiness import platform_readiness_report  # noqa: E402
 
 

@@ -12,7 +12,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from src.ai.llm.provider import DataTransferAnthropicProvider, DataTransferOpenAIProvider  # noqa: E402
+from src.ai.llm.provider import (  # noqa: E402
+    DataTransferAnthropicProvider,
+    DataTransferOpenAIProvider,
+)
 
 
 def test_openai_provider_survives_bad_integrations_store(monkeypatch: pytest.MonkeyPatch):

@@ -4,16 +4,18 @@ DataTransfer.space — API Server
 Enterprise-grade data transfer platform with AI-powered semantic analysis.
 """
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
 import time
 import uuid
-import asyncio
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from services.health_service import aggregate_health
 from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
@@ -23,26 +25,25 @@ from services.platform_config import (
     is_railway,
     vector_store_dir,
 )
-from services.health_service import aggregate_health
 
-from .routers.ai_router import router as ai_router
-from .routers.connectors_router import router as connectors_router
-from .routers.preflight_router import router as preflight_router
-from .routers.copilot_router import router as copilot_router
-from .routers.training_agent_router import router as training_agent_router
-from .routers.transfer_router import router as transfer_router
-from .routers.mcp_router import router as mcp_router
-from .routers.automation_router import router as automation_router
-from .routers.catalog_router import router as catalog_router
-from .routers.schedules_router import router as schedules_router
-from .routers.saved_connectors_router import router as saved_connectors_router
-from .routers.auth_router import router as auth_router
-from .routers.audit_router import router as audit_router
-from .routers.workspace_router import router as workspace_router
-from .routers.contracts_router import router as contracts_router
-from .routers.query_router import router as query_router
 from .middleware.auth_middleware import AuthMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
+from .routers.ai_router import router as ai_router
+from .routers.audit_router import router as audit_router
+from .routers.auth_router import router as auth_router
+from .routers.automation_router import router as automation_router
+from .routers.catalog_router import router as catalog_router
+from .routers.connectors_router import router as connectors_router
+from .routers.contracts_router import router as contracts_router
+from .routers.copilot_router import router as copilot_router
+from .routers.mcp_router import router as mcp_router
+from .routers.preflight_router import router as preflight_router
+from .routers.query_router import router as query_router
+from .routers.saved_connectors_router import router as saved_connectors_router
+from .routers.schedules_router import router as schedules_router
+from .routers.training_agent_router import router as training_agent_router
+from .routers.transfer_router import router as transfer_router
+from .routers.workspace_router import router as workspace_router
 
 logger = logging.getLogger("dataflow.api")
 
@@ -78,9 +79,9 @@ async def lifespan(app: FastAPI):
         "off", "0", "false",
     )
     try:
-        from .ai.rag.pipeline import get_rag_pipeline
         from .ai.knowledge.semantic_patterns import get_pattern_count
         from .ai.knowledge.synonyms import get_synonym_count
+        from .ai.rag.pipeline import get_rag_pipeline
         from .ai.training.training_scheduler import run_training_loop
 
         pipeline = get_rag_pipeline()
@@ -118,9 +119,9 @@ async def lifespan(app: FastAPI):
 
         start_transfer_scheduler()
 
+        from .services.mongodb_service import get_mongodb_service
         from .transfer.background import run_transfer_async
         from .transfer.models import transfer_request_from_dict
-        from .services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
         resumed = 0

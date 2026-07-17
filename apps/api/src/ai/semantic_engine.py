@@ -11,11 +11,10 @@ This is the core AI engine that differentiates us from competitors:
 """
 
 import re
-import math
-from difflib import SequenceMatcher
-from typing import Optional
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from enum import Enum
+from typing import Optional
 
 
 class DataCategory(Enum):
@@ -106,7 +105,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         synonyms=["productid", "prodid", "itemid", "product_code", "item_code"],
         base_confidence=0.92,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # PERSONAL INFORMATION (PII)
     # ─────────────────────────────────────────────────────────────────────────
@@ -175,7 +174,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         transformations=["age_bucket"],
         base_confidence=0.85,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # CONTACT INFORMATION (PII)
     # ─────────────────────────────────────────────────────────────────────────
@@ -229,7 +228,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         transformations=["mask", "encrypt", "tokenize"],
         base_confidence=0.95,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # GEOGRAPHIC
     # ─────────────────────────────────────────────────────────────────────────
@@ -297,7 +296,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         sample_patterns=[r"^-?\d{1,3}\.\d+$"],
         base_confidence=0.90,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # FINANCIAL
     # ─────────────────────────────────────────────────────────────────────────
@@ -372,7 +371,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         synonyms=["curr_code", "money_type"],
         base_confidence=0.90,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # TEMPORAL
     # ─────────────────────────────────────────────────────────────────────────
@@ -421,7 +420,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         sample_patterns=[r"^(0?[1-9]|1[0-2])$", r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"],
         base_confidence=0.85,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # HEALTH (HIPAA)
     # ─────────────────────────────────────────────────────────────────────────
@@ -453,7 +452,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         transformations=["generalize"],
         base_confidence=0.90,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # STATUS & ENUMS
     # ─────────────────────────────────────────────────────────────────────────
@@ -481,7 +480,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         sample_patterns=[r"^(low|medium|high|critical|urgent)$", r"^[1-5]$"],
         base_confidence=0.88,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # NUMERIC
     # ─────────────────────────────────────────────────────────────────────────
@@ -512,7 +511,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         sample_patterns=[r"^\d{1,3}\.?\d{0,2}$"],
         base_confidence=0.85,
     ),
-    
+
     # ─────────────────────────────────────────────────────────────────────────
     # TEXT
     # ─────────────────────────────────────────────────────────────────────────
@@ -597,20 +596,20 @@ class SchemaAnalysis:
 class SemanticAnalyzer:
     """
     AI-powered semantic analysis engine.
-    
+
     This is the core intelligence that differentiates DataTransfer.space.
     It uses multiple signals to understand data:
-    
+
     1. Column name analysis (NLP-based)
     2. Sample data pattern matching
     3. Statistical analysis
     4. Cross-column relationship detection
     """
-    
+
     def __init__(self):
         self.semantic_types = SEMANTIC_TYPES
         self._build_pattern_index()
-    
+
     def _build_pattern_index(self):
         """Build optimized pattern lookup structures"""
         self.pattern_index: dict[str, list[SemanticType]] = {}
@@ -625,27 +624,27 @@ class SemanticAnalyzer:
                 if key not in self.pattern_index:
                     self.pattern_index[key] = []
                 self.pattern_index[key].append(st)
-    
+
     def _normalize_column_name(self, name: str) -> str:
         """Normalize column name for matching"""
         name = name.lower().strip()
         name = re.sub(r'[^a-z0-9]', '_', name)
         name = re.sub(r'_+', '_', name)
         return name.strip('_')
-    
+
     def _tokenize_column_name(self, name: str) -> list[str]:
         """Split column name into semantic tokens"""
         normalized = self._normalize_column_name(name)
         tokens = re.split(r'_', normalized)
-        
+
         camel_case_splits = []
         for token in tokens:
             camel_case_splits.extend(
                 re.findall(r'[a-z]+|[A-Z][a-z]*|\d+', token)
             )
-        
+
         return [t.lower() for t in camel_case_splits if t]
-    
+
     def _match_column_name(self, column_name: str) -> tuple[Optional[SemanticType], float]:
         """
         Match column name against semantic patterns.
@@ -653,16 +652,16 @@ class SemanticAnalyzer:
         """
         normalized = self._normalize_column_name(column_name)
         tokens = self._tokenize_column_name(column_name)
-        
+
         best_match: Optional[SemanticType] = None
         best_score = 0.0
-        
+
         if normalized in self.pattern_index:
             matches = self.pattern_index[normalized]
             if matches:
                 best_match = matches[0]
                 best_score = matches[0].base_confidence * 1.1
-        
+
         for st in self.semantic_types:
             for pattern in st.patterns:
                 if pattern.lower() == normalized:
@@ -671,28 +670,28 @@ class SemanticAnalyzer:
                         best_match = st
                         best_score = score
                     break
-                
+
                 if pattern.lower() in normalized:
                     score = st.base_confidence * 0.85
                     if score > best_score:
                         best_match = st
                         best_score = score
-                
+
                 if pattern.lower() in tokens:
                     score = st.base_confidence * 0.75
                     if score > best_score:
                         best_match = st
                         best_score = score
-            
+
             for regex in st.regex_patterns:
                 if re.search(regex, normalized, re.IGNORECASE):
                     score = st.base_confidence * 0.9
                     if score > best_score:
                         best_match = st
                         best_score = score
-        
+
         return best_match, min(best_score, 0.99)
-    
+
     def _analyze_sample_data(self, values: list[str], semantic_type: Optional[SemanticType]) -> float:
         """
         Analyze sample data to validate/adjust semantic type confidence.
@@ -700,11 +699,11 @@ class SemanticAnalyzer:
         """
         if not values:
             return 0.8
-        
+
         non_empty = [v for v in values if v and str(v).strip()]
         if not non_empty:
             return 0.5
-        
+
         if semantic_type and semantic_type.sample_patterns:
             match_count = 0
             for value in non_empty[:100]:
@@ -712,7 +711,7 @@ class SemanticAnalyzer:
                     if re.match(pattern, str(value).strip(), re.IGNORECASE):
                         match_count += 1
                         break
-            
+
             match_rate = match_count / min(len(non_empty), 100)
             if match_rate > 0.8:
                 return 1.15
@@ -720,23 +719,23 @@ class SemanticAnalyzer:
                 return 1.0
             elif match_rate < 0.2:
                 return 0.6
-        
+
         return 0.9
-    
+
     def _infer_data_type(self, values: list[str]) -> str:
         """Infer the basic data type from sample values"""
         if not values:
             return "unknown"
-        
+
         non_empty = [str(v).strip() for v in values if v and str(v).strip()]
         if not non_empty:
             return "null"
-        
+
         int_count = 0
         float_count = 0
         bool_count = 0
         date_count = 0
-        
+
         for val in non_empty[:100]:
             if re.match(r'^-?\d+$', val):
                 int_count += 1
@@ -746,7 +745,7 @@ class SemanticAnalyzer:
                 bool_count += 1
             elif re.match(r'^\d{4}-\d{2}-\d{2}', val) or re.match(r'^\d{2}/\d{2}/\d{4}', val):
                 date_count += 1
-        
+
         sample_size = min(len(non_empty), 100)
         if int_count / sample_size > 0.8:
             return "integer"
@@ -756,18 +755,18 @@ class SemanticAnalyzer:
             return "boolean"
         if date_count / sample_size > 0.5:
             return "datetime"
-        
+
         return "string"
-    
+
     def _calculate_statistics(self, values: list[str]) -> dict:
         """Calculate statistical properties of the data"""
         if not values:
             return {}
-        
+
         non_empty = [v for v in values if v and str(v).strip()]
         total = len(values)
         non_empty_count = len(non_empty)
-        
+
         stats = {
             "total_count": total,
             "non_empty_count": non_empty_count,
@@ -776,39 +775,39 @@ class SemanticAnalyzer:
             "unique_count": len(set(non_empty)),
             "unique_percentage": (len(set(non_empty)) / non_empty_count * 100) if non_empty_count > 0 else 0,
         }
-        
+
         str_lengths = [len(str(v)) for v in non_empty]
         if str_lengths:
             stats["min_length"] = min(str_lengths)
             stats["max_length"] = max(str_lengths)
             stats["avg_length"] = sum(str_lengths) / len(str_lengths)
-        
+
         return stats
-    
+
     def analyze_column(self, column_name: str, sample_values: list[str] = None) -> ColumnAnalysis:
         """
         Perform complete analysis of a single column.
-        
+
         This is the main entry point for column-level analysis.
         It combines name analysis, sample data analysis, and statistics.
         """
         if sample_values is None:
             sample_values = []
-        
+
         semantic_type, name_confidence = self._match_column_name(column_name)
-        
+
         data_confidence = self._analyze_sample_data(sample_values, semantic_type)
         final_confidence = name_confidence * data_confidence
-        
+
         stats = self._calculate_statistics(sample_values)
         inferred_type = self._infer_data_type(sample_values)
-        
+
         warnings = []
         if stats.get("null_percentage", 0) > 50:
             warnings.append(f"High null rate: {stats['null_percentage']:.1f}%")
         if stats.get("unique_percentage", 0) < 1 and inferred_type not in ("boolean",):
             warnings.append("Very low cardinality - consider as enum/category")
-        
+
         return ColumnAnalysis(
             column_name=column_name,
             inferred_type=inferred_type,
@@ -824,36 +823,36 @@ class SemanticAnalyzer:
             statistics=stats,
             warnings=warnings,
         )
-    
+
     def analyze_schema(self, columns: dict[str, list[str]]) -> SchemaAnalysis:
         """
         Analyze a complete schema (multiple columns).
-        
+
         Args:
             columns: Dict mapping column names to sample values
-            
+
         Returns:
             SchemaAnalysis with complete analysis of all columns
         """
         analyses = []
         pii_columns = []
         compliance_map: dict[ComplianceFramework, list[str]] = {}
-        
+
         for col_name, values in columns.items():
             analysis = self.analyze_column(col_name, values)
             analyses.append(analysis)
-            
+
             if analysis.is_pii:
                 pii_columns.append(col_name)
                 for compliance in analysis.compliance:
                     if compliance not in compliance_map:
                         compliance_map[compliance] = []
                     compliance_map[compliance].append(col_name)
-        
+
         avg_confidence = sum(a.confidence for a in analyses) / len(analyses) if analyses else 0
         avg_null_rate = sum(a.null_percentage for a in analyses) / len(analyses) if analyses else 0
         quality_score = (avg_confidence * 0.6 + (100 - avg_null_rate) / 100 * 0.4) * 100
-        
+
         recommendations = []
         if pii_columns:
             recommendations.append(f"PII detected in {len(pii_columns)} columns - consider encryption or masking")
@@ -862,7 +861,7 @@ class SemanticAnalyzer:
         low_conf = [a.column_name for a in analyses if a.confidence < 0.7]
         if low_conf:
             recommendations.append(f"Low confidence mapping for: {', '.join(low_conf[:3])} - manual review recommended")
-        
+
         return SchemaAnalysis(
             columns=analyses,
             pii_columns=pii_columns,
@@ -879,7 +878,7 @@ class SemanticAnalyzer:
 class SmartMapper:
     """
     Intelligent schema mapping between source and destination.
-    
+
     Uses multiple strategies:
     1. Exact name match
     2. Normalized name match
@@ -887,11 +886,11 @@ class SmartMapper:
     4. Token overlap scoring
     5. Synonym matching
     """
-    
+
     def __init__(self, analyzer: SemanticAnalyzer):
         self.analyzer = analyzer
         self.synonym_groups = self._build_synonym_groups()
-    
+
     def _build_synonym_groups(self) -> list[set[str]]:
         """Build groups of synonymous terms"""
         groups = []
@@ -902,38 +901,38 @@ class SmartMapper:
             group.update(s.lower() for s in st.synonyms)
             groups.append(group)
         return groups
-    
+
     def _normalize(self, name: str) -> str:
         """Normalize column name"""
         name = name.lower()
         name = re.sub(r'[^a-z0-9]', '', name)
         return name
-    
+
     def _get_tokens(self, name: str) -> set[str]:
         """Get semantic tokens from column name"""
         normalized = re.sub(r'[^a-z0-9]', '_', name.lower())
         tokens = set(re.split(r'_+', normalized))
         tokens.discard('')
         return tokens
-    
+
     def _token_similarity(self, name1: str, name2: str) -> float:
         """Calculate token-based similarity score"""
         tokens1 = self._get_tokens(name1)
         tokens2 = self._get_tokens(name2)
-        
+
         if not tokens1 or not tokens2:
             return 0.0
-        
+
         intersection = tokens1 & tokens2
         union = tokens1 | tokens2
-        
+
         return len(intersection) / len(union)
-    
+
     def _synonym_match(self, name1: str, name2: str) -> bool:
         """Check if names are synonyms"""
         norm1 = self._normalize(name1)
         norm2 = self._normalize(name2)
-        
+
         for group in self.synonym_groups:
             if norm1 in group and norm2 in group:
                 return True
@@ -1119,7 +1118,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("DataTransfer.space — AI Semantic Engine Demo")
     print("=" * 60)
-    
+
     sample_schema = {
         "cust_id": ["C001", "C002", "C003"],
         "customer_name": ["John Smith", "Jane Doe", "Bob Wilson"],
@@ -1130,12 +1129,12 @@ if __name__ == "__main__":
         "order_amt": ["150.00", "89.99", "234.50"],
         "created_at": ["2024-01-15T10:30:00Z", "2024-01-16T14:22:00Z", "2024-01-17T09:15:00Z"],
     }
-    
+
     print("\n📊 Schema Analysis Results:")
     print("-" * 40)
-    
+
     analysis = analyze_schema(sample_schema)
-    
+
     for col in analysis.columns:
         pii_badge = "🔴 PII" if col.is_pii else "✅ OK"
         print(f"\n  {col.column_name}")
@@ -1144,29 +1143,29 @@ if __name__ == "__main__":
         print(f"    Status: {pii_badge}")
         if col.compliance:
             print(f"    Compliance: {', '.join(c.value.upper() for c in col.compliance)}")
-    
+
     print(f"\n📈 Quality Score: {analysis.quality_score:.1f}%")
     print(f"🔐 PII Columns: {', '.join(analysis.pii_columns)}")
-    
+
     if analysis.recommendations:
         print("\n💡 Recommendations:")
         for rec in analysis.recommendations:
             print(f"    • {rec}")
-    
+
     print("\n" + "=" * 60)
     print("🔄 Smart Mapping Demo")
     print("-" * 40)
-    
+
     source_cols = ["customer_id", "cust_name", "email", "mobile_phone", "amt"]
     target_cols = ["id", "full_name", "email_address", "phone_number", "amount"]
-    
+
     mappings = generate_mappings(source_cols, target_cols)
-    
+
     for m in mappings:
         status = "✅" if m.confidence > 0.7 else "⚠️" if m.confidence > 0.5 else "❌"
         print(f"  {status} {m.source_column} → {m.target_column}")
         print(f"      Confidence: {m.confidence:.1%} | Reason: {m.reason}")
         if m.transformation_needed:
             print(f"      Transform: {m.suggested_transformation}")
-    
+
     print("\n" + "=" * 60)

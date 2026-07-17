@@ -19,7 +19,6 @@ def test_postgresql(
 ) -> ConnectResult:
     try:
         import psycopg2
-        from psycopg2 import sql
     except ImportError:
         return _stub_fallback(host, database, username, connection_string)
 

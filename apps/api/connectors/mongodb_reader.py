@@ -13,19 +13,7 @@ if str(_api_root) not in sys.path:
 
 from services.value_serializer import cell_to_string
 
-
-# Reuse MongoClient instances per connection string. PyMongo clients manage their
-# own connection pools and are thread-safe, so creating one per batch is a major
-# bottleneck on large streaming transfers.
-_mongo_client_cache: dict[str, Any] = {}
-
-
-def _mongo_client(conn_str: str) -> Any:
-    from pymongo import MongoClient
-
-    if conn_str not in _mongo_client_cache:
-        _mongo_client_cache[conn_str] = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
-    return _mongo_client_cache[conn_str]
+from .mongodb_common import _mongo_client
 
 
 @dataclass
@@ -39,9 +27,10 @@ class ReadBatch:
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     """Convert a string cursor value into a BSON-native type for MongoDB queries."""
     from datetime import datetime
-    from decimal import Decimal, InvalidOperation
+    from decimal import InvalidOperation
 
     from bson.decimal128 import Decimal128
+
     from services.cdc_engine import WatermarkType, infer_watermark_type
 
     if not value:

@@ -27,7 +27,6 @@ from test_execute_tracked_universal_matrix import (  # noqa: E402
     _endpoint_reachable,
 )
 
-
 HEALTHCARE_COLUMNS = [
     "patient_id",
     "dob",

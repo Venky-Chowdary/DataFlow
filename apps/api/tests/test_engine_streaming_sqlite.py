@@ -16,9 +16,9 @@ _SRC = _API_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from services.checkpoint_service import Checkpoint  # noqa: E402
-from services import sync_cursor as sync_cursor_mod  # noqa: E402
 import src.transfer.engine as engine_mod  # noqa: E402
+from services import sync_cursor as sync_cursor_mod  # noqa: E402
+from services.checkpoint_service import Checkpoint  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 

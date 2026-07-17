@@ -58,7 +58,10 @@ def _check_coercion_safety(
     dest_kind: str = "",
     schema_policy: str = "manual_review",
 ) -> dict[str, Any]:
-    from services.type_coercion_validator import coerce_blocks_transfer, validate_mapping_coercions
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
 
     issues = validate_mapping_coercions(
         mappings,

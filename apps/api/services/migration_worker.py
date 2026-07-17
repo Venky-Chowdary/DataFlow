@@ -9,7 +9,12 @@ from connectors.postgresql_reader import read_table_batch
 from connectors.writer_common import CHUNK_SIZE, row_checksum
 from services.jobs import job_store
 from services.reconciliation import reconcile, verify_target
-from services.workflow import WorkflowPhase, run_in_background, set_phase, simulate_chunk_delay
+from services.workflow import (
+    WorkflowPhase,
+    run_in_background,
+    set_phase,
+    simulate_chunk_delay,
+)
 
 
 def _conn(d: dict[str, Any]) -> dict[str, Any]:

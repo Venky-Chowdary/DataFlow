@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -18,21 +19,15 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
+)
 from services.type_system import ddl_type
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "psycopg2"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def pg_type(inferred: str) -> str:
@@ -96,10 +91,7 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    try:
-        import psycopg2
-        from psycopg2 import sql
-    except ImportError:
+    if importlib.util.find_spec("psycopg2") is None:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 
@@ -118,6 +110,8 @@ def write_mapped_rows(
             ok=True, rows_written=rows, table_name=table_name, target_schema=schema or "public",
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
+
+    from psycopg2 import sql
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:

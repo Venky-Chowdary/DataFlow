@@ -37,9 +37,9 @@ class _MemoryCheckpointService:
 
 
 def _make_batcher(job_id: str, write_fn, read_next_fn, cp=None, max_attempts: int = 3):
-    from services.resilience import BatchResult
-    from services.error_handling import RetryBudget
     from services.checkpoint_service import Checkpoint
+    from services.error_handling import RetryBudget
+    from services.resilience import BatchResult
 
     if cp is None:
         cp = _MemoryCheckpointService()

@@ -9,7 +9,7 @@ from connectors.postgresql_writer import sanitize_identifier, write_mapped_rows
 from services.csv_profiler import parse_csv
 from services.file_parser import get_file
 from services.jobs import job_store
-from services.reconciliation import checksum_rows, reconcile, verify_postgres_table
+from services.reconciliation import reconcile, verify_postgres_table
 
 
 def _table_name_from_file(filename: str, file_id: str) -> str:

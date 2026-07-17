@@ -590,8 +590,8 @@ def _seed_demo_jobs(store: MemoryJobStore) -> None:
 
 
 def create_job_store() -> MemoryJobStore | PostgresJobStore | JsonFileJobStore:
-    from services.config import settings, get_settings
     from services import db
+    from services.config import get_settings, settings
     from services.platform_config import data_dir
 
     backend = settings.job_store_backend.lower()

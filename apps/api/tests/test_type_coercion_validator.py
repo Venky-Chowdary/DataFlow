@@ -1,6 +1,9 @@
 """Type coercion validator tests."""
 
-from services.type_coercion_validator import coerce_blocks_transfer, validate_mapping_coercions
+from services.type_coercion_validator import (
+    coerce_blocks_transfer,
+    validate_mapping_coercions,
+)
 
 
 def test_no_issue_for_same_logical_type():

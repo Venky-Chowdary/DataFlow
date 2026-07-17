@@ -21,6 +21,7 @@ def test_upload_registry_persists_across_reload(tmp_path, monkeypatch):
     monkeypatch.setattr("services.platform_config.upload_dir", lambda: uploads)
 
     import importlib
+
     import services.file_parser as fp
 
     importlib.reload(fp)
@@ -37,8 +38,8 @@ def test_upload_registry_persists_across_reload(tmp_path, monkeypatch):
 
 
 def test_auth_middleware_sets_user_email():
-    from src.services.auth_service import create_token
     from src.middleware.auth_middleware import AuthMiddleware
+    from src.services.auth_service import create_token
 
     token, _ = create_token("test@gmail.com")
     assert token

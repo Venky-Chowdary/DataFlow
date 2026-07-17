@@ -278,8 +278,8 @@ def test_gcs_to_snowflake():
     except OSError as exc:
         pytest.skip(f"Emulator not reachable: {exc}")
 
-    from google.auth.credentials import AnonymousCredentials
     from google.api_core.client_options import ClientOptions
+    from google.auth.credentials import AnonymousCredentials
     from google.cloud import storage
 
     bucket_name = "gcs_to_sf_" + uuid.uuid4().hex[:8]
@@ -373,8 +373,9 @@ def test_redis_to_snowflake():
     except OSError as exc:
         pytest.skip(f"Emulator not reachable: {exc}")
 
-    import redis
     import json
+
+    import redis
 
     r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
     prefix = "redis_to_sf_" + uuid.uuid4().hex[:8]

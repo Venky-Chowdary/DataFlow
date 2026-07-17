@@ -12,7 +12,6 @@ from connectors.saas_common import (
     object_name,
     request,
     token,
-    write_not_supported,
 )
 
 DEFAULT_HOST = "api.stripe.com"

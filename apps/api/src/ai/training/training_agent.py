@@ -6,17 +6,17 @@ Feeds schemas, synthesizes conversations, updates RAG knowledge base.
 """
 
 from __future__ import annotations
+
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-from .universal_data_feeder import UniversalDataFeeder
+from ..knowledge.copilot_knowledge import get_copilot_documents
 from .conversation_synthesis import ConversationSynthesizer
 from .data_synthesis import DataTransferDataSynthesizer
 from .fine_tuning import DataTransferFineTuningPipeline
-from ..knowledge.copilot_knowledge import get_copilot_documents
-
+from .universal_data_feeder import UniversalDataFeeder
 
 CHECKPOINT_FILE = "training_checkpoint.json"
 BATCH_SIZE = 200

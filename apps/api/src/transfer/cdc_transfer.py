@@ -21,9 +21,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from connectors.table_manager import delete_by_primary_keys
-from services.cdc_engine import ChangeBatch, WatermarkType, advance_watermark, compare_watermarks, infer_watermark_type, max_watermark
+from services.cdc_engine import (
+    ChangeBatch,
+    WatermarkType,
+    advance_watermark,
+    infer_watermark_type,
+    max_watermark,
+)
 from services.error_handling import RetryBudget, with_retry
-from services.sync_cursor import build_cursor_key, get_watermark, map_source_to_target, resolve_sync_contract, set_watermark
+from services.sync_cursor import (
+    build_cursor_key,
+    get_watermark,
+    map_source_to_target,
+    resolve_sync_contract,
+    set_watermark,
+)
 
 try:
     from .adapters import resolve_connector_config, resolve_dest_table

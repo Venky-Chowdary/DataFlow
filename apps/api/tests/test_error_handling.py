@@ -12,7 +12,11 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.error_handling import RetryBudget, classify_error, with_retry  # noqa: E402
+from services.error_handling import (  # noqa: E402
+    RetryBudget,
+    classify_error,
+    with_retry,
+)
 
 
 def test_classify_operational_error_as_retriable():

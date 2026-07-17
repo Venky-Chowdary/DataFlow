@@ -41,8 +41,8 @@ def test_quarantine_details_in_write_result():
 
 def test_job_quarantine_endpoint():
     from services import connector_store
-    from src.transfer.models import EndpointConfig, TransferRequest
     from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
 
     # Create a tiny CSV that fails integer coercion for one row.
     csv = b"id,age\n1,30\n2,not-a-number\n"

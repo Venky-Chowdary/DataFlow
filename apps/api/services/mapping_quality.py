@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from typing import Any
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")

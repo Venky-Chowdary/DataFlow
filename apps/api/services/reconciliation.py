@@ -11,9 +11,12 @@ import re
 import struct
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import date as _date, datetime as _datetime, time as _time, timezone
+from datetime import date as _date
+from datetime import datetime as _datetime
+from datetime import time as _time
+from datetime import timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
@@ -24,7 +27,12 @@ SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
 
-from services.transform_engine import _DATE_LIKE_RE, _parse_date, _parse_datetime, apply_transform
+from services.transform_engine import (
+    _DATE_LIKE_RE,
+    _parse_date,
+    _parse_datetime,
+    apply_transform,
+)
 
 
 @dataclass
@@ -663,6 +671,12 @@ def verify_sqlite_table(
         checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
         conn.close()
         return int(count), checksum
+    except sqlite3.OperationalError as exc:
+        # Missing table means the target is empty, not that verification is
+        # unavailable. Return 0 so reconciliation can surface the mismatch.
+        if "no such table" in str(exc).lower():
+            return 0, ""
+        return -1, ""
     except Exception:
         return -1, ""
 
@@ -711,6 +725,7 @@ def verify_mongodb_collection(
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
         from pymongo import MongoClient
+
         from connectors.mongodb_common import normalize_mongodb_connection_string
 
         conn_str = normalize_mongodb_connection_string(
@@ -1187,7 +1202,6 @@ def read_target_sample(
     col_sql = ", ".join(f'"{c}"' for c in cols) if cols != ["*"] else "*"
     try:
         if db_type == "postgresql":
-            import psycopg2
             from connectors.postgresql_conn import get_connection
 
             conn = get_connection(

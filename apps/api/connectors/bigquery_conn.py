@@ -29,8 +29,8 @@ def get_client(
     port: int = 0,
     connection_string: str = "",
 ) -> Any:
-    from google.cloud import bigquery
     from google.api_core.client_options import ClientOptions
+    from google.cloud import bigquery
 
     creds_ref = (service_account or connection_string or credentials_path or "").strip()
     is_local, endpoint_url = _is_local_endpoint(host, creds_ref)

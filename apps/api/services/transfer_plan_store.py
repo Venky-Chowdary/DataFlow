@@ -6,7 +6,6 @@ import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from services.platform_config import data_dir

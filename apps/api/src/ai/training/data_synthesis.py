@@ -5,14 +5,14 @@ Generate training data from known patterns and industry schemas.
 """
 
 from __future__ import annotations
+
 import json
 import random
 import uuid
 from dataclasses import dataclass, field
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
-from ..knowledge.synonyms import SYNONYM_DICTIONARY, CANONICAL_FORMS
-from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
+from ..knowledge.synonyms import SYNONYM_DICTIONARY
 
 
 @dataclass

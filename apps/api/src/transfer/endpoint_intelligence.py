@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from .adapters import _introspect_table_schema, mongodb_connection_string, parse_file_content, read_source_database, resolve_connector_config
+from .adapters import (
+    _introspect_table_schema,
+    mongodb_connection_string,
+    parse_file_content,
+    resolve_connector_config,
+)
 from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
@@ -77,6 +82,7 @@ def introspect_endpoint(
     if fmt == "mongodb":
         try:
             from pymongo import MongoClient
+
             from .connector_registry import humanize_connection_error, run_probe
 
             ok, msg = run_probe(fmt, cfg)
@@ -339,7 +345,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
             return
 
         if fmt == "dynamodb":
-            from connectors.dynamodb_reader import describe_table_schema, estimate_item_count
+            from connectors.dynamodb_reader import (
+                describe_table_schema,
+                estimate_item_count,
+            )
 
             table = endpoint.database or endpoint.table
             if table:

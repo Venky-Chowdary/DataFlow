@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional
 
 from services.team_store import can_write_workspace
 
@@ -106,8 +115,8 @@ class MapColumnsRequest(BaseModel):
 @router.get("/capabilities")
 async def transfer_capabilities():
     """All live source → destination combinations + honest platform manifest."""
-    from ..transfer.registry import get_capabilities
     from ..transfer.connector_capabilities import manifest_summary
+    from ..transfer.registry import get_capabilities
 
     caps = get_capabilities()
     caps["platform"] = manifest_summary()
@@ -125,8 +134,8 @@ async def transfer_capabilities():
 @router.get("/platform")
 async def platform_status():
     """Honest readiness summary for UI and marketing."""
-    from ..transfer.connector_capabilities import manifest_summary
     from ..services.catalog_service import catalog_summary
+    from ..transfer.connector_capabilities import manifest_summary
 
     cat = catalog_summary()
     manifest = manifest_summary()
@@ -205,10 +214,10 @@ async def map_columns_route(body: MapColumnsRequest):
     Map source columns to destination columns using semantic engine.
     Uses real destination schema when target_columns are provided.
     """
-    from ..services.preflight_service import confidence_threshold_for_mode
-
     import sys
     from pathlib import Path
+
+    from ..services.preflight_service import confidence_threshold_for_mode
     _api_root = Path(__file__).resolve().parents[2]
     if str(_api_root) not in sys.path:
         sys.path.insert(0, str(_api_root))
@@ -324,8 +333,8 @@ async def list_transfer_plans(limit: int = 50):
 
 @router.post("/plans")
 async def create_transfer_plan(body: CreatePlanRequest):
-    from services.transfer_plan_store import create_plan
     from services.audit_log import append_audit_event
+    from services.transfer_plan_store import create_plan
 
     plan = create_plan(body.model_dump())
     append_audit_event(
@@ -425,9 +434,9 @@ async def analyze_file_transfer(
     dest_collection: str = Form(""),
 ):
     """Analyze uploaded file against chosen destination — returns DDL plan."""
+    from ..transfer.adapters import parse_file_route_sample
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
-    from ..transfer.adapters import parse_file_route_sample
 
     content = await file.read()
     from ..services.file_parser import FileParser
@@ -509,9 +518,9 @@ async def run_universal_transfer(
     Execute universal transfer: file/db → db/file/warehouse.
     Auto-creates tables, collections, and typed schemas.
     """
+    from ..transfer.background import run_transfer_async
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
-    from ..transfer.background import run_transfer_async
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
 

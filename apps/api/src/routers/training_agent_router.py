@@ -4,7 +4,7 @@ DataTransfer.space — Dedicated Training Agent API
 Separate from Copilot chat — manages continuous model training on universal data.
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/training-agent", tags=["Training Agent"])

@@ -12,9 +12,11 @@ def analyze_route(
     dest_format: str,
 ) -> dict[str, Any]:
     """Score and describe a transfer route with conversion and driver hints."""
-    from src.transfer.registry import validate_transfer, get_capabilities as registry_caps
-    from src.transfer.connector_capabilities import get_capabilities as driver_caps, manifest_summary
     from services.format_converter import can_convert, conversion_matrix
+    from src.transfer.connector_capabilities import get_capabilities as driver_caps
+    from src.transfer.connector_capabilities import manifest_summary
+    from src.transfer.registry import get_capabilities as registry_caps
+    from src.transfer.registry import validate_transfer
 
     src_fmt = (source_format or "csv").lower()
     dst_fmt = (dest_format or "mongodb").lower()

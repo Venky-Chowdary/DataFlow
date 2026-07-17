@@ -6,7 +6,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime, _parse_integer
+from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 

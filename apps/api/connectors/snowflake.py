@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 from connectors.base import ConnectResult
 from connectors.driver_guard import platform_driver_unavailable
 from connectors.snowflake_conn import normalize_account
@@ -21,9 +23,7 @@ def test_snowflake(
     role: str = "",
 ) -> ConnectResult:
     del port, ssl
-    try:
-        import snowflake.connector
-    except ImportError:
+    if importlib.util.find_spec("snowflake.connector") is None:
         return _stub_fallback(host, database, username, connection_string, warehouse)
 
     account = normalize_account(host)

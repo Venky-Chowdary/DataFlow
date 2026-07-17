@@ -1,6 +1,10 @@
 """Data profiler statistical inference tests."""
 
-from services.data_profiler import merge_profiler_schema, profile_column, profile_dataset
+from services.data_profiler import (
+    merge_profiler_schema,
+    profile_column,
+    profile_dataset,
+)
 
 
 def test_profile_column_detects_integer():

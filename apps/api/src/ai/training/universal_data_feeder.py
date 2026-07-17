@@ -5,7 +5,7 @@ Ingest schemas from uploaded files, connectors, and industry templates for AI tr
 """
 
 from __future__ import annotations
-import os
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -111,7 +111,10 @@ class UniversalDataFeeder:
         all_schemas = []
 
         try:
-            from .universal_source_registry import load_connector_schemas, expand_schema_variants
+            from .universal_source_registry import (
+                expand_schema_variants,
+                load_connector_schemas,
+            )
             catalog_schemas = expand_schema_variants(load_connector_schemas(), max_variants=2)
         except Exception:
             catalog_schemas = []

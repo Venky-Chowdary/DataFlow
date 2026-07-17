@@ -1,9 +1,9 @@
 """MCP Server — expose Data Pilot tools to Cursor, Claude, VS Code, and external agents."""
 
+import time
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from typing import Any, Optional
-import time
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
 
@@ -59,8 +59,9 @@ async def list_mcp_tools():
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Data Pilot tool — same surface external agents use."""
-    from ..ai.copilot.tools import get_pilot_tools
     from services.mcp_invocation_log import log_mcp_invocation
+
+    from ..ai.copilot.tools import get_pilot_tools
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
     correlation_id = getattr(http_request.state, "correlation_id", None)
@@ -114,9 +115,10 @@ async def mcp_request_logs(limit: int = 50):
 
 @router.get("/status")
 async def mcp_status(http_request: Request):
-    from ..ai.copilot.pilot_agent import get_pilot_agent
     from services.connector_store import list_connectors
     from services.mcp_invocation_log import list_mcp_invocations
+
+    from ..ai.copilot.pilot_agent import get_pilot_agent
     from ..ai.copilot.tools import TOOL_DEFINITIONS
 
     try:

@@ -6,17 +6,28 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import os
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
 from pymongo.errors import PyMongoError
-from ..services.mongodb_service import get_mongodb_service
-from ..services.file_parser import FileParser
-from ..transfer.connector_capabilities import resolve_driver_type, get_capabilities
-from ..transfer.connector_registry import CONNECTOR_MODULES, run_probe
+
 from services.team_store import can_read_workspace, can_write_workspace
+
+from ..services.file_parser import FileParser
+from ..services.mongodb_service import get_mongodb_service
+from ..transfer.connector_capabilities import resolve_driver_type
+from ..transfer.connector_registry import run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
@@ -276,16 +287,16 @@ async def create_connector(
             created_at=saved.created_at,
             workspace_id=saved.workspace_id or "",
         )
-    except Exception as fs_err:
+    except Exception:
         pass  # fall through to MongoDB
 
     try:
         mongo = get_mongodb_service()
-        
+
         mongo_data = {k: v for k, v in connector_data.items() if k != "role" and k != "ssl"}
         connector_id = mongo.save_connector(mongo_data)
         connector = mongo.get_connector(connector_id)
-        
+
         return ConnectorResponse(
             id=connector["_id"],
             name=connector["name"],
@@ -297,7 +308,7 @@ async def create_connector(
             created_at=connector["created_at"].isoformat(),
             workspace_id=connector.get("workspace_id", ""),
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -640,12 +651,12 @@ async def get_connector(connector_id: str):
     try:
         mongo = get_mongodb_service()
         connector = mongo.get_connector(connector_id)
-        
+
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
-        
+
         return connector
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -658,12 +669,12 @@ async def delete_connector(connector_id: str):
     try:
         mongo = get_mongodb_service()
         success = mongo.delete_connector(connector_id)
-        
+
         if not success:
             raise HTTPException(status_code=404, detail="Connector not found")
-        
+
         return {"success": True, "message": "Connector deleted"}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -680,7 +691,7 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         content = await file.read()
         result = FileParser.parse(content, file.filename)
-        
+
         if not result.success:
             raise HTTPException(status_code=400, detail=result.error)
 
@@ -692,7 +703,7 @@ async def upload_file(file: UploadFile = File(...)):
                 status_code=400,
                 detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
             )
-        
+
         schema = FileParser.infer_schema(result.data)
         try:
             from services.data_profiler import merge_profiler_schema, profile_dataset
@@ -713,7 +724,7 @@ async def upload_file(file: UploadFile = File(...)):
                 sys.path.insert(0, str(_api_root))
             from services.csv_validator import validate_csv_content
             validation_report = validate_csv_content(content, result.columns, schema)
-        
+
         return {
             "success": True,
             "filename": file.filename,
@@ -726,7 +737,7 @@ async def upload_file(file: UploadFile = File(...)):
             "validation": validation_report,
             "profile": profile,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -766,9 +777,9 @@ async def transfer_data(
 ):
     """Universal file transfer — delegates to UniversalTransferEngine."""
     try:
+        from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
         from ..transfer.models import EndpointConfig, TransferRequest
-        from ..transfer.background import run_transfer_async
 
         workspace_id = _require_write_workspace(request, workspace_id)
 

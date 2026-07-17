@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable
@@ -14,7 +14,6 @@ from connectors.sqlite_common import sqlite_file_path
 from connectors.writer_common import (
     CHUNK_SIZE,
     _rejected_row_count,
-    build_mapped_rows,
     build_mapped_rows_with_details,
     quote_sql_identifier,
     resolve_target_columns,
@@ -22,22 +21,15 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
+)
 from services.type_system import ddl_type
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "sqlite3"
-    rejected_rows: int = 0
-    rejected_details: list[dict] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
 
 
 def sqlite_type(inferred: str) -> str:

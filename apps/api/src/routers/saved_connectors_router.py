@@ -9,13 +9,12 @@ id ``""`` for shared templates).
 
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:

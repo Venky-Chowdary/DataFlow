@@ -20,11 +20,14 @@ from connectors.writer_common import (  # noqa: E402
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
-    row_checksum,
     row_fingerprints,
 )
 
-from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
+from .adapters import (
+    _introspect_table_schema,
+    resolve_connector_config,
+    resolve_dest_table,
+)
 from .connector_capabilities import resolve_driver_type
 
 try:
@@ -34,7 +37,7 @@ try:
     from services.parallel_chunks import ChunkDispatcher
     from services.reconciliation import FingerprintAccumulator
     from services.resilience import adaptive_chunk_size
-    from services.row_filter import apply_row_filter, apply_row_filter_to_matrix
+    from services.row_filter import apply_row_filter_to_matrix
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.data_quality import run_integrity_audit
@@ -42,7 +45,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.parallel_chunks import ChunkDispatcher
     from src.services.reconciliation import FingerprintAccumulator
     from src.services.resilience import adaptive_chunk_size
-    from src.services.row_filter import apply_row_filter, apply_row_filter_to_matrix
+    from src.services.row_filter import apply_row_filter_to_matrix
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -101,7 +104,10 @@ def _read_batch_impl(
     redis_scan_state=None,
 ):
     if src_type == "postgresql" or src_type == "redshift":
-        from connectors.postgresql_reader import read_table_batch, read_table_cursor_batch
+        from connectors.postgresql_reader import (
+            read_table_batch,
+            read_table_cursor_batch,
+        )
 
         pg_port = int(cfg.get("port") or (5439 if src_type == "redshift" else 5432))
         if cursor_column:
@@ -170,7 +176,10 @@ def _read_batch_impl(
             known_total_rows=known_total_rows,
         )
     if src_type == "mongodb":
-        from connectors.mongodb_reader import read_collection_batch, read_collection_cursor_batch
+        from connectors.mongodb_reader import (
+            read_collection_batch,
+            read_collection_cursor_batch,
+        )
 
         if cursor_column:
             return read_collection_cursor_batch(
@@ -194,7 +203,10 @@ def _read_batch_impl(
             known_total_rows=known_total_rows,
         )
     if src_type == "snowflake":
-        from connectors.snowflake_reader import read_table_batch, read_table_cursor_batch
+        from connectors.snowflake_reader import (
+            read_table_batch,
+            read_table_cursor_batch,
+        )
 
         if cursor_column:
             return read_table_cursor_batch(
@@ -710,9 +722,6 @@ def stream_database_transfer(
     effective_sync = contract.sync_mode if contract else sync_mode
     incremental = requires_incremental(effective_sync)
     cursor_source_col = contract.cursor_field if contract else ""
-    cursor_col = cursor_source_col
-    if cursor_source_col and mappings:
-        cursor_col = map_source_to_target(cursor_source_col, mappings)
     pk_target_cols: list[str] = []
     if contract and contract.primary_key:
         pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
@@ -749,7 +758,11 @@ def stream_database_transfer(
         raise ValueError("S3 source requires bucket name in the database field")
 
     if src_type in ("s3", "gcs", "adls", "sftp"):
-        from services.object_streaming import download_for_object_store, download_object, stream_spilled_file_to_database
+        from services.object_streaming import (
+            download_for_object_store,
+            download_object,
+            stream_spilled_file_to_database,
+        )
 
         bucket = source.database or src_cfg.get("database", "")
         key = table
@@ -1395,7 +1408,6 @@ def stream_scd2_mirror_transfer(
     ]
 
     rows_written = 0
-    updated_rows = 0
     dest_summary: dict[str, Any] = {
         "source_rows": rows_staged,
         "staging_table": staging_qualified,
@@ -1438,13 +1450,15 @@ def stream_scd2_mirror_transfer(
                     on_checkpoint(batch_idx, approx_batches, written_total, checkpoint={"phase": "scd2"})
 
             rows_written = written_total
-            updated_rows = updated_total
             dest_summary["active_rows"] = active_rows
             dest_summary["active_checksum"] = active_checksum
             dest_summary["updated_rows"] = updated_total
 
         elif effective_sync in ("full_refresh_mirror", "mirror"):
-            from src.services.mirror_engine import _compute_active_checksum, _ensure_soft_delete_column
+            from src.services.mirror_engine import (
+                _compute_active_checksum,
+                _ensure_soft_delete_column,
+            )
 
             # Stream upsert staging → target.
             upsert_contract = [{"selected": True, "sync_mode": "upsert", "primary_key": contract.primary_key}] if contract else None

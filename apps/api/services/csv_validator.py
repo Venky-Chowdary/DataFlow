@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from services.csv_profiler import detect_delimiter, detect_encoding
-from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime, _parse_integer
+from services.transform_engine import (
+    _parse_boolean,
+    _parse_date,
+    _parse_datetime,
+    _parse_integer,
+)
 
 _INT_RE = re.compile(r"^-?\d+$")
 _DEC_RE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")

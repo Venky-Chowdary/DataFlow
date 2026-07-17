@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 import os
 import re
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
@@ -30,6 +31,56 @@ def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
     """Quote a SQL identifier and escape embedded quote characters."""
     escaped = name.replace(quote_char, quote_char + quote_char)
     return f"{quote_char}{escaped}{quote_char}"
+
+
+def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
+    """Convert a mapped cell to a JSON-serializable scalar.
+
+    Preserves strings/dates as text; parses structural and numeric JSON values
+    into native Python types so object-store exports contain numbers/objects
+    instead of quoted Decimal strings.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return value
+        try:
+            from services.type_system import normalize_logical_type
+        except Exception:
+            normalize_logical_type = lambda x: str(x or "").lower()
+        ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
+        if ctype in {"json", "array", "object", "struct"}:
+            try:
+                return json.loads(text, parse_constant=lambda v: None)
+            except json.JSONDecodeError:
+                return value
+        if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
+            return value
+        try:
+            return json.loads(text, parse_constant=lambda v: None)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+@dataclass
+class WriteResult:
+    """Canonical result object returned by all destination writers."""
+
+    ok: bool
+    rows_written: int
+    table_name: str
+    target_schema: str
+    checksum: str
+    chunks_completed: int
+    error: str | None = None
+    driver: str = ""
+    rejected_rows: int = 0
+    rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    load_method: str | None = None
 
 
 def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:

@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.writer_common import (
@@ -17,6 +17,9 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
+)
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
@@ -24,17 +27,8 @@ MONGO_WRITE_BATCH_SIZE = int(os.getenv("DATAFLOW_MONGO_BATCH_SIZE", "1000"))
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "pymongo"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def _connection_string(
@@ -118,7 +112,7 @@ def write_mapped_rows(
 ) -> WriteResult:
     del backfill_new_fields
     try:
-        from pymongo import MongoClient
+        from pymongo import MongoClient  # noqa: F401
     except ImportError:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
@@ -157,18 +151,12 @@ def write_mapped_rows(
     policy = transform_error_policy(error_policy)
 
     try:
-        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
-        # Keep socket operations bounded so a slow proxy cannot hang a whole batch.
-        client = MongoClient(
-            conn_str,
-            serverSelectionTimeoutMS=10000,
-            socketTimeoutMS=120000,
-            connectTimeoutMS=10000,
-            maxPoolSize=5,
-        )
+        from connectors.mongodb_common import _mongo_client
 
-        # Test connection
-        client.admin.command('ping')
+        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
+        # Reuse a cached MongoClient per connection string to avoid paying the
+        # connection handshake cost on every batch.
+        client = _mongo_client(conn_str)
 
         db = client[db_name]
         coll = db[collection_name]
@@ -196,10 +184,13 @@ def write_mapped_rows(
                 rejected_rows=rejected_rows,
                 warnings=transform_errors,
             )
-        
+
+        from datetime import date as _date
+        from datetime import datetime as _datetime
+        from datetime import time as _time
+
         from bson.binary import Binary
         from bson.decimal128 import Decimal128
-        from datetime import date as _date, datetime as _datetime, time as _time
 
         def _to_bson(value: Any, stype: str) -> Any:
             if value is None:
@@ -340,7 +331,6 @@ def write_mapped_rows(
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 
-        client.close()
         return WriteResult(
             ok=True,
             rows_written=written,

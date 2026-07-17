@@ -8,6 +8,7 @@ the tenant's security and residency policies.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -15,7 +16,6 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from services.byok_key_manager import is_ip_allowed
@@ -193,10 +193,10 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
         if isinstance(raw, dict) and raw.get("id") == tenant_id:
             if "custom_domain" in kwargs:
                 new_domain = _normalize_domain(kwargs["custom_domain"])
-                existing = get_tenant_by_domain(kwargs["custom_domain"])
+                existing = get_tenant_by_domain(new_domain)
                 if existing and existing.id != tenant_id:
-                    raise ValueError(f"Custom domain '{kwargs['custom_domain']}' is already in use")
-                raw["custom_domain"] = kwargs["custom_domain"].strip()[:253]
+                    raise ValueError(f"Custom domain '{new_domain}' is already in use")
+                raw["custom_domain"] = new_domain[:253]
             if "name" in kwargs:
                 raw["name"] = kwargs["name"].strip()[:128]
             if "data_region" in kwargs:

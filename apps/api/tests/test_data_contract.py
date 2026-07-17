@@ -2,26 +2,30 @@
 
 from __future__ import annotations
 
-import pytest
-
 import sys
 from pathlib import Path
+
+import pytest
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+from src.services.contract_store import (
+    InMemoryContractStore,
+    get_contract_store,
+    reset_contract_store,
+)
 from src.services.data_contract import (
-    CircuitBreaker,
     BreakerState,
+    CircuitBreaker,
+    ColumnRule,
     ContractEnforcer,
     ContractStatus,
     ContractViolation,
     DataContract,
-    ColumnRule,
     build_contract_from_preflight,
 )
-from src.services.contract_store import InMemoryContractStore, get_contract_store, reset_contract_store
 from src.transfer.models import EndpointConfig, TransferRequest
 
 

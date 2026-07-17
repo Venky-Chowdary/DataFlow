@@ -12,7 +12,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.schema_inference import infer_type
-from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime, _parse_integer, _parse_uuid
+from services.transform_engine import (
+    _parse_boolean,
+    _parse_date,
+    _parse_datetime,
+    _parse_integer,
+    _parse_uuid,
+)
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -116,7 +122,6 @@ def _histogram(values: list[float], buckets: int = 10) -> list[dict[str, Any]]:
 def _type_scores(values: list[str]) -> dict[str, float]:
     if not values:
         return {"VARCHAR": 1.0}
-    n = len(values)
     scores = {
         "BOOLEAN": 0.0,
         "INTEGER": 0.0,

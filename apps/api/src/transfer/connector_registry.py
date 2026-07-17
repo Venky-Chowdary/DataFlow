@@ -6,9 +6,9 @@ duplicating driver→module maps.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import inspect
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from .connector_capabilities import _DRIVER_CAPS, default_port

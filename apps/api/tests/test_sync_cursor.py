@@ -5,13 +5,13 @@ import json
 from services.sync_cursor import (
     build_cursor_key,
     compare_cursor_values,
+    get_watermark,
     map_source_to_target,
     max_cursor_value,
     requires_incremental,
     requires_upsert,
     resolve_sync_contract,
     set_watermark,
-    get_watermark,
 )
 
 

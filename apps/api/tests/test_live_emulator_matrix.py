@@ -21,7 +21,6 @@ if str(_API_ROOT) not in sys.path:
 from src.transfer.adapters import write_destination_database
 from src.transfer.models import EndpointConfig
 
-
 RECORDS = [
     {"id": "1", "amount": "1000.00"},
     {"id": "2", "amount": "2000.50"},

@@ -1,6 +1,7 @@
 """Read/write adapters for universal transfer — files, databases, warehouses."""
 
 from __future__ import annotations
+
 import csv
 import io
 import json
@@ -82,7 +83,11 @@ def parse_file_route_sample(
     """Headers + schema for route analysis without loading entire files."""
     ftype = FileParser.detect_file_type(filename, content)
     if ftype in ("csv", "tsv"):
-        from services.csv_profiler import count_csv_rows, detect_encoding, parse_csv_preview
+        from services.csv_profiler import (
+            count_csv_rows,
+            detect_encoding,
+            parse_csv_preview,
+        )
 
         enc = detect_encoding(content)
         headers, rows, _enc, _delim = parse_csv_preview(content, encoding=enc, preview_rows=preview_rows)
@@ -168,7 +173,9 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     return False, last_error
 
 
-def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
+def resolve_connector_config(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
     from .connector_capabilities import resolve_driver_type
     driver = resolve_driver_type(endpoint.format or "")
@@ -193,7 +200,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     cfg = {
         "host": endpoint.host or "localhost",
         "port": endpoint.port or default_port,
-        "database": endpoint.database if fmt in ("generic_sql", "sftp", "email", "rest_api") else (endpoint.database or endpoint.host or ""),
+        "database": endpoint.database or "",
         "schema": endpoint.schema or default_schema,
         "username": endpoint.username,
         "password": endpoint.password,
@@ -214,13 +221,21 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     cfg["role"] = endpoint.auth_role or cfg.get("role", "")
     cfg.update(endpoint.extra)
     if endpoint.connector_id:
-        conn_dict = _lookup_saved_connector(endpoint.connector_id)
+        conn_dict = _lookup_saved_connector(endpoint.connector_id, workspace_id=workspace_id)
         if not conn_dict:
             raise ValueError(f"Connector {endpoint.connector_id} not found")
+        # For MongoDB saved connectors that only supply a connection string, the
+        # database name in the URI should take precedence over an inline default
+        # like "test_db" sent by the UI form.
+        saved_database = conn_dict.get("database") or ""
+        if fmt == "mongodb" and not saved_database:
+            from connectors.mongodb_common import mongodb_database_from_uri
+
+            saved_database = mongodb_database_from_uri(conn_dict.get("connection_string", "")) or ""
         cfg.update({
             "host": conn_dict.get("host") or cfg["host"],
             "port": conn_dict.get("port") or cfg["port"],
-            "database": conn_dict.get("database") or cfg["database"],
+            "database": saved_database or cfg["database"],
             "schema": conn_dict.get("schema") or cfg["schema"],
             "username": conn_dict.get("username") or cfg["username"],
             "password": conn_dict.get("password") or cfg["password"],
@@ -238,15 +253,40 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
             "path_style": conn_dict.get("path_style") or cfg["path_style"],
             "role": conn_dict.get("role") or cfg["role"],
         })
+    if fmt == "mongodb" and not cfg.get("database"):
+        from connectors.mongodb_common import mongodb_database_from_uri
+
+        cfg["database"] = mongodb_database_from_uri(cfg.get("connection_string", "")) or ""
     return cfg
 
 
-def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
+def resolve_endpoint(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> EndpointConfig:
+    """Return a new EndpointConfig with saved-connector fields resolved.
+
+    This is the EndpointConfig equivalent of ``resolve_connector_config`` and is
+    the single place where a ``connector_id`` is expanded into host/port/credentials.
+    """
+    from .models import endpoint_to_dict
+
+    cfg = resolve_connector_config(endpoint, workspace_id=workspace_id)
+    merged = endpoint_to_dict(endpoint)
+    merged.update(cfg)
+    # ``EndpointConfig.from_dict`` expects ``format``; ``resolve_connector_config``
+    # uses ``type`` as the canonical driver key.
+    merged.setdefault("format", merged.get("type", endpoint.format))
+    return EndpointConfig.from_dict(endpoint.kind, merged)
+
+
+def _lookup_saved_connector(
+    connector_id: str, workspace_id: str | None = None
+) -> dict[str, Any] | None:
     """Find a saved connector in the file-backed store, falling back to MongoDB."""
     try:
         from services.connector_store import get_connector as fs_get
 
-        conn = fs_get(connector_id)
+        conn = fs_get(connector_id, workspace_id=workspace_id)
         if conn:
             return {
                 "host": conn.host,

@@ -15,7 +15,6 @@ if str(_API_ROOT) not in sys.path:
 from connectors.generic_sql import write_mapped_rows as generic_sql_write  # noqa: E402
 from connectors.sqlite_writer import write_mapped_rows as sqlite_write  # noqa: E402
 
-
 duckdb = pytest.importorskip("duckdb")
 
 

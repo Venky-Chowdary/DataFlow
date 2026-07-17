@@ -83,7 +83,6 @@ def blob_service_client(cfg: dict[str, Any]):
         url = _account_url(cfg)
         return BlobServiceClient(account_url=url, credential=sp, **client_kwargs)
 
-    account = _account_name(cfg)
     key = _account_key(cfg)
     url = _account_url(cfg)
     return BlobServiceClient(account_url=url, credential=key or None, **client_kwargs)

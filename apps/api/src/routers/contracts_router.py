@@ -15,10 +15,10 @@ from pydantic import BaseModel, Field
 from ..services.contract_store import get_contract_store
 from ..services.data_contract import (
     BreakerState,
+    ContractEnforcer,
     ContractStatus,
     ContractViolation,
     DataContract,
-    ContractEnforcer,
 )
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])

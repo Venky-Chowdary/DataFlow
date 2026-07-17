@@ -5,15 +5,15 @@ Tests RAG pipeline, enhanced mapping, synonym intelligence, and evaluation.
 """
 
 import json
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 
 def test_knowledge_base():
-    from ai.knowledge.semantic_patterns import get_pattern_count, SEMANTIC_PATTERNS
-    from ai.knowledge.synonyms import get_synonym_count, are_synonyms, resolve_canonical
+    from ai.knowledge.semantic_patterns import SEMANTIC_PATTERNS, get_pattern_count
+    from ai.knowledge.synonyms import are_synonyms, get_synonym_count, resolve_canonical
 
     assert get_pattern_count() >= 200, f"Expected 200+ patterns, got {get_pattern_count()}"
     assert get_synonym_count() >= 500, f"Expected 500+ synonyms, got {get_synonym_count()}"

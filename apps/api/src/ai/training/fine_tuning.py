@@ -5,12 +5,13 @@ Prepare datasets and manage fine-tuning workflows.
 """
 
 from __future__ import annotations
+
 import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .data_synthesis import DataTransferDataSynthesizer, TrainingDataset
+from .data_synthesis import DataTransferDataSynthesizer
 
 
 @dataclass
@@ -106,7 +107,7 @@ class DataTransferFineTuningPipeline:
         pairs_path = self.prepare_embedding_pairs()
 
         try:
-            from sentence_transformers import SentenceTransformer, InputExample, losses
+            from sentence_transformers import InputExample, SentenceTransformer, losses
             from torch.utils.data import DataLoader
 
             model = SentenceTransformer(job.model_base)

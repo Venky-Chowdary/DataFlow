@@ -6,18 +6,16 @@ in natural language, not just transfer step suggestions.
 """
 
 from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 
 from ..knowledge.copilot_knowledge import (
+    CONVERSATION_TEMPLATES,
     COPILOT_PERSONA,
     INTENT_PATTERNS,
-    CONVERSATION_TEMPLATES,
-    QUICK_REPLIES,
-    SUGGESTED_PROMPTS,
 )
 from ..knowledge.synonyms import are_synonyms, resolve_canonical
-from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from .data_analyst import get_data_analyst
 
 

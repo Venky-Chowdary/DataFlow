@@ -1,6 +1,10 @@
 """Writer row-mapping resilience tests."""
 
-from connectors.writer_common import build_mapped_rows, resolve_target_columns, sanitize_identifier
+from connectors.writer_common import (
+    build_mapped_rows,
+    resolve_target_columns,
+    sanitize_identifier,
+)
 
 
 def test_sanitize_identifier_preserves_mongodb_id():

@@ -13,7 +13,11 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.value_serializer import cell_to_string, json_default, sanitize_json_value  # noqa: E402
+from services.value_serializer import (  # noqa: E402
+    cell_to_string,
+    json_default,
+    sanitize_json_value,
+)
 
 
 def test_decimal_json_default_is_exact_string():

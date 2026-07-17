@@ -13,18 +13,17 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string
-
 from connectors.schema_drift import add_missing_columns
+from services.value_serializer import cell_to_string
 
 try:
     import sqlalchemy as sa
-    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy import create_engine, inspect
     from sqlalchemy.dialects import postgresql
 
     SQLALCHEMY_AVAILABLE = True
@@ -52,13 +51,14 @@ except Exception:  # pragma: no cover
 from connectors.writer_common import (
     CHUNK_SIZE,
     _rejected_row_count,
-    build_mapped_rows,
     build_mapped_rows_with_details,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
-    sanitize_identifier,
     transform_error_policy,
+)
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
 )
 
 
@@ -71,18 +71,8 @@ class ReadBatch:
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "sqlalchemy"
-    rejected_rows: int = 0
-    rejected_details: list[dict] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
 
 
 # Catalog type -> SQLAlchemy drivername.  If a type is missing we attempt to

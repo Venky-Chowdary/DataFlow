@@ -5,6 +5,7 @@ LLM prompt templates for schema analysis, mapping, and transformation.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 from .retriever import RetrievalResult
@@ -38,7 +39,6 @@ class DataTransferRAGGenerator:
         sample_values: list[str] | None = None,
     ) -> RAGResponse:
         """Generate schema analysis for a column."""
-        context = self._format_context(retrieval)
         pattern = retrieval.matched_pattern or "Unknown"
         canonical = retrieval.canonical_form or column_name
 
@@ -87,7 +87,7 @@ class DataTransferRAGGenerator:
             reason = f"'{source_col}' and '{target_col}' are synonyms"
             method = "synonym"
         elif mapping_info.get("same_canonical"):
-            reason = f"Both columns resolve to canonical form"
+            reason = "Both columns resolve to canonical form"
             method = "canonical"
         else:
             src_pattern = mapping_info.get("source", {}).get("pattern")
@@ -178,7 +178,10 @@ class DataTransferRAGGenerator:
         semantic_type: str | None = None,
     ) -> RAGResponse:
         """Suggest data transformations."""
-        from ..knowledge.type_conversions import suggest_type_conversion, get_compatible_types
+        from ..knowledge.type_conversions import (
+            get_compatible_types,
+            suggest_type_conversion,
+        )
 
         conversion = suggest_type_conversion(source_type, target_type)
         compatible = get_compatible_types(source_type)

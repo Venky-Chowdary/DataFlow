@@ -45,10 +45,21 @@ from connectors.writer_common import (  # noqa: E402
     row_fingerprints,
 )
 from services.reconciliation import FingerprintAccumulator  # noqa: E402
+
 try:
-    from services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
+    from services.csv_profiler import (  # noqa: E402
+        count_csv_rows,
+        detect_delimiter,
+        detect_encoding,
+        parse_csv_preview,
+    )
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    from src.services.csv_profiler import count_csv_rows, detect_delimiter, detect_encoding, parse_csv_preview  # noqa: E402
+    from src.services.csv_profiler import (  # noqa: E402
+        count_csv_rows,
+        detect_delimiter,
+        detect_encoding,
+        parse_csv_preview,
+    )
 
 from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_table
 from .stream import _write_batch
@@ -583,9 +594,17 @@ def stream_file_to_database(
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     try:
-        from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+        from services.sync_cursor import (
+            map_source_to_target,
+            requires_upsert,
+            resolve_sync_contract,
+        )
     except ImportError:
-        from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
+        from src.services.sync_cursor import (
+            map_source_to_target,
+            requires_upsert,
+            resolve_sync_contract,
+        )
     contract = resolve_sync_contract(stream_contracts)
     effective_sync = contract.sync_mode if contract else sync_mode
     pk_target_cols: list[str] = []
@@ -621,9 +640,15 @@ def stream_file_to_database(
     fp_accumulator = FingerprintAccumulator()
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     try:
-        from services.data_quality import BatchDriftDetector, run_integrity_audit  # noqa: E402
+        from services.data_quality import (  # noqa: E402
+            BatchDriftDetector,
+            run_integrity_audit,
+        )
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-        from src.services.data_quality import BatchDriftDetector, run_integrity_audit  # noqa: E402
+        from src.services.data_quality import (  # noqa: E402
+            BatchDriftDetector,
+            run_integrity_audit,
+        )
     drift_detector = BatchDriftDetector()
 
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))

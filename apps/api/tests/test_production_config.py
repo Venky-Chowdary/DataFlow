@@ -30,6 +30,7 @@ def test_mongodb_uri_from_railway_mongo_url(monkeypatch):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.setenv("MONGO_URL", "mongodb://user:pass@containers-us-west-123.railway.app:1234")
     from importlib import reload
+
     import services.platform_config as pc
     reload(pc)
     assert "railway.app" in pc.mongodb_uri()
@@ -39,6 +40,7 @@ def test_railway_is_production_by_default(monkeypatch):
     monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
     monkeypatch.delenv("DATAFLOW_ENV", raising=False)
     from importlib import reload
+
     import services.platform_config as pc
     reload(pc)
     assert pc.is_production() is True
@@ -48,6 +50,7 @@ def test_dev_mode_skips_production_validation(monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "development")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
     from importlib import reload
+
     import services.platform_config as pc
     reload(pc)
     assert pc.validate_production_config() == []
@@ -57,6 +60,7 @@ def test_stub_writes_blocked_in_production(monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.setenv("DATAFLOW_ALLOW_STUB_WRITES", "1")
     from importlib import reload
+
     import connectors.driver_guard as dg
     reload(dg)
     assert dg.stub_writes_allowed() is False
@@ -66,6 +70,7 @@ def test_stub_writes_allowed_in_dev_with_flag(monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "development")
     monkeypatch.setenv("DATAFLOW_ALLOW_STUB_WRITES", "1")
     from importlib import reload
+
     import connectors.driver_guard as dg
     reload(dg)
     assert dg.stub_writes_allowed() is True

@@ -26,10 +26,8 @@ from services.tenant_store import (
     create_tenant,
     delete_tenant,
     get_tenant,
-    get_tenant_by_domain,
     get_tenant_for_workspace,
     list_tenants,
-    tenant_region,
     update_tenant,
 )
 

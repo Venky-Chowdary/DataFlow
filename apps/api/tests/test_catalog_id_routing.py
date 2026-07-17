@@ -15,7 +15,13 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from src.services.catalog_service import search_catalog  # noqa: E402
-from src.transfer.connector_capabilities import default_port, dest_ready, get_capabilities, resolve_driver_type, source_ready  # noqa: E402
+from src.transfer.connector_capabilities import (  # noqa: E402
+    default_port,
+    dest_ready,
+    get_capabilities,
+    resolve_driver_type,
+    source_ready,
+)
 from src.transfer.registry import validate_transfer  # noqa: E402
 
 

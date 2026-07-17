@@ -2,6 +2,7 @@
 
 import pytest
 
+from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
 from services.transfer_plan_store import (
     add_mapping_revision,
     add_preflight_run,
@@ -9,7 +10,6 @@ from services.transfer_plan_store import (
     create_plan,
     get_plan,
 )
-from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
 
 
 @pytest.fixture(autouse=True)

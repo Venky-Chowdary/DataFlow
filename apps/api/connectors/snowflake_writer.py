@@ -5,9 +5,9 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import get_connection, normalize_account
@@ -21,24 +21,17 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
+)
 from services.type_system import ddl_type
 
 COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "2000"))
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "snowflake-connector-python"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
-    rejected_details: list[dict] = field(default_factory=list)
     load_method: str = "insert"
 
 

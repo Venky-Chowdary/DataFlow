@@ -5,13 +5,12 @@ Local vector storage using ChromaDB with in-memory fallback.
 """
 
 from __future__ import annotations
+
 import json
 import os
 import uuid
 from dataclasses import dataclass
 from typing import Optional
-
-import numpy as np
 
 from .embedding_service import get_embedding_service
 

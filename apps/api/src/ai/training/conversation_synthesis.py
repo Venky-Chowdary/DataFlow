@@ -5,12 +5,13 @@ Generate customer-facing Q&A pairs from universal data schemas.
 """
 
 from __future__ import annotations
+
 import uuid
 from dataclasses import dataclass, field
 
+from ..knowledge.copilot_knowledge import CONVERSATION_TEMPLATES
 from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
-from ..knowledge.copilot_knowledge import CONVERSATION_TEMPLATES
 
 
 @dataclass

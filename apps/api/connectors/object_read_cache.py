@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Callable
 
 _CACHE: dict[str, tuple[list[dict], list[str]]] = {}
 

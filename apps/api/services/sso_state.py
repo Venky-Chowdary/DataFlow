@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from services.platform_config import data_dir

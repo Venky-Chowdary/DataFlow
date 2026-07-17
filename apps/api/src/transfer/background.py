@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 def _notify_failure(request: TransferRequest, job_id: str, error: str, records_transferred: int = 0) -> None:
     """Fire workspace notifications for an exception-level transfer failure."""
     try:
-        from services.notification_service import build_job_payload, log_job_notifications, notify_workspace
+        from services.notification_service import (
+            build_job_payload,
+            log_job_notifications,
+            notify_workspace,
+        )
         from services.platform_config import public_url, web_url
 
         payload = build_job_payload(

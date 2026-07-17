@@ -57,7 +57,7 @@ SYNONYM_DICTIONARY: dict[str, list[str]] = {
     "transaction_id": ["transaction_id", "txn_id", "trans_id", "transaction_no", "txn_no"],
     "payment_date": ["payment_date", "pay_date", "payment_dt", "paid_date", "settlement_date"],
     "order_date": ["order_date", "purchase_date", "ordered_date", "placed_at"],
-    "hire_date": ["hire_date", "hired_date", "employment_date", "join_date", "onboarding_date"],
+    "hire_date": ["hire_date", "hired_date", "start_date", "employment_date", "join_date", "onboarding_date"],
     "ship_date": ["ship_date", "shipped_date", "shipping_date", "dispatch_date"],
     "delivery_date": ["delivery_date", "delivered_date", "del_date", "receipt_date"],
     "country_code": ["country_code", "country_cd", "country_iso", "ctry_code"],
@@ -65,12 +65,11 @@ SYNONYM_DICTIONARY: dict[str, list[str]] = {
     "province_code": ["province_code", "province_cd", "prov_code", "prov_cd"],
     "city_name": ["city_name", "city_nm", "town", "municipality"],
     "region_code": ["region_code", "region_cd", "territory_code", "area_code"],
-    "department": ["department", "dept", "division", "business_unit", "cost_center", "org_unit"],
+    "department": ["department", "dept", "division", "business_unit", "bu", "cost_center", "org_unit"],
     "email_address": ["email_address", "email_addr", "email", "e_mail"],
     "phone_number": ["phone_number", "phone_no", "phone_num", "contact_number", "tel"],
     "mobile_number": ["mobile_number", "mobile_no", "cell_number", "cell_phone", "cell"],
-    "first_name": ["first_name", "firstname", "fname", "given_name", "forename"],
-    "last_name": ["last_name", "lastname", "lname", "surname", "family_name"],
+
     "full_name": ["full_name", "fullname", "complete_name", "display_name", "person_name"],
     "currency": ["currency", "currency_code", "ccy", "curr_code", "money_type", "currency_type"],
     "credit_card": ["credit_card", "card_number", "cc_number", "card_no", "pan", "ccn", "cardnumber", "debit_card", "payment_card"],
@@ -135,10 +134,8 @@ SYNONYM_DICTIONARY: dict[str, list[str]] = {
     "channel": ["channel", "sales_channel", "order_channel", "source_channel", "marketplace"],
 
     # HR / Employee
-    "department": ["department", "dept", "division", "business_unit", "bu", "cost_center", "org_unit"],
     "job_title": ["job_title", "title", "position", "role", "designation", "job_role"],
     "salary": ["salary", "compensation", "pay", "wage", "base_salary", "annual_salary", "hourly_rate", "pay_rate"],
-    "hire_date": ["hire_date", "start_date", "employment_date", "join_date", "onboarding_date"],
     "termination_date": ["termination_date", "end_date", "exit_date", "separation_date", "last_day"],
 
     # Manufacturing
@@ -179,7 +176,7 @@ TOKEN_ABBREVIATIONS: dict[str, str] = {
     "acct": "account", "acc": "account",
     "trans": "transaction", "txn": "transaction",
     "inv": "invoice", "ord": "order",
-    "ship": "shipment", "dest": "destination",
+    "dest": "destination",
     "orig": "origin", "src": "source", "tgt": "target",
     "pct": "percentage", "perc": "percentage",
     "avg": "average", "tot": "total", "sum": "total",

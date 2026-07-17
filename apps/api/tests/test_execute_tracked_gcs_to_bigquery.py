@@ -28,8 +28,8 @@ def test_gcs_to_bigquery():
     except OSError as exc:
         pytest.skip(f"Emulator not reachable: {exc}")
 
-    from google.auth.credentials import AnonymousCredentials
     from google.api_core.client_options import ClientOptions
+    from google.auth.credentials import AnonymousCredentials
     from google.cloud import storage
 
     bucket_name = "gcs_to_bq_" + uuid.uuid4().hex[:8]

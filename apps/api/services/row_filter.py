@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _FILTER_OPS = frozenset({
     "eq", "ne", "gt", "gte", "lt", "lte",
     "in", "not_in", "contains", "startswith", "endswith", "regex",
