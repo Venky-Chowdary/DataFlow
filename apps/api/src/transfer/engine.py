@@ -551,12 +551,18 @@ class UniversalTransferEngine:
             and not request.priority_column
             and request.limit == 0
         ):
-            return self._execute_streaming(
-                request, job_id, mongo, src_fmt,
-                resume=resume,
-                checkpoint=checkpoint,
-                checkpoint_service=checkpoint_service,
-            )
+            try:
+                return self._execute_streaming(
+                    request, job_id, mongo, src_fmt,
+                    resume=resume,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                )
+            except NotImplementedError:
+                # Streaming transfer is not implemented for this sync-mode/destination
+                # combination (e.g. SCD2/mirror to a non-SQL destination). Fall through
+                # to the buffered path which supports all destinations.
+                pass
 
         non_streaming_mode = request.sync_mode.lower() in ("full_refresh_mirror", "mirror", "scd2")
         if (
