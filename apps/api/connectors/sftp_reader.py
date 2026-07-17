@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
+from connectors.object_store_common import ReadBatch
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 from services.object_streaming import (
     download_for_object_store,
     download_object,
     read_rows_from_spill,
 )
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int = 0
 
 
 def read_object(
