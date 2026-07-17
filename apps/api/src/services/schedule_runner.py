@@ -131,7 +131,7 @@ def _endpoint_from_connector(conn: dict, table: str):
 
 
 def _run_schedule(schedule_id: str) -> str | None:
-    from services.schedule_store import get_schedule
+    from services.schedule_store import get_schedule, mark_schedule_running, mark_schedule_run
     from ..transfer.engine import get_transfer_engine
     from ..transfer.background import run_transfer_async
 
@@ -153,8 +153,11 @@ def _run_schedule(schedule_id: str) -> str | None:
 
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
-    run_transfer_async(job_id, request)
-    mark_schedule_run(schedule_id, job_id)
+    mark_schedule_running(schedule_id, _scheduler_instance_id())
+    future = run_transfer_async(job_id, request)
+    future.add_done_callback(
+        lambda _f, sid=schedule_id, jid=job_id: mark_schedule_run(sid, jid)
+    )
     logger.info("Schedule %s started job %s", schedule_id, job_id)
     return job_id
 
@@ -176,9 +179,29 @@ def _run_due_schedules() -> int:
         _release_scheduler_lock()
 
 
+def _clear_stale_running_schedules() -> None:
+    """On startup, clear running flags left by a previous crashed instance."""
+    from services.schedule_store import _load_all, _save_all, _is_running_stale, PipelineSchedule
+
+    schedules = _load_all()
+    changed = False
+    for i, s in enumerate(schedules):
+        if s.running and _is_running_stale(s):
+            schedules[i] = PipelineSchedule.from_dict({
+                **s.to_dict(),
+                "running": False,
+                "running_instance": "",
+                "running_started_at": None,
+            })
+            changed = True
+    if changed:
+        _save_all(schedules)
+
+
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
+    await asyncio.get_event_loop().run_in_executor(_executor, _clear_stale_running_schedules)
     while True:
         try:
             count = await asyncio.get_event_loop().run_in_executor(_executor, _run_due_schedules)

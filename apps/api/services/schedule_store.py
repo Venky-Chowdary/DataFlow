@@ -40,6 +40,9 @@ class PipelineSchedule:
     next_run_at: str | None = None
     last_job_id: str | None = None
     run_count: int = 0
+    running: bool = False
+    running_instance: str = ""
+    running_started_at: str | None = None
     created_at: str = field(default_factory=lambda: _now())
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,6 +63,9 @@ class PipelineSchedule:
             next_run_at=data.get("next_run_at"),
             last_job_id=data.get("last_job_id"),
             run_count=int(data.get("run_count", 0)),
+            running=bool(data.get("running", False)),
+            running_instance=data.get("running_instance", ""),
+            running_started_at=data.get("running_started_at"),
             created_at=data.get("created_at", _now()),
         )
 
@@ -191,7 +197,56 @@ def delete_schedule(schedule_id: str) -> bool:
     return True
 
 
+def _is_running_stale(sched: PipelineSchedule) -> bool:
+    """Return True if a schedule's running flag is too old to be trustworthy."""
+    if not sched.running:
+        return True
+    started = _parse_ts(sched.running_started_at)
+    if started is None:
+        return True
+    # Allow a generous 4-hour runtime before treating a run as stale.
+    return (datetime.now(timezone.utc) - started) > timedelta(hours=4)
+
+
+def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
+    """Mark a schedule as running on this instance."""
+    schedules = _load_all()
+    now = _now()
+    for i, s in enumerate(schedules):
+        if s.id != schedule_id:
+            continue
+        updated = PipelineSchedule.from_dict({
+            **s.to_dict(),
+            "running": True,
+            "running_instance": instance,
+            "running_started_at": now,
+        })
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
+
+
+def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
+    """Clear the running flag after the transfer finishes or fails."""
+    schedules = _load_all()
+    for i, s in enumerate(schedules):
+        if s.id != schedule_id:
+            continue
+        updated = PipelineSchedule.from_dict({
+            **s.to_dict(),
+            "running": False,
+            "running_instance": "",
+            "running_started_at": None,
+        })
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
+
+
 def mark_schedule_run(schedule_id: str, job_id: str) -> PipelineSchedule | None:
+    """Record a completed/failed run and compute the next due time."""
     schedules = _load_all()
     now = _now()
     for i, s in enumerate(schedules):
@@ -203,6 +258,9 @@ def mark_schedule_run(schedule_id: str, job_id: str) -> PipelineSchedule | None:
             "next_run_at": compute_next_run(s.interval, _parse_ts(now)),
             "last_job_id": job_id,
             "run_count": s.run_count + 1,
+            "running": False,
+            "running_instance": "",
+            "running_started_at": None,
         })
         schedules[i] = updated
         _save_all(schedules)
@@ -215,6 +273,8 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     due: list[PipelineSchedule] = []
     for s in _load_all():
         if not s.enabled:
+            continue
+        if s.running and not _is_running_stale(s):
             continue
         nxt = _parse_ts(s.next_run_at)
         if nxt is None or nxt <= current:
