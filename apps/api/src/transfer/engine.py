@@ -450,6 +450,7 @@ class UniversalTransferEngine:
 
     def execute(self, request: TransferRequest) -> TransferResult:
         """Synchronous transfer — creates job record on completion."""
+        self._resolve_saved_connectors(request)
         job_id = self._create_pending_job(request)
         return self.execute_tracked(request, job_id)
 
@@ -461,8 +462,72 @@ class UniversalTransferEngine:
         except Exception:
             return 0
 
+    def _resolve_saved_connectors(self, request: TransferRequest) -> None:
+        """If source/destination carries a connector_id, fill missing fields from the saved connector profile."""
+        try:
+            from services.connector_store import get_connector
+        except Exception:
+            return
+        request.source = self._merge_saved_connector(request.source, request.workspace_id)
+        request.destination = self._merge_saved_connector(request.destination, request.workspace_id)
+
+    @staticmethod
+    def _merge_saved_connector(endpoint: EndpointConfig, workspace_id: str) -> EndpointConfig:
+        connector_id = endpoint.connector_id
+        if not connector_id:
+            return endpoint
+        try:
+            from services.connector_store import get_connector
+            conn = get_connector(connector_id, workspace_id=workspace_id or None)
+            if not conn:
+                return endpoint
+        except Exception:
+            return endpoint
+
+        from dataclasses import replace
+
+        kwargs: dict[str, Any] = {}
+        if not endpoint.format and conn.type:
+            kwargs["format"] = conn.type
+        if not endpoint.host:
+            kwargs["host"] = conn.host
+        if not endpoint.port:
+            kwargs["port"] = conn.port
+        if not endpoint.database:
+            kwargs["database"] = conn.database
+        if not endpoint.schema:
+            kwargs["schema"] = conn.schema
+        if not endpoint.username:
+            kwargs["username"] = conn.username
+        if not endpoint.password:
+            kwargs["password"] = conn.password
+        if not endpoint.connection_string:
+            kwargs["connection_string"] = conn.connection_string
+        if not endpoint.warehouse:
+            kwargs["warehouse"] = conn.warehouse
+        if not endpoint.auth_mode:
+            kwargs["auth_mode"] = conn.auth_mode
+        if not endpoint.auth_role:
+            kwargs["auth_role"] = conn.auth_role
+        if not endpoint.auth_source:
+            kwargs["auth_source"] = conn.auth_source
+        if not endpoint.api_key:
+            kwargs["api_key"] = conn.api_key
+        if not endpoint.service_account:
+            kwargs["service_account"] = conn.service_account
+        if not endpoint.private_key:
+            kwargs["private_key"] = conn.private_key
+        if not endpoint.endpoint_url:
+            kwargs["endpoint_url"] = conn.endpoint_url
+        if not endpoint.region:
+            kwargs["region"] = getattr(conn, "region", "")
+        kwargs["ssl"] = endpoint.ssl or conn.ssl
+        kwargs["path_style"] = endpoint.path_style or conn.path_style
+        return replace(endpoint, **kwargs)
+
     def execute_tracked(self, request: TransferRequest, job_id: str, resume: bool = False) -> TransferResult:
         """Timed wrapper around the core transfer engine."""
+        self._resolve_saved_connectors(request)
         start = time.monotonic()
         start_mem = self._peak_memory_bytes()
         result = self._execute_tracked_core(request, job_id, resume=resume)
@@ -1731,6 +1796,7 @@ class UniversalTransferEngine:
             )
 
     def _create_pending_job(self, request: TransferRequest) -> str:
+        self._resolve_saved_connectors(request)
         mongo = get_mongodb_service()
         return mongo.create_transfer_job({
             "source_type": request.source.kind,
