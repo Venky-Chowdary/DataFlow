@@ -168,7 +168,9 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     return False, last_error
 
 
-def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
+def resolve_connector_config(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
     from .connector_capabilities import resolve_driver_type
     driver = resolve_driver_type(endpoint.format or "")
@@ -214,7 +216,7 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     cfg["role"] = endpoint.auth_role or cfg.get("role", "")
     cfg.update(endpoint.extra)
     if endpoint.connector_id:
-        conn_dict = _lookup_saved_connector(endpoint.connector_id)
+        conn_dict = _lookup_saved_connector(endpoint.connector_id, workspace_id=workspace_id)
         if not conn_dict:
             raise ValueError(f"Connector {endpoint.connector_id} not found")
         cfg.update({
@@ -241,12 +243,33 @@ def resolve_connector_config(endpoint: EndpointConfig) -> dict[str, Any]:
     return cfg
 
 
-def _lookup_saved_connector(connector_id: str) -> dict[str, Any] | None:
+def resolve_endpoint(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> EndpointConfig:
+    """Return a new EndpointConfig with saved-connector fields resolved.
+
+    This is the EndpointConfig equivalent of ``resolve_connector_config`` and is
+    the single place where a ``connector_id`` is expanded into host/port/credentials.
+    """
+    from .models import endpoint_to_dict
+
+    cfg = resolve_connector_config(endpoint, workspace_id=workspace_id)
+    merged = endpoint_to_dict(endpoint)
+    merged.update(cfg)
+    # ``EndpointConfig.from_dict`` expects ``format``; ``resolve_connector_config``
+    # uses ``type`` as the canonical driver key.
+    merged.setdefault("format", merged.get("type", endpoint.format))
+    return EndpointConfig.from_dict(endpoint.kind, merged)
+
+
+def _lookup_saved_connector(
+    connector_id: str, workspace_id: str | None = None
+) -> dict[str, Any] | None:
     """Find a saved connector in the file-backed store, falling back to MongoDB."""
     try:
         from services.connector_store import get_connector as fs_get
 
-        conn = fs_get(connector_id)
+        conn = fs_get(connector_id, workspace_id=workspace_id)
         if conn:
             return {
                 "host": conn.host,
