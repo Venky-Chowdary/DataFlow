@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_table
 from .stream import _write_batch
 
-STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "excel", "parquet"}
+STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet"}
 STREAM_THRESHOLD = int(os.getenv("DATAFLOW_STREAM_FILE_ROWS", "1"))
 FILE_SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
 SPILL_DIR = os.getenv("DATAFLOW_SPILL_DIR") or None
