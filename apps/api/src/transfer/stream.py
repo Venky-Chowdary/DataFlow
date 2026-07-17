@@ -1207,6 +1207,18 @@ def stream_database_transfer(
         cursor_type_for_read: str | None = None
         if incremental and cursor_source_col:
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
+        # For keyset-capable NoSQL sources, use the same cursor column from the
+        # main write loop so the checksum re-read does not pay an O(n²) skip
+        # penalty on large collections (e.g. MongoDB with random-hash _ids).
+        checksum_cursor_col = cursor_source_col if incremental else ""
+        checksum_cursor_after = watermark if incremental else None
+        use_checksum_keyset = False
+        if not incremental and keyset_col and keyset_col in (columns or []):
+            if src_type in {"mongodb"}:
+                checksum_cursor_col = keyset_col
+                checksum_cursor_after = None
+                use_checksum_keyset = True
+                cursor_type_for_read = normalize_inferred(column_types.get(keyset_col, "string")).upper()
         read_offset = 0
         while True:
             batch, _ = _unwrap_read(
@@ -1218,8 +1230,8 @@ def stream_database_transfer(
                     read_offset,
                     chunk_size,
                     database=src_db,
-                    cursor_column=cursor_source_col if incremental else "",
-                    cursor_after=watermark if incremental else None,
+                    cursor_column=checksum_cursor_col,
+                    cursor_after=checksum_cursor_after,
                     cursor_type=cursor_type_for_read,
                     known_total_rows=total_rows,
                 )
@@ -1239,7 +1251,10 @@ def stream_database_transfer(
                 fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
             if len(batch.rows) < chunk_size:
                 break
-            read_offset += len(batch.rows)
+            if use_checksum_keyset:
+                checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
+            else:
+                read_offset += len(batch.rows)
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
     else:
         final_checksum = last_checksum

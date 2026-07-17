@@ -7,6 +7,7 @@ import hashlib
 import heapq
 import json
 import os
+import re
 import struct
 import tempfile
 from dataclasses import asdict, dataclass
@@ -15,6 +16,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Sequence
 
 SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
+
+# Quick pre-filter for the expensive Decimal / date normalization in
+# normalize_cell.  Most string columns (names, emails, codes) are clearly not
+# numbers or dates, so we can skip the exception-heavy Decimal constructor and
+# the date regex for them.
+_NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_DATE_LIKE_CHARS = frozenset("-:/T ")
 
 from services.transform_engine import _DATE_LIKE_RE, _parse_date, _parse_datetime, apply_transform
 
@@ -54,26 +62,42 @@ def _iter_fingerprints(
     """Yield (row_key, fingerprint) tuples for each row without materializing the full list."""
     if columns is not None:
         cols = columns
+        sorted_cols = sorted(cols, key=lambda x: x.lower())
+        col_index = {c: i for i, c in enumerate(cols)}
+        sort_idx = -1
+        if sort_key:
+            sort_key_lower = sort_key.lower()
+            for i, c in enumerate(cols):
+                if c.lower() == sort_key_lower:
+                    sort_idx = i
+                    break
         for row in rows:
             if isinstance(row, dict):
-                rec: dict[str, Any] = {c: row.get(c) for c in cols}
+                parts = [
+                    f"{c.lower()}={normalize_cell(row.get(c))}" for c in sorted_cols
+                ]
+                if sort_key:
+                    row_key = normalize_cell(row.get(sort_key))
+                    if row_key is None:
+                        for k, v in row.items():
+                            if k.lower() == sort_key_lower:
+                                row_key = normalize_cell(v)
+                                break
+                else:
+                    row_key = ""
             else:
-                rec = {c: row[i] if i < len(row) else None for i, c in enumerate(cols)}
-            parts = [
-                f"{c.lower()}={normalize_cell(rec.get(c))}"
-                for c in sorted(cols, key=lambda x: x.lower())
-            ]
+                parts = [
+                    f"{c.lower()}={normalize_cell(row[col_index[c]] if col_index[c] < len(row) else None)}"
+                    for c in sorted_cols
+                ]
+                row_key = normalize_cell(row[sort_idx] if sort_idx >= 0 and sort_idx < len(row) else None) if sort_key else ""
             fingerprint = "\x1f".join(parts)
-            row_key = normalize_cell(_get_case_insensitive(rec, sort_key)) if sort_key else ""
             yield (row_key, fingerprint)
     else:
         for row in rows:
             if isinstance(row, dict):
-                rec = {k: row.get(k) for k in sorted(row.keys())}
-                parts = [
-                    f"{k.lower()}={normalize_cell(v)}"
-                    for k, v in sorted(rec.items(), key=lambda item: item[0].lower())
-                ]
+                keys = sorted(row.keys(), key=lambda x: x.lower())
+                parts = [f"{k.lower()}={normalize_cell(row.get(k))}" for k in keys]
                 fingerprint = "\x1f".join(parts)
                 row_key = normalize_cell(_get_case_insensitive(row, sort_key)) if sort_key else ""
             else:
@@ -937,17 +961,22 @@ def normalize_cell(value: Any) -> str:
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, sort_keys=True, default=str)
     text = str(value).strip()
-    canonical = _canonicalize_number(text)
-    if canonical is not None:
-        return canonical
-    # Canonicalize common boolean spellings so source/target pairs like
-    # True, 1, "true", "yes", and "on" all produce the same fingerprint.
+    # Boolean and empty fast paths.
+    if not text:
+        return ""
     lowered = text.lower()
     if lowered in {"true", "t", "yes", "y", "on", "enabled", "active", "ok", "aye", "positive", "1"}:
         return "1"
     if lowered in {"false", "f", "no", "n", "off", "disabled", "inactive", "nope", "negative", "0"}:
         return "0"
-    # Normalize JSON payloads (e.g. jsonb) to a canonical string.
+    # Numeric fast path: only attempt Decimal normalization for strings that look
+    # like numbers, avoiding the expensive exception path for names, emails, codes.
+    if text[0] in "+-0123456789" and _NUMERIC_RE.match(text):
+        canonical = _canonicalize_number(text)
+        if canonical is not None:
+            return canonical
+        return text
+    # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
             parsed = json.loads(text)
@@ -955,11 +984,14 @@ def normalize_cell(value: Any) -> str:
                 return json.dumps(parsed, sort_keys=True, default=str)
         except (json.JSONDecodeError, TypeError):
             pass
-    # Normalize date/time formatting differences ("T" vs " ", "Z" vs "+00:00", etc.).
-    # Always canonicalize date-only values to midnight UTC so date and datetime
-    # representations of the same day produce identical checksums.
-    # Fast heuristic: skip expensive strptime attempts for strings that cannot be dates.
-    if text and _DATE_LIKE_RE.search(text):
+    # Date/time normalization: cheap heuristic first to avoid running the date
+    # regex on every non-date string.
+    if (
+        text[0].isdigit()
+        and len(text) >= 8
+        and _DATE_LIKE_CHARS.intersection(text)
+        and _DATE_LIKE_RE.search(text)
+    ):
         dtm = _parse_datetime(text)
         if dtm:
             return dtm
