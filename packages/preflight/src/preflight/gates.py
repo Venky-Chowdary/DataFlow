@@ -287,15 +287,37 @@ def gate_g7_capacity(ctx: PreflightContext) -> GateResult:
 
 
 def _dry_run_transform(value: str, transform: str | None) -> str | None:
+    """Best-effort preview of how a transform will affect a string value.
+
+    Returns ``None`` only for transforms that produce non-deterministic or
+    one-way output (hashing, masking, encryption, UUID generation) so the
+    dry-run gate knows that row cannot be compared.
+    """
     if not transform:
         return value
-    if transform == "upper":
+    t = str(transform).lower().strip()
+    if t in {"upper", "uppercase"}:
         return value.upper()
-    if transform == "lower":
+    if t in {"lower", "lowercase"}:
         return value.lower()
-    # Unknown or non-trivial transforms cannot be reconciled without writing to
-    # a real destination, so signal that the value is not comparable.
-    return None
+    if t in {"trim", "strip", "string", "varchar", "text"}:
+        return value.strip()
+    if t in {"integer", "int", "number", "decimal", "float", "double", "numeric"}:
+        try:
+            if "." in value or "e" in value.lower():
+                return str(float(value))
+            return str(int(value))
+        except Exception:
+            return value
+    if t in {"boolean", "bool"}:
+        return "true" if value and value.lower() not in {"false", "0", "", "no", "off"} else "false"
+    if t in {"date", "datetime", "timestamp", "time", "iso8601"}:
+        return value
+    # Non-deterministic / one-way transforms break reconciliation previews.
+    if t in {"uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
+        return None
+    # For other deterministic string-preserving transforms, keep the value as-is.
+    return value
 
 
 def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
@@ -400,15 +422,6 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         report.get("summary", "Data integrity checks passed"),
         start,
         {"checks_passed": report.get("checks_passed", 0)},
-    )
-
-
-def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
-    """Post-transfer gate — skipped during preflight, run after transfer completes."""
-    return GateResult(
-        gate_id=GateId.G8_RECONCILIATION,
-        status=GateStatus.SKIP,
-        message="Post-transfer reconciliation — runs after transfer",
     )
 
 

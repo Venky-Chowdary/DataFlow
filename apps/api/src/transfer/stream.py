@@ -755,9 +755,12 @@ def stream_database_transfer(
         if src_type in ("s3", "gcs") and not bucket:
             raise ValueError(f"{src_type.upper()} source requires bucket name in the database field")
         cache_key = f"{src_type}:{bucket}:{key}"
+        # Always fetch a fresh copy for a transfer run; atomic download protects
+        # against partial/corrupt reuse.
         path = download_object(
             cache_key,
             lambda p: download_for_object_store(src_type, p, src_cfg, bucket, key),
+            force=True,
         )
         return stream_spilled_file_to_database(
             path=path,
@@ -1334,8 +1337,9 @@ def stream_scd2_mirror_transfer(
         )
 
     dest_cfg = resolve_connector_config(destination)
-    dest_schema_name = get_sql_schema(dest_cfg)
-    schema_name = dest_schema_name or destination.schema or ""
+    # get_sql_schema() already respects dialect defaults; ignore the default
+    # "public" placeholder that resolve_connector_config sets for SQLite/MySQL.
+    schema_name = get_sql_schema(dest_cfg) or ""
 
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]

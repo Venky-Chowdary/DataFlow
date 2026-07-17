@@ -135,7 +135,15 @@ def write_mapped_rows(
 ) -> WriteResult:
     """Write records to a SQLite database file."""
     del port, username, password, ssl
-    path = connection_string or database or host
+    # Prefer the raw file path from `database`; if only a SQLAlchemy URL is
+    # supplied, strip the sqlite:// scheme so sqlite3 receives a filesystem path.
+    path = database or connection_string or host or ""
+    if path.startswith("sqlite://"):
+        path = path[len("sqlite://"):]
+        if path.startswith("//"):
+            path = path[1:]  # file: empty host, absolute path
+        elif path.startswith("/"):
+            path = path[1:]  # SQLAlchemy relative path (sqlite:///foo.db)
     if not path:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",

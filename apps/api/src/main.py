@@ -164,11 +164,12 @@ app = FastAPI(
 
 _cors_origins = cors_origins()
 # Railway deploys give each service a *.up.railway.app public domain, which is
-# not known until runtime. A permissive regex lets any Railway subdomain through
-# while still honouring credentials. The env var allows an explicit override.
+# not known until runtime.  Match exactly one Railway subdomain so origins like
+# https://evil.up.railway.app.attacker.com cannot pass.  The env var allows an
+# explicit override if the default is too restrictive.
 _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
-    _cors_origin_regex = r"https://.*\.up\.railway\.app"
+    _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
 app.add_middleware(
     CORSMiddleware,

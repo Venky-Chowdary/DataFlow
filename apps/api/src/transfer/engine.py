@@ -1238,7 +1238,7 @@ class UniversalTransferEngine:
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
                 )
-            if effective_sync == "cdc":
+            elif effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
                     request.source,
                     request.destination,

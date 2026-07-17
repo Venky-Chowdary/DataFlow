@@ -32,8 +32,13 @@ except ImportError:
 _logger = logging.getLogger(__name__)
 
 _SPILL_DIR: Path | None = None
-_SPILL_CACHE: dict[str, Path] = {}
+_SPILL_CACHE: dict[str, tuple[Path, float]] = {}
 _SPILL_LOCK = threading.Lock()
+
+# Default TTL for cached spilled objects (seconds).  A TTL defends against
+# stale data without forcing a re-download on every call; callers that need a
+# guaranteed fresh copy (e.g. per-transfer runs) can pass force=True.
+_SPILL_TTL_SECONDS = int(os.getenv("DATAFLOW_SPILL_TTL", "300"))
 
 _STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet"}
 
@@ -62,27 +67,72 @@ def clear_spill_cache() -> None:
         _SPILL_CACHE.clear()
 
 
-def download_object(cache_key: str, downloader: Callable[[Path], None]) -> Path:
-    """Download an object to a spilled temp file unless it is already cached.
+def _cache_is_fresh(key: str, now: float) -> bool:
+    with _SPILL_LOCK:
+        entry = _SPILL_CACHE.get(key)
+        if not entry:
+            return False
+        path, expires_at = entry
+        return path.exists() and now < expires_at
 
-    ``downloader`` is a callable that receives the target ``Path`` and is
-    responsible for writing bytes to it (e.g. with boto3 StreamingBody chunks).
+
+def download_object(
+    cache_key: str,
+    downloader: Callable[[Path], None],
+    *,
+    force: bool = False,
+    ttl_seconds: int = _SPILL_TTL_SECONDS,
+) -> Path:
+    """Download an object to a spilled temp file unless a fresh copy is cached.
+
+    ``downloader`` receives a temporary target ``Path`` and must write the full
+    object bytes to it.  On success the temp file is atomically renamed to the
+    deterministic spill path; on failure the partial temp file is removed and the
+    cache entry is invalidated so the next call re-downloads.
+
+    Use ``force=True`` when the caller needs a guaranteed fresh copy (e.g. each
+    transfer run) and ``force=False`` when repeated reads of the same object are
+    expected within the TTL.
     """
-    with _SPILL_LOCK:
-        cached = _SPILL_CACHE.get(cache_key)
-        if cached and cached.exists():
-            return cached
+    import time
 
-    path = spill_path(cache_key)
-    with _SPILL_LOCK:
-        _SPILL_CACHE[cache_key] = path
+    now = time.monotonic()
+    if not force and _cache_is_fresh(cache_key, now):
+        with _SPILL_LOCK:
+            path, _ = _SPILL_CACHE[cache_key]
+        _logger.info("Reusing fresh spilled object %s at %s", cache_key, path)
+        return path
 
-    if not path.exists():
-        _logger.info("Spilling object %s to %s", cache_key, path)
-        downloader(path)
-    else:
-        _logger.info("Reusing spilled object %s at %s", cache_key, path)
-    return path
+    final_path = spill_path(cache_key)
+    spill_dir = _spill_directory()
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=spill_dir, prefix=".spill_", suffix=".part")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        _logger.info("Spilling object %s to temp %s", cache_key, tmp_path)
+        downloader(tmp_path)
+        # Atomic rename so other readers never see a partially written file.
+        os.replace(tmp_path, final_path)
+        expires_at = now + ttl_seconds
+        with _SPILL_LOCK:
+            _SPILL_CACHE[cache_key] = (final_path, expires_at)
+        _logger.info("Spilled object %s atomically to %s", cache_key, final_path)
+        return final_path
+    except Exception:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        with _SPILL_LOCK:
+            _SPILL_CACHE.pop(cache_key, None)
+            if final_path.exists():
+                try:
+                    final_path.unlink()
+                except Exception:
+                    pass
+        raise
 
 
 def _records_to_matrix(records: list[dict[str, Any]], columns: list[str]) -> list[list[str]]:

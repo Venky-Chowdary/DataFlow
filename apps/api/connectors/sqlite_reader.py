@@ -32,7 +32,15 @@ def read_table_batch(
 ) -> ReadBatch:
     """Read a batch of rows from a SQLite table."""
     del port, username, password, schema, ssl
-    path = connection_string or database or host
+    # Prefer the raw file path from `database`; if only a SQLAlchemy URL is
+    # supplied, strip the sqlite:// scheme so sqlite3 receives a filesystem path.
+    path = database or connection_string or host or ""
+    if path.startswith("sqlite://"):
+        path = path[len("sqlite://"):]
+        if path.startswith("//"):
+            path = path[1:]  # file: empty host, absolute path
+        elif path.startswith("/"):
+            path = path[1:]  # SQLAlchemy relative path (sqlite:///foo.db)
     if not path:
         raise ValueError("SQLite path is required (database or connection_string).")
     if not table:
