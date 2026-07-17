@@ -27,7 +27,7 @@ class ColumnAnalysisRequest(BaseModel):
     """Request to analyze a single column"""
     column_name: str = Field(..., description="Name of the column to analyze")
     sample_values: list[str] = Field(default=[], description="Sample data values")
-    
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -58,10 +58,10 @@ class ColumnAnalysisResponse(BaseModel):
 class SchemaAnalysisRequest(BaseModel):
     """Request to analyze a complete schema"""
     columns: dict[str, list[str]] = Field(
-        ..., 
+        ...,
         description="Map of column names to sample values"
     )
-    
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -90,10 +90,10 @@ class MappingRequest(BaseModel):
     source_columns: list[str] = Field(..., description="Source column names")
     target_columns: list[str] = Field(..., description="Target column names")
     source_samples: Optional[dict[str, list[str]]] = Field(
-        default=None, 
+        default=None,
         description="Optional sample data for source columns"
     )
-    
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -159,7 +159,7 @@ class PIIDetectionResponse(BaseModel):
 async def api_analyze_column(request: ColumnAnalysisRequest):
     """
     Analyze a single column using AI semantic analysis.
-    
+
     This endpoint uses our proprietary semantic engine to:
     - Detect the semantic type (email, phone, SSN, etc.)
     - Identify if the column contains PII
@@ -169,7 +169,7 @@ async def api_analyze_column(request: ColumnAnalysisRequest):
     """
     try:
         result = analyze_column(request.column_name, request.sample_values)
-        
+
         return ColumnAnalysisResponse(
             column_name=result.column_name,
             inferred_type=result.inferred_type,
@@ -193,7 +193,7 @@ async def api_analyze_column(request: ColumnAnalysisRequest):
 async def api_analyze_schema(request: SchemaAnalysisRequest):
     """
     Analyze a complete schema with multiple columns.
-    
+
     This endpoint provides comprehensive analysis of your entire dataset:
     - Individual analysis for each column
     - PII detection across all columns
@@ -203,7 +203,7 @@ async def api_analyze_schema(request: SchemaAnalysisRequest):
     """
     try:
         result = analyze_schema(request.columns)
-        
+
         columns = [
             ColumnAnalysisResponse(
                 column_name=col.column_name,
@@ -222,11 +222,11 @@ async def api_analyze_schema(request: SchemaAnalysisRequest):
             )
             for col in result.columns
         ]
-        
+
         compliance_req = {
             k.value: v for k, v in result.compliance_requirements.items()
         }
-        
+
         return SchemaAnalysisResponse(
             columns=columns,
             pii_columns=result.pii_columns,
@@ -242,14 +242,14 @@ async def api_analyze_schema(request: SchemaAnalysisRequest):
 async def api_generate_mappings(request: MappingRequest):
     """
     Generate intelligent column mappings between source and target schemas.
-    
+
     Our AI engine uses multiple strategies:
     - Exact name matching
     - Normalized name matching
     - Semantic type correlation
     - Token overlap scoring
     - Synonym recognition
-    
+
     Each mapping includes a confidence score and explanation.
     """
     try:
@@ -258,16 +258,16 @@ async def api_generate_mappings(request: MappingRequest):
             request.target_columns,
             request.source_samples,
         )
-        
+
         mapped_targets = set()
         mapped_sources = set()
-        
+
         mapping_responses = []
         for m in mappings:
             if m.target_column != "<unmapped>":
                 mapped_targets.add(m.target_column)
                 mapped_sources.add(m.source_column)
-            
+
             mapping_responses.append(MappingSuggestionResponse(
                 source_column=m.source_column,
                 target_column=m.target_column,
@@ -276,16 +276,16 @@ async def api_generate_mappings(request: MappingRequest):
                 transformation_needed=m.transformation_needed,
                 suggested_transformation=m.suggested_transformation,
             ))
-        
+
         unmapped_source = [c for c in request.source_columns if c not in mapped_sources]
         unmapped_target = [c for c in request.target_columns if c not in mapped_targets]
-        
+
         confident_mappings = [m for m in mappings if m.confidence > 0.5]
         overall_confidence = (
             sum(m.confidence for m in confident_mappings) / len(confident_mappings)
             if confident_mappings else 0.0
         )
-        
+
         return MappingResponse(
             mappings=mapping_responses,
             unmapped_source=unmapped_source,
@@ -300,23 +300,23 @@ async def api_generate_mappings(request: MappingRequest):
 async def api_detect_pii(request: PIIDetectionRequest):
     """
     Detect PII (Personally Identifiable Information) in your data.
-    
+
     This endpoint scans all columns for:
     - Personal identifiers (SSN, passport, driver's license)
     - Contact information (email, phone, address)
     - Financial data (credit cards, bank accounts)
     - Health information (MRN, diagnoses)
-    
+
     Returns compliance requirements for GDPR, CCPA, HIPAA, PCI-DSS, etc.
     """
     try:
         schema_analysis = analyze_schema(request.columns)
-        
+
         pii_columns = []
         for col in schema_analysis.columns:
             if col.is_pii:
                 risk_level = "high" if col.confidence > 0.9 else "medium" if col.confidence > 0.7 else "low"
-                
+
                 pii_columns.append(PIIColumn(
                     column_name=col.column_name,
                     semantic_type=col.semantic_type or "unknown",
@@ -324,11 +324,11 @@ async def api_detect_pii(request: PIIDetectionRequest):
                     risk_level=risk_level,
                     recommended_actions=col.suggested_transformations[:3],
                 ))
-        
+
         compliance_summary = {
             k.value: v for k, v in schema_analysis.compliance_requirements.items()
         }
-        
+
         return PIIDetectionResponse(
             has_pii=len(pii_columns) > 0,
             pii_count=len(pii_columns),
@@ -343,12 +343,12 @@ async def api_detect_pii(request: PIIDetectionRequest):
 async def list_semantic_types():
     """
     List all supported semantic types.
-    
+
     Returns the complete catalog of data types our AI can recognize,
     including PII categories and compliance mappings.
     """
     from ..ai.semantic_engine import SEMANTIC_TYPES
-    
+
     return {
         "count": len(SEMANTIC_TYPES),
         "types": [

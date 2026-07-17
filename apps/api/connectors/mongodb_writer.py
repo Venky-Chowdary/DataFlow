@@ -184,7 +184,7 @@ def write_mapped_rows(
                 rejected_rows=rejected_rows,
                 warnings=transform_errors,
             )
-        
+
         from datetime import date as _date
         from datetime import datetime as _datetime
         from datetime import time as _time

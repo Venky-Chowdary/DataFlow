@@ -37,9 +37,9 @@ class ParseResult:
 
 class FileParser:
     """Universal file parser for DataTransfer platform"""
-    
+
     SUPPORTED_TYPES = ["json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"]
-    
+
     @staticmethod
     def detect_file_type(filename: str, content: bytes | None = None) -> str:
         """Detect file type from filename, with content sniffing as fallback.
@@ -105,13 +105,13 @@ class FileParser:
                 return "tsv"
 
         return "unknown"
-    
+
     @staticmethod
     def parse_json(content: str) -> ParseResult:
         """Parse JSON file content"""
         try:
             data = json.loads(content)
-            
+
             if isinstance(data, list):
                 records = data
             elif isinstance(data, dict):
@@ -133,7 +133,7 @@ class FileParser:
                     error="JSON must be an array or object",
                     file_type="json"
                 )
-            
+
             if not records:
                 return ParseResult(
                     success=True,
@@ -142,7 +142,7 @@ class FileParser:
                     row_count=0,
                     file_type="json"
                 )
-            
+
             columns = set()
             object_rows = 0
             for record in records:
@@ -169,7 +169,7 @@ class FileParser:
                     error="No columns detected — ensure each JSON object has consistent field names",
                     file_type="json",
                 )
-            
+
             return ParseResult(
                 success=True,
                 data=records,
@@ -177,7 +177,7 @@ class FileParser:
                 row_count=len(records),
                 file_type="json"
             )
-            
+
         except json.JSONDecodeError as e:
             return ParseResult(
                 success=False,
@@ -187,14 +187,14 @@ class FileParser:
                 error=f"Invalid JSON: {str(e)}",
                 file_type="json"
             )
-    
+
     @staticmethod
     def parse_jsonl(content: str) -> ParseResult:
         """Parse JSON Lines (JSONL/NDJSON) format"""
         try:
             records = []
             columns = set()
-            
+
             for line_num, line in enumerate(content.strip().split('\n'), 1):
                 line = line.strip()
                 if not line:
@@ -213,7 +213,7 @@ class FileParser:
                         error=f"Invalid JSON at line {line_num}: {str(e)}",
                         file_type="jsonl"
                     )
-            
+
             return ParseResult(
                 success=True,
                 data=records,
@@ -221,7 +221,7 @@ class FileParser:
                 row_count=len(records),
                 file_type="jsonl"
             )
-            
+
         except Exception as e:
             return ParseResult(
                 success=False,
@@ -231,7 +231,7 @@ class FileParser:
                 error=str(e),
                 file_type="jsonl"
             )
-    
+
     @staticmethod
     def parse_csv(content: str | bytes, delimiter: str = ",") -> ParseResult:
         """Parse CSV/TSV file content — auto-detects delimiter and encoding."""
@@ -279,7 +279,7 @@ class FileParser:
                 error=f"CSV parse error: {e}",
                 file_type="csv",
             )
-    
+
     @staticmethod
     def parse_excel(content: bytes, max_rows: int = 100_000) -> ParseResult:
         """Parse Excel (.xlsx) workbook — first sheet, header row."""
@@ -539,7 +539,7 @@ class FileParser:
                 content = decoded.decode("utf-8")
             except UnicodeDecodeError:
                 content = decoded.decode("latin-1")
-        
+
         if file_type == "json":
             return cls.parse_json(content)
         elif file_type == "jsonl":
@@ -569,7 +569,7 @@ class FileParser:
                 error=f"Unsupported file type: {file_type}",
                 file_type=file_type
             )
-    
+
     @staticmethod
     def _value_to_string(value: Any) -> str:
         """Convert a typed Python value into a string for statistical inference."""

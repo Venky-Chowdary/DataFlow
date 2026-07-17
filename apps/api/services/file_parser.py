@@ -203,12 +203,12 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
     record = get_file(file_id)
     if not record:
         raise FileNotFoundError(f"File {file_id} not found in registry")
-    
+
     path = Path(record["path"])
     fmt = record["format"]
     encoding = record["encoding"]
     delimiter = record["delimiter"]
-    
+
     if fmt == "csv":
         import csv
         with open(path, "r", encoding=encoding, errors="replace") as f:

@@ -292,11 +292,11 @@ async def create_connector(
 
     try:
         mongo = get_mongodb_service()
-        
+
         mongo_data = {k: v for k, v in connector_data.items() if k != "role" and k != "ssl"}
         connector_id = mongo.save_connector(mongo_data)
         connector = mongo.get_connector(connector_id)
-        
+
         return ConnectorResponse(
             id=connector["_id"],
             name=connector["name"],
@@ -308,7 +308,7 @@ async def create_connector(
             created_at=connector["created_at"].isoformat(),
             workspace_id=connector.get("workspace_id", ""),
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -651,12 +651,12 @@ async def get_connector(connector_id: str):
     try:
         mongo = get_mongodb_service()
         connector = mongo.get_connector(connector_id)
-        
+
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
-        
+
         return connector
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -669,12 +669,12 @@ async def delete_connector(connector_id: str):
     try:
         mongo = get_mongodb_service()
         success = mongo.delete_connector(connector_id)
-        
+
         if not success:
             raise HTTPException(status_code=404, detail="Connector not found")
-        
+
         return {"success": True, "message": "Connector deleted"}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -691,7 +691,7 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         content = await file.read()
         result = FileParser.parse(content, file.filename)
-        
+
         if not result.success:
             raise HTTPException(status_code=400, detail=result.error)
 
@@ -703,7 +703,7 @@ async def upload_file(file: UploadFile = File(...)):
                 status_code=400,
                 detail="No columns detected — use CSV/JSON/JSONL with object rows and consistent field names",
             )
-        
+
         schema = FileParser.infer_schema(result.data)
         try:
             from services.data_profiler import merge_profiler_schema, profile_dataset
@@ -724,7 +724,7 @@ async def upload_file(file: UploadFile = File(...)):
                 sys.path.insert(0, str(_api_root))
             from services.csv_validator import validate_csv_content
             validation_report = validate_csv_content(content, result.columns, schema)
-        
+
         return {
             "success": True,
             "filename": file.filename,
@@ -737,7 +737,7 @@ async def upload_file(file: UploadFile = File(...)):
             "validation": validation_report,
             "profile": profile,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:

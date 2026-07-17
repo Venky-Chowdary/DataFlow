@@ -41,7 +41,7 @@ def _fresh_object_id_hex() -> str:
 
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
-    
+
     def __init__(self, connection_string: str | None = None):
         if connection_string:
             self.connection_string = connection_string
@@ -55,7 +55,7 @@ class MongoDBService:
                 )
         self.client: Optional[MongoClient] = None
         self.db_name = "datatransfer"
-    
+
     def connect(self) -> bool:
         """Establish connection to MongoDB"""
         try:
@@ -66,13 +66,13 @@ class MongoDBService:
             print(f"[ERROR] MongoDB connection failed: {e}")
             self.client = None
             return False
-    
+
     def disconnect(self):
         """Close MongoDB connection"""
         if self.client:
             self.client.close()
             self.client = None
-    
+
     def get_database(self, db_name: Optional[str] = None):
         """Get database instance.
 
@@ -86,7 +86,7 @@ class MongoDBService:
                 f"MongoDB unavailable at {self.connection_string}"
             )
         return self.client[db_name or self.db_name]
-    
+
     def test_connection(self) -> dict:
         """Test connection and return server info"""
         try:
@@ -104,22 +104,22 @@ class MongoDBService:
                 "error": str(e),
                 "host": self.connection_string,
             }
-    
+
     # ═══════════════════════════════════════════════════════════════════════
     # CONNECTOR CONFIGURATION STORAGE
     # ═══════════════════════════════════════════════════════════════════════
-    
+
     def save_connector(self, connector_data: dict) -> str:
         """Save a connector configuration"""
         db = self.get_database()
         collection = db["connectors"]
-        
+
         connector_data["created_at"] = datetime.now(timezone.utc)
         connector_data["updated_at"] = datetime.now(timezone.utc)
-        
+
         result = collection.insert_one(connector_data)
         return str(result.inserted_id)
-    
+
     def get_connector(self, connector_id: str) -> Optional[dict]:
         """Get a connector by ID"""
         db = self.get_database()
@@ -172,11 +172,11 @@ class MongoDBService:
 
         result = collection.delete_one({"_id": oid})
         return result.deleted_count > 0
-    
+
     # ═══════════════════════════════════════════════════════════════════════
     # DATA TRANSFER OPERATIONS
     # ═══════════════════════════════════════════════════════════════════════
-    
+
     def insert_data(self, database: str, collection: str, data: list[dict], client: Optional["MongoClient"] = None) -> dict:
         """Insert data into a MongoDB collection"""
         try:
@@ -186,10 +186,10 @@ class MongoDBService:
                 db_client = self.client
             db = db_client[database]
             coll = db[collection]
-            
+
             if not data:
                 return {"success": False, "error": "No data to insert"}
-            
+
             result = coll.insert_many(data)
             return {
                 "success": True,
@@ -199,7 +199,7 @@ class MongoDBService:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def get_client_for_connector(self, connector_id: str):
         """Build MongoClient from saved connector config (file store or platform MongoDB)."""
         from pymongo import MongoClient
@@ -223,10 +223,10 @@ class MongoDBService:
                 self.connect()
                 db_client = self.client
             db = db_client[database]
-            
+
             if collection in db.list_collection_names():
                 return {"success": True, "message": "Collection already exists"}
-            
+
             db.create_collection(collection)
             return {
                 "success": True,
@@ -234,19 +234,19 @@ class MongoDBService:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def get_collection_stats(self, database: str, collection: str) -> dict:
         """Get statistics for a collection"""
         try:
             db = self.client[database]
             coll = db[collection]
-            
+
             count = coll.count_documents({})
             sample = list(coll.find().limit(5))
-            
+
             for doc in sample:
                 doc["_id"] = str(doc["_id"])
-            
+
             return {
                 "success": True,
                 "document_count": count,
@@ -254,11 +254,11 @@ class MongoDBService:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     # ═══════════════════════════════════════════════════════════════════════
     # TRANSFER JOB TRACKING
     # ═══════════════════════════════════════════════════════════════════════
-    
+
     def create_transfer_job(self, job_data: dict) -> str:
         """Create a new transfer job record.
 
@@ -286,7 +286,7 @@ class MongoDBService:
 
         result = collection.insert_one(job_data)
         return str(result.inserted_id)
-    
+
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         """Update transfer job status.
 
@@ -340,7 +340,7 @@ class MongoDBService:
             {"$set": updates}
         )
         return result.modified_count > 0
-    
+
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
         try:
@@ -357,7 +357,7 @@ class MongoDBService:
         if result:
             result["_id"] = str(result["_id"])
         return result
-    
+
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
         db = self.get_database()

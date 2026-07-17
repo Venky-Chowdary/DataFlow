@@ -41,11 +41,11 @@ def dispatch_file_to_database(
 
             from connectors.writer_common import row_checksum
             from services.file_parser import get_file, get_file_chunks
-            
+
             record = get_file(file_id)
             if not record:
                 raise FileNotFoundError("Source file not found")
-                
+
             column_types = {c["name"]: c["inferred_type"] for c in record["columns"]}
             total_rows = record["row_count"]
 
@@ -67,7 +67,7 @@ def dispatch_file_to_database(
                 "mappings": mappings,
                 "column_types": column_types,
             }
-            
+
             if db_type == "snowflake":
                 from connectors.snowflake_writer import write_mapped_rows
                 common["schema"] = dest.get("schema", "PUBLIC")
@@ -84,7 +84,7 @@ def dispatch_file_to_database(
             rows_written = 0
             rejected_rows = 0
             final_checksum_list = []
-            
+
             target_schema_out = ""
             table_name_out = table_name
             driver_out = ""
@@ -99,11 +99,11 @@ def dispatch_file_to_database(
                 if db_type == "snowflake":
                     common["create_table"] = is_first
                 common["on_checkpoint"] = _wrap_checkpoint(job_id, lambda c, t, r: None)
-                
+
                 result = write_mapped_rows(**common)
                 if not result.ok:
                     raise RuntimeError(result.error or "Batch write failed")
-                    
+
                 rows_written += result.rows_written
                 rejected_rows += int(getattr(result, "rejected_rows", 0) or 0)
                 if getattr(result, "rejected_details", None):
@@ -112,7 +112,7 @@ def dispatch_file_to_database(
                 target_schema_out = result.target_schema
                 table_name_out = result.table_name
                 driver_out = result.driver
-                
+
                 chunk_idx += 1
 
             combined_checksum = row_checksum([[c] for c in final_checksum_list])

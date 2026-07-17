@@ -87,7 +87,7 @@ class DataTransferRAGGenerator:
             reason = f"'{source_col}' and '{target_col}' are synonyms"
             method = "synonym"
         elif mapping_info.get("same_canonical"):
-            reason = f"Both columns resolve to canonical form"
+            reason = "Both columns resolve to canonical form"
             method = "canonical"
         else:
             src_pattern = mapping_info.get("source", {}).get("pattern")

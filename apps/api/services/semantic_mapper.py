@@ -16,7 +16,7 @@ def _load_ml_baseline():
     global _model_cache
     if _model_cache is not None:
         return _model_cache
-    
+
     # Try to load the ML baseline model if it exists
     try:
         model_path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
@@ -442,7 +442,7 @@ def _score_pair(
 
     bm25 = _bm25_score(_tokenize(source), _tokenize(target), idf, avgdl)
     bm25_norm = min(bm25 / 8.0, 1.0)
-    
+
     # Advanced heuristic: ML Baseline prediction
     ml_model = _load_ml_baseline()
     ml_boost = 0.0
@@ -466,7 +466,7 @@ def _score_pair(
         return 0.82 + overlap * 0.03 + bm25_norm * 0.05 - type_penalty + type_boost + ml_boost + sample_boost, f"Shared tokens ({overlap}) + BM25"
 
     fuzzy = _similarity(src_sem, tgt_sem)
-    
+
     # Advanced heuristic: Character n-gram Jaccard (n=3)
     def ngrams(s, n):
         return set(s[i:i+n] for i in range(max(1, len(s)-n+1)))
@@ -476,7 +476,7 @@ def _score_pair(
         jaccard = len(s_ngrams & t_ngrams) / len(s_ngrams | t_ngrams)
 
     combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) - type_penalty + type_boost + ml_boost + sample_boost
-    
+
     if combined >= 0.78:
         return min(combined, 0.99), "BM25 / Jaccard lexical retrieval"
     if overlap == 1 and len(src_sem.split("_")) > 1:
