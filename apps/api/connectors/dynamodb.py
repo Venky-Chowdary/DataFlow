@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_endpoint_url, resolve_region
+from connectors.base import ConnectResult
 
 
 def _cfg(host: str, port: int, username: str, password: str, connection_string: str) -> dict:
@@ -28,8 +29,6 @@ def test_dynamodb(
     warehouse: str = "",
     table: str = "",
 ) -> ConnectResult:
-    from connectors.base import ConnectResult
-
     del schema, ssl, warehouse
 
     table = (table or database or "").strip()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write

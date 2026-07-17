@@ -8,6 +8,7 @@ the tenant's security and residency policies.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os

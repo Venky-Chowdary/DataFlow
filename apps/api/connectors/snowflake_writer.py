@@ -7,7 +7,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import get_connection, normalize_account

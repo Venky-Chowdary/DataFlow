@@ -6,7 +6,6 @@ import csv
 import io
 import json
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.adls_common import blob_service_client
@@ -14,7 +13,6 @@ from connectors.writer_common import (
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
-    sanitize_identifier,
     transform_error_policy,
 )
 from services.value_serializer import cell_to_string, json_default
@@ -48,13 +46,13 @@ def _to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
         if ctype in {"json", "array", "object", "struct"}:
             try:
-                return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+                return json.loads(text, parse_constant=lambda v: None)
             except json.JSONDecodeError:
                 return value
         if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
             return value
         try:
-            return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+            return json.loads(text, parse_constant=lambda v: None)
         except json.JSONDecodeError:
             return value
     return value

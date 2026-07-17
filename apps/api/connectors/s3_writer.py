@@ -7,7 +7,6 @@ import io
 import json
 import sys
 from dataclasses import dataclass, field
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -137,7 +136,7 @@ def write_mapped_rows(
             # Structural types are parsed as JSON objects/arrays.
             if ctype in {"json", "array", "object", "struct"}:
                 try:
-                    return json.loads(text, parse_float=Decimal, parse_constant=lambda v: None)
+                    return json.loads(text, parse_constant=lambda v: None)
                 except json.JSONDecodeError:
                     return value
             # Text, dates, UUID, binary and other non-numeric types must stay as strings.
