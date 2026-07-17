@@ -669,19 +669,34 @@ def verify_duckdb_table(
 
 def verify_mongodb_collection(
     *,
-    connection_string: str,
-    database: str,
-    table_name: str,
+    host: str = "",
+    port: int = 27017,
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    database: str = "",
+    ssl: bool = False,
+    auth_source: str = "",
+    table_name: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
         from pymongo import MongoClient
+        from connectors.mongodb_common import normalize_mongodb_connection_string
 
-        client = MongoClient(
-            connection_string or "localhost", serverSelectionTimeoutMS=5000
+        conn_str = normalize_mongodb_connection_string(
+            connection_string or "",
+            database=database,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            ssl=ssl,
+            auth_source=auth_source,
         )
+        client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
@@ -762,8 +777,14 @@ def verify_target(
 ) -> tuple[int, str]:
     if db_type == "mongodb":
         count, chk = verify_mongodb_collection(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 27017),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
+            ssl=bool(dest.get("ssl", False)),
+            auth_source=dest.get("auth_source", ""),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,

@@ -171,6 +171,9 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(AuthMiddleware)
+app.add_middleware(TenantMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -179,9 +182,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.add_middleware(AuthMiddleware)
-app.add_middleware(TenantMiddleware)
 
 
 @app.middleware("http")
