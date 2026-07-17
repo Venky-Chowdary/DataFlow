@@ -333,7 +333,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         )
 
     source_count = len(sample_rows)
-    unknown_transform = any(m.transform for m in ctx.plan.mappings)
+    has_transform = any(m.transform for m in ctx.plan.mappings)
 
     mapped_rows: list[dict[str, Any]] = []
     for row in sample_rows:
@@ -369,18 +369,23 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         )
 
     # When no non-trivial transforms are applied, the source and target value
-    # streams should be identical (column ordering does not matter).
-    if not unknown_transform:
-        def _sorted_hash(rows: list[dict[str, Any]]) -> str:
-            payload = []
-            for row in rows:
-                payload.append(
-                    json.dumps(sorted((str(k), str(v)) for k, v in row.items()), ensure_ascii=True)
-                )
-            return hashlib.sha256("\n".join(payload).encode("utf-8")).hexdigest()
+    # streams should be identical.  Compare values along the mapping, ignoring
+    # source column names so renames, unmapped columns, and null/'' values do not
+    # produce false mismatches.
+    if not has_transform:
 
-        source_hash = _sorted_hash(sample_rows)
-        target_hash = _sorted_hash(mapped_rows)
+        def _norm(value: Any) -> str:
+            return "" if value is None else str(value)
+
+        def _value_fingerprint(rows: list[dict[str, Any]], key_attr: str) -> str:
+            payload: list[list[str]] = []
+            for row in rows:
+                values = [_norm(row.get(getattr(m, key_attr))) for m in ctx.plan.mappings]
+                payload.append(values)
+            return hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+        source_hash = _value_fingerprint(sample_rows, "source")
+        target_hash = _value_fingerprint(mapped_rows, "target")
         if source_hash != target_hash:
             return _block(
                 GateId.G8_RECONCILIATION,
