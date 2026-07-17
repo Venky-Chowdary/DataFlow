@@ -616,6 +616,7 @@ def verify_sqlite_table(
     connection_string: str,
     database: str,
     table_name: str,
+    host: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
@@ -623,7 +624,9 @@ def verify_sqlite_table(
     try:
         import sqlite3
 
-        path = connection_string or database
+        from connectors.sqlite_common import sqlite_file_path
+
+        path = sqlite_file_path(database, connection_string, host)
         if not path:
             return -1, ""
         conn = sqlite3.connect(str(path))
@@ -806,6 +809,7 @@ def verify_target(
         count, chk = verify_sqlite_table(
             connection_string=dest.get("connection_string", ""),
             database=dest.get("database", ""),
+            host=dest.get("host", ""),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
