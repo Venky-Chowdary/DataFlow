@@ -210,7 +210,7 @@ def write_mapped_rows(
                 insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
 
             converted_rows = [
-                tuple(_to_mysql_value(v, source_types[i]) for i, v in enumerate(row))
+                tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
                 for row in mapped_rows
             ]
 
