@@ -219,10 +219,18 @@ def resolve_connector_config(
         conn_dict = _lookup_saved_connector(endpoint.connector_id, workspace_id=workspace_id)
         if not conn_dict:
             raise ValueError(f"Connector {endpoint.connector_id} not found")
+        # For MongoDB saved connectors that only supply a connection string, the
+        # database name in the URI should take precedence over an inline default
+        # like "test_db" sent by the UI form.
+        saved_database = conn_dict.get("database") or ""
+        if fmt == "mongodb" and not saved_database:
+            from connectors.mongodb_common import mongodb_database_from_uri
+
+            saved_database = mongodb_database_from_uri(conn_dict.get("connection_string", "")) or ""
         cfg.update({
             "host": conn_dict.get("host") or cfg["host"],
             "port": conn_dict.get("port") or cfg["port"],
-            "database": conn_dict.get("database") or cfg["database"],
+            "database": saved_database or cfg["database"],
             "schema": conn_dict.get("schema") or cfg["schema"],
             "username": conn_dict.get("username") or cfg["username"],
             "password": conn_dict.get("password") or cfg["password"],
