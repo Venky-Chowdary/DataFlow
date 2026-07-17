@@ -58,7 +58,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-    "s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
+    "s3", "gcs", "adls", "sftp", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
 })
 
 
@@ -747,10 +747,37 @@ def stream_database_transfer(
     if src_type == "s3" and not src_cfg.get("database"):
         raise ValueError("S3 source requires bucket name in the database field")
 
-    if src_type in ("s3", "gcs"):
-        from connectors.object_read_cache import clear_object_cache
+    if src_type in ("s3", "gcs", "adls", "sftp"):
+        from services.object_streaming import download_for_object_store, download_object, stream_spilled_file_to_database
 
-        clear_object_cache()
+        bucket = source.database or src_cfg.get("database", "")
+        key = table
+        if src_type in ("s3", "gcs") and not bucket:
+            raise ValueError(f"{src_type.upper()} source requires bucket name in the database field")
+        cache_key = f"{src_type}:{bucket}:{key}"
+        # Always fetch a fresh copy for a transfer run; atomic download protects
+        # against partial/corrupt reuse.
+        path = download_object(
+            cache_key,
+            lambda p: download_for_object_store(src_type, p, src_cfg, bucket, key),
+            force=True,
+        )
+        return stream_spilled_file_to_database(
+            path=path,
+            filename=key,
+            destination=destination,
+            mappings=mappings,
+            schema=schema,
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service,
+            retry_budget=retry_budget,
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            source_filter=source_filter,
+        )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
@@ -1224,6 +1251,286 @@ def stream_database_transfer(
     dest_summary["watermark"] = running_cursor
     ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")
     return written, ddl_log, dest_summary, columns
+
+
+class _NoOpCheckpointService:
+    """A checkpoint service that does not persist anything.
+
+    Used for temporary staging transfers so the parent job's checkpoint is not
+    overwritten by an internal phase.
+    """
+
+    def save(self, checkpoint: Any) -> bool:  # noqa: ARG002
+        return True
+
+    def load(self, job_id: str) -> Any | None:  # noqa: ARG002
+        return None
+
+
+def _qualified(table: str, schema: str | None) -> str:
+    """Return a SQL quoted qualified table name."""
+    from connectors.writer_common import quote_sql_identifier
+
+    table_q = quote_sql_identifier(table)
+    if schema:
+        return f"{quote_sql_identifier(schema)}.{table_q}"
+    return table_q
+
+
+def _staging_endpoint(destination: EndpointConfig, job_id: str) -> EndpointConfig:
+    """Clone a destination endpoint for use as a per-transfer staging table."""
+    from dataclasses import replace
+
+    suffix = re.sub(r"[^a-zA-Z0-9_]", "", job_id)[:16] or "stg"
+    return replace(
+        destination,
+        table=f"_dataflow_stg_{suffix}",
+        collection=f"_dataflow_stg_{suffix}",
+    )
+
+
+def stream_scd2_mirror_transfer(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Callable[..., None] | None = None,
+    *,
+    sync_mode: str = "full_refresh_mirror",
+    stream_contracts: list[dict] | None = None,
+    job_id: str | None = None,
+    checkpoint: Any = None,  # noqa: ARG001 - reserved for future resume support
+    checkpoint_service: Any = None,  # noqa: ARG001
+    backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """Stream a mirror or SCD2 database-to-database transfer through a staging table.
+
+    Instead of loading the entire source table into memory, this helper:
+      1. Streams the source into a temporary staging table.
+      2. For SCD2, applies the slowly-changing-dimension merge in batches.
+      3. For mirror, upserts the staging table into the target and then runs a
+         single SQL pass to reactivate present keys and soft-delete missing keys.
+    """
+    import math
+
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
+    from connectors.writer_common import quote_sql_identifier
+    from services.sync_cursor import resolve_sync_contract
+
+    contract = resolve_sync_contract(stream_contracts)
+    effective_sync = (contract.sync_mode if contract else sync_mode).lower()
+
+    src_type = resolve_driver_type(source.format)
+    dest_type = resolve_driver_type(destination.format)
+
+    # Supported SQL-backed destinations that can be driven through SQLAlchemy.
+    _SQL_STREAMING_DESTS = {
+        "generic_sql", "postgresql", "mysql", "sqlite", "snowflake", "bigquery", "redshift",
+    }
+    if dest_type not in _SQL_STREAMING_DESTS:
+        raise NotImplementedError(
+            f"{effective_sync} streaming transfer is currently implemented for SQL destinations; "
+            f"'{destination.format}' is not yet supported."
+        )
+
+    dest_cfg = resolve_connector_config(destination)
+    # get_sql_schema() already respects dialect defaults; ignore the default
+    # "public" placeholder that resolve_connector_config sets for SQLite/MySQL.
+    schema_name = get_sql_schema(dest_cfg) or ""
+
+    if not mappings:
+        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]
+    target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True)
+    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in schema}
+
+    staging = _staging_endpoint(destination, job_id or "")
+    staging_qualified = _qualified(staging.table, schema_name)
+    target_qualified = _qualified(destination.table or staging.table, schema_name)
+
+    # 1. Drop any leftover staging table and stream source into staging.
+    drop_table(dest_cfg, staging.table, schema_name or None)
+
+    stage_cb: Callable[..., None] | None = None
+    if on_checkpoint:
+        def stage_cb(chunk: int, chunks: int, rows: int, checkpoint: dict | None = None) -> None:  # type: ignore[misc]
+            pct = int(25 + (chunk / max(chunks, 1)) * 35)
+            on_checkpoint(chunk, chunks, rows, checkpoint=checkpoint or {"phase": "staging", "progress_pct": pct})
+
+    rows_staged, stage_ddl, stage_summary, stage_columns = stream_database_transfer(
+        source,
+        staging,
+        mappings,
+        schema,
+        on_checkpoint=stage_cb,
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[{"selected": True, "sync_mode": "full_refresh_overwrite"}],
+        job_id=f"{job_id or ''}_stage",
+        checkpoint_service=_NoOpCheckpointService(),
+        backfill_new_fields=backfill_new_fields,
+        validation_mode=validation_mode,
+    )
+
+    ddl_log = [
+        f"STAGING {src_type}.{source.table or source.collection} → {staging_qualified} "
+        f"({rows_staged:,} rows)",
+    ]
+
+    rows_written = 0
+    updated_rows = 0
+    dest_summary: dict[str, Any] = {
+        "source_rows": rows_staged,
+        "staging_table": staging_qualified,
+        "sync_mode": effective_sync,
+    }
+
+    try:
+        if effective_sync == "scd2":
+            from src.services.scd2_engine import apply_scd2
+
+            batch_size = 1_000
+            pk = (contract.primary_key if contract else "") or target_cols[0]
+            conflict_columns = [pk]
+            written_total = 0
+            updated_total = 0
+            active_rows = 0
+            active_checksum = ""
+            batch_idx = 0
+            # Rough batch count for progress reporting; exact number does not matter.
+            approx_batches = max(1, math.ceil(rows_staged / batch_size))
+
+            for records in _read_staging_batches(staging, dest_cfg, schema_name, target_cols, batch_size):
+                if not records:
+                    break
+                summary = apply_scd2(
+                    destination,
+                    records,
+                    target_cols,
+                    column_types,
+                    mappings=mappings,
+                    conflict_columns=conflict_columns,
+                    batch_size=batch_size,
+                )
+                written_total += int(summary.get("rows_written", 0))
+                updated_total += int(summary.get("updated_rows", 0))
+                active_rows = int(summary.get("active_rows", 0))
+                active_checksum = str(summary.get("active_checksum", ""))
+                batch_idx += 1
+                if on_checkpoint:
+                    on_checkpoint(batch_idx, approx_batches, written_total, checkpoint={"phase": "scd2"})
+
+            rows_written = written_total
+            updated_rows = updated_total
+            dest_summary["active_rows"] = active_rows
+            dest_summary["active_checksum"] = active_checksum
+            dest_summary["updated_rows"] = updated_total
+
+        elif effective_sync in ("full_refresh_mirror", "mirror"):
+            from src.services.mirror_engine import _compute_active_checksum, _ensure_soft_delete_column
+
+            # Stream upsert staging → target.
+            upsert_contract = [{"selected": True, "sync_mode": "upsert", "primary_key": contract.primary_key}] if contract else None
+            rows_upserted, _, upsert_summary, _ = stream_database_transfer(
+                staging,
+                destination,
+                mappings,
+                schema,
+                on_checkpoint=on_checkpoint,
+                sync_mode="upsert",
+                stream_contracts=upsert_contract,
+                job_id=f"{job_id or ''}_mirror",
+                checkpoint_service=_NoOpCheckpointService(),
+                backfill_new_fields=backfill_new_fields,
+                validation_mode=validation_mode,
+            )
+
+            rows_written = rows_upserted
+            dest_summary["upserted"] = rows_upserted
+            dest_summary["checksum"] = upsert_summary.get("checksum", "")
+
+            # Single SQL pass to reactivate present keys and soft-delete missing keys.
+            engine = get_sqlalchemy_engine(dest_cfg)
+            soft_delete_col = quote_sql_identifier("_deleted")
+            pk = quote_sql_identifier(
+                contract.primary_key if contract else target_cols[0]
+            )
+            with engine.connect() as conn:
+                _ensure_soft_delete_column(conn, target_qualified, "_deleted")
+                # Reactivate rows that are back in the source.
+                conn.execute(
+                    sa.text(
+                        f"UPDATE {target_qualified} "
+                        f"SET {soft_delete_col} = FALSE "
+                        f"WHERE {pk} IN (SELECT {pk} FROM {staging_qualified})"
+                    )
+                )
+                # Soft-delete rows that are no longer in the source.
+                conn.execute(
+                    sa.text(
+                        f"UPDATE {target_qualified} "
+                        f"SET {soft_delete_col} = TRUE "
+                        f"WHERE {pk} NOT IN (SELECT {pk} FROM {staging_qualified}) "
+                        f"AND ({soft_delete_col} IS NULL OR {soft_delete_col} = FALSE)"
+                    )
+                )
+                conn.commit()
+
+                # Read active rows and compute checksum.
+                active_count, active_checksum = _compute_active_checksum(
+                    conn, target_qualified, target_cols, "_deleted", batch_size=1_000
+                )
+                conn.commit()
+            engine.dispose()
+            dest_summary["active_rows"] = active_count
+            dest_summary["active_checksum"] = active_checksum
+
+        else:
+            raise ValueError(f"Unsupported sync mode for SCD2/mirror streaming: {effective_sync}")
+    finally:
+        # Clean up the temporary staging table.
+        try:
+            drop_table(dest_cfg, staging.table, schema_name or None)
+        except Exception:
+            pass
+
+    ddl_log.append(f"{effective_sync.upper()} {staging_qualified} → {target_qualified}")
+    dest_summary["rejected_rows"] = max(0, rows_staged - rows_written)
+    return rows_written, ddl_log, dest_summary, target_cols
+
+
+def _read_staging_batches(
+    endpoint: EndpointConfig,
+    cfg: dict[str, Any],
+    schema_name: str,
+    columns: list[str],
+    batch_size: int,
+):
+    """Yield batches of dicts from the staging table using LIMIT/OFFSET."""
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.writer_common import quote_sql_identifier
+
+    engine = get_sqlalchemy_engine(cfg)
+    qualified = _qualified(endpoint.table, schema_name)
+    try:
+        with engine.connect() as conn:
+            offset = 0
+            while True:
+                cols = ",".join(quote_sql_identifier(c) for c in columns)
+                sql = f"SELECT {cols} FROM {qualified} LIMIT {batch_size} OFFSET {offset}"
+                result = conn.execute(sa.text(sql))
+                rows = result.mappings().all()
+                if not rows:
+                    break
+                yield [{c: row[c] for c in columns} for row in rows]
+                if len(rows) < batch_size:
+                    break
+                offset += batch_size
+    finally:
+        engine.dispose()
 
 
 def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:

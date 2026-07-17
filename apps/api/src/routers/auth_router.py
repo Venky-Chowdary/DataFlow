@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import secrets
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException
@@ -10,9 +9,12 @@ from pydantic import BaseModel, Field
 
 from ..services.auth_service import authenticate, create_token, public_user
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+try:
+    from services.sso_state import generate_state, get_and_pop
+except ImportError:  # pragma: no cover - tests with src on PYTHONPATH
+    from src.services.sso_state import generate_state, get_and_pop
 
-_SSO_STATE: dict[str, str] = {}
+router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class LoginRequest(BaseModel):
@@ -43,8 +45,7 @@ async def sso_start(sso_type: str):
         raise HTTPException(status_code=400, detail=check["message"])
 
     cfg = get_sso_config_raw(sso_type)
-    state = secrets.token_urlsafe(16)
-    _SSO_STATE[state] = sso_type
+    state = generate_state(sso_type)
 
     if sso_type in ("oidc", "azure_ad"):
         if sso_type == "azure_ad":
@@ -80,7 +81,7 @@ async def sso_start(sso_type: str):
 async def sso_callback(sso_type: str, code: str = "", state: str = "", error: str = ""):
     if error:
         raise HTTPException(status_code=400, detail=f"SSO error: {error}")
-    if state not in _SSO_STATE or _SSO_STATE.pop(state) != sso_type:
+    if not get_and_pop(state, sso_type):
         raise HTTPException(status_code=400, detail="Invalid SSO state")
 
     if sso_type not in ("oidc", "azure_ad") or not code:

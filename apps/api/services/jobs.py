@@ -113,6 +113,12 @@ class MemoryJobStore:
             if job:
                 job.workflow_phase = phase
 
+    def set_message(self, job_id: str, message: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.message = message
+
     def set_running(self, job_id: str, *, total_rows: int, table_name: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -243,6 +249,10 @@ class JsonFileJobStore(MemoryJobStore):
 
     def set_workflow_phase(self, job_id: str, phase: str) -> None:
         super().set_workflow_phase(job_id, phase)
+        self._persist()
+
+    def set_message(self, job_id: str, message: str) -> None:
+        super().set_message(job_id, message)
         self._persist()
 
     def set_running(self, job_id: str, *, total_rows: int, table_name: str) -> None:
@@ -414,6 +424,15 @@ class PostgresJobStore:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE jobs SET workflow_phase = %s WHERE job_id = %s", (phase, job_id))
+        finally:
+            conn.close()
+
+    def set_message(self, job_id: str, message: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE jobs SET message = %s WHERE job_id = %s", (message, job_id))
         finally:
             conn.close()
 

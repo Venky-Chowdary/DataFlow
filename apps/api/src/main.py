@@ -20,6 +20,7 @@ from services.platform_config import (
     docs_enabled,
     enforce_production_config,
     is_production,
+    is_railway,
     vector_store_dir,
 )
 from services.health_service import aggregate_health
@@ -113,11 +114,16 @@ async def lifespan(app: FastAPI):
         print(f"[!] RAG initialization warning: {e}")
 
     try:
+        from services.transfer_scheduler import start as start_transfer_scheduler
+
+        start_transfer_scheduler()
+
         from .transfer.background import run_transfer_async
         from .transfer.models import transfer_request_from_dict
         from .services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
+        resumed = 0
         for job in mongo.list_jobs(limit=200):
             if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
                 payload = job["transfer_request"]
@@ -125,8 +131,9 @@ async def lifespan(app: FastAPI):
                     mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
                     continue
                 request = transfer_request_from_dict(payload)
-                asyncio.create_task(asyncio.to_thread(run_transfer_async, job["_id"], request, resume=True))
-        print("[+] Orphaned job resume scan complete")
+                run_transfer_async(job["_id"], request, resume=True)
+                resumed += 1
+        print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
     except Exception as e:
         print(f"[!] Orphaned job resume warning: {e}")
 
@@ -156,10 +163,18 @@ app = FastAPI(
 )
 
 _cors_origins = cors_origins()
+# Railway deploys give each service a *.up.railway.app public domain, which is
+# not known until runtime.  Match exactly one Railway subdomain so origins like
+# https://evil.up.railway.app.attacker.com cannot pass.  The env var allows an
+# explicit override if the default is too restrictive.
+_cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
+if not _cors_origin_regex and is_railway():
+    _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

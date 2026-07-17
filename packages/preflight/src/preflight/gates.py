@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import tempfile
 import time
 from typing import Any, Callable
 
@@ -258,17 +261,145 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     return _pass(GateId.G6_TARGET_DDL, "Target DDL compatible", start)
 
 
+def _actual_disk_bytes() -> int:
+    """Return usable bytes on the temporary/staging volume, or 0 if unknown."""
+    try:
+        import shutil
+
+        usage = shutil.disk_usage(tempfile.gettempdir())
+        return int(usage.free * 0.85)
+    except Exception:
+        return 0
+
+
 def gate_g7_capacity(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     needed = ctx.plan.estimated_bytes
-    available = ctx.plan.available_staging_bytes
-    if available > 0 and needed > available:
+    available = ctx.plan.available_staging_bytes or _actual_disk_bytes()
+    if available and needed > available:
         return _block(
             GateId.G7_CAPACITY,
             f"Insufficient staging capacity: need {needed}, have {available}",
             start,
         )
-    return _pass(GateId.G7_CAPACITY, "Capacity sufficient", start)
+    ratio = f" ({available // max(needed, 1)}x headroom)" if available and needed else ""
+    return _pass(GateId.G7_CAPACITY, f"Capacity sufficient{ratio}", start)
+
+
+def _dry_run_transform(value: str, transform: str | None) -> str | None:
+    """Best-effort preview of how a transform will affect a string value.
+
+    Returns ``None`` only for transforms that produce non-deterministic or
+    one-way output (hashing, masking, encryption, UUID generation) so the
+    dry-run gate knows that row cannot be compared.
+    """
+    if not transform:
+        return value
+    t = str(transform).lower().strip()
+    if t in {"upper", "uppercase"}:
+        return value.upper()
+    if t in {"lower", "lowercase"}:
+        return value.lower()
+    if t in {"trim", "strip", "string", "varchar", "text"}:
+        return value.strip()
+    if t in {"integer", "int", "number", "decimal", "float", "double", "numeric"}:
+        try:
+            if "." in value or "e" in value.lower():
+                return str(float(value))
+            return str(int(value))
+        except Exception:
+            return value
+    if t in {"boolean", "bool"}:
+        return "true" if value and value.lower() not in {"false", "0", "", "no", "off"} else "false"
+    if t in {"date", "datetime", "timestamp", "time", "iso8601"}:
+        return value
+    # Non-deterministic / one-way transforms break reconciliation previews.
+    if t in {"uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
+        return None
+    # For other deterministic string-preserving transforms, keep the value as-is.
+    return value
+
+
+def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
+    """Dry-run reconciliation: ensure sample rows survive mapping without loss."""
+    start = time.perf_counter()
+    sample_rows = getattr(ctx, "sample_rows", None) or []
+    if not sample_rows:
+        return GateResult(
+            gate_id=GateId.G8_RECONCILIATION,
+            status=GateStatus.SKIP,
+            message="No sample rows for dry-run reconciliation",
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+
+    source_count = len(sample_rows)
+    has_transform = any(m.transform for m in ctx.plan.mappings)
+
+    mapped_rows: list[dict[str, Any]] = []
+    for row in sample_rows:
+        mapped: dict[str, Any] = {}
+        for m in ctx.plan.mappings:
+            raw = row.get(m.source, "")
+            transformed = _dry_run_transform(str(raw) if raw is not None else "", m.transform)
+            mapped[m.target] = transformed
+        mapped_rows.append(mapped)
+
+    # Detect a likely primary key on the target side and verify uniqueness.
+    pk_target = None
+    for m in ctx.plan.mappings:
+        if m.target.lower() in {"id", "_id"} or m.target.lower().endswith("_id"):
+            pk_target = m.target
+            break
+
+    duplicates = 0
+    if pk_target:
+        seen: set[str] = set()
+        for row in mapped_rows:
+            val = str(row.get(pk_target, ""))
+            if val and val in seen:
+                duplicates += 1
+            seen.add(val)
+
+    if duplicates:
+        return _block(
+            GateId.G8_RECONCILIATION,
+            f"Dry-run reconciliation failed — {duplicates} duplicate target key(s)",
+            start,
+            {"duplicate_keys": duplicates, "target_rows": len(mapped_rows)},
+        )
+
+    # When no non-trivial transforms are applied, the source and target value
+    # streams should be identical.  Compare values along the mapping, ignoring
+    # source column names so renames, unmapped columns, and null/'' values do not
+    # produce false mismatches.
+    if not has_transform:
+
+        def _norm(value: Any) -> str:
+            return "" if value is None else str(value)
+
+        def _value_fingerprint(rows: list[dict[str, Any]], key_attr: str) -> str:
+            payload: list[list[str]] = []
+            for row in rows:
+                values = [_norm(row.get(getattr(m, key_attr))) for m in ctx.plan.mappings]
+                payload.append(values)
+            return hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+        source_hash = _value_fingerprint(sample_rows, "source")
+        target_hash = _value_fingerprint(mapped_rows, "target")
+        if source_hash != target_hash:
+            return _block(
+                GateId.G8_RECONCILIATION,
+                "Dry-run reconciliation mismatch — source and target fingerprints differ",
+                start,
+                {"source_rows": source_count, "target_rows": len(mapped_rows)},
+            )
+
+    return _pass(
+        GateId.G8_RECONCILIATION,
+        f"Dry-run reconciliation passed — {source_count} row(s)",
+        start,
+        {"source_rows": source_count, "target_rows": len(mapped_rows)},
+    )
 
 
 def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
@@ -296,15 +427,6 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         report.get("summary", "Data integrity checks passed"),
         start,
         {"checks_passed": report.get("checks_passed", 0)},
-    )
-
-
-def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
-    """Post-transfer gate — skipped during preflight, run after transfer completes."""
-    return GateResult(
-        gate_id=GateId.G8_RECONCILIATION,
-        status=GateStatus.SKIP,
-        message="Post-transfer reconciliation — runs after transfer",
     )
 
 

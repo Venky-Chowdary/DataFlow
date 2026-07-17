@@ -18,6 +18,11 @@ from typing import Any
 
 from services.platform_config import data_dir
 
+try:
+    from src.services.mongodb_service import get_mongodb_service
+except ImportError:
+    from services.mongodb_service import get_mongodb_service
+
 STORE_PATH = data_dir() / "teams.json"
 
 _ROLES = ("owner", "editor", "viewer")
@@ -31,6 +36,37 @@ def _now() -> str:
 def _store_path() -> Path:
     env = os.getenv("DATAFLOW_TEAM_STORE", "").strip()
     return Path(env) if env else STORE_PATH
+
+
+def _mongo_backend():
+    """Return a real MongoDB service when connected, otherwise None."""
+    try:
+        svc = get_mongodb_service()
+    except Exception:
+        return None
+    if type(svc).__name__ == "MemoryMongoDBService":
+        return None
+    return svc if getattr(svc, "client", None) is not None else None
+
+
+def _load_mongo(svc):
+    db = svc.get_database()
+    doc = db["team_store"].find_one({"_id": "primary"})
+    if not doc:
+        return {"workspaces": [], "memberships": []}
+    return {
+        "workspaces": doc.get("workspaces", []),
+        "memberships": doc.get("memberships", []),
+    }
+
+
+def _save_mongo(svc, data: dict[str, Any]) -> None:
+    db = svc.get_database()
+    db["team_store"].replace_one(
+        {"_id": "primary"},
+        {"_id": "primary", "workspaces": data.get("workspaces", []), "memberships": data.get("memberships", [])},
+        upsert=True,
+    )
 
 
 @dataclass
@@ -76,6 +112,9 @@ class Membership:
 
 
 def _load_raw() -> dict[str, Any]:
+    svc = _mongo_backend()
+    if svc:
+        return _load_mongo(svc)
     path = _store_path()
     if not path.exists():
         return {"workspaces": [], "memberships": []}
@@ -89,6 +128,10 @@ def _load_raw() -> dict[str, Any]:
 
 
 def _save(data: dict[str, Any]) -> None:
+    svc = _mongo_backend()
+    if svc:
+        _save_mongo(svc, data)
+        return
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")

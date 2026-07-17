@@ -49,6 +49,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         auth = request.headers.get("Authorization", "")
         token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        # EventSource / SSE cannot send custom headers, so the token may be
+        # passed as a query parameter.  Only allow this fallback on the SSE
+        # stream paths to keep tokens out of general access logs.
+        if not token and request.url.path.endswith("/stream"):
+            token = request.query_params.get("token") or request.query_params.get("access_token") or ""
 
         if not auth_required():
             if token:

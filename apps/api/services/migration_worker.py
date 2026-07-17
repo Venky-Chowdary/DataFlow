@@ -145,4 +145,4 @@ def dispatch_postgresql_migration(
             set_phase(job_id, WorkflowPhase.FAILED, str(exc))
             job_store.set_workflow_phase(job_id, "failed")
 
-    run_in_background(_run)
+    run_in_background(_run, job_id)

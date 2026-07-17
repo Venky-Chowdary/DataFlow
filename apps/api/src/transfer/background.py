@@ -1,16 +1,26 @@
-"""Background transfer runner with live job progress."""
+"""Background transfer runner with live job progress and durable scheduling."""
 
 from __future__ import annotations
 
 import logging
-import threading
+from typing import Any
 
 try:
     from services.mongodb_service import get_mongodb_service
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
+
+from services.transfer_scheduler import submit as _submit_transfer
+
 from .engine import get_transfer_engine
 from .models import TransferRequest
+
+
+def _log_transfer_exception(fut: Any) -> None:
+    try:
+        fut.result()
+    except Exception as exc:
+        logger.exception("Background transfer raised an unhandled exception: %s", exc)
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +78,19 @@ def _run_transfer(
         _notify_failure(request, job_id, str(exc))
 
 
-def run_transfer_async(job_id: str, request: TransferRequest, resume: bool = False, resume_from_job_id: str | None = None) -> None:
-    """Execute transfer in a background thread without blocking the caller.
+def run_transfer_async(job_id: str, request: TransferRequest, resume: bool = False, resume_from_job_id: str | None = None) -> Any:
+    """Execute transfer on the durable scheduler and return immediately.
 
-    FastAPI BackgroundTasks runs added tasks sequentially.  By starting a daemon
-    thread and returning immediately, multiple transfers can run concurrently while
-    the HTTP response is still sent first.
+    The scheduler uses a process-wide thread pool and persists phase/status through
+    the job store / MongoDB so in-flight work can be recovered after a restart.
     """
-    thread = threading.Thread(
-        target=_run_transfer,
-        args=(job_id, request),
-        kwargs={"resume": resume, "resume_from_job_id": resume_from_job_id},
-        daemon=True,
-        name=f"transfer-{job_id[:8]}",
+    future = _submit_transfer(
+        job_id,
+        _run_transfer,
+        job_id,
+        request,
+        resume=resume,
+        resume_from_job_id=resume_from_job_id,
     )
-    thread.start()
+    future.add_done_callback(_log_transfer_exception)
+    return future

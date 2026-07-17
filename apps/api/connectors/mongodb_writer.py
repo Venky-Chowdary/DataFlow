@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -16,6 +17,10 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+
+# MongoDB commands handle ~1000-document batches most reliably through proxies
+# and serverless tiers. 20k-document single calls can hit socket/proxy limits.
+MONGO_WRITE_BATCH_SIZE = int(os.getenv("DATAFLOW_MONGO_BATCH_SIZE", "1000"))
 
 
 @dataclass
@@ -153,8 +158,15 @@ def write_mapped_rows(
 
     try:
         conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
-        client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
-        
+        # Keep socket operations bounded so a slow proxy cannot hang a whole batch.
+        client = MongoClient(
+            conn_str,
+            serverSelectionTimeoutMS=10000,
+            socketTimeoutMS=120000,
+            connectTimeoutMS=10000,
+            maxPoolSize=5,
+        )
+
         # Test connection
         client.admin.command('ping')
 
@@ -282,12 +294,14 @@ def write_mapped_rows(
             typed_rows.append(tuple(_to_bson(v, t) for v, t in zip(row, logical_types)))
 
         total = len(typed_rows)
-        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
+        # MongoDB writes are split into smaller server-friendly batches.
+        mongo_batch_size = max(1, min(MONGO_WRITE_BATCH_SIZE, CHUNK_SIZE))
+        chunks = max(1, (total + mongo_batch_size - 1) // mongo_batch_size)
         written = 0
 
         for chunk_idx in range(chunks):
-            start = chunk_idx * CHUNK_SIZE
-            batch = typed_rows[start : start + CHUNK_SIZE]
+            start = chunk_idx * mongo_batch_size
+            batch = typed_rows[start : start + mongo_batch_size]
             if not batch:
                 break
 

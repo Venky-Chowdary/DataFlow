@@ -1,4 +1,4 @@
-"""GCS object reader — download and parse JSON/CSV/JSONL/Parquet objects."""
+"""GCS object reader — stream object payloads to disk before parsing."""
 
 from __future__ import annotations
 
@@ -8,13 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.gcs_common import gcs_client
-from connectors.object_read_cache import get_or_parse
-
-_API_ROOT = Path(__file__).resolve().parents[1]
-if str(_API_ROOT) not in sys.path:
-    sys.path.insert(0, str(_API_ROOT))
-
-from services.value_serializer import cell_to_string
+from services.object_streaming import download_object, read_rows_from_spill
 
 
 @dataclass
@@ -25,20 +19,10 @@ class ReadBatch:
     total_rows: int = 0
 
 
-def _parse_object_body(body: bytes, key: str) -> tuple[list[dict], list[str], dict[str, str]]:
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[1]
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from src.services.file_parser import FileParser
-
-    result = FileParser.parse(body, key)
-    if not result.success:
-        raise ValueError(result.error or f"Cannot parse GCS object `{key}`")
-    schema = FileParser.infer_schema(result.data)
-    return result.data, result.columns, schema
+def _download_gcs_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
+    client = gcs_client(cfg)
+    blob = client.bucket(bucket).blob(key)
+    blob.download_to_filename(str(path))
 
 
 def read_object(
@@ -51,23 +35,15 @@ def read_object(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     cache_key = f"gcs:{bucket}:{key}"
-
-    def _load() -> tuple[list[dict], list[str], dict[str, str]]:
-        client = gcs_client(cfg)
-        blob = client.bucket(bucket).blob(key)
-        body = blob.download_as_bytes()
-        return _parse_object_body(body, key)
-
-    records, columns, total = get_or_parse(cache_key, _load)
-    if known_total_rows is not None:
-        total = known_total_rows
-    slice_rows = records[offset : offset + limit]
-
-    def cell(v: Any) -> str:
-        return cell_to_string(v)
-
-    rows = [[cell(r.get(c)) for c in columns] for r in slice_rows]
-    return ReadBatch(headers=columns, rows=rows, offset=offset, total_rows=total)
+    path = download_object(cache_key, lambda p: _download_gcs_object(p, cfg, bucket, key))
+    headers, rows, total = read_rows_from_spill(
+        path,
+        key,
+        offset=offset,
+        limit=limit,
+        known_total=known_total_rows,
+    )
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
