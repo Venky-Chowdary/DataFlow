@@ -13,6 +13,7 @@ from connectors.writer_common import (
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
+    to_json_value,
 )
 from services.value_serializer import cell_to_string, json_default
 
@@ -29,32 +30,6 @@ class WriteResult:
     driver: str = "azure-storage-blob"
     rejected_rows: int = 0
     warnings: list[str] = field(default_factory=list)
-
-
-def _to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return value
-        try:
-            from services.type_system import normalize_logical_type
-        except Exception:
-            normalize_logical_type = lambda x: str(x or "").lower()
-        ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
-        if ctype in {"json", "array", "object", "struct"}:
-            try:
-                return json.loads(text, parse_constant=lambda v: None)
-            except json.JSONDecodeError:
-                return value
-        if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
-            return value
-        try:
-            return json.loads(text, parse_constant=lambda v: None)
-        except json.JSONDecodeError:
-            return value
-    return value
 
 
 def write_mapped_rows(
@@ -115,7 +90,7 @@ def write_mapped_rows(
         preserve_case=True,
     )
 
-    records = [{c: _to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
     if key.endswith(".csv"):
         buf = io.StringIO()

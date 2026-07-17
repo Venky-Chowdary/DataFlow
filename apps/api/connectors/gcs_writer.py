@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from connectors.gcs_common import gcs_client
-from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum
+from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -91,35 +91,7 @@ def write_mapped_rows(
         preserve_case=True,
     )
 
-    def _to_json_value(value: Any, col: str) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return value
-            try:
-                from services.type_system import normalize_logical_type
-            except Exception:
-                normalize_logical_type = lambda x: str(x or "").lower()
-            ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
-            # Structural types are parsed as JSON objects/arrays.
-            if ctype in {"json", "array", "object", "struct"}:
-                try:
-                    return json.loads(text, parse_constant=lambda v: None)
-                except json.JSONDecodeError:
-                    return value
-            # Text, dates, UUID, binary and other non-numeric types must stay as strings.
-            if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
-                return value
-            # Numeric / boolean types: allow JSON scalar parsing where valid.
-            try:
-                return json.loads(text, parse_constant=lambda v: None)
-            except json.JSONDecodeError:
-                return value
-        return value
-
-    records = [{c: _to_json_value(v, c) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
     if key.endswith(".csv"):
         def _csv_cell(value: Any) -> str:

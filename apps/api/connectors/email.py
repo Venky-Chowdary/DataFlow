@@ -15,7 +15,7 @@ from email.mime.text import MIMEText
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum
+from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
 from services.value_serializer import cell_to_string, json_default
 
 
@@ -243,13 +243,14 @@ def write_mapped_rows(
         )
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     mapped_rows, transform_errors = build_mapped_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
-        dest_types={target_cols[i]: logical_types[i] for i in range(len(target_cols))},
+        dest_types=dest_types,
         preserve_case=True,
     )
 
@@ -258,32 +259,7 @@ def write_mapped_rows(
         # surface warnings but continue
         pass
 
-    def _to_json_value(value: Any, col: str) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return value
-            try:
-                from services.type_system import normalize_logical_type
-            except Exception:
-                normalize_logical_type = lambda x: str(x or "").lower()
-            ctype = normalize_logical_type({target_cols[i]: logical_types[i] for i in range(len(target_cols))}.get(col, ""))
-            if ctype in {"json", "array", "object", "struct"}:
-                try:
-                    return json.loads(text, parse_float=float, parse_constant=lambda v: None)
-                except json.JSONDecodeError:
-                    return value
-            if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
-                return value
-            try:
-                return json.loads(text, parse_float=float, parse_constant=lambda v: None)
-            except json.JSONDecodeError:
-                return value
-        return value
-
-    records = [{c: _to_json_value(v, c) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
     fmt = cfg.format.lower()
     if fmt == "jsonl":
         body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")
