@@ -160,7 +160,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
           searchPlaceholder="Search saved connections…"
           filters={
-            <div className="df2-toolbar-filters df2-toolbar-filter-stack">
+            <>
               <FilterTabs
                 ariaLabel="Connector views"
                 value={tab}
@@ -194,7 +194,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                   ]}
                 />
               )}
-            </div>
+            </>
           }
           actions={
             <>

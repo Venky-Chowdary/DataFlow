@@ -198,15 +198,14 @@
   padding: 20px 18px;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  background: linear-gradient(180deg, #fff 0%, #f8fafb 100%);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  transition: border-color 0.2s ease, box-shadow 0.25s ease, transform 0.25s ease;
+  background: #fff;
+  transition: border-color 0.2s ease;
 }
 
 .df2-connectors-feature-card:hover {
   border-color: rgba(13, 148, 136, 0.35);
-  box-shadow: 0 10px 28px rgba(13, 148, 136, 0.08);
-  transform: translateY(-2px);
+  transform: none;
+  box-shadow: none;
 }
 
 .df2-connectors-feature-icon {

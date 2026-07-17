@@ -8,6 +8,7 @@ import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTil
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
+import { FilterBar } from "../components/ui/FilterBar";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
@@ -2005,36 +2006,38 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         <div className="df2-card-body">
           <div className="df2-field">
             <label className="df2-label">Destination Mode</label>
-            <FilterTabs
-              ariaLabel="Destination mode"
-              className="df2-filter-tabs--field"
-              value={destKindMode}
-              onChange={(mode) => {
-                setDestKindMode(mode);
-                setTransferPlan(null);
-                if (mode === "file_export") void loadTransferPlan();
-              }}
-              items={[
-                { id: "database", label: "Database / Warehouse" },
-                { id: "file_export", label: "File Export" },
-              ]}
-            />
+            <FilterBar ariaLabel="Destination mode">
+              <FilterTabs
+                ariaLabel="Destination mode"
+                value={destKindMode}
+                onChange={(mode) => {
+                  setDestKindMode(mode);
+                  setTransferPlan(null);
+                  if (mode === "file_export") void loadTransferPlan();
+                }}
+                items={[
+                  { id: "database", label: "Database / Warehouse" },
+                  { id: "file_export", label: "File Export" },
+                ]}
+              />
+            </FilterBar>
           </div>
 
           {destKindMode === "file_export" ? (
             <>
               <div className="df2-field">
                 <label className="df2-label">Export Format</label>
-                <FilterTabs
-                  ariaLabel="Export format"
-                  className="df2-filter-tabs--field"
-                  value={exportFormat}
-                  onChange={(format) => {
-                    setExportFormat(format);
-                    setTransferPlan(null);
-                  }}
-                  items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-                />
+                <FilterBar ariaLabel="Export format">
+                  <FilterTabs
+                    ariaLabel="Export format"
+                    value={exportFormat}
+                    onChange={(format) => {
+                      setExportFormat(format);
+                      setTransferPlan(null);
+                    }}
+                    items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
+                  />
+                </FilterBar>
               </div>
               <div className="df2-field">
                 <label className="df2-label">Output path (optional)</label>
@@ -2225,13 +2228,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <div className="df2-policy-toolbar">
               <div className="df2-field">
                 <label className="df2-label">Validation</label>
-                <FilterTabs
-                  ariaLabel="Validation mode"
-                  className="df2-filter-tabs--field"
-                  value={validationMode}
-                  onChange={setValidationMode}
-                  items={VALIDATION_MODES.map((mode) => ({ id: mode.id, label: mode.label }))}
-                />
+                <FilterBar ariaLabel="Validation mode">
+                  <FilterTabs
+                    ariaLabel="Validation mode"
+                    value={validationMode}
+                    onChange={setValidationMode}
+                    items={VALIDATION_MODES.map((mode) => ({ id: mode.id, label: mode.label }))}
+                  />
+                </FilterBar>
               </div>
               <label className="df2-policy-toggle">
                 <input

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Skeleton } from "./LoadingState";
+import { FilterTabs } from "./ui/FilterTabs";
+import { FilterBar } from "./ui/FilterBar";
 import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 
@@ -125,61 +127,40 @@ export function ConnectorCatalogPanel({
 
   return (
     <div className={`df2-catalog-layout ${compact ? "df2-catalog-compact" : ""}`}>
-      {!compact && (
-        <nav className="df2-catalog-nav" aria-label="Categories">
-          {categoryNav.map((item) => (
-            <button
-              key={item.id || "all"}
-              type="button"
-              className={category === item.id ? "active" : ""}
-              onClick={() => setCategory(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-      )}
-
       <div>
-        <div className="df2-search">
-          <span className="df2-search-icon"><DtIcon name="search" size={16} /></span>
-          <input
-            type="search"
-            placeholder="Search connectors…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search connector catalog"
-            autoFocus={compact}
-          />
-        </div>
-
-        <div className="df2-chips" role="group" aria-label="Filter by capability">
-          {STATUS_FILTERS.map((f) => (
-            <button
-              key={f.id || "all"}
-              type="button"
-              className={`df2-chip ${status === f.id ? "active" : ""}`}
-              onClick={() => setStatus(f.id)}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        {compact && categoryNav.length > 1 && (
-          <div className="df2-chips" style={{ marginTop: 10 }} role="group" aria-label="Filter by category">
-            {categoryNav.slice(0, 8).map((item) => (
-              <button
-                key={item.id || "all-cat"}
-                type="button"
-                className={`df2-chip ${category === item.id ? "active" : ""}`}
-                onClick={() => setCategory(item.id)}
-              >
-                {item.label}
-              </button>
-            ))}
+        <div className="df2-catalog-filter-row">
+          <div className="df2-search">
+            <span className="df2-search-icon"><DtIcon name="search" size={16} /></span>
+            <input
+              type="search"
+              placeholder="Search connectors…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search connector catalog"
+              autoFocus={compact}
+            />
           </div>
-        )}
+
+          <FilterBar ariaLabel="Catalog filters" className="df2-catalog-filter-bar">
+            <FilterTabs
+              ariaLabel="Filter by capability"
+              value={status}
+              onChange={setStatus}
+              items={STATUS_FILTERS.map((f) => ({ id: f.id, label: f.label }))}
+            />
+            {categoryNav.length > 1 && (
+              <FilterTabs
+                ariaLabel="Filter by category"
+                value={category}
+                onChange={setCategory}
+                items={categoryNav.map((item) => ({
+                  id: item.id,
+                  label: item.id ? item.label : "All categories",
+                }))}
+              />
+            )}
+          </FilterBar>
+        </div>
 
         {error ? (
           <div className="df2-empty" style={{ padding: "24px 0" }}>

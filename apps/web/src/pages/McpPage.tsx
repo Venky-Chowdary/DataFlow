@@ -3,6 +3,7 @@ import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
+import { FilterBar } from "../components/ui/FilterBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageMetricsRow } from "../components/ui/PageMetricsRow";
 import { PageShell } from "../components/ui/PageShell";
@@ -224,16 +225,18 @@ export function McpPage() {
               </div>
               {logs.length > 0 && (
                 <div className="df2-mcp-panel-filters">
-                  <FilterTabs
-                    ariaLabel="Filter MCP request log"
-                    value={logFilter}
-                    onChange={setLogFilter}
-                    items={[
-                      { id: "all", label: "All", count: logs.length },
-                      { id: "ok", label: "Success", count: okCount },
-                      { id: "error", label: "Errors", count: errCount },
-                    ]}
-                  />
+                  <FilterBar ariaLabel="Filter MCP request log">
+                    <FilterTabs
+                      ariaLabel="Filter MCP request log"
+                      value={logFilter}
+                      onChange={setLogFilter}
+                      items={[
+                        { id: "all", label: "All", count: logs.length },
+                        { id: "ok", label: "Success", count: okCount },
+                        { id: "error", label: "Errors", count: errCount },
+                      ]}
+                    />
+                  </FilterBar>
                 </div>
               )}
               <div className="df2-mcp-panel-body df2-mcp-panel-body--flush">

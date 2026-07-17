@@ -513,16 +513,18 @@
 }
 
 .df2-jobs-v3-mappings {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
+  width: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 8px;
 }
 
 .df2-jobs-v3-mappings-scroll {
-  flex: 1 1 auto;
-  min-height: 180px;
-  max-height: none;
+  flex: none;
+  max-height: min(280px, 32vh);
+  min-height: 0;
   overflow: auto;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: 8px;
@@ -1536,26 +1538,40 @@
   box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.25);
 }
 
-/* One shared filter cluster — no double borders / trailing separators */
+/* One shared filter cluster — oval pill, single row (Airbyte / Job Theater pattern) */
+.df2-filter-bar,
 .df2-toolbar-filters {
   display: inline-flex;
   align-items: center;
   flex-wrap: nowrap;
   gap: 2px;
   height: var(--df-toolbar-h);
-  max-width: min(720px, 56vw);
-  padding: 3px;
+  max-width: min(960px, 72vw);
+  padding: 4px;
   border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: 9px;
+  border-radius: 999px;
   background: #f1f5f9;
   overflow-x: auto;
   overflow-y: hidden;
   box-sizing: border-box;
   scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
 
+.df2-filter-bar-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+  min-width: 0;
+}
+
+.df2-filter-bar .df2-tabs,
+.df2-filter-bar .df2-filter-tabs,
 .df2-toolbar-filters .df2-tabs,
-.df2-toolbar-filters .df2-filter-tabs {
+.df2-toolbar-filters .df2-filter-tabs,
+.df2-filter-bar-inline .df2-tabs,
+.df2-filter-bar-inline .df2-filter-tabs {
   display: inline-flex !important;
   align-items: center;
   flex: 0 0 auto;
@@ -1577,20 +1593,29 @@
 }
 
 /* Soft mid-gap between filter groups only — never after the last group */
+.df2-filter-bar .df2-tabs:not(:last-child),
+.df2-filter-bar .df2-filter-tabs:not(:last-child),
 .df2-toolbar-filters .df2-tabs:not(:last-child),
-.df2-toolbar-filters .df2-filter-tabs:not(:last-child) {
+.df2-toolbar-filters .df2-filter-tabs:not(:last-child),
+.df2-filter-bar-inline .df2-tabs:not(:last-child),
+.df2-filter-bar-inline .df2-filter-tabs:not(:last-child) {
   margin-right: 4px !important;
-  padding-right: 6px !important;
+  padding-right: 8px !important;
   border-right: 1px solid #dbe3ec !important;
 }
 
+.df2-filter-bar .df2-tabs:last-child,
+.df2-filter-bar .df2-filter-tabs:last-child,
 .df2-toolbar-filters .df2-tabs:last-child,
-.df2-toolbar-filters .df2-filter-tabs:last-child {
+.df2-toolbar-filters .df2-filter-tabs:last-child,
+.df2-filter-bar-inline .df2-tabs:last-child,
+.df2-filter-bar-inline .df2-filter-tabs:last-child {
   margin-right: 0 !important;
   padding-right: 0 !important;
   border-right: 0 !important;
 }
 
+.df2-filter-bar .df2-tab,
 .df2-toolbar .df2-tab {
   display: inline-flex !important;
   align-items: center;
@@ -1599,9 +1624,9 @@
   height: calc(var(--df-toolbar-h) - 6px) !important;
   min-height: calc(var(--df-toolbar-h) - 6px) !important;
   margin: 0 !important;
-  padding: 0 11px !important;
+  padding: 0 14px !important;
   border: 0 !important;
-  border-radius: 6px !important;
+  border-radius: 999px !important;
   font-size: 12.5px !important;
   font-weight: 600 !important;
   line-height: 1 !important;
@@ -1611,11 +1636,14 @@
   box-shadow: none !important;
 }
 
+.df2-filter-bar .df2-tab:hover:not(.active):not([aria-selected="true"]),
 .df2-toolbar .df2-tab:hover:not(.active):not([aria-selected="true"]) {
   color: #0f172a !important;
   background: rgba(255, 255, 255, 0.55) !important;
 }
 
+.df2-filter-bar .df2-tab.active,
+.df2-filter-bar .df2-tab[aria-selected="true"],
 .df2-toolbar .df2-tab.active,
 .df2-toolbar .df2-tab[aria-selected="true"] {
   background: #fff !important;
@@ -1639,22 +1667,51 @@
 .df2-mcp-panel-filters {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 0 14px 12px;
 }
 
-.df2-mcp-panel-filters .df2-tabs,
-.df2-mcp-panel-filters .df2-filter-tabs {
-  display: inline-flex !important;
-  align-items: center;
-  gap: 2px !important;
-  height: 36px !important;
-  margin: 0 !important;
-  padding: 3px !important;
-  border-radius: 9px !important;
+.df2-mcp-panel-filters .df2-filter-bar {
+  max-width: 100%;
+  width: 100%;
 }
 
-/* Actions match search / filter height */
+/* Standalone filter bars in forms / pickers */
+.df2-field .df2-filter-bar {
+  width: 100%;
+  max-width: 100%;
+}
+
+.df2-dest-picker-head .df2-filter-bar {
+  width: 100%;
+  max-width: 100%;
+}
+
+.df2-connection-workbench > .df2-filter-bar {
+  width: 100%;
+  max-width: 100%;
+  margin-bottom: 14px;
+}
+
+.df2-catalog-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.df2-catalog-filter-row .df2-filter-bar {
+  flex: 1 1 auto;
+  min-width: min(100%, 520px);
+  max-width: 100%;
+}
+
+.df2-catalog-filter-row .df2-search {
+  flex: 1 1 240px;
+  min-width: 200px;
+  max-width: 360px;
+}
 .df2-toolbar .df2-btn,
 .df2-toolbar .df2-btn.df2-btn-sm {
   height: var(--df-toolbar-h) !important;
@@ -3096,6 +3153,9 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
   padding: 14px 16px;
   border-radius: 10px;
   border: 1px solid #fecaca;
@@ -3625,11 +3685,19 @@
   height: 100%;
 }
 
-.df2-page-fit.df2-page-jobs .df2-jobs-v3-list,
-.df2-page-fit.df2-page-jobs .df2-jobs-v3-detail {
+.df2-page-fit.df2-page-jobs .df2-jobs-v3-list {
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   height: 100%;
+}
+
+.df2-page-fit.df2-page-jobs .df2-jobs-v3-detail {
+  min-height: 0;
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Toolbar: stacked filters need height auto (Connectors / Jobs) */
@@ -3838,10 +3906,11 @@
 }
 
 .df2-page-fit.df2-page-jobs .df2-jobs-v3-detail {
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
+  overflow: hidden !important;
   min-height: 0 !important;
   align-self: stretch;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Settings — fields never force full width inside toolbars / flex rows */
@@ -3895,6 +3964,11 @@
 .df2-overview-enterprise .df2-glass-panel {
   border-color: color-mix(in srgb, var(--df-border, #e6e9ee) 88%, var(--df-brand, #0d9488));
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03), 0 10px 28px rgba(15, 23, 42, 0.04);
+}
+
+.df2-app.df2-overview-enterprise .df2-glass-panel,
+.df2-app .df2-overview-enterprise .df2-glass-panel {
+  box-shadow: none !important;
 }
 
 .df2-overview-enterprise .df2-glass-panel-head {
@@ -4281,7 +4355,10 @@
   flex-direction: column;
   gap: 16px;
   padding: 20px;
-  min-height: 100%;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-radius: 0;
 }
 
@@ -4760,6 +4837,75 @@
   filter: none !important;
 }
 
+/* Extended flat surfaces — no partial shadows / square clip artifacts */
+.df2-app .df2-glass-panel-deep,
+.df2-app .df2-overview-v3-card,
+.df2-app .df2-connectors-feature-card,
+.df2-app .df2-preflight,
+.df2-app .df2-glance-tile,
+.df2-app .df2-docs-panel,
+.df2-app .df2-settings-panel,
+.df2-app .df2-topology-card,
+.df2-app .df2-connection-panel,
+.df2-app .df2-transfer-panel,
+.df2-app .df2-rail-panel,
+.df2-app .df2-policy-option,
+.df2-app .df2-pipeline,
+.df2-app .df2-job-item,
+.df2-app .df2-table-wrap,
+.df2-app .df2-dest-connector-card,
+.df2-app .df2-connector-tile,
+.df2-app .df2-page-section {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+/* Border-only surfaces — kill inset highlight stacks from legacy theme layers */
+.df2-app :is(
+  .df2-card,
+  .df2-stat,
+  .df2-metric-glass,
+  .df2-glass-panel,
+  .df2-glass-panel-deep,
+  .df2-overview-v3-card,
+  .df2-connector-card,
+  .df2-pipeline-card,
+  .df2-chart-panel,
+  .df2-mcp-panel,
+  .df2-settings-section,
+  .df2-connectors-feature-card
+) {
+  background: #fff !important;
+  border: 1px solid var(--df-border, #e2e8f0) !important;
+  box-shadow: none !important;
+}
+
+/* Never clip shadows/borders on shell cards — scroll inner bodies only */
+.df2-app :is(
+  .df2-card,
+  .df2-stat,
+  .df2-metric-glass,
+  .df2-glass-panel,
+  .df2-overview-v3-card,
+  .df2-chart-panel,
+  .df2-connector-card,
+  .df2-pipeline-card,
+  .df2-control-metric,
+  .df2-page-section-card,
+  .df2-mcp-panel,
+  .df2-settings-section
+) {
+  overflow: visible !important;
+}
+
+.df2-app .df2-overview-v3-card-body,
+.df2-app .df2-overview-v3-card-body--flush,
+.df2-app .df2-chart-panel-body,
+.df2-app .df2-card-body-flush,
+.df2-app .df2-mcp-logs-table-wrap {
+  overflow: auto;
+}
+
 .df2-app .df2-card:hover,
 .df2-app .df2-stat:hover,
 .df2-app .df2-metric-glass:hover,
@@ -4911,7 +5057,8 @@
   border: 1px solid var(--df-border, #e2e8f0);
   background: #fff;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
+  box-shadow: none;
 }
 
 .df2-overview-v3-card-head {
@@ -5235,5 +5382,57 @@
   .df2-overview-v3-kpis {
     grid-template-columns: 1fr;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Job Theater detail — section stack (no overlap)
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-jobs-v3-detail .df2-jobs-v3-summary {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.df2-jobs-v3-summary > * {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.df2-jobs-v3-mappings-scroll {
+  max-height: min(280px, 32vh);
+}
+
+.df2-jobs-v3-log,
+.df2-jobs-v3-notifications,
+.df2-jobs-v3-actions {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-jobs-v3-summary-dl div {
+  min-width: 0;
+}
+
+.df2-jobs-v3-summary-dl dd {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.df2-jobs-v3-mappings-scroll td,
+.df2-jobs-v3-mappings-scroll th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 0;
+}
+
+.df2-jobs-v3-failure-message {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 

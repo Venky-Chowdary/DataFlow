@@ -4855,6 +4855,13 @@ textarea.df2-pilot-composer textarea {
   overflow: visible;
 }
 
+.df2-app .df2-glass-panel,
+.df2-app .df2-glass-panel-deep {
+  background: #fff !important;
+  box-shadow: none !important;
+  border: 1px solid var(--df-border, #e2e8f0) !important;
+}
+
 .df2-page-overview-enterprise .df2-glass-panel {
   overflow: visible;
 }

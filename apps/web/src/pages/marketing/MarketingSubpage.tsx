@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../../components/DtIcon";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
+import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
+import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
@@ -21,6 +23,32 @@ function FeatureList({ items }: { items: string[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
+  return (
+    <div className="lp-mkt-stats-strip" role="list">
+      {items.map((item) => (
+        <div key={item.label} className="lp-mkt-stats-item" role="listitem">
+          <strong>{item.value}</strong>
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ComplianceBadges({ items }: { items: string[] }) {
+  return (
+    <div className="lp-mkt-compliance-badges" aria-label="Compliance posture">
+      {items.map((item) => (
+        <span key={item} className="lp-mkt-compliance-badge">
+          <DtIcon name="shield" size={14} />
+          {item}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -226,6 +254,7 @@ function ProductPage({
         }
       />
 
+      <MarketingReveal>
       <section className="lp-mkt-workflow" aria-label="Workflow">
         {workflow.map((item) => (
           <article key={item.step} className="lp-mkt-workflow-step">
@@ -235,7 +264,9 @@ function ProductPage({
           </article>
         ))}
       </section>
+      </MarketingReveal>
 
+      <MarketingReveal>
       <section className="lp-mkt-body">
         <h2>What you get</h2>
         <div className="lp-mkt-feature-grid">
@@ -254,6 +285,7 @@ function ProductPage({
           </button>
         </MarketingSectionFooter>
       </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -289,32 +321,85 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
     },
   ];
 
+  const compareRows = [
+    { feature: "Transfer Studio", starter: true, team: true, enterprise: true },
+    { feature: "Preflight gates & quarantine", starter: true, team: true, enterprise: true },
+    { feature: "Pipelines & schedules", starter: false, team: true, enterprise: true },
+    { feature: "Data Pilot", starter: false, team: true, enterprise: true },
+    { feature: "MCP for agents", starter: false, team: false, enterprise: true },
+    { feature: "SSO / SAML", starter: false, team: false, enterprise: true },
+    { feature: "BYOK & dedicated tenant", starter: false, team: false, enterprise: true },
+  ];
+
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
         kicker="Pricing"
         title="Plans that match how you move data"
         lead="Start free in Transfer Studio. Scale to Team or Enterprise when you need pipelines, SSO, and agent-native ops."
+        visual={<MarketingIllustration kind="pricing" />}
       />
-      <section className="lp-mkt-pricing lp-mkt-body">
-        {tiers.map((tier) => (
-          <article key={tier.name} className={`lp-mkt-price-card ${tier.featured ? "is-featured" : ""}`}>
-            <h2>{tier.name}</h2>
-            <p className="lp-mkt-price">{tier.price}</p>
-            <p className="lp-mkt-price-blurb">{tier.blurb}</p>
-            <FeatureList items={tier.items} />
-            <button type="button" className={`lp-btn ${tier.featured ? "lp-btn--brand" : "lp-btn--outline"}`} onClick={tier.action}>
-              {tier.cta}
+
+      <MarketingReveal>
+        <StatsStrip
+          items={[
+            { value: "Free", label: "Starter tier" },
+            { value: "8", label: "Preflight gates" },
+            { value: "600+", label: "Connectors" },
+            { value: "48h", label: "Pilot kickoff" },
+          ]}
+        />
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-pricing lp-mkt-body">
+          {tiers.map((tier) => (
+            <article key={tier.name} className={`lp-mkt-price-card ${tier.featured ? "is-featured" : ""}`}>
+              <h2>{tier.name}</h2>
+              <p className="lp-mkt-price">{tier.price}</p>
+              <p className="lp-mkt-price-blurb">{tier.blurb}</p>
+              <FeatureList items={tier.items} />
+              <button type="button" className={`lp-btn ${tier.featured ? "lp-btn--brand" : "lp-btn--outline"}`} onClick={tier.action}>
+                {tier.cta}
+              </button>
+            </article>
+          ))}
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <h2>Compare plans</h2>
+          <div className="lp-mkt-compare-wrap">
+            <table className="lp-mkt-compare-table">
+              <thead>
+                <tr>
+                  <th scope="col">Capability</th>
+                  <th scope="col">Starter</th>
+                  <th scope="col">Team</th>
+                  <th scope="col">Enterprise</th>
+                </tr>
+              </thead>
+              <tbody>
+                {compareRows.map((row) => (
+                  <tr key={row.feature}>
+                    <th scope="row">{row.feature}</th>
+                    <td>{row.starter ? "✓" : "—"}</td>
+                    <td>{row.team ? "✓" : "—"}</td>
+                    <td>{row.enterprise ? "✓" : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <MarketingSectionFooter>
+            <p className="lp-section-cta-text">Need a formal quote or security questionnaire?</p>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
+              Contact sales
             </button>
-          </article>
-        ))}
-      </section>
-      <MarketingSectionFooter>
-        <p className="lp-section-cta-text">Need a formal quote or security questionnaire?</p>
-        <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-          Contact sales
-        </button>
-      </MarketingSectionFooter>
+          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -343,28 +428,44 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
             </button>
           </div>
         }
+        visual={<MarketingIllustration kind="enterprise" />}
       />
-      <section className="lp-mkt-body">
-        <h2>Enterprise pillars</h2>
-        <div className="lp-mkt-feature-grid">
-          {pillars.map((c) => (
-            <article key={c.t} className="lp-mkt-feature-card">
-              <span className="lp-mkt-feature-icon" aria-hidden>
-                <DtIcon name={c.icon} size={18} />
-              </span>
-              <div>
-                <h3>{c.t}</h3>
-                <p>{c.d}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-        <MarketingSectionFooter>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("security")}>
-            Read the security overview
-          </button>
-        </MarketingSectionFooter>
-      </section>
+
+      <MarketingReveal>
+        <StatsStrip
+          items={[
+            { value: "SSO", label: "SAML & OIDC" },
+            { value: "BYOK", label: "Customer keys" },
+            { value: "100%", label: "Audit coverage" },
+            { value: "Multi", label: "Tenant isolation" },
+          ]}
+        />
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <h2>Enterprise pillars</h2>
+          <div className="lp-mkt-feature-grid">
+            {pillars.map((c) => (
+              <article key={c.t} className="lp-mkt-feature-card">
+                <span className="lp-mkt-feature-icon" aria-hidden>
+                  <DtIcon name={c.icon} size={18} />
+                </span>
+                <div>
+                  <h3>{c.t}</h3>
+                  <p>{c.d}</p>
+                </div>
+              </article>
+            ))}
+          </div>
+          <ComplianceBadges items={["SOC 2 Type II posture", "GDPR-ready", "HIPAA paths", "Regional residency"]} />
+          <MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("security")}>
+              Read the security overview
+            </button>
+          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -388,34 +489,58 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
     },
   ];
 
+  const logos = ["RetailCo", "HealthSys", "CloudScale", "FinOps", "DataMesh"];
+
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
         kicker="Customers"
         title="Built for teams who cannot afford silent failure"
         lead="Retail, healthcare, SaaS, and finance teams use DataFlow when accuracy matters more than raw throughput alone."
+        visual={<MarketingIllustration kind="customers" />}
       />
-      <section className="lp-mkt-body">
-        <div className="lp-mkt-quote-grid">
-          {quotes.map((item) => (
-            <blockquote key={item.a} className="lp-mkt-quote">
-              <p>&ldquo;{item.q}&rdquo;</p>
-              <footer>
-                <strong>{item.a}</strong>
-                <span>{item.r}</span>
-              </footer>
-            </blockquote>
-          ))}
-        </div>
-        <MarketingSectionFooter>
-          <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
-            Become a design partner
-          </button>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-migrations")}>
-            See migration stories
-          </button>
-        </MarketingSectionFooter>
-      </section>
+
+      <MarketingReveal>
+        <StatsStrip
+          items={[
+            { value: "12k+", label: "Migrations run" },
+            { value: "99.2%", label: "Preflight pass rate" },
+            { value: "4.8", label: "Avg. NPS" },
+            { value: "48h", label: "Time to first load" },
+          ]}
+        />
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <div className="lp-mkt-logo-row" aria-label="Customer industries">
+            {logos.map((name) => (
+              <span key={name} className="lp-mkt-logo-pill">
+                {name}
+              </span>
+            ))}
+          </div>
+          <div className="lp-mkt-quote-grid">
+            {quotes.map((item) => (
+              <blockquote key={item.a} className="lp-mkt-quote">
+                <p>&ldquo;{item.q}&rdquo;</p>
+                <footer>
+                  <strong>{item.a}</strong>
+                  <span>{item.r}</span>
+                </footer>
+              </blockquote>
+            ))}
+          </div>
+          <MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
+              Become a design partner
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-migrations")}>
+              See migration stories
+            </button>
+          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -438,47 +563,74 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         kicker="Contact"
         title="Talk to DataFlow sales"
         lead="Tell us about your sources, destinations, and compliance needs. We will follow up with a pilot plan — not a generic demo reel."
+        visual={<MarketingIllustration kind="contact" />}
       />
-      <section className="lp-mkt-body lp-mkt-contact">
-        {sent ? (
-          <div className="lp-mkt-card">
-            <h2>Thanks — we received your note</h2>
-            <p>
-              This demo workspace stores the request locally. In production, it routes to sales. Meanwhile, explore{" "}
-              <button type="button" className="lp-section-link" onClick={() => onNavigate("help")}>
-                docs
-              </button>{" "}
-              or{" "}
-              <button type="button" className="lp-section-link" onClick={() => onNavigate("pricing")}>
-                pricing
-              </button>
-              .
-            </p>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-mkt-contact">
+          <div className="lp-mkt-contact-grid">
+            <div className="lp-mkt-contact-aside">
+              <h2>What to expect</h2>
+              <FeatureList
+                items={[
+                  "Solutions engineer assigned within one business day",
+                  "Pilot scoped to your sources and compliance needs",
+                  "Security questionnaire support for enterprise",
+                  "No obligation — start with Transfer Studio free",
+                ]}
+              />
+              <div className="lp-mkt-trust-strip">
+                <span>
+                  <DtIcon name="clock" size={16} /> 48h pilot kickoff
+                </span>
+                <span>
+                  <DtIcon name="shield" size={16} /> SOC 2 posture
+                </span>
+              </div>
+            </div>
+            <div className="lp-mkt-contact-main">
+              {sent ? (
+                <div className="lp-mkt-card">
+                  <h2>Thanks — we received your note</h2>
+                  <p>
+                    This demo workspace stores the request locally. In production, it routes to sales. Meanwhile, explore{" "}
+                    <button type="button" className="lp-section-link" onClick={() => onNavigate("help")}>
+                      docs
+                    </button>{" "}
+                    or{" "}
+                    <button type="button" className="lp-section-link" onClick={() => onNavigate("pricing")}>
+                      pricing
+                    </button>
+                    .
+                  </p>
+                </div>
+              ) : (
+                <form className="lp-mkt-form" onSubmit={submit}>
+                  <label>
+                    Name
+                    <input className="lp-mkt-input" value={name} onChange={(e) => setName(e.target.value)} required />
+                  </label>
+                  <label>
+                    Work email
+                    <input className="lp-mkt-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+                  </label>
+                  <label>
+                    Company
+                    <input className="lp-mkt-input" value={company} onChange={(e) => setCompany(e.target.value)} required />
+                  </label>
+                  <label>
+                    What are you moving?
+                    <textarea className="lp-mkt-input lp-mkt-textarea" value={message} onChange={(e) => setMessage(e.target.value)} rows={5} required />
+                  </label>
+                  <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg">
+                    Send message
+                  </button>
+                </form>
+              )}
+            </div>
           </div>
-        ) : (
-          <form className="lp-mkt-form" onSubmit={submit}>
-            <label>
-              Name
-              <input className="lp-mkt-input" value={name} onChange={(e) => setName(e.target.value)} required />
-            </label>
-            <label>
-              Work email
-              <input className="lp-mkt-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-            </label>
-            <label>
-              Company
-              <input className="lp-mkt-input" value={company} onChange={(e) => setCompany(e.target.value)} required />
-            </label>
-            <label>
-              What are you moving?
-              <textarea className="lp-mkt-input lp-mkt-textarea" value={message} onChange={(e) => setMessage(e.target.value)} rows={5} required />
-            </label>
-            <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg">
-              Send message
-            </button>
-          </form>
-        )}
-      </section>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -508,16 +660,32 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
             ? "How DataFlow handles workspace data, credentials, and audit logs."
             : "Terms governing use of the DataFlow platform."
         }
+        visual={<MarketingIllustration kind="legal" />}
       />
-      <section className="lp-mkt-body">
-        {blocks.map((b) => (
-          <article key={b.h} className="lp-mkt-legal-block">
-            <h2>{b.h}</h2>
-            <p>{b.p}</p>
-          </article>
-        ))}
-        <p className="lp-mkt-footnote">Last updated July 2026. Enterprise customers receive negotiated addenda as needed.</p>
-      </section>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-mkt-legal-layout">
+          <nav className="lp-mkt-legal-nav" aria-label="On this page">
+            <h2>On this page</h2>
+            <ul>
+              {blocks.map((b) => (
+                <li key={b.h}>
+                  <a href={`#${b.h.toLowerCase().replace(/\s+/g, "-")}`}>{b.h}</a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+          <div className="lp-mkt-legal-content">
+            {blocks.map((b) => (
+              <article key={b.h} id={b.h.toLowerCase().replace(/\s+/g, "-")} className="lp-mkt-legal-block">
+                <h2>{b.h}</h2>
+                <p>{b.p}</p>
+              </article>
+            ))}
+            <p className="lp-mkt-footnote">Last updated July 2026. Enterprise customers receive negotiated addenda as needed.</p>
+          </div>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -538,39 +706,60 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         kicker="Security"
         title="Security and governance built in"
         lead="Tenant isolation, encryption, residency, and audit-ready jobs — designed for regulated environments from day one."
+        visual={<MarketingIllustration kind="security" />}
       />
-      <section className="lp-mkt-body">
-        <div className="lp-mkt-feature-grid">
-          {items.map((c) => (
-            <article key={c.t} className="lp-mkt-feature-card">
-              <span className="lp-mkt-feature-icon" aria-hidden>
-                <DtIcon name="check" size={18} />
-              </span>
-              <div>
-                <h3>{c.t}</h3>
-                <p>{c.d}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-        <MarketingSectionFooter>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
-            Enterprise capabilities
-          </button>
-        </MarketingSectionFooter>
-      </section>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body lp-mkt-body--badges">
+          <ComplianceBadges items={["SOC 2 Type II posture", "GDPR", "HIPAA-ready paths", "ISO 27001 aligned", "Regional residency"]} />
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <h2>Security controls</h2>
+          <div className="lp-mkt-feature-grid">
+            {items.map((c) => (
+              <article key={c.t} className="lp-mkt-feature-card">
+                <span className="lp-mkt-feature-icon" aria-hidden>
+                  <DtIcon name="shield" size={18} />
+                </span>
+                <div>
+                  <h3>{c.t}</h3>
+                  <p>{c.d}</p>
+                </div>
+              </article>
+            ))}
+          </div>
+          <MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
+              Enterprise capabilities
+            </button>
+            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
+              Request security pack
+            </button>
+          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
 
 function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" | "onGetStarted">) {
   const guides = [
-    { t: "Transfer Studio basics", d: "Connect source and destination, review maps, run preflight, write with proof.", r: "product-transfer" as PublicRoute },
-    { t: "Connector catalog", d: "Honest transfer-ready labels for native drivers and SQLAlchemy generics.", r: "integrations" as PublicRoute },
-    { t: "Preflight gates", d: "Eight gates that block dangerous writes before production.", r: "product-transfer" as PublicRoute },
-    { t: "Pipelines & sync", d: "Schedule recurring loads with quarantine and watermark incremental.", r: "solution-sync" as PublicRoute },
-    { t: "Data Pilot", d: "Natural-language triage for failed jobs and mapping questions.", r: "product-pilot" as PublicRoute },
-    { t: "MCP for agents", d: "Call the same governed engine from Cursor and Claude.", r: "product-mcp" as PublicRoute },
+    { t: "Transfer Studio basics", d: "Connect source and destination, review maps, run preflight, write with proof.", r: "product-transfer" as PublicRoute, icon: "transfer" as const },
+    { t: "Connector catalog", d: "Honest transfer-ready labels for native drivers and SQLAlchemy generics.", r: "integrations" as PublicRoute, icon: "connectors" as const },
+    { t: "Preflight gates", d: "Eight gates that block dangerous writes before production.", r: "product-transfer" as PublicRoute, icon: "gate" as const },
+    { t: "Pipelines & sync", d: "Schedule recurring loads with quarantine and watermark incremental.", r: "solution-sync" as PublicRoute, icon: "activity" as const },
+    { t: "Data Pilot", d: "Natural-language triage for failed jobs and mapping questions.", r: "product-pilot" as PublicRoute, icon: "sparkle" as const },
+    { t: "MCP for agents", d: "Call the same governed engine from Cursor and Claude.", r: "product-mcp" as PublicRoute, icon: "zap" as const },
+  ];
+
+  const quickStart = [
+    { step: "1", title: "Connect systems", body: "Add a source and destination connector — or upload CSV, JSONL, or Parquet." },
+    { step: "2", title: "Map columns", body: "Review semantic mappings and accept or reject ambiguous field matches." },
+    { step: "3", title: "Run preflight", body: "Eight gates validate schema, types, capacity, and destination readiness." },
+    { step: "4", title: "Write with proof", body: "Load data, reconcile checksums, and inspect quarantined rows in Job Theater." },
   ];
 
   return (
@@ -578,7 +767,7 @@ function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" |
       <MarketingHeroBand
         kicker="Docs & help"
         title="Learn DataFlow without signing in"
-        lead="Public guides for product surfaces. Sign in when you are ready to run a live transfer in your workspace."
+        lead="Public guides for every product surface. Sign in when you are ready to run a live transfer in your workspace."
         actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -589,28 +778,74 @@ function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" |
             </button>
           </div>
         }
+        visual={<MarketingIllustration kind="help" />}
       />
-      <section className="lp-mkt-body">
-        <h2>Guides</h2>
-        <div className="lp-mkt-feature-grid">
-          {guides.map((g) => (
-            <button key={g.t} type="button" className="lp-mkt-feature-card lp-mkt-card--button" onClick={() => onNavigate(g.r)}>
-              <span className="lp-mkt-feature-icon" aria-hidden>
-                <DtIcon name="sparkle" size={18} />
-              </span>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <h2>Quick start</h2>
+          <p className="lp-mkt-lead">Four steps from first connector to checksum-proven load.</p>
+          <div className="lp-mkt-workflow lp-mkt-workflow--help">
+            {quickStart.map((item) => (
+              <article key={item.step} className="lp-mkt-workflow-step">
+                <span className="lp-mkt-workflow-num">{item.step}</span>
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <h2>Guides</h2>
+          <div className="lp-mkt-feature-grid">
+            {guides.map((g) => (
+              <button key={g.t} type="button" className="lp-mkt-feature-card lp-mkt-card--button" onClick={() => onNavigate(g.r)}>
+                <span className="lp-mkt-feature-icon" aria-hidden>
+                  <DtIcon name={g.icon} size={18} />
+                </span>
+                <div>
+                  <h3>{g.t}</h3>
+                  <p>{g.d}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <div className="lp-mkt-faq">
+            <h2>Common questions</h2>
+            <dl>
               <div>
-                <h3>{g.t}</h3>
-                <p>{g.d}</p>
+                <dt>What is quarantine?</dt>
+                <dd>Rows that fail validation during load are isolated with the column, value, and reason — never silently dropped.</dd>
               </div>
+              <div>
+                <dt>Do I need the API online?</dt>
+                <dd>File-to-file demo transfers work locally. Connectors and Job Theater need the API for live runs.</dd>
+              </div>
+              <div>
+                <dt>How is DataFlow different from ETL scripts?</dt>
+                <dd>Preflight gates and post-load reconciliation prove every transfer before and after write.</dd>
+              </div>
+            </dl>
+          </div>
+
+          <MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
+              Contact sales
             </button>
-          ))}
-        </div>
-        <MarketingSectionFooter>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-            Contact sales
-          </button>
-        </MarketingSectionFooter>
-      </section>
+            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+              Start a transfer
+            </button>
+          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }
@@ -634,25 +869,45 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             </button>
           </div>
         }
+        visual={<MarketingIllustration kind="integrations" />}
       />
-      <section className="lp-mkt-body">
-        <div className="lp-mkt-icon-grid">
-          {ids.map((id) => (
-            <div key={id} className="lp-mkt-icon-cell">
-              <ConnectorIcon id={id} size={32} />
-              <span>{id}</span>
-            </div>
-          ))}
-        </div>
-        <FeatureList
+
+      <MarketingReveal>
+        <StatsStrip
           items={[
-            "Upserts and watermark incremental where the destination supports it",
-            "File formats: CSV, JSON, Parquet routes",
-            "Object stores: S3, GCS, ADLS",
-            "Warehouse bulk paths for Snowflake, BigQuery, Redshift",
+            { value: "600+", label: "Connectors" },
+            { value: "Native", label: "Warehouse paths" },
+            { value: "SQLA", label: "Generic drivers" },
+            { value: "Files", label: "CSV · JSON · Parquet" },
           ]}
         />
-      </section>
+      </MarketingReveal>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <div className="lp-mkt-icon-grid">
+            {ids.map((id) => (
+              <div key={id} className="lp-mkt-icon-cell">
+                <ConnectorIcon id={id} size={32} />
+                <span>{id}</span>
+              </div>
+            ))}
+          </div>
+          <FeatureList
+            items={[
+              "Upserts and watermark incremental where the destination supports it",
+              "File formats: CSV, JSON, Parquet routes",
+              "Object stores: S3, GCS, ADLS",
+              "Warehouse bulk paths for Snowflake, BigQuery, Redshift",
+            ]}
+          />
+          <MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+              Open connector catalog
+            </button>
+          </MarketingSectionFooter>
+        </section>
+      </MarketingReveal>
     </div>
   );
 }

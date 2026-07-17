@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { FilterTabs } from "../ui/FilterTabs";
+import { FilterBar } from "../ui/FilterBar";
 import { Connector } from "../../lib/types";
 import { getConnectorDefaults } from "../../lib/connectorTypes";
 
@@ -50,13 +51,14 @@ export function DestinationPicker({
     <div className="df2-dest-picker">
       <div className="df2-dest-picker-head">
         <label className="df2-label">Choose destination</label>
-        <FilterTabs
-          ariaLabel="Filter destinations by type"
-          className="df2-filter-tabs--compact"
-          value={filter}
-          onChange={setFilter}
-          items={typeFilters}
-        />
+        <FilterBar ariaLabel="Filter destinations by type">
+          <FilterTabs
+            ariaLabel="Filter destinations by type"
+            value={filter}
+            onChange={setFilter}
+            items={typeFilters}
+          />
+        </FilterBar>
       </div>
 
       <div className="df2-dest-connector-grid" role="listbox" aria-label="Destination connectors">

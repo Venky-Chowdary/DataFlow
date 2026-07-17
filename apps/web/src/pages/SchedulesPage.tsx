@@ -183,7 +183,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
           searchPlaceholder="Search pipelines by name, table, or cadence…"
           filters={
             schedules.length > 0 ? (
-              <div className="df2-toolbar-filter-stack">
+              <>
                 {showForm ? (
                   <span className="df2-toolbar-status" role="status">
                     Creating pipeline
@@ -200,7 +200,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
                     { id: "paused", label: "Paused", count: pausedCount },
                   ]}
                 />
-              </div>
+              </>
             ) : showForm ? (
               <span className="df2-toolbar-status" role="status">
                 Creating your first pipeline

@@ -50,7 +50,8 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
   return (
     <div className={`lp ${isHome ? "lp-home" : "lp-subpage"}`} onMouseLeave={() => setMenu(null)}>
       <header className={`lp-nav ${scrolled ? "is-scrolled" : ""}`}>
-        <div className="lp-nav-inner">
+        <div className="lp-nav-shell">
+          <div className="lp-nav-pill">
           <div className="lp-nav-start">
             <a
               className="lp-nav-brand"
@@ -214,6 +215,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
             >
               <DtIcon name={navOpen ? "x" : "menu"} size={18} />
             </button>
+          </div>
           </div>
         </div>
       </header>

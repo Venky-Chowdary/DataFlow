@@ -4748,8 +4748,58 @@ body {
     0 10px 30px rgba(20, 29, 25, 0.055);
 }
 
+/* App shell — border-only surfaces; no inset/outer stacks that clip as square artifacts */
+.df2-app :is(
+  .df2-card,
+  .df2-stat,
+  .df2-ops-card,
+  .df2-rail-panel,
+  .df2-policy-option,
+  .df2-pipeline,
+  .df2-mcp-tile,
+  .df2-job-item,
+  .df2-table-wrap,
+  .df2-glass-panel,
+  .df2-glass-panel-deep,
+  .df2-overview-v3-card,
+  .df2-chart-panel,
+  .df2-connector-card,
+  .df2-pipeline-card,
+  .df2-mcp-panel,
+  .df2-settings-section,
+  .df2-connectors-feature-card,
+  .df2-page-section-card,
+  .df2-metric-glass,
+  .df2-control-metric
+) {
+  box-shadow: none !important;
+  filter: none !important;
+  background: #fff !important;
+  border: 1px solid var(--df-border, #e2e8f0) !important;
+}
+
+.df2-app :is(
+  .df2-card,
+  .df2-stat,
+  .df2-glass-panel,
+  .df2-overview-v3-card,
+  .df2-chart-panel,
+  .df2-connector-card,
+  .df2-pipeline-card,
+  .df2-mcp-panel,
+  .df2-settings-section,
+  .df2-page-section-card,
+  .df2-metric-glass
+) {
+  overflow: visible !important;
+}
+
 .df2-card {
   overflow: hidden;
+}
+
+.df2-app .df2-card {
+  overflow: visible;
 }
 
 .df2-card-head {

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
 function scrollRootFor(el: HTMLElement): Element | null {
+  // Marketing pages scroll on window — not the app shell
+  if (el.closest(".lp")) return null;
+
   let node: HTMLElement | null = el.parentElement;
   while (node) {
     if (node.classList.contains("df2-content")) return node;
@@ -29,6 +32,16 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
     }
 
     const reveal = () => setVisible(true);
+
+    // Marketing pages: reveal on mount — window scroll, no app shell
+    if (el.closest(".lp")) {
+      const rect = el.getBoundingClientRect();
+      if (rect.top < window.innerHeight * 0.98) {
+        reveal();
+        return;
+      }
+    }
+
     const root = scrollRootFor(el);
     const rootHeight = root instanceof Element ? root.clientHeight : window.innerHeight;
 
