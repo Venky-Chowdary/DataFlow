@@ -15,11 +15,15 @@ import os
 import threading
 from typing import Any, Callable
 
+from services.worker_leases import WorkerLeaseStore, worker_id
+
 _logger = logging.getLogger(__name__)
 
 _executor: concurrent.futures.ThreadPoolExecutor | None = None
 _started = threading.Event()
 _shutdown = False
+_worker_id = worker_id()
+_lease_store = WorkerLeaseStore(_worker_id)
 
 
 def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -60,12 +64,31 @@ def running() -> bool:
 
 
 def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> concurrent.futures.Future:
-    """Schedule a transfer job on the durable thread pool."""
+    """Schedule a transfer job on the durable thread pool.
+
+    A short-lived worker lease is acquired for ``job_id`` so multiple Railway
+    replicas do not run the same transfer concurrently.  If another replica
+    already holds the lease, the duplicate submission is ignored.
+    """
     executor = _ensure_executor()
     if not _started.is_set():
         _started.set()
+
+    if not _lease_store.acquire(job_id):
+        _logger.warning("Transfer job %s is already leased by another worker; skipping", job_id)
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        future.set_result(None)
+        return future
+
     _logger.info("Scheduling transfer job %s", job_id)
-    return executor.submit(fn, *args, **kwargs)
+
+    def _leased_fn(*a: Any, **kw: Any) -> Any:
+        try:
+            return fn(*a, **kw)
+        finally:
+            _lease_store.release(job_id)
+
+    return executor.submit(_leased_fn, *args, **kwargs)
 
 
 def resubmit_orphan_jobs() -> int:
