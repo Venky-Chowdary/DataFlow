@@ -27,8 +27,8 @@ def write_json_atomic(
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", dir=path.parent, delete=False
             ) as tmp:
-                json.dump(data, tmp, indent=indent, default=default)
                 tmp_path = Path(tmp.name)
+                json.dump(data, tmp, indent=indent, default=default)
             os.replace(tmp_path, path)
         except Exception:
             if tmp_path is not None and tmp_path.exists():
