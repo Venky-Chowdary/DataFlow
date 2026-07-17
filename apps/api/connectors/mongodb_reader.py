@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from connectors.base import ReadBatch
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -14,14 +15,6 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 from .mongodb_common import _mongo_client
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int
-    total_rows: int
 
 
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:

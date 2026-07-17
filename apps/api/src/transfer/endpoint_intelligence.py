@@ -314,8 +314,8 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
             batch = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             out["columns"] = batch.headers
             out["schema"] = {c: "string" for c in batch.headers}
-            out["row_estimate"] = batch.total_rows
-            out["table_exists"] = batch.total_rows > 0
+            out["row_estimate"] = (batch.total_rows or 0)
+            out["table_exists"] = (batch.total_rows or 0) > 0
             return
 
         if fmt == "s3":
@@ -327,7 +327,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
                 out["schema"] = {c: "string" for c in batch.headers}
-                out["row_estimate"] = batch.total_rows
+                out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
             return
 
@@ -340,7 +340,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
                 out["schema"] = {c: "string" for c in batch.headers}
-                out["row_estimate"] = batch.total_rows
+                out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
             return
 
@@ -364,8 +364,8 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
                     batch = read_all_paginated(cfg, table, limit=sample_limit)
                     out["columns"] = batch.headers
                     out["schema"] = {c: "string" for c in batch.headers}
-                    out["row_estimate"] = batch.total_rows
-                    out["table_exists"] = batch.total_rows > 0
+                    out["row_estimate"] = (batch.total_rows or 0)
+                    out["table_exists"] = (batch.total_rows or 0) > 0
             return
 
         if fmt == "elasticsearch":
@@ -376,8 +376,8 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
                 batch = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
                 out["schema"] = {c: "string" for c in batch.headers}
-                out["row_estimate"] = batch.total_rows
-                out["table_exists"] = batch.total_rows > 0
+                out["row_estimate"] = (batch.total_rows or 0)
+                out["table_exists"] = (batch.total_rows or 0) > 0
             return
 
         table = endpoint.table or endpoint.collection

@@ -357,9 +357,10 @@ _NON_STREAMING_ROW_LIMIT = 100_000
 
 def _guard_truncated_read(batch, db_type: str, name: str) -> None:
     """Fail closed when a non-streaming read would silently drop rows."""
-    if batch.total_rows > len(batch.rows):
+    total_rows = batch.total_rows or 0
+    if total_rows > len(batch.rows):
         raise ValueError(
-            f"Source {db_type}.{name} has {batch.total_rows:,} rows but non-streaming reads "
+            f"Source {db_type}.{name} has {total_rows:,} rows but non-streaming reads "
             f"are capped at {len(batch.rows):,}. Use database-to-database transfer (async) "
             "for large tables."
         )

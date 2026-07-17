@@ -18,6 +18,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from connectors.base import ReadBatch
 from connectors.schema_drift import add_missing_columns
 from services.value_serializer import cell_to_string
 
@@ -60,14 +61,6 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int | None = None
 
 
 @dataclass

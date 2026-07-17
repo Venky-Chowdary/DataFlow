@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 
+from connectors.base import ReadBatch
 from connectors.sqlite_common import sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[tuple]
-    total_rows: int
 
 
 def read_table_batch(

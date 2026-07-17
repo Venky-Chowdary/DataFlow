@@ -17,4 +17,4 @@ class ReadBatch:
     headers: list[str]
     rows: list[list[str]]
     offset: int = 0
-    total_rows: int = 0
+    total_rows: int | None = 0

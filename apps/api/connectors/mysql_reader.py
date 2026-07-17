@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from connectors.base import ReadBatch
 from connectors.mysql_conn import get_connection
 
 _api_root = Path(__file__).resolve().parents[1]
@@ -19,13 +19,6 @@ from services.value_serializer import cell_to_string
 def _cell(value: Any) -> str:
     return cell_to_string(value)
 
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int
-    total_rows: int
 
 
 def _primary_key_columns(cur, table: str) -> list[str] | None:
