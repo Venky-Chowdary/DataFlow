@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _new_job_id() -> str:
+    """Return a 24-character hex ObjectId-compatible job id."""
+    return os.urandom(12).hex()
+
+
 @dataclass
 class ScaleResult:
     target: str
@@ -129,9 +134,7 @@ def _run_transfer(
     )
 
     start = time.monotonic()
-    result = UniversalTransferEngine().execute_tracked(
-        request, f"bench_{target_label}_{rows}_{uuid.uuid4().hex[:8]}"
-    )
+    result = UniversalTransferEngine().execute_tracked(request, _new_job_id())
     elapsed = time.monotonic() - start
     return ScaleResult(
         target=target_label,

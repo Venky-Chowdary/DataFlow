@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.gcs_common import gcs_client
-from services.object_streaming import download_object, read_rows_from_spill
+from services.object_streaming import download_for_object_store, download_object, read_rows_from_spill
 
 
 @dataclass
@@ -17,12 +17,6 @@ class ReadBatch:
     rows: list[list[str]]
     offset: int = 0
     total_rows: int = 0
-
-
-def _download_gcs_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
-    client = gcs_client(cfg)
-    blob = client.bucket(bucket).blob(key)
-    blob.download_to_filename(str(path))
 
 
 def read_object(
@@ -35,7 +29,10 @@ def read_object(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     cache_key = f"gcs:{bucket}:{key}"
-    path = download_object(cache_key, lambda p: _download_gcs_object(p, cfg, bucket, key))
+    path = download_object(
+        cache_key,
+        lambda p: download_for_object_store("gcs", p, cfg, bucket, key),
+    )
     headers, rows, total = read_rows_from_spill(
         path,
         key,

@@ -13,6 +13,33 @@ from datetime import datetime, timezone
 import json
 
 
+def _as_object_id(job_id: str):
+    """Return a valid ``ObjectId`` or ``None`` for malformed ids.
+
+    Callers must check ``None`` and degrade instead of crashing on an
+    arbitrary/external job identifier.
+    """
+    from bson import ObjectId, errors
+
+    if not job_id:
+        return None
+    try:
+        return ObjectId(job_id)
+    except (errors.InvalidId, TypeError, ValueError):
+        return None
+
+
+def _fresh_object_id_hex() -> str:
+    """Return a fresh 24-character hex string that looks like an ObjectId.
+
+    Used as a fallback job id when MongoDB is unavailable so the transfer
+    engine can keep running and report its own result.
+    """
+    import os
+
+    return os.urandom(12).hex()
+
+
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
     
@@ -36,7 +63,7 @@ class MongoDBService:
             self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=5000)
             self.client.admin.command('ping')
             return True
-        except ConnectionFailure as e:
+        except Exception as e:
             print(f"[ERROR] MongoDB connection failed: {e}")
             self.client = None
             return False
@@ -96,46 +123,55 @@ class MongoDBService:
     
     def get_connector(self, connector_id: str) -> Optional[dict]:
         """Get a connector by ID"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["connectors"]
-        
-        result = collection.find_one({"_id": ObjectId(connector_id)})
+
+        oid = _as_object_id(connector_id)
+        if not oid:
+            return None
+
+        result = collection.find_one({"_id": oid})
         if result:
             result["_id"] = str(result["_id"])
         return result
-    
+
     def list_connectors(self) -> list[dict]:
         """List all saved connectors"""
         db = self.get_database()
         collection = db["connectors"]
-        
+
         connectors = []
         for doc in collection.find().sort("created_at", -1):
             doc["_id"] = str(doc["_id"])
             connectors.append(doc)
         return connectors
-    
+
     def update_connector(self, connector_id: str, updates: dict) -> bool:
         """Update a connector configuration"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["connectors"]
-        
+
+        oid = _as_object_id(connector_id)
+        if not oid:
+            return False
+
         updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
-            {"_id": ObjectId(connector_id)},
+            {"_id": oid},
             {"$set": updates}
         )
         return result.modified_count > 0
-    
+
     def delete_connector(self, connector_id: str) -> bool:
         """Delete a connector"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["connectors"]
-        
-        result = collection.delete_one({"_id": ObjectId(connector_id)})
+
+        oid = _as_object_id(connector_id)
+        if not oid:
+            return False
+
+        result = collection.delete_one({"_id": oid})
         return result.deleted_count > 0
     
     # ═══════════════════════════════════════════════════════════════════════
@@ -222,10 +258,18 @@ class MongoDBService:
     # ═══════════════════════════════════════════════════════════════════════
     
     def create_transfer_job(self, job_data: dict) -> str:
-        """Create a new transfer job record"""
-        db = self.get_database()
+        """Create a new transfer job record.
+
+        If MongoDB is unavailable, return a generated ObjectId-compatible id
+        so the transfer engine can continue and report its result.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return _fresh_object_id_hex()
+
         collection = db["transfer_jobs"]
-        
+
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
         job_data["started_at"] = None
@@ -237,19 +281,29 @@ class MongoDBService:
             job_data["phases"] = initial_phases()
         except Exception:
             pass
-        
+
         result = collection.insert_one(job_data)
         return str(result.inserted_id)
     
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
-        """Update transfer job status"""
-        from bson import ObjectId
-        db = self.get_database()
+        """Update transfer job status.
+
+        Degrades gracefully when MongoDB is unavailable so a transient
+        persistence outage does not kill an otherwise-successful transfer.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
         collection = db["transfer_jobs"]
-        
+
+        oid = _as_object_id(job_id)
+        if not oid:
+            return False
+
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
-        
+
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "failed", "cancelled"):
@@ -261,7 +315,7 @@ class MongoDBService:
             try:
                 from services.job_phases import advance_phase, complete_phases, initial_phases, phase_from_engine_label
 
-                existing = collection.find_one({"_id": ObjectId(job_id)}, {"phases": 1})
+                existing = collection.find_one({"_id": oid}, {"phases": 1})
                 phases = (existing or {}).get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
                 if status in ("completed",):
@@ -273,20 +327,26 @@ class MongoDBService:
                 updates["phases"] = phases
             except Exception:
                 pass
-        
+
         result = collection.update_one(
-            {"_id": ObjectId(job_id)},
+            {"_id": oid},
             {"$set": updates}
         )
         return result.modified_count > 0
     
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
-        from bson import ObjectId
-        db = self.get_database()
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return None
         collection = db["transfer_jobs"]
-        
-        result = collection.find_one({"_id": ObjectId(job_id)})
+
+        oid = _as_object_id(job_id)
+        if not oid:
+            return None
+
+        result = collection.find_one({"_id": oid})
         if result:
             result["_id"] = str(result["_id"])
         return result

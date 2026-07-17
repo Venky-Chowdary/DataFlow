@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from connectors.sqlite_common import sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
 
 
@@ -32,15 +33,7 @@ def read_table_batch(
 ) -> ReadBatch:
     """Read a batch of rows from a SQLite table."""
     del port, username, password, schema, ssl
-    # Prefer the raw file path from `database`; if only a SQLAlchemy URL is
-    # supplied, strip the sqlite:// scheme so sqlite3 receives a filesystem path.
-    path = database or connection_string or host or ""
-    if path.startswith("sqlite://"):
-        path = path[len("sqlite://"):]
-        if path.startswith("//"):
-            path = path[1:]  # file: empty host, absolute path
-        elif path.startswith("/"):
-            path = path[1:]  # SQLAlchemy relative path (sqlite:///foo.db)
+    path = sqlite_file_path(database, connection_string, host)
     if not path:
         raise ValueError("SQLite path is required (database or connection_string).")
     if not table:
