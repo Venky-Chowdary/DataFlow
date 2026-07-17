@@ -113,7 +113,11 @@ def read_collection_batch(
             total = known_total_rows
         else:
             total = coll.count_documents({})
-        cursor = coll.find({}).skip(offset).limit(limit)
+        # Sort by _id so the first batch and any offset-based pagination share the
+        # same ordering as cursor/keyset pagination. Without this, the initial
+        # batch can come back in insertion order and the keyset cursor will skip
+        # every document whose _id is less than an arbitrary high watermark.
+        cursor = coll.find({}).sort("_id", 1).skip(offset).limit(limit)
         docs = list(cursor)
         if not docs:
             return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
@@ -155,7 +159,20 @@ def read_collection_cursor_batch(
         coll = client[database][collection]
         query: dict[str, Any] = {}
         if cursor_after is not None and cursor_after != "":
-            query[cursor_column] = {"$gt": _cast_cursor_value(cursor_after, cursor_type)}
+            from bson.objectid import ObjectId
+
+            casted = _cast_cursor_value(cursor_after, cursor_type)
+            # _id is frequently an ObjectId in native MongoDB collections. When the
+            # cursor value is a 24-character hex string, compare it as an ObjectId
+            # so keyset pagination continues past the first batch.
+            if (
+                cursor_column == "_id"
+                and isinstance(casted, str)
+                and len(casted) == 24
+                and ObjectId.is_valid(casted)
+            ):
+                casted = ObjectId(casted)
+            query[cursor_column] = {"$gt": casted}
         total = coll.count_documents(query)
         cursor = coll.find(query).sort(cursor_column, 1).limit(limit)
         docs = list(cursor)
