@@ -1,4 +1,9 @@
-"""Append-only workspace audit log — real events, redacted secrets."""
+"""Append-only workspace audit log — real events, redacted secrets.
+
+When MongoDB is connected, events are written to an ``audit_events`` collection
+so they are shared across Railway replicas. Otherwise events fall back to a
+local JSONL file.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +43,18 @@ def _redact(value: Any) -> Any:
     return value
 
 
+def _mongo_collection():
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        mongo = get_mongodb_service()
+        if mongo and getattr(mongo, "client", None) and type(mongo).__name__ != "MemoryMongoDBService":
+            return mongo.get_database().get("audit_events")
+    except Exception:
+        pass
+    return None
+
+
 def append_audit_event(
     *,
     action: str,
@@ -47,7 +64,9 @@ def append_audit_event(
     correlation_id: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Record a redacted audit event to MongoDB (preferred) or a local JSONL file."""
     event = {
+        "_id": str(uuid.uuid4()),
         "id": str(uuid.uuid4()),
         "time": _now(),
         "actor": actor,
@@ -57,9 +76,20 @@ def append_audit_event(
         "correlation_id": correlation_id,
         "details": _redact(details or {}),
     }
+
+    coll = _mongo_collection()
+    if coll is not None:
+        try:
+            coll.insert_one(event)
+            return event
+        except Exception:
+            pass
+
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Remove MongoDB-specific _id before writing to file
+    file_event = {k: v for k, v in event.items() if k != "_id"}
     with STORE_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(file_event, ensure_ascii=False) + "\n")
     _trim_if_needed()
     return event
 
@@ -70,6 +100,20 @@ def list_audit_events(
     level: str | None = None,
     actor: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Return the most recent audit events, newest first."""
+    coll = _mongo_collection()
+    if coll is not None:
+        try:
+            query: dict[str, Any] = {}
+            if level and level != "all":
+                query["level"] = level
+            if actor:
+                query["actor"] = actor
+            cursor = coll.find(query).sort("time", -1).limit(limit)
+            return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
+        except Exception:
+            pass
+
     if not STORE_PATH.exists():
         return []
     lines = STORE_PATH.read_text(encoding="utf-8").strip().splitlines()
@@ -99,3 +143,13 @@ def _trim_if_needed() -> None:
         return
     trimmed = lines[-MAX_EVENTS:]
     STORE_PATH.write_text("\n".join(trimmed) + "\n", encoding="utf-8")
+
+
+def actor_from_request(request: Any) -> str:
+    """Extract the actor email from a FastAPI request, if available."""
+    if request is None:
+        return "anonymous"
+    user = getattr(request.state, "user", None)
+    if user and isinstance(user, dict):
+        return str(user.get("email") or user.get("sub") or "anonymous")
+    return "anonymous"
