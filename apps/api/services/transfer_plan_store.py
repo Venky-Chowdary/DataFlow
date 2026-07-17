@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
 
@@ -125,13 +126,12 @@ def _load_all() -> list[TransferPlanRecord]:
 
 
 def _save_all(plans: list[TransferPlanRecord]) -> None:
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps({"plans": [p.to_dict() for p in plans]}, indent=2),
-        encoding="utf-8",
+    write_json_atomic(
+        STORE_PATH,
+        {"plans": [p.to_dict() for p in plans]},
+        indent=2,
+        default=None,
     )
-    tmp.replace(STORE_PATH)
 
 
 def list_plans(*, limit: int = 50) -> list[TransferPlanRecord]:
