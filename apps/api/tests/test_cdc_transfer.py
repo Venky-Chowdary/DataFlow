@@ -154,6 +154,7 @@ def test_run_cdc_database_transfer_uses_mongodb_change_stream():
         patch("src.transfer.cdc_transfer.MongodbChangeStreamCdc", FakeChangeStreamCdc),
         patch("src.transfer.cdc_transfer._write_batch", mock_write),
         patch("src.transfer.cdc_transfer.delete_by_primary_keys", mock_delete),
+        patch("src.transfer.cdc_transfer.get_watermark", return_value=None),
     ):
         rows_written, ddl_log, dest_summary, columns = run_cdc_database_transfer(
             source,

@@ -24,6 +24,7 @@ from typing import Any
 from bson import json_util
 
 from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 from connectors.table_manager import delete_by_primary_keys
 from services.cdc_engine import (
     ChangeBatch,
@@ -319,8 +320,8 @@ def run_cdc_database_transfer(
     cursor_field = contract.cursor_field if contract else ""
     if not primary_key:
         raise ValueError("CDC sync requires primary_key in the stream contract")
-    if src_type == "mongodb":
-        cursor_field = cursor_field or primary_key or "_id"
+    if src_type in {"mongodb", "postgresql"}:
+        cursor_field = cursor_field or primary_key or ("_id" if src_type == "mongodb" else "id")
     elif not cursor_field:
         raise ValueError("CDC sync requires cursor_field in the stream contract")
 
@@ -341,7 +342,7 @@ def run_cdc_database_transfer(
 
     if src_type == "mongodb":
         try:
-            cdc: CdcEngine | MongodbChangeStreamCdc = MongodbChangeStreamCdc(
+            cdc: CdcEngine | MongodbChangeStreamCdc | PostgreSqlChangeStreamCdc = MongodbChangeStreamCdc(
                 src_cfg,
                 collection=table_name,
                 primary_key=primary_key,
@@ -354,6 +355,39 @@ def run_cdc_database_transfer(
             ddl_log = [
                 f"CDC(change_stream) {src_type}.{table_name} → {dest_type}.{dest_table} "
                 f"(pk={primary_key}, resume_token={'set' if watermark else 'initial'})"
+            ]
+        except Exception:
+            cdc = CdcEngine(
+                src_cfg,
+                src_type,
+                table_name,
+                cursor_field,
+                primary_key,
+                watermark,
+                columns=headers,
+                schema=schema,
+            )
+            ddl_log = [
+                f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+            ]
+    elif src_type == "postgresql":
+        try:
+            cdc = PostgreSqlChangeStreamCdc(
+                src_cfg,
+                table=table_name,
+                primary_key=primary_key,
+                cursor_key=cursor_key,
+                schema=src_cfg.get("schema") or "public",
+                columns=headers,
+                resume_token=watermark,
+                batch_size=CHUNK_SIZE,
+            )
+            if not cdc.is_available():
+                raise RuntimeError("PostgreSQL logical decoding not available; falling back to query CDC")
+            ddl_log = [
+                f"CDC(logical_decoding) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(pk={primary_key}, slot={'set' if watermark else 'initial'})"
             ]
         except Exception:
             cdc = CdcEngine(
@@ -391,7 +425,7 @@ def run_cdc_database_transfer(
     chunk_idx = 0
 
     for change in cdc.snapshot() if watermark is None else cdc.poll():
-        if not change.total_changes and not change.deletes:
+        if not change.total_changes and not change.deletes and change.resume_token is None:
             continue
 
         rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
