@@ -601,7 +601,11 @@ export function streamJobProgress(
   };
 
   try {
-    const es = new EventSource(`${API_BASE}/connectors/jobs/${jobId}/stream`);
+    const token = getAuthToken();
+    const streamUrl = token
+      ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
+      : `${API_BASE}/connectors/jobs/${jobId}/stream`;
+    const es = new EventSource(streamUrl);
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
