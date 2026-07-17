@@ -69,12 +69,16 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     A short-lived worker lease is acquired for ``job_id`` so multiple Railway
     replicas do not run the same transfer concurrently.  If another replica
     already holds the lease, the duplicate submission is ignored.
+
+    While the job runs, a background thread heartbeats the lease every half TTL
+    so long-running transfers are not stolen by another replica.
     """
     executor = _ensure_executor()
     if not _started.is_set():
         _started.set()
 
-    if not _lease_store.acquire(job_id):
+    ttl_seconds = int(os.getenv("DATAFLOW_WORKER_LEASE_TTL", "60"))
+    if not _lease_store.acquire(job_id, ttl_seconds=ttl_seconds):
         _logger.warning("Transfer job %s is already leased by another worker; skipping", job_id)
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         future.set_result(None)
@@ -83,9 +87,22 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     _logger.info("Scheduling transfer job %s", job_id)
 
     def _leased_fn(*a: Any, **kw: Any) -> Any:
+        stop_event = threading.Event()
+        interval = max(5, ttl_seconds // 2)
+
+        def _heartbeat() -> None:
+            while not stop_event.wait(interval):
+                if not _lease_store.heartbeat(job_id, ttl_seconds=ttl_seconds):
+                    _logger.warning("Lease heartbeat failed for job %s; another worker may have taken over", job_id)
+                    break
+
+        beat_thread = threading.Thread(target=_heartbeat, name=f"df-lease-{job_id}", daemon=True)
+        beat_thread.start()
         try:
             return fn(*a, **kw)
         finally:
+            stop_event.set()
+            beat_thread.join(timeout=interval * 2)
             _lease_store.release(job_id)
 
     return executor.submit(_leased_fn, *args, **kwargs)
