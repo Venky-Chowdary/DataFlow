@@ -55,14 +55,15 @@ def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]
 
 
 def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str]) -> int:
-    stage = f"@{table_name}_STAGE"
-    cur.execute(f"CREATE TEMP STAGE IF NOT EXISTS {stage}")
-    cur.execute(f"PUT file://{local_path} {stage} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
+    stage_name = f"{table_name}_STAGE"
+    stage_ref = f"@{stage_name}"
+    cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
+    cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
     col_list = ", ".join(f'"{c}"' for c in target_cols)
     cur.execute(
         f"""
         COPY INTO "{table_name}" ({col_list})
-        FROM {stage}
+        FROM {stage_ref}
         FILE_FORMAT = (
             TYPE = CSV
             SKIP_HEADER = 1
