@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import importlib.util
-
 from connectors.base import ConnectResult
-from connectors.driver_guard import platform_driver_unavailable
-from connectors.snowflake_conn import normalize_account
+from connectors.snowflake_conn import get_connection, normalize_account
 
 
 def test_snowflake(
@@ -23,9 +20,6 @@ def test_snowflake(
     role: str = "",
 ) -> ConnectResult:
     del port, ssl
-    if importlib.util.find_spec("snowflake.connector") is None:
-        return _stub_fallback(host, database, username, connection_string, warehouse)
-
     account = normalize_account(host)
     if not connection_string.strip() and (not account or not username):
         return ConnectResult(
@@ -35,7 +29,6 @@ def test_snowflake(
         )
 
     try:
-        from connectors.snowflake_conn import get_connection
 
         conn = get_connection(
             account=account,
@@ -70,19 +63,3 @@ def test_snowflake(
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="snowflake-connector-python")
-
-
-def _stub_fallback(
-    host: str,
-    database: str,
-    username: str,
-    connection_string: str,
-    warehouse: str,
-) -> ConnectResult:
-    del host, database, username, connection_string, warehouse
-    return ConnectResult(
-        ok=False,
-        tables=[],
-        error=platform_driver_unavailable("Snowflake"),
-        driver="none",
-    )
