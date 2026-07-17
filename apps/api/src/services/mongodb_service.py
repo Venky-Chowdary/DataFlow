@@ -29,6 +29,17 @@ def _as_object_id(job_id: str):
         return None
 
 
+def _fresh_object_id_hex() -> str:
+    """Return a fresh 24-character hex string that looks like an ObjectId.
+
+    Used as a fallback job id when MongoDB is unavailable so the transfer
+    engine can keep running and report its own result.
+    """
+    import os
+
+    return os.urandom(12).hex()
+
+
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
     
@@ -52,7 +63,7 @@ class MongoDBService:
             self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=5000)
             self.client.admin.command('ping')
             return True
-        except ConnectionFailure as e:
+        except Exception as e:
             print(f"[ERROR] MongoDB connection failed: {e}")
             self.client = None
             return False
@@ -247,10 +258,18 @@ class MongoDBService:
     # ═══════════════════════════════════════════════════════════════════════
     
     def create_transfer_job(self, job_data: dict) -> str:
-        """Create a new transfer job record"""
-        db = self.get_database()
+        """Create a new transfer job record.
+
+        If MongoDB is unavailable, return a generated ObjectId-compatible id
+        so the transfer engine can continue and report its result.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return _fresh_object_id_hex()
+
         collection = db["transfer_jobs"]
-        
+
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
         job_data["started_at"] = None
@@ -262,13 +281,20 @@ class MongoDBService:
             job_data["phases"] = initial_phases()
         except Exception:
             pass
-        
+
         result = collection.insert_one(job_data)
         return str(result.inserted_id)
     
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
-        """Update transfer job status"""
-        db = self.get_database()
+        """Update transfer job status.
+
+        Degrades gracefully when MongoDB is unavailable so a transient
+        persistence outage does not kill an otherwise-successful transfer.
+        """
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
         collection = db["transfer_jobs"]
 
         oid = _as_object_id(job_id)
@@ -310,7 +336,10 @@ class MongoDBService:
     
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
-        db = self.get_database()
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return None
         collection = db["transfer_jobs"]
 
         oid = _as_object_id(job_id)
