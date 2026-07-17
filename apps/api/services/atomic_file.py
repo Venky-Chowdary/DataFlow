@@ -22,9 +22,15 @@ def write_json_atomic(
     """Write ``data`` to ``path`` atomically using a temp file and ``os.replace``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with _WRITE_LOCK:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, delete=False
-        ) as tmp:
-            json.dump(data, tmp, indent=indent, default=default)
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, path)
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, delete=False
+            ) as tmp:
+                json.dump(data, tmp, indent=indent, default=default)
+                tmp_path = Path(tmp.name)
+            os.replace(tmp_path, path)
+        except Exception:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            raise
