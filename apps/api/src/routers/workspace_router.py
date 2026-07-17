@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -695,7 +696,7 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
 
 
 @router.post("/benchmark")
-async def run_workspace_benchmark(body: BenchmarkRequest, background_tasks: BackgroundTasks):
+async def run_workspace_benchmark(body: BenchmarkRequest):
     """Run a reproducible local benchmark and return a standardized report.
 
     The local benchmark transfers a synthetic CSV into an in-memory SQLite file
@@ -704,7 +705,20 @@ async def run_workspace_benchmark(body: BenchmarkRequest, background_tasks: Back
     """
     import benchmarks.cloud_scale as bench
 
-    report = bench.run_local_benchmark(body.rows)
+    # The benchmark is synchronous and can block the event loop for large row
+    # counts; run it in a thread and surface any failures gracefully.
+    try:
+        report = await asyncio.to_thread(bench.run_local_benchmark, body.rows)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "target": "sqlite",
+                "rows": body.rows,
+                "success": False,
+                "error": str(exc),
+            },
+            status_code=500,
+        )
     report["competitors"] = _baseline_competitors()
     if body.format == "md":
         return PlainTextResponse(

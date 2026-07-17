@@ -166,6 +166,12 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         writer="connectors.saas_common",
         writer_fn="write_not_supported",
     ),
+    "pgvector": ConnectorModules(
+        probe=("connectors.postgresql", "test_postgresql"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.pgvector_writer",
+    ),
 }
 
 

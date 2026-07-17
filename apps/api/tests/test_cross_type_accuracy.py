@@ -35,7 +35,6 @@ from transfer.connector_capabilities import (  # noqa: E402
 from transfer.registry import (  # noqa: E402
     LIVE_DEST_DATABASES,
     LIVE_SOURCE_DATABASES,
-    LIVE_SOURCE_FORMATS,
     validate_transfer,
 )
 
@@ -60,6 +59,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "snowflake": ("connectors.snowflake", "test_snowflake"),
         "bigquery": ("connectors.bigquery", "test_bigquery"),
         "redshift": ("connectors.redshift", "test_redshift"),
+        "pgvector": ("connectors.postgresql", "test_postgresql"),
         "dynamodb": ("connectors.dynamodb", "test_dynamodb"),
         "s3": ("connectors.s3", "test_s3"),
         "gcs": ("connectors.gcs", "test_gcs"),
@@ -97,6 +97,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "redis": "connectors.redis_reader",
         "elasticsearch": "connectors.elasticsearch_reader",
         "sqlite": "connectors.sqlite_reader",
+        "pgvector": None,
         "sftp": "connectors.sftp_reader",
         "salesforce": "connectors.salesforce",
         "hubspot": "connectors.hubspot",
@@ -120,6 +121,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "redis": "connectors.redis_writer",
         "elasticsearch": "connectors.elasticsearch_writer",
         "sqlite": "connectors.sqlite_writer",
+        "pgvector": "connectors.pgvector_writer",
         "sftp": "connectors.sftp_writer",
         "email": "connectors.email",
         "salesforce": "connectors.saas_common",

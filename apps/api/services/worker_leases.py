@@ -42,7 +42,7 @@ class WorkerLeaseStore:
             mongo = get_mongodb_service()
             if mongo and getattr(mongo, "client", None):
                 db = mongo.get_database()
-                if db:
+                if db is not None:
                     return db["worker_leases"]
         except Exception:
             pass
