@@ -14,6 +14,20 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
+# Reuse MongoClient instances per connection string. PyMongo clients manage their
+# own connection pools and are thread-safe, so creating one per batch is a major
+# bottleneck on large streaming transfers.
+_mongo_client_cache: dict[str, Any] = {}
+
+
+def _mongo_client(conn_str: str) -> Any:
+    from pymongo import MongoClient
+
+    if conn_str not in _mongo_client_cache:
+        _mongo_client_cache[conn_str] = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
+    return _mongo_client_cache[conn_str]
+
+
 @dataclass
 class ReadBatch:
     headers: list[str]
@@ -104,40 +118,35 @@ def read_collection_batch(
     limit: int = 500,
     known_total_rows: int | None = None,
 ) -> ReadBatch:
-    from pymongo import MongoClient
+    client = _mongo_client(_connection_string(cfg))
+    coll = client[database][collection]
+    if known_total_rows is not None:
+        total = known_total_rows
+    else:
+        total = coll.count_documents({})
+    # Sort by _id so the first batch and any offset-based pagination share the
+    # same ordering as cursor/keyset pagination. Without this, the initial
+    # batch can come back in insertion order and the keyset cursor will skip
+    # every document whose _id is less than an arbitrary high watermark.
+    cursor = coll.find({}).sort("_id", 1).skip(offset).limit(limit)
+    docs = list(cursor)
+    if not docs:
+        return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
 
-    client = MongoClient(_connection_string(cfg), serverSelectionTimeoutMS=10000)
-    try:
-        coll = client[database][collection]
-        if known_total_rows is not None:
-            total = known_total_rows
-        else:
-            total = coll.count_documents({})
-        # Sort by _id so the first batch and any offset-based pagination share the
-        # same ordering as cursor/keyset pagination. Without this, the initial
-        # batch can come back in insertion order and the keyset cursor will skip
-        # every document whose _id is less than an arbitrary high watermark.
-        cursor = coll.find({}).sort("_id", 1).skip(offset).limit(limit)
-        docs = list(cursor)
-        if not docs:
-            return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
+    for doc in docs:
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
 
+    if columns:
+        headers = columns
+    else:
+        keys: set[str] = set()
         for doc in docs:
-            if "_id" in doc:
-                doc["_id"] = str(doc["_id"])
+            keys.update(doc.keys())
+        headers = sorted(keys)
 
-        if columns:
-            headers = columns
-        else:
-            keys: set[str] = set()
-            for doc in docs:
-                keys.update(doc.keys())
-            headers = sorted(keys)
-
-        rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
-        return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
-    finally:
-        client.close()
+    rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
 def read_collection_cursor_batch(
@@ -153,49 +162,44 @@ def read_collection_cursor_batch(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     """Read documents where cursor_column > watermark — incremental sync."""
-    from pymongo import MongoClient
+    client = _mongo_client(_connection_string(cfg))
+    coll = client[database][collection]
+    query: dict[str, Any] = {}
+    if cursor_after is not None and cursor_after != "":
+        from bson.objectid import ObjectId
 
-    client = MongoClient(_connection_string(cfg), serverSelectionTimeoutMS=10000)
-    try:
-        coll = client[database][collection]
-        query: dict[str, Any] = {}
-        if cursor_after is not None and cursor_after != "":
-            from bson.objectid import ObjectId
+        casted = _cast_cursor_value(cursor_after, cursor_type)
+        # _id is frequently an ObjectId in native MongoDB collections. When the
+        # cursor value is a 24-character hex string, compare it as an ObjectId
+        # so keyset pagination continues past the first batch.
+        if (
+            cursor_column == "_id"
+            and isinstance(casted, str)
+            and len(casted) == 24
+            and ObjectId.is_valid(casted)
+        ):
+            casted = ObjectId(casted)
+        query[cursor_column] = {"$gt": casted}
+    if known_total_rows is not None:
+        total = known_total_rows
+    else:
+        total = coll.count_documents(query)
+    cursor = coll.find(query).sort(cursor_column, 1).limit(limit)
+    docs = list(cursor)
+    if not docs:
+        return ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=total)
 
-            casted = _cast_cursor_value(cursor_after, cursor_type)
-            # _id is frequently an ObjectId in native MongoDB collections. When the
-            # cursor value is a 24-character hex string, compare it as an ObjectId
-            # so keyset pagination continues past the first batch.
-            if (
-                cursor_column == "_id"
-                and isinstance(casted, str)
-                and len(casted) == 24
-                and ObjectId.is_valid(casted)
-            ):
-                casted = ObjectId(casted)
-            query[cursor_column] = {"$gt": casted}
-        if known_total_rows is not None:
-            total = known_total_rows
-        else:
-            total = coll.count_documents(query)
-        cursor = coll.find(query).sort(cursor_column, 1).limit(limit)
-        docs = list(cursor)
-        if not docs:
-            return ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=total)
+    for doc in docs:
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
 
+    if columns:
+        headers = columns
+    else:
+        keys: set[str] = set()
         for doc in docs:
-            if "_id" in doc:
-                doc["_id"] = str(doc["_id"])
+            keys.update(doc.keys())
+        headers = sorted(keys)
 
-        if columns:
-            headers = columns
-        else:
-            keys: set[str] = set()
-            for doc in docs:
-                keys.update(doc.keys())
-            headers = sorted(keys)
-
-        rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
-        return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
-    finally:
-        client.close()
+    rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
+    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
