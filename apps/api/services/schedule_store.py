@@ -1,4 +1,9 @@
-"""Recurring pipeline schedules — JSON persistence."""
+"""Recurring pipeline schedules — shared persistence.
+
+When a real MongoDB is available schedules are stored in a collection so
+multi-instance Railway deployments share the same schedule state.  Otherwise
+they fall back to a JSON file in ``data_dir``.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from services.platform_config import data_dir
+
+try:
+    from src.services.mongodb_service import get_mongodb_service
+except ImportError:
+    from services.mongodb_service import get_mongodb_service
 
 STORE_PATH = data_dir() / "schedules.json"
 
@@ -70,7 +80,38 @@ def compute_next_run(interval: str, from_time: datetime | None = None) -> str:
     return (base + delta).isoformat()
 
 
+def _mongo_backend():
+    """Return a real MongoDB service when connected, otherwise None."""
+    try:
+        svc = get_mongodb_service()
+    except Exception:
+        return None
+    if type(svc).__name__ == "MemoryMongoDBService":
+        return None
+    return svc if getattr(svc, "client", None) is not None else None
+
+
+def _load_mongo(svc) -> list[PipelineSchedule]:
+    db = svc.get_database()
+    doc = db["schedule_store"].find_one({"_id": "primary"})
+    if not doc:
+        return []
+    return [PipelineSchedule.from_dict(s) for s in doc.get("schedules", [])]
+
+
+def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
+    db = svc.get_database()
+    db["schedule_store"].replace_one(
+        {"_id": "primary"},
+        {"_id": "primary", "schedules": [s.to_dict() for s in schedules]},
+        upsert=True,
+    )
+
+
 def _load_all() -> list[PipelineSchedule]:
+    svc = _mongo_backend()
+    if svc:
+        return _load_mongo(svc)
     if not STORE_PATH.exists():
         return []
     try:
@@ -81,6 +122,10 @@ def _load_all() -> list[PipelineSchedule]:
 
 
 def _save_all(schedules: list[PipelineSchedule]) -> None:
+    svc = _mongo_backend()
+    if svc:
+        _save_mongo(svc, schedules)
+        return
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(
         json.dumps({"schedules": [s.to_dict() for s in schedules]}, indent=2),
