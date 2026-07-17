@@ -195,7 +195,7 @@ def resolve_connector_config(
     cfg = {
         "host": endpoint.host or "localhost",
         "port": endpoint.port or default_port,
-        "database": endpoint.database if fmt in ("generic_sql", "sftp", "email", "rest_api") else (endpoint.database or endpoint.host or ""),
+        "database": endpoint.database or "",
         "schema": endpoint.schema or default_schema,
         "username": endpoint.username,
         "password": endpoint.password,
