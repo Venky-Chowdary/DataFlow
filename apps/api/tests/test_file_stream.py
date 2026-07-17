@@ -39,6 +39,6 @@ def test_should_stream_file_csv():
     assert should_stream_file(content, "small.csv", dest) is True
 
 
-def test_should_stream_file_json_not_supported():
+def test_should_stream_file_json_supported():
     dest = EndpointConfig(kind="database", format="postgresql", table="t")
-    assert should_stream_file(b'{"a":1}', "data.json", dest) is False
+    assert should_stream_file(b'{"a":1}', "data.json", dest) is True

@@ -44,5 +44,5 @@ def test_supports_file_streaming_csv():
 
     dest = EndpointConfig(kind="database", format="postgresql", table="t")
     assert supports_file_streaming("file", "data.csv", dest) is True
-    assert supports_file_streaming("file", "data.json", dest) is False
+    assert supports_file_streaming("file", "data.json", dest) is True
     assert supports_file_streaming("database", "data.csv", dest) is False
