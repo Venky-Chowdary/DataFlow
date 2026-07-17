@@ -44,6 +44,7 @@ from .routers.schedules_router import router as schedules_router
 from .routers.training_agent_router import router as training_agent_router
 from .routers.transfer_router import router as transfer_router
 from .routers.workspace_router import router as workspace_router
+from .services.rbac import RBACMiddleware
 
 logger = logging.getLogger("dataflow.api")
 
@@ -176,6 +177,7 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
 

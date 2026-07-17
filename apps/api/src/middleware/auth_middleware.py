@@ -32,6 +32,9 @@ def _attach_user(request: Request, token: str) -> bool:
         user = lookup_user(email)
         if user:
             request.state.user = user
+        else:
+            # Valid token for a user not in the static user list: default to viewer.
+            request.state.user = {"email": email, "role": "viewer"}
         return True
 
     from services.integrations_store import verify_workspace_api_key
@@ -39,6 +42,10 @@ def _attach_user(request: Request, token: str) -> bool:
     key_info = verify_workspace_api_key(token)
     if key_info:
         request.state.user_email = key_info.get("created_by") or "api-key"
+        request.state.user = {
+            "email": request.state.user_email,
+            "role": key_info.get("role") or "viewer",
+        }
         request.state.api_key_id = key_info["id"]
         request.state.api_key_auth = True
         return True
