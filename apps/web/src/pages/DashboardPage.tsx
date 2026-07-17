@@ -112,32 +112,18 @@ export function DashboardPage({
   return (
     <PageShell wide className="df2-page-overview-v3" title="Overview">
       <PageFrame className="df2-overview-v3">
-        {(failed.length > 0 || running.length > 0) && (
+        {running.length > 0 && (
           <section className="df2-overview-v3-ops" aria-label="Live operations">
-            {running.length > 0 && (
-              <button
-                type="button"
-                className="df2-overview-v3-ops-chip is-live"
-                onClick={() => onOpenJobs?.()}
-                disabled={!onOpenJobs}
-              >
-                <DtIcon name="activity" size={14} />
-                <strong>{running.length}</strong>
-                <span>transfer{running.length === 1 ? "" : "s"} running</span>
-              </button>
-            )}
-            {failed.length > 0 && (
-              <button
-                type="button"
-                className="df2-overview-v3-ops-chip is-fail"
-                onClick={() => onOpenJobs?.()}
-                disabled={!onOpenJobs}
-              >
-                <DtIcon name="alert" size={14} />
-                <strong>{failed.length}</strong>
-                <span>need review in Job Theater</span>
-              </button>
-            )}
+            <button
+              type="button"
+              className="df2-overview-v3-ops-chip is-live"
+              onClick={() => onOpenJobs?.()}
+              disabled={!onOpenJobs}
+            >
+              <DtIcon name="activity" size={14} />
+              <strong>{running.length}</strong>
+              <span>transfer{running.length === 1 ? "" : "s"} running</span>
+            </button>
           </section>
         )}
 

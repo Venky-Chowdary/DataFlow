@@ -16,19 +16,20 @@ export function DtLogo({ size = 36 }: DtLogoProps) {
       viewBox="0 0 36 36"
       fill="none"
       aria-hidden
+      shapeRendering="geometricPrecision"
     >
       <rect width="36" height="36" rx="9" fill={`url(#${gradId})`} />
       <path
         d="M10 24V14M10 14h6l2 4 4-8h4"
         stroke="white"
-        strokeWidth="2"
+        strokeWidth="2.25"
         strokeLinecap="round"
         strokeLinejoin="round"
-        opacity="0.95"
+        opacity="0.98"
       />
-      <circle cx="10" cy="24" r="2.5" fill="#F59E0B" />
-      <circle cx="10" cy="14" r="2.5" fill="#2DD4BF" />
-      <circle cx="26" cy="10" r="2.5" fill="#A7F3D0" />
+      <circle cx="10" cy="24" r="2.75" fill="#F59E0B" />
+      <circle cx="10" cy="14" r="2.75" fill="#2DD4BF" />
+      <circle cx="26" cy="10" r="2.75" fill="#A7F3D0" />
       <defs>
         <linearGradient id={gradId} x1="4" y1="4" x2="32" y2="32" gradientUnits="userSpaceOnUse">
           <stop stopColor="#134E4A" />

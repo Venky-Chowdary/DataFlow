@@ -1,5 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 
+function scrollRootFor(el: HTMLElement): Element | null {
+  let node: HTMLElement | null = el.parentElement;
+  while (node) {
+    if (node.classList.contains("df2-content")) return node;
+    const { overflowY } = getComputedStyle(node);
+    if (/(auto|scroll|overlay)/.test(overflowY) && node.scrollHeight > node.clientHeight + 1) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
 /** Fade/slide sections in when they enter the viewport (Devin-style scroll reveals). */
 export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(threshold = 0.08) {
   const ref = useRef<T>(null);
@@ -16,10 +29,13 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
     }
 
     const reveal = () => setVisible(true);
+    const root = scrollRootFor(el);
+    const rootHeight = root instanceof Element ? root.clientHeight : window.innerHeight;
 
-    // Already on-screen (hash nav / short pages) — reveal immediately
+    // Already on-screen (hash nav / short pages / in-app scroll host) — reveal immediately
     const rect = el.getBoundingClientRect();
-    if (rect.top < window.innerHeight * 0.92 && rect.bottom > 0) {
+    const rootRect = root instanceof Element ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+    if (rect.top < rootRect.bottom - rootHeight * 0.08 && rect.bottom > rootRect.top) {
       reveal();
       return;
     }
@@ -31,14 +47,22 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
           observer.disconnect();
         }
       },
-      { threshold, rootMargin: "0px 0px -8% 0px" },
+      { threshold, root: root ?? undefined, rootMargin: "0px 0px -6% 0px" },
     );
     observer.observe(el);
 
-    // Safety: never leave content invisible
-    const failsafe = window.setTimeout(reveal, 1800);
+    // Safety: never leave content invisible when scroll host or route changes
+    const failsafe = window.setTimeout(reveal, 1200);
+    const scrollHost = root ?? window;
+    const onScroll = () => {
+      const r = el.getBoundingClientRect();
+      const hostRect = root instanceof Element ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      if (r.top < hostRect.bottom - 24 && r.bottom > hostRect.top + 24) reveal();
+    };
+    scrollHost.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       observer.disconnect();
+      scrollHost.removeEventListener("scroll", onScroll);
       window.clearTimeout(failsafe);
     };
   }, [threshold]);

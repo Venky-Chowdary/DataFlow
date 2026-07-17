@@ -1056,21 +1056,30 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
     setAnalyzing(true);
+    const bump = (pct: number, phase: string) => {
+      setMappingProgress(pct);
+      setMappingPhase(phase);
+    };
     try {
+      bump(8, "Preparing schema context…");
       if (destKindMode === "database") {
+        bump(22, "Loading destination schema…");
         await loadDestinationSchema();
       }
+      bump(42, "Building transfer plan…");
       await loadTransferPlan();
       if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
+          bump(58, "Profiling source columns…");
           await runSourceColumnAnalysis(parsed);
-        } else {
-          await applyPipelineMappings(
-            destColumns.length ? destColumns : undefined,
-            destSchemaMap,
-          );
         }
+        bump(72, "Matching source to destination fields…");
+        await applyPipelineMappings(
+          destColumns.length ? destColumns : undefined,
+          destSchemaMap,
+        );
       } else if (analysis?.columns.length || currentSourceColumns.length) {
+        bump(65, "Matching source to destination fields…");
         await applyPipelineMappings(
           destColumns.length ? destColumns : undefined,
           destSchemaMap,
@@ -1082,13 +1091,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           tone: "warning",
         });
         setStep(STEP_SOURCE);
+        return;
       }
+      bump(100, "Mapping ready");
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
       toast({ title: "Mapping setup failed", message, tone: "error" });
       console.error(e);
     } finally {
       setAnalyzing(false);
+      setMappingProgress(0);
+      setMappingPhase("Preparing schema context…");
     }
   };
 
@@ -1406,12 +1419,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
+    setRunStartupProgress(12);
+    setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     const transferMappings = columnMappings.length
       ? buildPreflightMappings(analysis?.columns ?? [], columnMappings)
       : analysis
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
+      setRunStartupProgress(28);
+      setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
         sourceKind: sourceKind === "cloud" ? "database" : sourceKind,
@@ -1449,7 +1466,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         streamContracts,
         planId: persistedPlanId ?? undefined,
       });
+      setRunStartupProgress(88);
+      setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       if (data.job_id && (data as { async?: boolean }).async) {
+        setRunStartupProgress(100);
         setActiveJobId(data.job_id);
         setTransferring(false);
         toast({
@@ -1460,6 +1480,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         return;
       }
       setResult(data);
+      setRunStartupProgress(100);
       setStep(STEP_RUN);
       if (data.success) onTransferComplete();
     } catch (transferErr) {
@@ -1478,6 +1499,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           outputBasename: targetCollection || undefined,
         });
         setResult(localResult);
+        setRunStartupProgress(100);
         setStep(STEP_RUN);
         onTransferComplete();
         toast({
@@ -1631,61 +1653,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
 
   useEffect(() => {
-    if (!(step === STEP_MAP && analyzing)) {
-      setMappingProgress(0);
-      setMappingPhase("Preparing schema context…");
-      return;
-    }
-
-    const phaseForProgress = (value: number) => {
-      if (value < 25) return "Preparing schema context…";
-      if (value < 55) return "Profiling semantic intent…";
-      if (value < 80) return "Matching source to destination fields…";
-      if (value < 95) return "Scoring confidence and policy checks…";
-      return "Finalizing mapping editor…";
-    };
-
-    setMappingProgress(10);
-    setMappingPhase(phaseForProgress(10));
-
-    const timer = window.setInterval(() => {
-      setMappingProgress((prev) => {
-        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 8)), 96);
-        setMappingPhase(phaseForProgress(next));
-        return next;
-      });
-    }, 260);
-
-    return () => window.clearInterval(timer);
-  }, [step, analyzing]);
-
-  useEffect(() => {
     const isLaunching = step === STEP_RUN && transferring && !activeJobId && !result;
     if (!isLaunching) {
       setRunStartupProgress(0);
       setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
-      return;
     }
-
-    const phaseForProgress = (value: number) => {
-      if (value < 25) return RUN_LAUNCH_STAGES[0];
-      if (value < 50) return RUN_LAUNCH_STAGES[1];
-      if (value < 75) return RUN_LAUNCH_STAGES[2];
-      return RUN_LAUNCH_STAGES[3];
-    };
-
-    setRunStartupProgress(12);
-    setRunStartupPhase(phaseForProgress(12));
-
-    const timer = window.setInterval(() => {
-      setRunStartupProgress((prev) => {
-        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 6)), 94);
-        setRunStartupPhase(phaseForProgress(next));
-        return next;
-      });
-    }, 280);
-
-    return () => window.clearInterval(timer);
   }, [step, transferring, activeJobId, result]);
 
   return (
@@ -1774,9 +1746,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_MAP && analyzing && (
-        <div className="df2-transfer-step-panel">
+        <div className="df2-transfer-step-panel df2-transfer-analyzing-panel">
           <div className="df2-card-body df2-analyzing">
-            <Spinner />
+            <Spinner size="lg" premium />
             <p className="df2-analyzing-title">Mapping source to destination…</p>
             <div className="df2-mapping-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={mappingProgress}>
               <div className="df2-mapping-progress-meta">
@@ -2284,50 +2256,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 <strong>Streams and fields</strong>
                 <span>{currentSourceColumns.length} discovered fields</span>
               </div>
-              <div className="df2-stream-cards" aria-label="Stream contract">
-                <article className="df2-stream-card">
-                  <header className="df2-stream-card-head">
-                    <strong>{sourceStreamName}</strong>
-                    <span className="df2-badge df2-badge-live df2-badge-xs">{syncModeLabel}</span>
-                  </header>
-                  <dl className="df2-stream-card-meta">
-                    <div><dt>Fields</dt><dd>{currentSourceColumns.length || "—"}</dd></div>
-                    <div><dt>Policy</dt><dd>{schemaPolicyLabel}</dd></div>
-                    <div><dt>Status</dt><dd>{currentSourceColumns.length ? "Ready" : "Pending schema"}</dd></div>
-                  </dl>
-                  <div className="df2-stream-card-fields">
-                    <label className="df2-label">Cursor field</label>
-                    <select
-                      className="df2-input df2-select df2-stream-select"
-                      value={requiresCursor ? cursorField : ""}
-                      disabled={!requiresCursor || currentSourceColumns.length === 0}
-                      onChange={(e) => setCursorField(e.target.value)}
-                    >
-                      <option value="">{requiresCursor ? "Select cursor" : "Not required"}</option>
-                      {currentSourceColumns.map((col) => (
-                        <option key={col} value={col}>
-                          {col}{currentSourceSchema[col] ? ` · ${currentSourceSchema[col]}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                    <label className="df2-label">Primary key</label>
-                    <select
-                      className="df2-input df2-select df2-stream-select"
-                      value={requiresPrimaryKey ? primaryKeyField : ""}
-                      disabled={!requiresPrimaryKey || currentSourceColumns.length === 0}
-                      onChange={(e) => setPrimaryKeyField(e.target.value)}
-                    >
-                      <option value="">{requiresPrimaryKey ? "Select key" : "Not required"}</option>
-                      {currentSourceColumns.map((col) => (
-                        <option key={col} value={col}>
-                          {col}{currentSourceSchema[col] ? ` · ${currentSourceSchema[col]}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </article>
-              </div>
-              <div className="df2-stream-table-wrap df2-stream-table-desktop">
+              <div className="df2-stream-table-wrap">
                 <table className="df2-stream-table">
                   <thead>
                     <tr>

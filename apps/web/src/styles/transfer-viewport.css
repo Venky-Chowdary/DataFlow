@@ -722,3 +722,95 @@
     max-height: calc(var(--df-viewport-h, 100dvh) - var(--df-header-height, 60px) - 32px);
   }
 }
+
+/* Destination advanced mode — readable policy + stream table */
+.df2-dest-step.is-advanced .df2-policy-console {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.df2-dest-step.is-advanced .df2-policy-grid {
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.df2-dest-step.is-advanced .df2-policy-options {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.df2-dest-step.is-advanced .df2-policy-option {
+  min-height: 72px;
+  box-shadow: none !important;
+}
+
+.df2-dest-step.is-advanced .df2-policy-option strong,
+.df2-dest-step.is-advanced .df2-policy-option span {
+  display: block;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.df2-dest-step.is-advanced .df2-policy-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--df-border, #e2e8f0);
+}
+
+.df2-dest-step.is-advanced .df2-policy-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.df2-dest-step.is-advanced .df2-policy-toggle strong,
+.df2-dest-step.is-advanced .df2-policy-toggle small {
+  display: block;
+  line-height: 1.45;
+}
+
+.df2-dest-step.is-advanced .df2-stream-contract {
+  margin-top: 16px;
+}
+
+.df2-dest-step.is-advanced .df2-stream-table {
+  min-width: 640px;
+}
+
+.df2-transfer-analyzing-panel .df2-analyzing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: min(420px, 52vh);
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.df2-transfer-analyzing-panel .df2-analyzing-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.df2-transfer-analyzing-panel .df2-mapping-progress {
+  width: min(420px, 100%);
+}
+
+@media (max-width: 768px) {
+  .df2-dest-step.is-advanced .df2-policy-toolbar {
+    grid-template-columns: 1fr;
+  }
+}

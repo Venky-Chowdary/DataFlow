@@ -112,25 +112,36 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
 
   return (
     <>
-      <section className="lp-hero">
-        <p className="lp-hero-brand">DataFlow</p>
-        <h1>Move any schema anywhere</h1>
-        <p className="lp-hero-sub">
-          Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
-          {liveDrivers != null ? ` ${liveDrivers}+ live transfer drivers ready today.` : ""}
-        </p>
+      <section className="lp-hero lp-hero--v2">
+        <div className="lp-hero-glow" aria-hidden />
+        <div className="lp-hero-inner">
+          <div className="lp-hero-copy">
+            <p className="lp-hero-kicker">Universal data platform</p>
+            <h1>Move any schema anywhere — with proof</h1>
+            <p className="lp-hero-sub">
+              Semantic mapping, eight preflight gates, and checksum reconciliation — from Transfer Studio to MCP agents.
+              {liveDrivers != null ? ` ${liveDrivers}+ live transfer drivers ready today.` : ""}
+            </p>
 
-        <div className="lp-hero-cta">
-          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-            Try DataFlow
-          </button>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("product-transfer")}>
-            See Transfer Studio
-          </button>
-        </div>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Start free trial
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("product-transfer")}>
+                Tour Transfer Studio
+              </button>
+            </div>
 
-        <div className="lp-hero-mock" aria-label="DataFlow Transfer Studio preview">
-          <div className="lp-mock-shell">
+            <ul className="lp-hero-proof" aria-label="Platform highlights">
+              <li><DtIcon name="gate" size={16} /> 8 preflight gates</li>
+              <li><DtIcon name="check" size={16} /> Checksum reconciliation</li>
+              <li><DtIcon name="connectors" size={16} /> 600+ connectors</li>
+            </ul>
+          </div>
+
+          <div className="lp-hero-visual">
+            <div className="lp-hero-mock" aria-label="DataFlow Transfer Studio preview">
+              <div className="lp-mock-shell lp-mock-shell--hero">
             <aside className="lp-mock-side">
               <div className="lp-mock-side-title">
                 <span className="lp-mock-org">
@@ -198,25 +209,17 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
                   <span>Checksum OK</span>
                 </div>
               </div>
-            </div>
-
-            <aside className="lp-mock-detail">
-              <h3>Proof report: Orders migration</h3>
-              <p>Independent reconciliation verifies row counts and content checksums after write.</p>
-              <ul>
-                <li>Source rows: 12,480</li>
-                <li>Target rows: 12,480</li>
-                <li>Checksum: matched</li>
-              </ul>
-              <div className="lp-mock-gates">
-                {["Schema contract", "Type coercion", "Nullability", "Destination probe", "Capacity", "Write plan"].map((g) => (
+              <div className="lp-mock-gates lp-mock-gates--inline">
+                {["Schema", "Types", "Nullability", "Probe", "Capacity", "Write plan", "Reconcile", "Checksum"].map((g) => (
                   <div key={g} className="lp-mock-gate">
                     <span>{g}</span>
                     <em>pass</em>
                   </div>
                 ))}
               </div>
-            </aside>
+            </div>
+          </div>
+            </div>
           </div>
         </div>
       </section>

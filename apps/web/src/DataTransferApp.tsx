@@ -586,7 +586,7 @@ function AppShell({
         />
       )}
 
-      {screen !== "pilot" && !copilotOpen && (
+      {screen !== "pilot" && screen !== "transfer" && !copilotOpen && (
         <button
           type="button"
           className="df2-copilot-fab"

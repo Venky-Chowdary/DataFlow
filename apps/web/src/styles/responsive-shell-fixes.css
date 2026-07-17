@@ -41,7 +41,15 @@
 
 /* ─── Content scroll modes (explicit — never :has() with keep-alive screens) ─── */
 
-/* Document pages: natural height; .df2-main scrolls */
+/* Document pages: natural height; .df2-content scrolls */
+.df2-content-inner.df2-content-document {
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+  display: block;
+  min-height: min-content;
+}
+
 .df2-content-document {
   display: block;
   min-height: min-content;

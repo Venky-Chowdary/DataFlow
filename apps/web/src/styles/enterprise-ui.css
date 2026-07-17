@@ -3039,7 +3039,180 @@
   display: flex !important;
   flex-direction: column !important;
   gap: 0 !important;
-  overflow: hidden !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+.df2-result-proof-panel {
+  margin: 0 14px 10px;
+  padding: 12px 14px;
+  border: 1px solid #a7f3d0;
+  border-radius: 10px;
+  background: #ecfdf5;
+}
+
+.df2-result-proof-panel.is-error {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.df2-result-proof-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 650;
+  color: #0f172a;
+}
+
+.df2-result-proof-dl {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.df2-result-proof-dl > div {
+  display: grid;
+  gap: 2px;
+}
+
+.df2-result-proof-dl dt {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+
+.df2-result-proof-dl dd {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #0f172a;
+}
+
+.df2-jobs-v3-failure-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+}
+
+.df2-jobs-v3-failure-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.df2-jobs-v3-failure-head strong {
+  display: block;
+  font-size: 14px;
+  color: #991b1b;
+}
+
+.df2-jobs-v3-failure-head span {
+  display: block;
+  font-size: 12px;
+  color: #b91c1c;
+  margin-top: 2px;
+}
+
+.df2-jobs-v3-failure-message {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #fecaca;
+  font-family: var(--df-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #7f1d1d;
+  word-break: break-word;
+}
+
+.df2-jobs-v3-failure-meta {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.df2-jobs-v3-failure-meta dt {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #991b1b;
+}
+
+.df2-jobs-v3-failure-meta dd {
+  margin: 0;
+  font-size: 12px;
+  color: #7f1d1d;
+}
+
+.df2-quarantine-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.df2-quarantine-explainer {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+}
+
+.df2-quarantine-explainer strong {
+  display: block;
+  font-size: 13px;
+  color: #92400e;
+  margin-bottom: 4px;
+}
+
+.df2-quarantine-explainer p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #78350f;
+}
+
+.df2-quarantine-explainer-count {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  color: #b45309;
+}
+
+.df2-quarantine-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--df-border, #e6e9ee);
+  background: #fffbeb;
+}
+
+.df2-quarantine-summary-chip {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #fde68a;
+  color: #78350f;
+}
+
+.df2-quarantine-summary-chip strong {
+  font-weight: 700;
 }
 
 .df2-result-top {
@@ -3791,16 +3964,33 @@
 .df2-transfer-studio-chrome {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.94) 100%);
   border-bottom: 1px solid var(--df-border, #e6e9ee);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.03);
+  box-shadow: none;
   backdrop-filter: blur(10px);
 }
 
 .df2-transfer-studio-chrome-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px 18px;
-  padding: 12px 16px;
+  gap: 12px 20px;
+  padding: 10px 16px;
+}
+
+.df2-transfer-studio-chrome-row .df2-wizard {
+  flex: unset;
+  min-width: 0;
+  width: 100%;
+}
+
+.df2-transfer-studio-chrome-row .df2-route-bar {
+  flex: unset;
+  justify-self: end;
+  max-width: min(380px, 36vw);
+  padding: 6px 12px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: none !important;
 }
 
 .df2-transfer-step-panel {
@@ -4430,19 +4620,27 @@
 
 /* Transfer Studio chrome — prevent stepper / route overlap */
 .df2-transfer-studio-chrome-row {
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 20px;
 }
 
 .df2-transfer-studio-chrome-row .df2-wizard {
-  flex: 1 1 320px;
+  flex: unset;
   min-width: 0;
-  max-width: 100%;
+  width: 100%;
 }
 
 .df2-transfer-studio-chrome-row .df2-route-bar {
-  flex: 1 1 200px;
-  min-width: 0;
-  max-width: 100%;
+  flex: unset;
+  justify-self: end;
+  max-width: min(380px, 36vw);
+  padding: 6px 12px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: none !important;
 }
 
 .df2-wizard-studio .df2-wizard-track {
@@ -4629,7 +4827,7 @@
 .df2-overview-v3 {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -4680,7 +4878,7 @@
 .df2-overview-v3-kpis {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .df2-overview-v3 .df2-metric-glass {
@@ -4688,8 +4886,8 @@
   border: 1px solid var(--df-border, #e2e8f0);
   background: #fff;
   box-shadow: none;
-  min-height: 96px;
-  padding: 14px 16px;
+  min-height: 80px;
+  padding: 12px 14px;
 }
 
 .df2-overview-v3 .df2-metric-glass-teal {
@@ -4721,7 +4919,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px 20px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--df-border, #e2e8f0);
 }
 
@@ -4752,7 +4950,7 @@
 }
 
 .df2-overview-v3-card-body {
-  padding: 16px 20px;
+  padding: 12px 16px;
 }
 
 .df2-overview-v3-card-body--flush {
@@ -4780,13 +4978,13 @@
 
 .df2-overview-v3-analytics {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+  gap: 12px;
 }
 
 .df2-overview-v3-card--chart .df2-overview-v3-chart-body {
-  min-height: 240px;
-  padding: 8px 12px 16px;
+  min-height: 168px;
+  padding: 6px 10px 12px;
   display: flex;
   align-items: stretch;
 }
@@ -4851,8 +5049,8 @@
 
 .df2-overview-v3-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(248px, 288px);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
+  gap: 12px;
   align-items: start;
 }
 
@@ -4878,8 +5076,8 @@
 }
 
 .df2-overview-v3-card--plane .df2-overview-v3-plane-body {
-  min-height: 280px;
-  padding: 12px 16px 20px;
+  min-height: 200px;
+  padding: 10px 12px 14px;
 }
 
 .df2-overview-v3-health {

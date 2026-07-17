@@ -9,11 +9,29 @@ export interface QuarantinePanelProps {
   initiallyOpen?: boolean;
 }
 
+type QuarantineRow = {
+  row?: number;
+  column?: string;
+  target?: string;
+  value?: string;
+  reason?: string;
+  policy?: string;
+};
+
+function summarizeReasons(rows: QuarantineRow[]) {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = r.reason?.trim() || "Unknown validation failure";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+}
+
 export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: QuarantinePanelProps) {
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen);
   const [loading, setLoading] = useState(false);
-  const [rows, setRows] = useState<{ row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[]>([]);
+  const [rows, setRows] = useState<QuarantineRow[]>([]);
 
   const load = async () => {
     setLoading(true);
@@ -44,8 +62,26 @@ export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: 
     }
   };
 
+  const topReasons = summarizeReasons(rows);
+
   return (
-    <>
+    <div className="df2-quarantine-panel">
+      <div className="df2-quarantine-explainer">
+        <DtIcon name="warning" size={18} />
+        <div>
+          <strong>What is quarantine?</strong>
+          <p>
+            Rows that fail validation during load are isolated — not silently dropped. Each row records the column,
+            offending value, validation policy, and reason so you can fix source data or mapping rules and retry.
+          </p>
+          {rejectedRows != null && rejectedRows > 0 && (
+            <span className="df2-quarantine-explainer-count">
+              {rejectedRows.toLocaleString()} row{rejectedRows === 1 ? "" : "s"} quarantined for this job
+            </span>
+          )}
+        </div>
+      </div>
+
       {!open && (
         <button
           type="button"
@@ -53,15 +89,16 @@ export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: 
           onClick={() => void load()}
           disabled={loading}
         >
-          <DtIcon name="warning" size={14} /> {loading ? "Loading…" : rejectedRows ? `View ${rejectedRows.toLocaleString()} quarantined rows` : "View quarantine"}
+          <DtIcon name="warning" size={14} /> {loading ? "Loading…" : rejectedRows ? `Inspect ${rejectedRows.toLocaleString()} quarantined rows` : "Inspect quarantine"}
         </button>
       )}
+
       {open && (
         <section className="df2-job-log-panel is-result is-open" aria-label="Quarantine">
           <header className="df2-job-log-panel-head">
             <div className="df2-job-log-panel-title">
               <DtIcon name="warning" size={14} />
-              <strong>Quarantine</strong>
+              <strong>Quarantine detail</strong>
               <span className="df2-job-log-count">{rows.length} rows</span>
             </div>
             <div className="df2-job-log-actions">
@@ -71,9 +108,20 @@ export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: 
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setOpen(false)}>Close</button>
             </div>
           </header>
+
+          {topReasons.length > 0 && (
+            <div className="df2-quarantine-summary">
+              {topReasons.map(([reason, count]) => (
+                <span key={reason} className="df2-quarantine-summary-chip">
+                  <strong>{count.toLocaleString()}</strong> {reason}
+                </span>
+              ))}
+            </div>
+          )}
+
           <div className="df2-job-log-panel-body" role="log">
             {rows.length === 0 ? (
-              <div className="df2-job-log-empty">No quarantined rows recorded.</div>
+              <div className="df2-job-log-empty">No quarantined rows recorded for this job.</div>
             ) : (
               <table className="df2-query-table">
                 <thead>
@@ -103,6 +151,6 @@ export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: 
           </div>
         </section>
       )}
-    </>
+    </div>
   );
 }

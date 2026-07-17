@@ -419,9 +419,35 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                     )}
 
                     {liveJob.error && (
-                      <div className="df2-jobs-v3-alert error">
-                        <DtIcon name="alert" size={16} />
-                        <p>{liveJob.error}</p>
+                      <div className="df2-jobs-v3-failure-panel" role="alert">
+                        <header className="df2-jobs-v3-failure-head">
+                          <DtIcon name="alert" size={18} />
+                          <div>
+                            <strong>What went wrong</strong>
+                            <span>Job stopped before completion — review the failure below and quarantined rows if any.</span>
+                          </div>
+                        </header>
+                        <p className="df2-jobs-v3-failure-message">{liveJob.error}</p>
+                        <dl className="df2-jobs-v3-failure-meta">
+                          {liveJob.phase && (
+                            <div>
+                              <dt>Failed phase</dt>
+                              <dd>{liveJob.phase}</dd>
+                            </div>
+                          )}
+                          {(liveJob.rejected_rows ?? 0) > 0 && (
+                            <div>
+                              <dt>Quarantined rows</dt>
+                              <dd>{liveJob.rejected_rows!.toLocaleString()} — validation failures isolated, not silently dropped</dd>
+                            </div>
+                          )}
+                          {liveJob.records_processed != null && liveJob.records_processed > 0 && (
+                            <div>
+                              <dt>Progress before failure</dt>
+                              <dd>{liveJob.records_processed.toLocaleString()} rows processed</dd>
+                            </div>
+                          )}
+                        </dl>
                       </div>
                     )}
 

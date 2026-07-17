@@ -183,3 +183,8 @@
 .df2-pipeline-packet {
   display: none;
 }
+
+.dt-brand-mark {
+  flex-shrink: 0;
+  display: block;
+}

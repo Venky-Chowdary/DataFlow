@@ -153,7 +153,7 @@ export function TransferResultDashboard({
           {rejected > 0 && (
             <div className="df2-result-stat-card warn">
               <strong>{rejected.toLocaleString()}</strong>
-              <span>Rejected</span>
+              <span>Quarantined</span>
             </div>
           )}
           {passed !== undefined && (
@@ -170,7 +170,66 @@ export function TransferResultDashboard({
           ) : null}
         </div>
 
-        {(result.reconciliation?.message || (ds?.warnings && ds.warnings.length > 0) || (result.ddl_executed && result.ddl_executed.length > 0) || (!result.success && result.error) || result.destination?.download_url) && (
+        {result.success && (
+          <section className="df2-result-proof-panel" aria-label="Transfer proof">
+            <header className="df2-result-proof-head">
+              <DtIcon name="check" size={16} />
+              <strong>Proof summary</strong>
+              {result.job_id && (
+                <span className="df2-theater-v3-job-id" title={result.job_id}>Job #{result.job_id.slice(0, 8)}</span>
+              )}
+            </header>
+            <dl className="df2-result-proof-dl">
+              <div>
+                <dt>Route</dt>
+                <dd>{sourceLabel} → {destLabel}</dd>
+              </div>
+              <div>
+                <dt>Reconciliation</dt>
+                <dd>{passed ? "Source and destination row counts and checksums matched" : result.reconciliation?.message || "Pending verification"}</dd>
+              </div>
+              {result.operation && (
+                <div>
+                  <dt>Write mode</dt>
+                  <dd>{result.operation}</dd>
+                </div>
+              )}
+              {ds?.error_policy && (
+                <div>
+                  <dt>Error policy</dt>
+                  <dd>{ds.error_policy}</dd>
+                </div>
+              )}
+              {rejected > 0 && (
+                <div>
+                  <dt>Quarantine</dt>
+                  <dd>{rejected.toLocaleString()} rows isolated — failed validation, not silently dropped. Inspect below to fix source data or mapping.</dd>
+                </div>
+              )}
+            </dl>
+            {result.destination?.download_url && (
+              <a
+                href={result.destination.download_url}
+                className="df2-btn df2-btn-sm df2-btn-primary"
+                download={result.destination.filename || `export.${result.destination?.format || "json"}`}
+              >
+                <DtIcon name="download" size={14} /> Download export
+              </a>
+            )}
+          </section>
+        )}
+
+        {!result.success && (
+          <section className="df2-result-proof-panel is-error" aria-label="Transfer failure">
+            <header className="df2-result-proof-head">
+              <DtIcon name="alert" size={16} />
+              <strong>Failure details</strong>
+            </header>
+            <p className="df2-result-error-detail">{result.error || "The transfer could not complete."}</p>
+          </section>
+        )}
+
+        {(result.reconciliation?.message || (ds?.warnings && ds.warnings.length > 0) || (result.ddl_executed && result.ddl_executed.length > 0) || rejected > 0) && (
           <div className="df2-result-more-body df2-result-more-inline">
             <p className="df2-result-explain-body">
               Checksums are computed over source and destination rows and compared. If reconciliation passed, the transfer is complete and unchanged.
@@ -188,15 +247,6 @@ export function TransferResultDashboard({
             )}
             {!result.success && result.error && (
               <p className="df2-result-error-detail">{result.error}</p>
-            )}
-            {result.destination?.download_url && (
-              <a
-                href={result.destination.download_url}
-                className="df2-btn df2-btn-primary df2-btn-sm"
-                download={result.destination.filename || `export.${result.destination?.format || "json"}`}
-              >
-                <DtIcon name="download" size={14} /> Download export
-              </a>
             )}
             {rejected > 0 && (
               <button

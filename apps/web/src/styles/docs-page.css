@@ -1,7 +1,12 @@
 /* Docs — scroll reveal, flat surfaces, readable layout */
 
 .df2-docs-workspace {
-  max-width: 1120px;
+  width: 100%;
+  max-width: none;
+}
+
+.df2-page-docs .df2-docs-illustration {
+  max-width: none;
 }
 
 .df2-page-docs {
