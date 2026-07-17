@@ -77,10 +77,17 @@ def _legacy_verify(password: str, password_hash: str) -> bool:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify a password against either a bcrypt or legacy SHA-256 hash."""
+    """Verify a password against a bcrypt hash.
+
+    Legacy unsalted SHA-256 is still accepted in development for backwards
+    compatibility, but it is rejected in production because it is not suitable
+    for regulated deployments.
+    """
     if not password_hash:
         return False
     if _LEGACY_SHA256_RE.match(password_hash):
+        if is_production():
+            return False
         return _legacy_verify(password, password_hash)
     try:
         import bcrypt
