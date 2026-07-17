@@ -1,8 +1,29 @@
-"""Shared MongoDB URI helpers for reader, writer, and adapter probes."""
+"""Shared MongoDB URI helpers and client cache for reader, writer, and adapter probes."""
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+# PyMongo clients manage their own connection pools and are thread-safe. Reusing a
+# single client per connection string removes per-batch connection handshake
+# overhead, which is the dominant cost for large streaming transfers.
+_mongo_client_cache: dict[str, Any] = {}
+
+
+def _mongo_client(conn_str: str) -> Any:
+    """Return a cached MongoClient for ``conn_str``."""
+    from pymongo import MongoClient
+
+    if conn_str not in _mongo_client_cache:
+        _mongo_client_cache[conn_str] = MongoClient(
+            conn_str,
+            serverSelectionTimeoutMS=10000,
+            socketTimeoutMS=120000,
+            connectTimeoutMS=10000,
+            maxPoolSize=10,
+        )
+    return _mongo_client_cache[conn_str]
 
 
 def _is_localhost(uri: str) -> bool:

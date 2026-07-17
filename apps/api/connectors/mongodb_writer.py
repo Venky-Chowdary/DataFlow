@@ -118,7 +118,7 @@ def write_mapped_rows(
 ) -> WriteResult:
     del backfill_new_fields
     try:
-        from pymongo import MongoClient
+        from pymongo import MongoClient  # noqa: F401
     except ImportError:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
@@ -157,18 +157,12 @@ def write_mapped_rows(
     policy = transform_error_policy(error_policy)
 
     try:
-        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
-        # Keep socket operations bounded so a slow proxy cannot hang a whole batch.
-        client = MongoClient(
-            conn_str,
-            serverSelectionTimeoutMS=10000,
-            socketTimeoutMS=120000,
-            connectTimeoutMS=10000,
-            maxPoolSize=5,
-        )
+        from connectors.mongodb_common import _mongo_client
 
-        # Test connection
-        client.admin.command('ping')
+        conn_str = _connection_string(host, port, username, password, connection_string, database, ssl, auth_source)
+        # Reuse a cached MongoClient per connection string to avoid paying the
+        # connection handshake cost on every batch.
+        client = _mongo_client(conn_str)
 
         db = client[db_name]
         coll = db[collection_name]
@@ -340,7 +334,6 @@ def write_mapped_rows(
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 
-        client.close()
         return WriteResult(
             ok=True,
             rows_written=written,
