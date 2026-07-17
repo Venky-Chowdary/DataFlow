@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 from services.schedule_store import due_schedules, mark_schedule_run
 
@@ -12,6 +15,67 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule-runner")
 CHECK_INTERVAL_SECONDS = 60
+LOCK_TTL_SECONDS = int(os.getenv("DATAFLOW_SCHEDULER_LOCK_TTL", "300"))
+
+
+def _scheduler_instance_id() -> str:
+    return f"{socket.gethostname()}-{os.getpid()}"
+
+
+def _lock_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(seconds=LOCK_TTL_SECONDS)
+
+
+def _mongo_backend():
+    try:
+        from services.mongodb_service import get_mongodb_service
+    except ImportError:
+        from ..services.mongodb_service import get_mongodb_service
+    try:
+        svc = get_mongodb_service()
+    except Exception:
+        return None
+    if type(svc).__name__ == "MemoryMongoDBService":
+        return None
+    return svc if getattr(svc, "client", None) is not None else None
+
+
+def _acquire_scheduler_lock() -> bool:
+    """Try to acquire a short-lived distributed lock for this scheduler beat.
+
+    When a real MongoDB is shared across Railway instances this prevents
+    multiple replicas from running the same scheduled pipelines simultaneously.
+    Falls back to an in-process lock when MongoDB is unavailable.
+    """
+    svc = _mongo_backend()
+    if not svc:
+        return True
+    db = svc.get_database()
+    now = datetime.now(timezone.utc)
+    instance = _scheduler_instance_id()
+    try:
+        result = db["schedule_locks"].find_one_and_update(
+            {"_id": "global_scheduler_lock", "$or": [{"expires_at": {"$lte": now}}, {"expires_at": None}]},
+            {"$set": {"_id": "global_scheduler_lock", "instance": instance, "acquired_at": now, "expires_at": _lock_expiry()}},
+            upsert=True,
+            return_document=True,
+        )
+        return bool(result and result.get("instance") == instance)
+    except Exception:
+        logger.exception("Failed to acquire scheduler lock")
+        return False
+
+
+def _release_scheduler_lock() -> None:
+    svc = _mongo_backend()
+    if not svc:
+        return
+    try:
+        svc.get_database()["schedule_locks"].delete_one(
+            {"_id": "global_scheduler_lock", "instance": _scheduler_instance_id()}
+        )
+    except Exception:
+        logger.exception("Failed to release scheduler lock")
 
 
 def _resolve_connector(connector_id: str) -> dict | None:
@@ -96,14 +160,20 @@ def _run_schedule(schedule_id: str) -> str | None:
 
 
 def _run_due_schedules() -> int:
-    started = 0
-    for sched in due_schedules():
-        try:
-            if _run_schedule(sched.id):
-                started += 1
-        except Exception:
-            logger.exception("Failed to run schedule %s", sched.id)
-    return started
+    if not _acquire_scheduler_lock():
+        logger.debug("Scheduler lock held by another instance; skipping this beat")
+        return 0
+    try:
+        started = 0
+        for sched in due_schedules():
+            try:
+                if _run_schedule(sched.id):
+                    started += 1
+            except Exception:
+                logger.exception("Failed to run schedule %s", sched.id)
+        return started
+    finally:
+        _release_scheduler_lock()
 
 
 async def run_schedule_loop() -> None:
