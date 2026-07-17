@@ -150,6 +150,7 @@ def read_collection_cursor_batch(
     cursor_type: str | None = None,
     columns: list[str] | None = None,
     limit: int = 500,
+    known_total_rows: int | None = None,
 ) -> ReadBatch:
     """Read documents where cursor_column > watermark — incremental sync."""
     from pymongo import MongoClient
@@ -173,7 +174,10 @@ def read_collection_cursor_batch(
             ):
                 casted = ObjectId(casted)
             query[cursor_column] = {"$gt": casted}
-        total = coll.count_documents(query)
+        if known_total_rows is not None:
+            total = known_total_rows
+        else:
+            total = coll.count_documents(query)
         cursor = coll.find(query).sort(cursor_column, 1).limit(limit)
         docs = list(cursor)
         if not docs:

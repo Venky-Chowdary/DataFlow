@@ -182,6 +182,7 @@ def _read_batch_impl(
                 cursor_type=cursor_type,
                 columns=columns,
                 limit=limit,
+                known_total_rows=known_total_rows,
             )
         return read_collection_batch(
             cfg=cfg,
