@@ -3,25 +3,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.redis_reader import _redis_client
-from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum, sanitize_identifier
+from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum, sanitize_identifier
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "redis-py"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def write_mapped_rows(

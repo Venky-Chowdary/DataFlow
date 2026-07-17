@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
+    WriteResult as _WriteResult,
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
@@ -19,17 +20,8 @@ from services.type_system import ddl_type
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "google-cloud-bigquery"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def bq_type(inferred: str) -> str:

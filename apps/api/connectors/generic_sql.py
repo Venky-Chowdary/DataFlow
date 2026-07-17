@@ -13,7 +13,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
@@ -50,6 +50,7 @@ except Exception:  # pragma: no cover
     TrinoTimestamp = None
 
 from connectors.writer_common import (
+    WriteResult as _WriteResult,
     CHUNK_SIZE,
     _rejected_row_count,
     build_mapped_rows_with_details,
@@ -69,18 +70,8 @@ class ReadBatch:
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "sqlalchemy"
-    rejected_rows: int = 0
-    rejected_details: list[dict] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
 
 
 # Catalog type -> SQLAlchemy drivername.  If a type is missing we attempt to

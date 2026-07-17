@@ -5,11 +5,12 @@ from __future__ import annotations
 import csv
 import io
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.adls_common import blob_service_client
 from connectors.writer_common import (
+    WriteResult as _WriteResult,
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
@@ -19,17 +20,8 @@ from services.value_serializer import cell_to_string, json_default
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "azure-storage-blob"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def write_mapped_rows(

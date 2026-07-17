@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
@@ -62,6 +63,24 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+@dataclass
+class WriteResult:
+    """Canonical result object returned by all destination writers."""
+
+    ok: bool
+    rows_written: int
+    table_name: str
+    target_schema: str
+    checksum: str
+    chunks_completed: int
+    error: str | None = None
+    driver: str = ""
+    rejected_rows: int = 0
+    rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    load_method: str | None = None
 
 
 def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:

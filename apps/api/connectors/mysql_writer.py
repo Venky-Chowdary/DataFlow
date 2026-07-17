@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from connectors.mysql_conn import get_connection
 from connectors.writer_common import (
+    WriteResult as _WriteResult,
     CHUNK_SIZE,
     build_mapped_rows,
     dedupe_rows,
@@ -21,17 +22,8 @@ from services.type_system import ddl_type
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "pymysql"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def mysql_type(inferred: str) -> str:

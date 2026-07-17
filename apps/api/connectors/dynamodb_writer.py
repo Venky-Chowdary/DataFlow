@@ -4,26 +4,17 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.aws_common import boto3_client
-from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum
+from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "boto3"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def _to_dynamo_value(value: Any, source_type: str) -> Any:

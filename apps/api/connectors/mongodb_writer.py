@@ -6,10 +6,11 @@ import base64
 import hashlib
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.writer_common import (
+    WriteResult as _WriteResult,
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
@@ -24,17 +25,8 @@ MONGO_WRITE_BATCH_SIZE = int(os.getenv("DATAFLOW_MONGO_BATCH_SIZE", "1000"))
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "pymongo"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 def _connection_string(

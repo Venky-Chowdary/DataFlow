@@ -7,7 +7,7 @@ import io
 import json
 import smtplib
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -15,22 +15,13 @@ from email.mime.text import MIMEText
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from connectors.writer_common import build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
+from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
 from services.value_serializer import cell_to_string, json_default
 
 
 @dataclass
-class WriteResult:
-    ok: bool
-    rows_written: int
-    table_name: str
-    target_schema: str
-    checksum: str
-    chunks_completed: int
-    error: str | None = None
+class WriteResult(_WriteResult):
     driver: str = "smtplib"
-    rejected_rows: int = 0
-    warnings: list[str] = field(default_factory=list)
 
 
 class _EmailConfig:
