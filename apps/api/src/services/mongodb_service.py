@@ -13,6 +13,22 @@ from datetime import datetime, timezone
 import json
 
 
+def _as_object_id(job_id: str):
+    """Return a valid ``ObjectId`` or ``None`` for malformed ids.
+
+    Callers must check ``None`` and degrade instead of crashing on an
+    arbitrary/external job identifier.
+    """
+    from bson import ObjectId, errors
+
+    if not job_id:
+        return None
+    try:
+        return ObjectId(job_id)
+    except (errors.InvalidId, TypeError, ValueError):
+        return None
+
+
 class MongoDBService:
     """MongoDB service for DataTransfer platform"""
     
@@ -96,46 +112,55 @@ class MongoDBService:
     
     def get_connector(self, connector_id: str) -> Optional[dict]:
         """Get a connector by ID"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["connectors"]
-        
-        result = collection.find_one({"_id": ObjectId(connector_id)})
+
+        oid = _as_object_id(connector_id)
+        if not oid:
+            return None
+
+        result = collection.find_one({"_id": oid})
         if result:
             result["_id"] = str(result["_id"])
         return result
-    
+
     def list_connectors(self) -> list[dict]:
         """List all saved connectors"""
         db = self.get_database()
         collection = db["connectors"]
-        
+
         connectors = []
         for doc in collection.find().sort("created_at", -1):
             doc["_id"] = str(doc["_id"])
             connectors.append(doc)
         return connectors
-    
+
     def update_connector(self, connector_id: str, updates: dict) -> bool:
         """Update a connector configuration"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["connectors"]
-        
+
+        oid = _as_object_id(connector_id)
+        if not oid:
+            return False
+
         updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
-            {"_id": ObjectId(connector_id)},
+            {"_id": oid},
             {"$set": updates}
         )
         return result.modified_count > 0
-    
+
     def delete_connector(self, connector_id: str) -> bool:
         """Delete a connector"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["connectors"]
-        
-        result = collection.delete_one({"_id": ObjectId(connector_id)})
+
+        oid = _as_object_id(connector_id)
+        if not oid:
+            return False
+
+        result = collection.delete_one({"_id": oid})
         return result.deleted_count > 0
     
     # ═══════════════════════════════════════════════════════════════════════
@@ -243,13 +268,16 @@ class MongoDBService:
     
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         """Update transfer job status"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["transfer_jobs"]
-        
+
+        oid = _as_object_id(job_id)
+        if not oid:
+            return False
+
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
-        
+
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "failed", "cancelled"):
@@ -261,7 +289,7 @@ class MongoDBService:
             try:
                 from services.job_phases import advance_phase, complete_phases, initial_phases, phase_from_engine_label
 
-                existing = collection.find_one({"_id": ObjectId(job_id)}, {"phases": 1})
+                existing = collection.find_one({"_id": oid}, {"phases": 1})
                 phases = (existing or {}).get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
                 if status in ("completed",):
@@ -273,20 +301,23 @@ class MongoDBService:
                 updates["phases"] = phases
             except Exception:
                 pass
-        
+
         result = collection.update_one(
-            {"_id": ObjectId(job_id)},
+            {"_id": oid},
             {"$set": updates}
         )
         return result.modified_count > 0
     
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
-        from bson import ObjectId
         db = self.get_database()
         collection = db["transfer_jobs"]
-        
-        result = collection.find_one({"_id": ObjectId(job_id)})
+
+        oid = _as_object_id(job_id)
+        if not oid:
+            return None
+
+        result = collection.find_one({"_id": oid})
         if result:
             result["_id"] = str(result["_id"])
         return result
