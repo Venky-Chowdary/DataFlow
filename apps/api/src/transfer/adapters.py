@@ -240,6 +240,10 @@ def resolve_connector_config(
             "path_style": conn_dict.get("path_style") or cfg["path_style"],
             "role": conn_dict.get("role") or cfg["role"],
         })
+    if fmt == "mongodb" and not cfg.get("database"):
+        from connectors.mongodb_common import mongodb_database_from_uri
+
+        cfg["database"] = mongodb_database_from_uri(cfg.get("connection_string", "")) or ""
     return cfg
 
 

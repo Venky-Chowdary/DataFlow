@@ -37,6 +37,18 @@ def _is_localhost(uri: str) -> bool:
     return host.lower() in ("localhost", "127.0.0.1", "::1")
 
 
+def mongodb_database_from_uri(uri: str) -> str:
+    """Return the database name encoded in a MongoDB URI path, if any."""
+    try:
+        parsed = urlparse(uri.strip())
+        path = (parsed.path or "").strip("/")
+        if path and not path.startswith("?"):
+            return path
+    except Exception:
+        pass
+    return ""
+
+
 def normalize_mongodb_connection_string(
     connection_string: str = "",
     *,
