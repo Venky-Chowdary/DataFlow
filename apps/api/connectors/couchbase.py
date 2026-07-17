@@ -117,4 +117,3 @@ def read_object(
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=len(rows))
 
 
-from connectors.saas_common import write_not_supported as write_mapped_rows

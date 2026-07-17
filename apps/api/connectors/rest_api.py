@@ -77,10 +77,8 @@ def _build_headers(cfg: dict[str, Any]) -> dict[str, str]:
     if auth_header:
         if api_key:
             headers[auth_header] = api_key
-    elif mode in ("bearer", "") and api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    elif mode in ("token",) and api_key:
-        headers["Authorization"] = f"Token {api_key}"
+    elif mode in ("bearer", "token", "") and api_key:
+        headers["Authorization"] = f"{auth_prefix} {api_key}"
     elif mode in ("api_key", "apikey") and api_key:
         headers["X-Api-Key"] = api_key
     elif username and password:
@@ -348,4 +346,3 @@ def read_object(
 
 
 # Source-only connector: writes are not supported.
-from connectors.saas_common import write_not_supported as write_mapped_rows

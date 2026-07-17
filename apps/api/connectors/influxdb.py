@@ -6,13 +6,11 @@ Configuration uses host, port, database, username/password, and measurement.
 
 from __future__ import annotations
 
-import json
-import urllib.parse
 from typing import Any
 
 import requests
 
-from connectors.saas_common import ReadBatch, base_url, humanize_http_error
+from connectors.saas_common import ReadBatch, humanize_http_error
 
 
 def _url(host: str, port: int, ssl: bool) -> str:
@@ -112,4 +110,3 @@ def read_object(
 
 
 # Source-only connector
-from connectors.saas_common import write_not_supported as write_mapped_rows

@@ -8,7 +8,6 @@ Upgrades the base pattern engine with embedding similarity and retrieval.
 from __future__ import annotations
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .semantic_engine import (
     SemanticAnalyzer,
@@ -18,12 +17,9 @@ from .semantic_engine import (
     MappingSuggestion,
     DataCategory,
     ComplianceFramework,
-    analyze_column as _base_analyze_column,
-    analyze_schema as _base_analyze_schema,
-    generate_mappings as _base_generate_mappings,
 )
-from .knowledge.synonyms import resolve_canonical, are_synonyms, get_synonym_count
-from .knowledge.semantic_patterns import get_pattern_count, SEMANTIC_PATTERNS
+from .knowledge.synonyms import resolve_canonical, get_synonym_count
+from .knowledge.semantic_patterns import get_pattern_count
 
 
 @dataclass

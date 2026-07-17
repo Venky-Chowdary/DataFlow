@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from .connector_capabilities import _DRIVER_CAPS, _FILE_CAPS, transfer_live_driver_types
+from .connector_capabilities import _FILE_CAPS, transfer_live_driver_types
 from .connector_registry import CONNECTOR_MODULES
 
 # driver/format → pip package(s) required at runtime

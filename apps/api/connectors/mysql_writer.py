@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -97,6 +96,8 @@ def write_mapped_rows(
     try:
         import pymysql
     except ImportError:
+        pymysql = None
+    if pymysql is None:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 

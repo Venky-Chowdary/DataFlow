@@ -5,14 +5,12 @@ Parse various file formats: CSV, JSON, Excel, Parquet
 
 from __future__ import annotations
 
-import base64
 import csv
 import gzip
 import io
 import json
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -403,7 +401,6 @@ class FileParser:
     def parse_orc(content: bytes, max_rows: int = 100_000) -> ParseResult:
         try:
             import pyarrow.orc as orc
-            import pyarrow.parquet as pq
             import io
 
             table = orc.read_table(io.BytesIO(content))

@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from typing import Any, Optional
 import time
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])

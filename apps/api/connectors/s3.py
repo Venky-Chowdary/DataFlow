@@ -44,7 +44,6 @@ def test_s3(
     }
 
     try:
-        import boto3
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError:
         from connectors.driver_guard import require_driver

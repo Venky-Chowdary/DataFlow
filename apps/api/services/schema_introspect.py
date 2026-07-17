@@ -287,7 +287,6 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     schema = kwargs.get("schema") or "public"
     try:
-        import psycopg2
         from connectors.postgresql_conn import get_connection
 
         conn = get_connection(

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import itertools
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from connectors.adls_common import blob_service_client

@@ -116,7 +116,6 @@ def _histogram(values: list[float], buckets: int = 10) -> list[dict[str, Any]]:
 def _type_scores(values: list[str]) -> dict[str, float]:
     if not values:
         return {"VARCHAR": 1.0}
-    n = len(values)
     scores = {
         "BOOLEAN": 0.0,
         "INTEGER": 0.0,

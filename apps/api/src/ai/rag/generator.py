@@ -38,7 +38,6 @@ class DataTransferRAGGenerator:
         sample_values: list[str] | None = None,
     ) -> RAGResponse:
         """Generate schema analysis for a column."""
-        context = self._format_context(retrieval)
         pattern = retrieval.matched_pattern or "Unknown"
         canonical = retrieval.canonical_form or column_name
 

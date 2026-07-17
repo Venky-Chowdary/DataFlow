@@ -25,7 +25,6 @@ def _load_ml_baseline():
             pkg_path = str(Path(__file__).resolve().parents[3] / "packages")
             if pkg_path not in sys.path:
                 sys.path.append(pkg_path)
-            import ml.train.baseline  # to ensure class is available for unpickling
             with model_path.open("rb") as f:
                 _model_cache = pickle.load(f)
                 return _model_cache

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from connectors.aws_common import boto3_client

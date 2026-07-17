@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
-from typing import Any, Callable
+from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform

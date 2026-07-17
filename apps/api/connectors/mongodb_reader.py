@@ -27,7 +27,7 @@ class ReadBatch:
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     """Convert a string cursor value into a BSON-native type for MongoDB queries."""
     from datetime import datetime
-    from decimal import Decimal, InvalidOperation
+    from decimal import InvalidOperation
 
     from bson.decimal128 import Decimal128
     from services.cdc_engine import WatermarkType, infer_watermark_type

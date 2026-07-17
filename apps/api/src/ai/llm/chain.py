@@ -5,19 +5,11 @@ Multi-step reasoning for complex schema analysis and mapping.
 """
 
 from __future__ import annotations
-import json
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from .provider import DataTransferLLMProvider, LLMResponse, DataTransferLocalProvider
-from .prompts import (
-    CHAIN_OF_THOUGHT_TEMPLATE,
-    SCHEMA_ANALYSIS_PROMPT,
-    COLUMN_MAPPING_PROMPT,
-    PII_DETECTION_PROMPT,
-)
-from ..knowledge.synonyms import resolve_canonical, are_synonyms, CANONICAL_FORMS
-from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS, get_pattern_by_name
+from .provider import DataTransferLLMProvider, DataTransferLocalProvider
+from ..knowledge.synonyms import resolve_canonical, are_synonyms
+from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.type_conversions import suggest_type_conversion
 
 

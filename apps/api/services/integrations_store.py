@@ -151,7 +151,6 @@ def update_sso_config(sso_type: str, patch: dict[str, Any]) -> dict[str, Any]:
     data = _load_raw()
     cfg = data["sso"][sso_type]
     existing_secret = cfg.get("client_secret", "")
-    existing_cert = cfg.get("x509_cert", "")
 
     for key, value in patch.items():
         if key == "client_secret":

@@ -6,7 +6,6 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from services.audit_log import _redact, append_audit_event

@@ -211,7 +211,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
     delimiter = record["delimiter"]
     
     if fmt == "csv":
-        import csv, io
+        import csv
         with open(path, "r", encoding=encoding, errors="replace") as f:
             reader = csv.reader(f, delimiter=delimiter)
             headers = next(reader, [])

@@ -14,7 +14,6 @@ from services.schedule_store import (
     delete_schedule,
     get_schedule,
     list_schedules,
-    mark_schedule_run,
     update_schedule,
 )
 

@@ -8,8 +8,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from ..knowledge.synonyms import are_synonyms, resolve_canonical
-from ..knowledge.semantic_patterns import get_pattern_by_name, SEMANTIC_PATTERNS
+from ..knowledge.synonyms import are_synonyms
 
 
 @dataclass

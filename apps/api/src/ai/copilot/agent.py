@@ -13,11 +13,8 @@ from ..knowledge.copilot_knowledge import (
     COPILOT_PERSONA,
     INTENT_PATTERNS,
     CONVERSATION_TEMPLATES,
-    QUICK_REPLIES,
-    SUGGESTED_PROMPTS,
 )
 from ..knowledge.synonyms import are_synonyms, resolve_canonical
-from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from .data_analyst import get_data_analyst
 
 

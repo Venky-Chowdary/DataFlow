@@ -97,7 +97,7 @@ def _build_scd_table(
     """Build or reflect the destination table with SCD2 audit columns."""
     import sqlalchemy as sa
 
-    from connectors.generic_sql import _build_table_for_write, _sa_type_for_logical
+    from connectors.generic_sql import _build_table_for_write
 
     all_cols = list(dict.fromkeys(list(target_cols) + SCD2_COLUMNS))
     all_types = {**column_types}
@@ -268,10 +268,9 @@ def apply_scd2(
     Returns a summary dict with ``rows_written`` (new current versions),
     ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
     """
-    import sqlalchemy as sa
 
     from connectors.generic_sql import get_sqlalchemy_engine, get_sql_schema
-    from connectors.writer_common import build_mapped_rows, resolve_target_columns
+    from connectors.writer_common import build_mapped_rows
     from src.transfer.adapters import records_to_matrix, resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
 
@@ -283,7 +282,6 @@ def apply_scd2(
     pk_target = conflict_columns[0]
 
     target_cols = _target_columns(columns, mappings)
-    target_set = set(target_cols)
 
     _, data_rows = records_to_matrix(records, columns)
     mapped_tuples, _ = build_mapped_rows(

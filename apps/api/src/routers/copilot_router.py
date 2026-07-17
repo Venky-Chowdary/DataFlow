@@ -164,7 +164,6 @@ async def copilot_status():
     from ..ai.copilot import get_copilot_agent
     from ..ai.training.training_agent import get_training_agent
     from ..ai.rag.pipeline import get_rag_pipeline
-    from ..ai.copilot.pilot_agent import get_pilot_agent
 
     rag = get_rag_pipeline()
     training = get_training_agent()

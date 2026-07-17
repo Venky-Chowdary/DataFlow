@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date as _date, datetime as _datetime, time as _time, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
@@ -1193,7 +1193,6 @@ def read_target_sample(
     col_sql = ", ".join(f'"{c}"' for c in cols) if cols != ["*"] else "*"
     try:
         if db_type == "postgresql":
-            import psycopg2
             from connectors.postgresql_conn import get_connection
 
             conn = get_connection(

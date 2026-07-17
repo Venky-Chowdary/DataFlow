@@ -77,7 +77,6 @@ def _primary_key_target(
     contract. For SQL destinations prefer exact `id`/`_id` target, then exact
     `id`/`_id` source, then the first `*_id` source.
     """
-    src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
     tgt_by_src = {str(m.get("source") or ""): str(m.get("target") or "") for m in mappings if m.get("source")}
     srcs = [str(m.get("source") or "") for m in mappings if m.get("source")]
     tgts = [str(m.get("target") or "") for m in mappings if m.get("target")]

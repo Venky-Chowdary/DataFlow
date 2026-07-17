@@ -11,7 +11,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 
 from .embedding_service import get_embedding_service
 

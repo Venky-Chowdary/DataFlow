@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from services.pii_guard import detect_pii, mask as pii_mask
+from services.pii_guard import mask as pii_mask
 from services.value_serializer import json_default
 from services.semantic_types import SemanticType, normalize_value_for_target, detect_semantic_type
 

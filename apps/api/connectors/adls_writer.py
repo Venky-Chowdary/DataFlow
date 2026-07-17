@@ -13,7 +13,6 @@ from connectors.writer_common import (
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
-    transform_error_policy,
 )
 from services.value_serializer import cell_to_string, json_default
 

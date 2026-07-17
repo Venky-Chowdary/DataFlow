@@ -48,7 +48,6 @@ def count_table_rows(
     ssl: bool,
     table: str,
 ) -> int:
-    import psycopg2
     from psycopg2 import sql
 
     schema = schema or "public"
@@ -101,7 +100,6 @@ def _primary_key_columns(cur, schema: str, table: str) -> list[str] | None:
 
 def _order_by_clause(cur, schema: str, table: str, columns: list[str] | None) -> str:
     """Return a deterministic ORDER BY for stable LIMIT/OFFSET pagination."""
-    import psycopg2
     from psycopg2 import sql
     pk = _primary_key_columns(cur, schema, table)
     if pk:
@@ -127,7 +125,6 @@ def read_table_batch(
     limit: int = 500,
     known_total_rows: int | None = None,
 ) -> ReadBatch:
-    import psycopg2
     from psycopg2 import sql
 
     schema = schema or "public"
@@ -224,7 +221,6 @@ def read_table_cursor_batch(
     limit: int = 500,
 ) -> ReadBatch:
     """Read rows with cursor_column > watermark — for incremental sync."""
-    import psycopg2
     from psycopg2 import sql
 
     schema = schema or "public"

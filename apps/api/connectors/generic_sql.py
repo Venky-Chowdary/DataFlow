@@ -24,7 +24,7 @@ from connectors.schema_drift import add_missing_columns
 
 try:
     import sqlalchemy as sa
-    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy import create_engine, inspect
     from sqlalchemy.dialects import postgresql
 
     SQLALCHEMY_AVAILABLE = True
@@ -52,12 +52,10 @@ except Exception:  # pragma: no cover
 from connectors.writer_common import (
     CHUNK_SIZE,
     _rejected_row_count,
-    build_mapped_rows,
     build_mapped_rows_with_details,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
-    sanitize_identifier,
     transform_error_policy,
 )
 

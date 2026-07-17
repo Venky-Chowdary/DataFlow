@@ -20,7 +20,6 @@ from connectors.writer_common import (  # noqa: E402
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
-    row_checksum,
     row_fingerprints,
 )
 
@@ -34,7 +33,7 @@ try:
     from services.parallel_chunks import ChunkDispatcher
     from services.reconciliation import FingerprintAccumulator
     from services.resilience import adaptive_chunk_size
-    from services.row_filter import apply_row_filter, apply_row_filter_to_matrix
+    from services.row_filter import apply_row_filter_to_matrix
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.data_quality import run_integrity_audit
@@ -42,7 +41,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.parallel_chunks import ChunkDispatcher
     from src.services.reconciliation import FingerprintAccumulator
     from src.services.resilience import adaptive_chunk_size
-    from src.services.row_filter import apply_row_filter, apply_row_filter_to_matrix
+    from src.services.row_filter import apply_row_filter_to_matrix
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -710,9 +709,6 @@ def stream_database_transfer(
     effective_sync = contract.sync_mode if contract else sync_mode
     incremental = requires_incremental(effective_sync)
     cursor_source_col = contract.cursor_field if contract else ""
-    cursor_col = cursor_source_col
-    if cursor_source_col and mappings:
-        cursor_col = map_source_to_target(cursor_source_col, mappings)
     pk_target_cols: list[str] = []
     if contract and contract.primary_key:
         pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
@@ -1395,7 +1391,6 @@ def stream_scd2_mirror_transfer(
     ]
 
     rows_written = 0
-    updated_rows = 0
     dest_summary: dict[str, Any] = {
         "source_rows": rows_staged,
         "staging_table": staging_qualified,
@@ -1438,7 +1433,6 @@ def stream_scd2_mirror_transfer(
                     on_checkpoint(batch_idx, approx_batches, written_total, checkpoint={"phase": "scd2"})
 
             rows_written = written_total
-            updated_rows = updated_total
             dest_summary["active_rows"] = active_rows
             dest_summary["active_checksum"] = active_checksum
             dest_summary["updated_rows"] = updated_total

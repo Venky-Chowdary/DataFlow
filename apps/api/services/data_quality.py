@@ -7,7 +7,6 @@ null-rate spikes, and low-cardinality anomalies before a transfer commits.
 
 from __future__ import annotations
 
-import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field

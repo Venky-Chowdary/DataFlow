@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .data_synthesis import DataTransferDataSynthesizer, TrainingDataset
+from .data_synthesis import DataTransferDataSynthesizer
 
 
 @dataclass

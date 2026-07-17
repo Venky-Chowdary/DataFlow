@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from services.semantic_mapper import map_columns
-from services.transform_engine import infer_transform, infer_transform_for_mapping
+from services.transform_engine import infer_transform_for_mapping
 
 CONFIDENCE_FLOOR = 0.72
 

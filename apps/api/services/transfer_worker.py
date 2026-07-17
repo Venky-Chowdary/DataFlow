@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from services.jobs import job_store
-from services.reconciliation import checksum_rows, reconcile, verify_target
+from services.reconciliation import reconcile, verify_target
 from services.workflow import WorkflowPhase, run_in_background, set_phase, simulate_chunk_delay
 
 
@@ -84,9 +84,7 @@ def dispatch_file_to_database(
             driver_out = ""
 
             chunk_idx = 0
-            # Rough estimation of total chunks for progress UI
-            estimated_chunks = max(1, (total_rows + 24999) // 25000)
-            
+
             for headers, data_rows in chunks_generator:
                 is_first = (chunk_idx == 0)
                 common["headers"] = headers

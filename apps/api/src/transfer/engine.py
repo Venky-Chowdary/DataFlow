@@ -51,7 +51,6 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 from .adapters import (
     parse_file_content,
     read_source_database,
-    resolve_connector_config,
     write_destination_database,
     write_destination_file,
 )
@@ -71,7 +70,7 @@ from .stream import (
     stream_scd2_mirror_transfer,
     supports_streaming,
 )
-from .type_mapper import build_column_types, default_mappings
+from .type_mapper import default_mappings
 try:
     from .contract_engine import enforce_or_create_contract, finalize_contract
     from services.data_contract import ContractViolation
@@ -628,8 +627,6 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
-            column_types = request.column_types or build_column_types(columns, schema)
-
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = contract.sync_mode if contract else request.sync_mode
@@ -1071,8 +1068,6 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
-            column_types = request.column_types or build_column_types(columns, schema)
-
             mongo.update_job_status(
                 job_id, "running", phase="preflight", progress_pct=15,
                 message="Validating mapping and schema…",
@@ -1444,8 +1439,6 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
             )
-            column_types = request.column_types or build_column_types(columns, schema)
-
             mongo.update_job_status(
                 job_id, "running", phase="preflight", progress_pct=15,
                 message="Validating mapping and schema…",

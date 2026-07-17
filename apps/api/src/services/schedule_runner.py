@@ -9,7 +9,7 @@ import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-from services.schedule_store import due_schedules, mark_schedule_run
+from services.schedule_store import due_schedules
 
 logger = logging.getLogger(__name__)
 

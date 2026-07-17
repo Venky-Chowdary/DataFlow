@@ -206,9 +206,6 @@ DOMAINS: dict[str, dict[str, Any]] = {
 
 def detect_data_domain(columns: list[str]) -> dict[str, Any]:
     """Score columns against domain pattern libraries."""
-    col_lower = [c.lower() for c in columns]
-    col_blob = " ".join(col_lower)
-
     best_domain = "general"
     best_score = 0.0
     best_signals: list[str] = []

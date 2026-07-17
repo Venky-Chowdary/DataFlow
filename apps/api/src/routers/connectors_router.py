@@ -14,8 +14,8 @@ from typing import Optional
 from pymongo.errors import PyMongoError
 from ..services.mongodb_service import get_mongodb_service
 from ..services.file_parser import FileParser
-from ..transfer.connector_capabilities import resolve_driver_type, get_capabilities
-from ..transfer.connector_registry import CONNECTOR_MODULES, run_probe
+from ..transfer.connector_capabilities import resolve_driver_type
+from ..transfer.connector_registry import run_probe
 from services.team_store import can_read_workspace, can_write_workspace
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
@@ -276,7 +276,7 @@ async def create_connector(
             created_at=saved.created_at,
             workspace_id=saved.workspace_id or "",
         )
-    except Exception as fs_err:
+    except Exception:
         pass  # fall through to MongoDB
 
     try:

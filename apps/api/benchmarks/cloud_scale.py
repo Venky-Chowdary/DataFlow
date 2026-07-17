@@ -195,7 +195,6 @@ def benchmark_sqlite(rows: int = 100_000, *, db_path: str | None = None) -> Scal
 
     target = "sqlite"
     path = db_path or tempfile.mktemp(suffix=".db")
-    content = generate_csv(rows)
     try:
         result = _run_transfer(
             target_label=target,

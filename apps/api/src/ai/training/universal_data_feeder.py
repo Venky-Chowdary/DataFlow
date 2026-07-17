@@ -5,7 +5,6 @@ Ingest schemas from uploaded files, connectors, and industry templates for AI tr
 """
 
 from __future__ import annotations
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 

@@ -113,7 +113,6 @@ class DataTransferFallbackChain:
     def query_with_fallback(self, question: str) -> FallbackResult:
         """Answer natural language query with fallback."""
         # Try LLM first
-        from .prompts import NATURAL_LANGUAGE_PROMPT
 
         rag_response = self.rag.query(question)
 

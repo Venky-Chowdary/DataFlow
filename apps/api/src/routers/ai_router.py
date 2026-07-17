@@ -11,8 +11,6 @@ from ..ai import (
     analyze_column,
     analyze_schema,
     generate_mappings,
-    detect_pii,
-    DataCategory,
     ComplianceFramework,
 )
 

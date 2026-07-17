@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
-from ..knowledge.synonyms import SYNONYM_DICTIONARY, CANONICAL_FORMS
+from ..knowledge.synonyms import SYNONYM_DICTIONARY
 from ..knowledge.industry_schemas import INDUSTRY_SCHEMAS
 from ..knowledge.type_conversions import TYPE_CONVERSION_MATRIX
 from .vector_store import get_vector_store

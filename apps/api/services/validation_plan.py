@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.preflight_rules import HARD_GATE_IDS, SOFT_GATE_IDS, PREFLIGHT_GATE_RULES
+from services.preflight_rules import PREFLIGHT_GATE_RULES
 from services.connector_capability_registry import get_connector_capability
 
 

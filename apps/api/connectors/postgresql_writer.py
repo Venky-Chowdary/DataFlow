@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 from dataclasses import dataclass, field
@@ -96,10 +97,7 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    try:
-        import psycopg2
-        from psycopg2 import sql
-    except ImportError:
+    if importlib.util.find_spec("psycopg2") is None:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
 
@@ -118,6 +116,8 @@ def write_mapped_rows(
             ok=True, rows_written=rows, table_name=table_name, target_schema=schema or "public",
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
+
+    from psycopg2 import sql
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if not target_cols:

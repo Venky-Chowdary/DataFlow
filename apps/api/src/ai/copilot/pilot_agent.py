@@ -7,7 +7,6 @@ Answers any data question and performs work in the app when asked.
 
 from __future__ import annotations
 import json
-import re
 from dataclasses import dataclass, field
 
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS

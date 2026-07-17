@@ -14,7 +14,6 @@ from connectors.sqlite_common import sqlite_file_path
 from connectors.writer_common import (
     CHUNK_SIZE,
     _rejected_row_count,
-    build_mapped_rows,
     build_mapped_rows_with_details,
     quote_sql_identifier,
     resolve_target_columns,

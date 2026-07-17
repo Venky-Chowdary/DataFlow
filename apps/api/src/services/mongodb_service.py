@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import os
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, OperationFailure
 from typing import Optional, Any
 from datetime import datetime, timezone
-import json
 
 
 def _as_object_id(job_id: str):

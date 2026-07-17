@@ -10,7 +10,6 @@ import os
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 def _is_valid_api_key(value: str) -> bool:
@@ -259,7 +258,7 @@ class DataTransferLocalProvider(DataTransferLLMProvider):
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         """Generate structured response using local knowledge."""
-        from ..knowledge.synonyms import resolve_canonical, are_synonyms
+        from ..knowledge.synonyms import resolve_canonical
         from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 
         reasoning_steps = []

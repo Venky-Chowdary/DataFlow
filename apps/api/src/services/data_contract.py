@@ -252,7 +252,6 @@ class ContractEnforcer:
             })
 
         schema = sample_schema or {}
-        contract_sources = {c.source_name for c in self.contract.columns}
         missing_required = [
             c for c in self.contract.columns
             if not c.nullable and c.source_name not in schema

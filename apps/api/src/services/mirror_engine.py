@@ -12,7 +12,6 @@ complete source snapshot to the destination.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any
 
 SOFT_DELETE_COLUMN = "_deleted"
@@ -200,10 +199,8 @@ def apply_inferred_soft_deletes(
         raise ValueError("mirror sync could not build a non-empty source key set from the primary key")
 
     from src.transfer.adapters import resolve_connector_config
-    from src.transfer.connector_capabilities import resolve_driver_type
     from connectors.generic_sql import get_sqlalchemy_engine, get_sql_schema
 
-    db_type = resolve_driver_type(endpoint.format)
     cfg = resolve_connector_config(endpoint)
     table = endpoint.table or endpoint.collection or "dt_import"
     schema_name = get_sql_schema(cfg)
