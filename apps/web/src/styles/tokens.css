@@ -47,34 +47,39 @@
   --df-ink-primary: var(--df-text-primary);
   --df-ink-secondary: var(--df-text-secondary);
   --df-line: var(--df-border);
-  --df-page-gutter: 20px;
+  --df-page-gutter: 24px;
+  --df-page-gutter-sm: 16px;
 
   --df-font-sans: "Plus Jakarta Sans", "IBM Plex Sans", Inter, system-ui, -apple-system, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
 
   --df-header-height: 56px;
-  --df-sidebar-width: 248px;
+  --df-sidebar-width: 252px;
   --df-content-max: none;
   --df-rail-width: 360px;
   --dt-copilot-rail-width: 360px;
 
   --df-radius-sm: 6px;
   --df-radius-md: 8px;
-  --df-radius-lg: 12px;
-  --df-radius-xl: 16px;
-  --df-radius-card: 12px;
+  --df-radius-lg: 10px;
+  --df-radius-xl: 14px;
+  --df-radius-card: 10px;
   --df-radius-panel: 12px;
-  --df-radius-tile: 12px;
+  --df-radius-tile: 10px;
 
   --df-btn-height: 34px;
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
 
+  --df-table-row-height: 44px;
+  --df-table-row-height-sm: 36px;
+  --df-nav-item-height: 36px;
+
   --df-card-pad: 16px;
   --df-card-head-pad: 12px 16px;
   --df-card-footer-pad: 12px 16px;
-  --df-grid-gap: 14px;
-  --df-grid-gap-lg: 18px;
+  --df-grid-gap: 12px;
+  --df-grid-gap-lg: 16px;
   --df-page-section-gap: 16px;
   --df-rail-column: minmax(260px, 320px);
 

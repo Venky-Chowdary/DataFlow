@@ -46,8 +46,9 @@
 
 .df2-mcp-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
   gap: 16px;
+  align-items: start;
 }
 
 .df2-mcp-panel {
@@ -55,6 +56,31 @@
   border-radius: var(--df-radius-card, 12px);
   background: #fff;
   overflow: visible;
+}
+
+.df2-mcp-panel--integrations {
+  height: fit-content;
+  align-self: start;
+}
+
+.df2-mcp-panel--logs {
+  display: flex;
+  flex-direction: column;
+  min-height: 280px;
+  max-height: min(560px, calc(100vh - 280px));
+}
+
+.df2-mcp-panel--logs .df2-mcp-panel-body--flush {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-mcp-panel--logs .df2-mcp-logs-table-wrap {
+  flex: 1;
+  min-height: 180px;
+  max-height: none;
 }
 
 .df2-mcp-panel-head {
@@ -135,7 +161,8 @@
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 10px;
   background: #fff;
-  min-height: 96px;
+  min-height: 0;
+  height: fit-content;
 }
 
 .df2-mcp-tile code {

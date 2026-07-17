@@ -1,5 +1,13 @@
 /* Benchmarks page — layered on existing design tokens */
 
+.df2-page-benchmarks {
+  background: var(--df-bg-canvas, #f4f6f8);
+}
+
+.df2-page-benchmarks-workspace {
+  max-width: 1100px;
+}
+
 .df2-page-benchmarks .df2-page-section-card {
   max-width: 1100px;
   margin: 0 auto;

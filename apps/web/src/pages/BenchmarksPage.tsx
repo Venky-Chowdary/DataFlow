@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { EmptyState } from "../components/EmptyState";
+import { SectionLoader } from "../components/LoadingState";
+import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { StatCard } from "../components/ui/StatCard";
@@ -75,7 +78,13 @@ export function BenchmarksPage() {
   }, []);
 
   return (
-    <PageShell wide className="df2-page-benchmarks" title="Benchmarks">
+    <PageShell
+      wide
+      className="df2-page-benchmarks"
+      title="Benchmarks"
+      description="Scale proofs against baseline ETL throughput."
+    >
+      <PageFrame className="df2-page-benchmarks-workspace">
       <div className="df2-page-benchmarks-content">
         <PageSection title="Reproducible scale proof">
           <p className="df2-page-benchmarks-intro">
@@ -109,7 +118,11 @@ export function BenchmarksPage() {
             </div>
           </div>
 
-          {error && (
+          {running && (
+            <SectionLoader title="Running benchmark" hint={`Transferring ${rows.toLocaleString()} synthetic rows to SQLite…`} />
+          )}
+
+          {error && !running && (
             <div className="df2-alert df2-alert-error" role="alert">
               <DtIcon name="alert" size={18} />
               <div>{error}</div>
@@ -217,13 +230,21 @@ export function BenchmarksPage() {
           )}
 
           {!report && !running && !error && (
-            <div className="df2-empty-state">
-              <DtIcon name="speed" size={32} />
-              <p>Click "Run benchmark" to generate a live scale proof.</p>
-            </div>
+            <EmptyState
+              page
+              icon="speed"
+              title="Generate a live scale proof"
+              description="Run a synthetic CSV → SQLite transfer and compare throughput, memory, and correctness against Fivetran, Airbyte, and Stitch baselines."
+              action={
+                <button type="button" className="df2-btn df2-btn-primary" onClick={() => void handleRun()} disabled={running}>
+                  <DtIcon name="play" size={14} /> Run benchmark
+                </button>
+              }
+            />
           )}
         </PageSection>
       </div>
+      </PageFrame>
     </PageShell>
   );
 }

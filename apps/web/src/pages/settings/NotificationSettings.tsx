@@ -293,7 +293,7 @@ export function NotificationSettings() {
           )}
 
           {kind === "email" && (
-            <div className="df2-settings-field df2-settings-field--full" style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 12 }}>
+            <div className="df2-settings-field df2-settings-field--full df2-settings-field--inline">
               <label className="df2-switch-label" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                 <input type="checkbox" checked={useCustomSmtp} onChange={(e) => setUseCustomSmtp(e.target.checked)} />
                 Use custom SMTP (optional; platform mailer is used otherwise)

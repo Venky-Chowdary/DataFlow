@@ -244,13 +244,13 @@ export function TenantSettings() {
                 </select>
               </div>
               {newKeyProvider === "wrapped" && (
-                <div className="df2-settings-field" style={{ flex: "1 1 100%" }}>
+                <div className="df2-settings-field df2-settings-field--full">
                   <label htmlFor="key-material">Base64-encoded 256-bit key material</label>
                   <textarea id="key-material" className="df2-input" rows={3} value={newKeyMaterial} onChange={(e) => setNewKeyMaterial(e.target.value)} placeholder="Paste customer key material…" />
                 </div>
               )}
               {newKeyProvider === "aws_kms" && (
-                <div className="df2-settings-field" style={{ flex: "1 1 100%" }}>
+                <div className="df2-settings-field df2-settings-field--full">
                   <label htmlFor="key-arn">KMS key ARN</label>
                   <input id="key-arn" className="df2-input" value={newKeyMaterial} onChange={(e) => setNewKeyMaterial(e.target.value)} placeholder="arn:aws:kms:us-east-1:123456789:key/…" />
                 </div>

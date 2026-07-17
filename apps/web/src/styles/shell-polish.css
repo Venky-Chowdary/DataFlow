@@ -132,7 +132,8 @@
     display: none;
   }
 
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-cta span {
+  /* Hide label text only — never hide .dt-nav-icon (icon wrapper) */
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-cta > span:not(.dt-nav-icon) {
     display: none;
   }
 
@@ -141,7 +142,7 @@
     padding-inline: 12px;
   }
 
-  .df2-app.df2-sidebar-nav-compact .df2-user-actions button span {
+  .df2-app.df2-sidebar-nav-compact .df2-user-actions button > span:not(.dt-nav-icon) {
     display: none;
   }
 
@@ -185,7 +186,7 @@
     min-width: var(--df-sidebar-compact-w, 220px);
   }
 
-  .df2-app.df2-sidebar-collapsed .df2-nav-item > span:not(.df2-nav-badge),
+  .df2-app.df2-sidebar-collapsed .df2-nav-item > span:not(.df2-nav-badge):not(.dt-nav-icon),
   .df2-app.df2-sidebar-collapsed .df2-nav-group-label {
     display: none;
   }
@@ -660,7 +661,23 @@ select.df2-select {
 .df2-sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.df2-sidebar-brand-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.df2-sidebar-brand .dt-brand-mark {
+  flex-shrink: 0;
+  display: block;
+}
+
+.df2-brand-name {
+  font-size: 16px;
+  line-height: 1.15;
 }
 
 /* ─── Flow topology (source → hub → dest) ─── */
@@ -1555,13 +1572,14 @@ textarea.df2-pilot-composer textarea {
   grid-column: 1 / -1;
 }
 
-.df2-pipeline-card-head .df2-badge {
+.df2-pipe-card-head .df2-badge {
   cursor: pointer;
   border: none;
   font: inherit;
+  flex-shrink: 0;
 }
 
-.df2-pipeline-card-head .df2-badge:hover {
+.df2-pipe-card-head .df2-badge:hover {
   filter: brightness(0.97);
 }
 

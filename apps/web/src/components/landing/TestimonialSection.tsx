@@ -1,4 +1,7 @@
+import type { CSSProperties } from "react";
 import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
+import { MarketingSectionFooter } from "../marketing/MarketingSectionFooter";
+import type { PublicRoute } from "../../lib/publicNavigation";
 
 const QUOTES = [
   {
@@ -18,10 +21,14 @@ const QUOTES = [
   },
 ];
 
-export function TestimonialSection() {
+interface TestimonialSectionProps {
+  onNavigate?: (route: PublicRoute) => void;
+}
+
+export function TestimonialSection({ onNavigate }: TestimonialSectionProps) {
   const reveal = useRevealOnScroll();
   return (
-    <section className={`lp-section lp-reveal ${reveal.className}`} id="testimonials" ref={reveal.ref}>
+    <section className={`lp-section lp-section-alt lp-reveal ${reveal.className}`} id="testimonials" ref={reveal.ref}>
       <div className="lp-section-head">
         <p className="lp-section-kicker">Proof</p>
         <h2>What data teams say</h2>
@@ -29,7 +36,7 @@ export function TestimonialSection() {
       </div>
       <div className="lp-testimonial-grid">
         {QUOTES.map((q, i) => (
-          <blockquote key={i} className="lp-testimonial-card" style={{ "--reveal-i": i } as React.CSSProperties}>
+          <blockquote key={i} className="lp-testimonial-card" style={{ "--reveal-i": i } as CSSProperties}>
             <p className="lp-testimonial-quote">&ldquo;{q.quote}&rdquo;</p>
             <footer>
               <strong>{q.name}</strong>
@@ -38,6 +45,16 @@ export function TestimonialSection() {
           </blockquote>
         ))}
       </div>
+      {onNavigate ? (
+        <MarketingSectionFooter>
+          <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("customers")}>
+            Read customer stories
+          </button>
+          <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("contact")}>
+            Become a design partner
+          </button>
+        </MarketingSectionFooter>
+      ) : null}
     </section>
   );
 }

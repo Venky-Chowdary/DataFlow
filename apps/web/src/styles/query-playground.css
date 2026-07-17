@@ -31,6 +31,40 @@
   align-items: flex-end;
 }
 
+.df2-query-meta.df2-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
+  align-items: flex-end;
+}
+
+.df2-query-meta > .df2-field,
+.df2-query-meta > .df2-field-flex,
+.df2-query-meta .df2-field {
+  margin-bottom: 0;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.df2-query-meta > .df2-field-flex {
+  flex: 1 1 200px;
+}
+
+.df2-query-meta > .df2-field-flex > .df2-field {
+  width: 100%;
+}
+
+.df2-query-meta > .df2-field-md {
+  flex: 1 1 160px;
+  max-width: 280px;
+}
+
+.df2-query-meta > .df2-field-sm {
+  flex: 0 1 120px;
+}
+
 .df2-query-editor {
   font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 14px;
@@ -84,13 +118,19 @@
 
 .df2-query-export-destination {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+  min-width: 0;
+  flex: 1 1 240px;
 }
 
 .df2-query-export-destination .df2-field {
   margin-bottom: 0;
+  width: auto;
+  min-width: 180px;
+  flex: 1 1 200px;
+  max-width: 100%;
 }
 
 .df2-query-export-destination .df2-field label {
@@ -167,8 +207,11 @@
 .df2-query-editor-shell {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  overflow: hidden;
+  overflow: hidden; /* radius clip only — editor scrolls internally */
   background: var(--df-surface, #ffffff);
+  min-width: 0;
+  max-width: 100%;
+  isolation: isolate;
 }
 
 .df2-query-editor-langbar {

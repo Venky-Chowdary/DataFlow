@@ -6,6 +6,47 @@
   padding: 0 12px 12px !important;
 }
 
+.df2-transfer-studio-chrome {
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fff 0%, #f8fafb 100%);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.df2-transfer-step-panel .df2-label,
+.df2-transfer-step-panel .df2-section-label {
+  color: #334155;
+  font-weight: 600;
+}
+
+.df2-transfer-step-panel .df2-label-hint,
+.df2-upload-hint {
+  color: #64748b;
+}
+
+.df2-upload-title {
+  color: #0f172a;
+  font-weight: 650;
+}
+
+.df2-upload-sample-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.df2-map-step-head .df2-card-sub {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .df2-connection-source-toggle {
   align-items: center;
   gap: 12px;

@@ -2,17 +2,19 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { DtLogo } from "../components/DtLogo";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
+import { ComparisonSection } from "../components/landing/ComparisonSection";
+import { TrustSection } from "../components/landing/TrustSection";
+import { TestimonialSection } from "../components/landing/TestimonialSection";
 import { fetchCatalogStats } from "../lib/api";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
+import { MarketingSectionFooter } from "../components/marketing/MarketingSectionFooter";
+import type { PublicRoute } from "../lib/publicNavigation";
 
-interface LandingPageProps {
-  onEnterApp: () => void;
-  onStartTransfer: () => void;
-  onOpenPilot?: () => void;
-  onOpenMcp?: () => void;
+export interface LandingHomeProps {
+  onLogin: () => void;
+  onGetStarted: () => void;
+  onNavigate: (route: PublicRoute) => void;
 }
-
-type NavMenu = "product" | "solutions" | "resources" | null;
 
 const MARQUEE_IDS = [
   "postgresql", "snowflake", "mysql", "mongodb", "bigquery", "redshift",
@@ -98,19 +100,9 @@ function ConnectorMarqueeBand() {
   );
 }
 
-/** Devin.ai layout ditto — DataFlow product copy and surfaces. */
-export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMcp }: LandingPageProps) {
-  const [navOpen, setNavOpen] = useState(false);
-  const [menu, setMenu] = useState<NavMenu>(null);
-  const [scrolled, setScrolled] = useState(false);
+/** Home marketing body — chrome (nav/footer) lives in MarketingChrome. */
+export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 4);
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
 
   useEffect(() => {
     fetchCatalogStats()
@@ -118,130 +110,22 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
       .catch(() => setLiveDrivers(null));
   }, []);
 
-  const closeMenus = () => {
-    setMenu(null);
-    setNavOpen(false);
-  };
-
   return (
-    <div className="lp" onMouseLeave={() => setMenu(null)}>
-      <header className={`lp-nav ${scrolled ? "is-scrolled" : ""}`}>
-        <a className="lp-nav-brand" href="/" onClick={(e) => e.preventDefault()}>
-          <DtLogo size={26} />
-          <span>DataFlow</span>
-        </a>
-
-        <button
-          type="button"
-          className="lp-nav-toggle"
-          aria-label="Toggle menu"
-          aria-expanded={navOpen}
-          onClick={() => setNavOpen((o) => !o)}
-        >
-          <DtIcon name="menu" size={18} />
-        </button>
-
-        <nav className={`lp-nav-links ${navOpen ? "is-open" : ""}`}>
-          <div
-            className={`lp-nav-item ${menu === "product" ? "is-open" : ""}`}
-            onMouseEnter={() => setMenu("product")}
-          >
-            <button type="button" className="lp-nav-link" aria-expanded={menu === "product"}>
-              Product <DtIcon name="chevron-down" size={12} />
-            </button>
-            <div className="lp-nav-dropdown">
-              <button type="button" onClick={() => { closeMenus(); onStartTransfer(); }}>
-                <strong>Transfer Studio</strong>
-                <span>Map, preflight, and prove any→any loads</span>
-              </button>
-              <button type="button" onClick={() => { closeMenus(); (onOpenPilot ?? onEnterApp)(); }}>
-                <strong>Data Pilot</strong>
-                <span>Natural-language triage for transfers</span>
-              </button>
-              <button type="button" onClick={() => { closeMenus(); (onOpenMcp ?? onEnterApp)(); }}>
-                <strong>MCP Server</strong>
-                <span>Governed transfers from Cursor &amp; Claude</span>
-              </button>
-              <a href="#tools" onClick={closeMenus}>
-                <strong>Connectors</strong>
-                <span>Native drivers + SQLAlchemy generics</span>
-              </a>
-            </div>
-          </div>
-
-          <div
-            className={`lp-nav-item ${menu === "solutions" ? "is-open" : ""}`}
-            onMouseEnter={() => setMenu("solutions")}
-          >
-            <button type="button" className="lp-nav-link" aria-expanded={menu === "solutions"}>
-              Solutions <DtIcon name="chevron-down" size={12} />
-            </button>
-            <div className="lp-nav-dropdown">
-              <a href="#usecases" onClick={closeMenus}>
-                <strong>Migrations</strong>
-                <span>Cross-schema moves with proof</span>
-              </a>
-              <a href="#usecases" onClick={closeMenus}>
-                <strong>Warehouse loading</strong>
-                <span>Snowflake, BigQuery, Redshift routes</span>
-              </a>
-              <a href="#usecases" onClick={closeMenus}>
-                <strong>Recurring sync</strong>
-                <span>Incremental pipelines with quarantine</span>
-              </a>
-            </div>
-          </div>
-
-          <a href="#customers" className="lp-nav-link" onClick={closeMenus}>Customers</a>
-
-          <div
-            className={`lp-nav-item ${menu === "resources" ? "is-open" : ""}`}
-            onMouseEnter={() => setMenu("resources")}
-          >
-            <button type="button" className="lp-nav-link" aria-expanded={menu === "resources"}>
-              Resources <DtIcon name="chevron-down" size={12} />
-            </button>
-            <div className="lp-nav-dropdown">
-              <button type="button" onClick={() => { closeMenus(); onEnterApp(); }}>
-                <strong>Docs</strong>
-                <span>Guides for Transfer Studio &amp; drivers</span>
-              </button>
-              <a href="#enterprise" onClick={closeMenus}>
-                <strong>Enterprise</strong>
-                <span>SSO, RBAC, audit, tenants</span>
-              </a>
-              <a href="#tools" onClick={closeMenus}>
-                <strong>Connector catalog</strong>
-                <span>Honest transfer-ready labels</span>
-              </a>
-            </div>
-          </div>
-
-          <a href="#enterprise" className="lp-nav-link" onClick={closeMenus}>Pricing</a>
-        </nav>
-
-        <div className="lp-nav-actions">
-          <button type="button" className="lp-btn lp-btn--ghost" onClick={onEnterApp}>Contact sales</button>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={onStartTransfer}>Get started</button>
-          <button type="button" className="lp-btn lp-btn--black" onClick={onEnterApp}>Log in</button>
-        </div>
-      </header>
-
+    <>
       <section className="lp-hero">
-        <a className="lp-pill" href="#product" onClick={(e) => e.preventDefault()}>
-          <span className="lp-pill-new">NEW</span>
-          Introducing Transfer Studio proof dashboard
-          <DtIcon name="arrow-up-right" size={14} />
-        </a>
-
-        <h1>DataFlow, the universal data platform</h1>
+        <p className="lp-hero-brand">DataFlow</p>
+        <h1>Move any schema anywhere</h1>
+        <p className="lp-hero-sub">
+          Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
+          {liveDrivers != null ? ` ${liveDrivers}+ live transfer drivers ready today.` : ""}
+        </p>
 
         <div className="lp-hero-cta">
-          <button type="button" className="lp-btn lp-btn--black lp-btn--lg" onClick={onStartTransfer}>
+          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
             Try DataFlow
           </button>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={onEnterApp}>
-            Contact sales
+          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("product-transfer")}>
+            See Transfer Studio
           </button>
         </div>
 
@@ -298,93 +182,81 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                 Mapping <code>order_amt → payment_amount</code> at 96% confidence. Running eight preflight gates, then writing with reconciliation. Starting now.
               </div>
               <div className="lp-mock-stat">
-                <span>Worked for 4m 13s</span>
-                <span className="lp-mock-diff"><em>+12,480</em> <i>−0</i></span>
+                <span>Preflight</span>
+                <strong>8 / 8 gates passed</strong>
               </div>
               <div className="lp-mock-pr">
                 <div className="lp-mock-pr-top">
-                  <span className="lp-mock-open">Open</span>
-                  <strong>Orders CSV → PostgreSQL</strong>
+                  <strong>Proof report: Orders migration</strong>
+                  <span className="lp-mock-open">matched</span>
                 </div>
                 <div className="lp-mock-pr-meta">
-                  <ConnectorIcon id="csv" size={14} />
-                  orders_export.csv
-                  <DtIcon name="transfer" size={12} />
-                  <ConnectorIcon id="postgresql" size={14} />
-                  public.payments
+                  <span>Source 12,480</span>
+                  <span>·</span>
+                  <span>Target 12,480</span>
+                  <span>·</span>
+                  <span>Checksum OK</span>
                 </div>
-                <div className="lp-mock-pr-stats">+12,480 rows · 8/8 gates</div>
-              </div>
-              <div className="lp-mock-pr">
-                <div className="lp-mock-pr-top">
-                  <span className="lp-mock-open">Open</span>
-                  <strong>Semantic map review</strong>
-                </div>
-                <div className="lp-mock-pr-meta">order_amt · customer_email · created_at</div>
-                <div className="lp-mock-pr-stats">96% avg confidence · 1 needs review</div>
               </div>
             </div>
 
-            <div className="lp-mock-detail">
-              <div className="lp-mock-filetab">proof_orders_migration.md</div>
+            <aside className="lp-mock-detail">
               <h3>Proof report: Orders migration</h3>
-              <p>
-                Independent reconciliation verifies row counts and content checksums after write.
-                {liveDrivers != null ? ` ${liveDrivers} transfer-ready drivers online.` : ""}
-              </p>
-              <div className="lp-mock-compare">
-                <div>
-                  <span className="lp-mock-compare-label">Before mapping</span>
-                  <strong className="lp-mock-before">order_amt</strong>
-                </div>
-                <div>
-                  <span className="lp-mock-compare-label">After mapping</span>
-                  <strong className="lp-mock-after">payment_amount</strong>
-                </div>
-              </div>
-              <div className="lp-mock-gates">
-                {[
-                  ["G1 Schema contract", "Pass"],
-                  ["G4 Mapping confidence", "Pass"],
-                  ["G5 Dry-run transform", "Pass"],
-                  ["G8 Reconciliation", "Pass"],
-                ].map(([name, status]) => (
-                  <div key={name} className="lp-mock-gate">
-                    <span>{name}</span>
-                    <em>{status}</em>
-                  </div>
-                ))}
-              </div>
+              <p>Independent reconciliation verifies row counts and content checksums after write.</p>
               <ul>
                 <li>Source rows: 12,480</li>
                 <li>Target rows: 12,480</li>
                 <li>Checksum: matched</li>
               </ul>
-            </div>
+              <div className="lp-mock-gates">
+                {["Schema contract", "Type coercion", "Nullability", "Destination probe", "Capacity", "Write plan"].map((g) => (
+                  <div key={g} className="lp-mock-gate">
+                    <span>{g}</span>
+                    <em>pass</em>
+                  </div>
+                ))}
+              </div>
+            </aside>
           </div>
         </div>
       </section>
 
       <section className="lp-logos" aria-label="Trusted stacks">
+        <h5>Industry leaders move data with</h5>
+        <div className="lp-logos-row">
+          {["postgresql", "snowflake", "bigquery", "mongodb", "kafka", "s3"].map((id) => (
+            <span key={id} className="lp-logo-item">
+              <ConnectorIcon id={id} size={22} />
+              {id}
+            </span>
+          ))}
+        </div>
+      </section>
+
+      <section className="lp-section lp-section-platform" id="platform">
         <Reveal>
-          <h5>Industry leaders move data with</h5>
-          <div className="lp-logos-row">
-            {[
-              ["postgresql", "PostgreSQL"],
-              ["snowflake", "Snowflake"],
-              ["bigquery", "BigQuery"],
-              ["mongodb", "MongoDB"],
-              ["mysql", "MySQL"],
-              ["s3", "Amazon S3"],
-              ["redshift", "Redshift"],
-              ["elasticsearch", "Elastic"],
-            ].map(([id, label]) => (
-              <span key={id} className="lp-logo-item">
-                <ConnectorIcon id={id} size={22} />
-                {label}
-              </span>
-            ))}
+          <div className="lp-section-head">
+            <p className="lp-section-kicker">Platform</p>
+            <h2>From source to proof in four steps</h2>
+            <p>The same governed path in Transfer Studio, Data Pilot, MCP, and scheduled pipelines.</p>
           </div>
+        </Reveal>
+        <Reveal className="lp-platform-steps">
+          {[
+            { step: "01", title: "Connect", body: "Pick from 600+ drivers or upload CSV, JSONL, and Parquet. Honest transfer-ready labels.", icon: "connectors" as const },
+            { step: "02", title: "Map", body: "Semantic column mapping with confidence scores and human review for ambiguous fields.", icon: "sparkle" as const },
+            { step: "03", title: "Preflight", body: "Eight fail-fast gates — schema, types, capacity, and destination probes before write.", icon: "gate" as const },
+            { step: "04", title: "Proof", body: "Job Theater shows batch progress, reconciliation, checksums, and quarantine for bad rows.", icon: "check" as const },
+          ].map((item, i) => (
+            <article key={item.step} className="lp-platform-step" style={{ "--reveal-i": i } as CSSProperties}>
+              <span className="lp-platform-step-num">{item.step}</span>
+              <span className="lp-platform-step-icon" aria-hidden>
+                <DtIcon name={item.icon} size={20} />
+              </span>
+              <h3>{item.title}</h3>
+              <p>{item.body}</p>
+            </article>
+          ))}
         </Reveal>
       </section>
 
@@ -393,10 +265,35 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
           <div className="lp-section-head">
             <h2>Build with DataFlow</h2>
             <p>Governed any-schema transfers for migration, sync, and warehouse loading — with proof before and after every run.</p>
-            <button type="button" className="lp-section-link" onClick={onEnterApp}>
-              Hear from our customers →
-            </button>
           </div>
+        </Reveal>
+        <Reveal className="lp-product-cards">
+          {[
+            { title: "Transfer Studio", body: "Wizard for map → preflight → write → reconcile.", route: "product-transfer" as PublicRoute },
+            { title: "Data Pilot", body: "Natural-language triage on the same engine.", route: "product-pilot" as PublicRoute },
+            { title: "MCP Server", body: "Agent tools for Cursor, Claude, and VS Code.", route: "product-mcp" as PublicRoute },
+            { title: "Connectors", body: "Native drivers with honest transfer-ready labels.", route: "integrations" as PublicRoute },
+          ].map((card, i) => (
+            <button
+              key={card.title}
+              type="button"
+              className="lp-product-card"
+              style={{ "--reveal-i": i } as CSSProperties}
+              onClick={() => onNavigate(card.route)}
+            >
+              <h3>{card.title}</h3>
+              <p>{card.body}</p>
+              <span className="lp-section-link">Learn more →</span>
+            </button>
+          ))}
+        </Reveal>
+        <Reveal>
+          <MarketingSectionFooter>
+            <p className="lp-section-cta-text">See how teams ship governed migrations without brittle scripts.</p>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("customers")}>
+              Hear from our customers
+            </button>
+          </MarketingSectionFooter>
         </Reveal>
       </section>
 
@@ -416,8 +313,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                 "Type coercion with fail-fast preflight gates",
                 "Checksum-proven loads into warehouses",
               ],
-              cta: "Learn about Transfer Studio →",
-              action: onStartTransfer,
+              cta: "Learn about migrations →",
+              route: "solution-migrations" as PublicRoute,
             },
             {
               title: "Schema intelligence",
@@ -427,7 +324,7 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                 "Backfill new fields when schemas drift",
               ],
               cta: "Learn about Data Pilot →",
-              action: onOpenPilot ?? onEnterApp,
+              route: "product-pilot" as PublicRoute,
             },
             {
               title: "Governed recurring sync",
@@ -436,8 +333,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                 "Upsert, append, overwrite, and watermark incremental",
                 "Quarantine bad rows without silent failure",
               ],
-              cta: "Learn about Pipelines →",
-              action: onEnterApp,
+              cta: "Learn about sync →",
+              route: "solution-sync" as PublicRoute,
             },
             {
               title: "Preflight & proof",
@@ -446,6 +343,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                 "Destination probes and capacity checks",
                 "Post-load reconciliation reports",
               ],
+              cta: "Learn about Transfer Studio →",
+              route: "product-transfer" as PublicRoute,
             },
             {
               title: "Agent-native ops",
@@ -455,17 +354,17 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                 "Same governed engine under every surface",
               ],
               cta: "Learn about MCP →",
-              action: onOpenMcp ?? onEnterApp,
+              route: "product-mcp" as PublicRoute,
             },
             {
-              title: "And many others",
+              title: "Warehouse loading",
               items: [
-                "File → database and database → file dumps",
-                "Locale and currency integrity transfers",
-                "Object store routes across S3, GCS, and ADLS",
-                "Query playground across live connectors",
-                "Job Theater from queue to reconcile",
+                "Snowflake, BigQuery, and Redshift bulk paths",
+                "Finance-ready row counts and checksums",
+                "Scheduled refreshes from Pipelines",
               ],
+              cta: "Learn about warehouses →",
+              route: "solution-warehouse" as PublicRoute,
             },
           ].map((card, i) => (
             <article key={card.title} className="lp-usecase" style={{ "--reveal-i": i } as CSSProperties}>
@@ -475,8 +374,8 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
                   <li key={item}>{item}</li>
                 ))}
               </ul>
-              {card.cta && card.action ? (
-                <button type="button" className="lp-section-link lp-usecase-link" onClick={card.action}>
+              {card.cta && card.route ? (
+                <button type="button" className="lp-section-link lp-usecase-link" onClick={() => onNavigate(card.route)}>
                   {card.cta}
                 </button>
               ) : null}
@@ -484,6 +383,9 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
           ))}
         </Reveal>
       </section>
+
+      <ComparisonSection />
+      <TestimonialSection onNavigate={onNavigate} />
 
       <section className="lp-section" id="customers">
         <Reveal>
@@ -583,8 +485,15 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
               <p>Tag DataFlow from Cursor or Claude to launch the same governed engine your UI already uses.</p>
             </article>
           </div>
+          <MarketingSectionFooter>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("integrations")}>
+              Browse the connector catalog
+            </button>
+          </MarketingSectionFooter>
         </Reveal>
       </section>
+
+      <TrustSection />
 
       <section className="lp-section" id="enterprise">
         <div className="lp-enterprise">
@@ -595,7 +504,7 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
               same governed transfer engine your team already trusts.
             </p>
           </div>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={onEnterApp}>
+          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("enterprise")}>
             Learn about DataFlow Enterprise
           </button>
         </div>
@@ -603,53 +512,24 @@ export function LandingPage({ onEnterApp, onStartTransfer, onOpenPilot, onOpenMc
 
       <section className="lp-cta-band">
         <h3>Build more with DataFlow</h3>
+        <p className="lp-cta-band-sub">Start in Transfer Studio, scale to enterprise SSO and audit.</p>
         <div className="lp-hero-cta">
-          <button type="button" className="lp-btn lp-btn--black lp-btn--lg" onClick={onStartTransfer}>
+          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
             Get started
           </button>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={onEnterApp}>
+          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
             Contact sales
+          </button>
+          <button type="button" className="lp-btn lp-btn--ghost lp-btn--lg" onClick={onLogin}>
+            Log in
           </button>
         </div>
       </section>
-
-      <footer className="lp-footer">
-        <div className="lp-footer-grid">
-          <div className="lp-footer-brand">
-            <strong>DataFlow</strong>
-            <p>Universal data freedom — move any data, anywhere, with proof.</p>
-          </div>
-          <div>
-            <h4>Product</h4>
-            <button type="button" className="lp-footer-link" onClick={onStartTransfer}>Transfer Studio</button>
-            <button type="button" className="lp-footer-link" onClick={onOpenPilot ?? onEnterApp}>Data Pilot</button>
-            <button type="button" className="lp-footer-link" onClick={onOpenMcp ?? onEnterApp}>MCP Server</button>
-            <a href="#tools">Connectors</a>
-          </div>
-          <div>
-            <h4>Solutions</h4>
-            <a href="#usecases">Migrations</a>
-            <a href="#usecases">Recurring sync</a>
-            <a href="#usecases">Warehouse loading</a>
-          </div>
-          <div>
-            <h4>Resources</h4>
-            <button type="button" className="lp-footer-link" onClick={onEnterApp}>Docs</button>
-            <a href="#enterprise">Enterprise</a>
-            <a href="#customers">Customers</a>
-          </div>
-          <div>
-            <h4>Company</h4>
-            <button type="button" className="lp-footer-link" onClick={onEnterApp}>Contact sales</button>
-            <button type="button" className="lp-footer-link" onClick={onEnterApp}>Log in</button>
-            <a href="#enterprise">Pricing</a>
-          </div>
-        </div>
-        <div className="lp-footer-bottom">
-          <span>© {new Date().getFullYear()} DataFlow</span>
-          <span>Privacy · Terms</span>
-        </div>
-      </footer>
-    </div>
+    </>
   );
+}
+
+/** @deprecated Prefer MarketingSite — kept for any direct imports. */
+export function LandingPage(props: LandingHomeProps) {
+  return <LandingHome {...props} />;
 }

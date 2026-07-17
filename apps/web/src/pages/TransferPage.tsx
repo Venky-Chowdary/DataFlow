@@ -57,6 +57,9 @@ import {
   TransferResult,
   JobProgress,
 } from "../lib/types";
+import { parseCsvTextForPreview } from "../lib/csvPreview";
+import { runLocalFileExport } from "../lib/localFileExport";
+import { runLocalPreflight } from "../lib/localPreflight";
 
 interface TransferPageProps {
   connectors: Connector[];
@@ -835,7 +838,23 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setLlmMappingUsed(false);
     setUploading(true);
     try {
-      const data = await uploadFile(selected);
+      let data: ParsedUpload;
+      try {
+        data = await uploadFile(selected);
+      } catch (uploadErr) {
+        const ext = fileExtension(selected.name);
+        if (ext === "csv" || ext === "tsv") {
+          const text = await selected.text();
+          data = parseCsvTextForPreview(text);
+          toast({
+            title: "Profiled locally",
+            message: "API unavailable — preview uses browser parsing. Start the API for full preflight and write.",
+            tone: "warning",
+          });
+        } else {
+          throw uploadErr;
+        }
+      }
       if (!data.columns?.length) {
         throw new Error("No columns detected — ensure JSON is an array of objects with field names.");
       }
@@ -884,6 +903,23 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setDragOver(false);
     const selected = e.dataTransfer.files?.[0];
     if (selected) processFile(selected);
+  };
+
+  const loadSampleDataset = async () => {
+    if (uploading) return;
+    try {
+      const res = await fetch("/fixtures/sample-orders.csv");
+      if (!res.ok) throw new Error("Sample file not found");
+      const blob = await res.blob();
+      const sample = new File([blob], "sample-orders.csv", { type: "text/csv" });
+      await processFile(sample);
+    } catch (e) {
+      toast({
+        title: "Could not load sample",
+        message: e instanceof Error ? e.message : "Try uploading your own CSV instead.",
+        tone: "error",
+      });
+    }
   };
 
   const explainSourceGap = () => {
@@ -1200,54 +1236,81 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
       const planId = await ensurePersistedPlan();
       if (planId) {
-        await syncTransferPlanMappings(planId, mappings);
-        const pf = await preflightTransferPlan(planId);
-        if (pf.passed) {
-          await approveTransferPlan(planId);
+        try {
+          await syncTransferPlanMappings(planId, mappings);
+          const pf = await preflightTransferPlan(planId);
+          if (pf.passed) {
+            await approveTransferPlan(planId);
+          }
+          setPreflight(pf);
+          if (!pf.passed) {
+            toast({
+              title: "Validation incomplete",
+              message: pf.blockers?.[0]?.message ?? `${pf.blockers?.length ?? 0} check(s) failed — use the fix actions below.`,
+              tone: "warning",
+            });
+          } else {
+            setStep(STEP_RUN);
+            toast({
+              title: "Ready to transfer",
+              message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved — moved to Run step.`,
+              tone: "success",
+            });
+          }
+          return;
+        } catch (planErr) {
+          if (!(sourceKind === "file" && destKindMode === "file_export" && parsed)) {
+            throw planErr;
+          }
         }
-        setPreflight(pf);
-        if (!pf.passed) {
+      }
+
+      let pf: PreflightResult;
+      try {
+        pf = await runPreflight({
+          columns,
+          column_types: columnTypes,
+          row_count: rowCount,
+          mappings,
+          dest_kind: destKindMode,
+          connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
+          source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
+          dest_type: destKindMode === "database" && !connectorId ? destType : undefined,
+          dest_host: destKindMode === "database" && !connectorId ? destHost : undefined,
+          dest_port: destKindMode === "database" && !connectorId ? destPort : undefined,
+          dest_database: destKindMode === "database" && !connectorId ? targetDb : undefined,
+          dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
+          dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
+          dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
+          dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
+          dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          sample_rows: sampleRows,
+          estimated_bytes: estimatedBytes,
+          sync_mode: syncMode,
+          schema_policy: schemaPolicy,
+          validation_mode: validationOverride ?? validationMode,
+          backfill_new_fields: backfillNewFields,
+          stream_contracts: streamContracts,
+        });
+      } catch (apiErr) {
+        if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
+          pf = runLocalPreflight({
+            columns,
+            rowCount,
+            mappings: activeMappings.length ? activeMappings : columnMappings,
+            sampleRows,
+            confidenceThreshold: threshold,
+            destKind: destKindMode,
+          });
           toast({
-            title: "Validation incomplete",
-            message: pf.blockers?.[0]?.message ?? `${pf.blockers?.length ?? 0} check(s) failed — use the fix actions below.`,
+            title: "Validated locally",
+            message: "API unavailable — browser preflight passed for file export demo.",
             tone: "warning",
           });
         } else {
-          setStep(STEP_RUN);
-          toast({
-            title: "Ready to transfer",
-            message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved — moved to Run step.`,
-            tone: "success",
-          });
+          throw apiErr;
         }
-        return;
       }
-
-      const pf = await runPreflight({
-        columns,
-        column_types: columnTypes,
-        row_count: rowCount,
-        mappings,
-        dest_kind: destKindMode,
-        connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
-        source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
-        dest_type: destKindMode === "database" && !connectorId ? destType : undefined,
-        dest_host: destKindMode === "database" && !connectorId ? destHost : undefined,
-        dest_port: destKindMode === "database" && !connectorId ? destPort : undefined,
-        dest_database: destKindMode === "database" && !connectorId ? targetDb : undefined,
-        dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
-        dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
-        dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-        dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
-        dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
-        sample_rows: sampleRows,
-        estimated_bytes: estimatedBytes,
-        sync_mode: syncMode,
-        schema_policy: schemaPolicy,
-        validation_mode: validationOverride ?? validationMode,
-        backfill_new_fields: backfillNewFields,
-        stream_contracts: streamContracts,
-      });
       setPreflight(pf);
       if (!pf.passed) {
         toast({
@@ -1264,9 +1327,36 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         });
       }
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Validation could not complete.";
-      toast({ title: "Preflight failed", message, tone: "error" });
-      console.error(e);
+      if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
+        const threshold = confidenceThresholdForMode(validationOverride ?? validationMode);
+        const pf = runLocalPreflight({
+          columns: parsed.columns,
+          rowCount: parsed.row_count,
+          mappings: overrideMappings ?? columnMappings,
+          sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, 100),
+          confidenceThreshold: threshold,
+          destKind: destKindMode,
+        });
+        setPreflight(pf);
+        if (pf.passed) {
+          setStep(STEP_RUN);
+          toast({
+            title: "Validated locally",
+            message: "API unavailable — browser preflight passed for file export demo.",
+            tone: "warning",
+          });
+        } else {
+          toast({
+            title: "Validation incomplete",
+            message: pf.blockers[0]?.message ?? "Local validation failed.",
+            tone: "warning",
+          });
+        }
+      } else {
+        const message = e instanceof Error ? e.message : "Validation could not complete.";
+        toast({ title: "Preflight failed", message, tone: "error" });
+        console.error(e);
+      }
     } finally {
       setPreflighting(false);
     }
@@ -1372,9 +1462,33 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       setResult(data);
       setStep(STEP_RUN);
       if (data.success) onTransferComplete();
-    } catch {
-      setResult({ success: false, error: "Transfer failed" });
-      toast({ title: "Transfer failed", message: "See details below or check Job Theater.", tone: "error" });
+    } catch (transferErr) {
+      if (
+        sourceKind === "file"
+        && destKindMode === "file_export"
+        && parsed
+        && columnMappings.length > 0
+      ) {
+        const rows = parsed.data ?? parsed.sample_data ?? [];
+        const localResult = runLocalFileExport({
+          sourceFilename: file?.name ?? "export",
+          rows,
+          mappings: columnMappings,
+          format: exportFormat,
+          outputBasename: targetCollection || undefined,
+        });
+        setResult(localResult);
+        setStep(STEP_RUN);
+        onTransferComplete();
+        toast({
+          title: "Exported locally",
+          message: `${localResult.records_transferred?.toLocaleString() ?? 0} rows saved — start the API for governed Job Theater proof.`,
+          tone: "success",
+        });
+      } else {
+        setResult({ success: false, error: transferErr instanceof Error ? transferErr.message : "Transfer failed" });
+        toast({ title: "Transfer failed", message: "See details below or check Job Theater.", tone: "error" });
+      }
     }
     setTransferring(false);
   };
@@ -1580,7 +1694,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       showHeader={false}
       className="df2-page-transfer-studio"
       title="Transfer Studio"
-      description="Source → Destination → Map → Validate → Run"
+      description="Governed path: source → destination → map → preflight → run → proof"
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
       <header className="df2-transfer-studio-chrome">
@@ -1738,6 +1852,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                   ))}
                 </div>
               </div>
+              {!parsed && !uploading && (
+                <div className="df2-upload-sample-row">
+                  <span className="df2-label-hint">New to DataFlow?</span>
+                  <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void loadSampleDataset()}>
+                    <DtIcon name="sparkle" size={14} /> Load sample orders CSV
+                  </button>
+                </div>
+              )}
               {file && parsed && (
                 <>
                   <div className="df2-upload-result">

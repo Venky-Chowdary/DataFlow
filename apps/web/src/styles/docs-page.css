@@ -1,3 +1,34 @@
+/* Docs — scroll reveal, flat surfaces, readable layout */
+
+.df2-docs-workspace {
+  max-width: 1120px;
+}
+
+.df2-page-docs {
+  background: var(--df-bg-canvas, #f4f6f8);
+}
+
+.df2-docs-reveal {
+  opacity: 0.85;
+  transform: translateY(16px);
+  transition:
+    opacity 480ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 480ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.df2-docs-reveal.df2-docs-reveal--in {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .df2-docs-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
+
 .df2-docs-illustration {
   display: block;
   width: 100%;
@@ -7,7 +38,7 @@
   margin: 0 auto;
   border-radius: 12px;
   border: 1px solid var(--df-line, #e2e8f0);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+  box-shadow: none;
 }
 
 .df2-docs-arch-sub tspan {
@@ -19,4 +50,60 @@
   font-size: 12px;
   font-weight: 700;
   fill: #0f172a;
+}
+
+/* Flat card overrides (enterprise-pages defines structure) */
+.df2-page-docs .df2-docs-orbit-card,
+.df2-page-docs .df2-docs-rule-card,
+.df2-page-docs .df2-docs-use-case,
+.df2-page-docs .df2-docs-pillar {
+  box-shadow: none;
+}
+
+.df2-page-docs .df2-docs-arch-node {
+  filter: none;
+}
+
+.df2-page-docs .df2-docs-architecture {
+  background: #fff;
+}
+
+.df2-page-docs .df2-docs-stats .df2-stat {
+  box-shadow: none;
+}
+
+.df2-page-docs .df2-docs-list {
+  margin: 0;
+  padding: 0 0 0 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--df-text-secondary, #64748b);
+}
+
+.df2-page-docs .df2-docs-list li {
+  padding-left: 4px;
+}
+
+.df2-page-docs .df2-docs-faq {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.df2-page-docs .df2-docs-faq p {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: var(--df-surface-muted, #f8fafc);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--df-text-secondary, #64748b);
+}
+
+.df2-page-docs .df2-docs-faq strong {
+  color: var(--df-text-primary, #0f172a);
 }

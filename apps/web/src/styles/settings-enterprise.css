@@ -138,8 +138,20 @@
   color: #64748b;
 }
 
-.df2-settings-section-body {
-  padding: 20px 22px;
+.df2-page-settings .df2-settings-section-body .df2-filter-tabs,
+.df2-page-settings .df2-settings-section-body > .df2-tabs {
+  margin-bottom: 14px;
+}
+
+.df2-settings-subhead {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-settings-subhead--spaced {
+  margin-top: 20px;
 }
 
 .df2-settings-section-footer {
@@ -167,6 +179,92 @@
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  width: auto;
+  max-width: 100%;
+}
+
+/* Grid cells may grow; never force 100% in toolbars / inline rows */
+.df2-settings-grid > .df2-settings-field,
+.df2-settings-grid--row > .df2-settings-field,
+.df2-settings-sso-grid > .df2-settings-field {
+  min-width: 0;
+}
+
+/* Team invite + API key generate rows — prevent input/button overlap */
+.df2-api-key-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.df2-api-key-toolbar .df2-settings-field {
+  width: auto !important;
+  min-width: 0;
+  max-width: none;
+}
+
+.df2-api-key-toolbar > .df2-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  align-self: end;
+  height: 42px;
+}
+
+/* API keys: one field + button */
+.df2-api-key-toolbar:has(> .df2-btn:nth-child(2)) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+/* Inline switch / label rows (notifications SMTP toggle, etc.) */
+.df2-settings-field--inline {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.df2-settings-field--inline > .df2-input,
+.df2-settings-field--inline > .df2-select,
+.df2-settings-field--inline > input:not([type="checkbox"]):not([type="radio"]),
+.df2-settings-field--inline > select {
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Alert banner: copy + actions without collision */
+.df2-page-settings .df2-alert-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+}
+
+.df2-page-settings .df2-alert-banner-body {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.df2-page-settings .df2-alert-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+  .df2-api-key-toolbar,
+  .df2-api-key-toolbar:has(> .df2-btn:nth-child(2)) {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-api-key-toolbar > .df2-btn {
+    width: 100%;
+  }
 }
 
 .df2-settings-field label {
@@ -187,6 +285,17 @@
   background: #fff;
   color: #0f172a;
   font-size: 14px;
+}
+
+.df2-settings-field input[type="checkbox"],
+.df2-settings-field input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .df2-settings-field input:focus,

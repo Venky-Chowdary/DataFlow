@@ -13,6 +13,7 @@ interface FilterTabsProps<T extends string = string> {
   onChange: (id: T) => void;
   className?: string;
   ariaLabel?: string;
+  disabled?: boolean;
 }
 
 /** Consistent segmented tab control used on Connectors, Jobs, Settings, etc. */
@@ -22,9 +23,15 @@ export function FilterTabs<T extends string = string>({
   onChange,
   className = "",
   ariaLabel = "Filter",
+  disabled = false,
 }: FilterTabsProps<T>) {
   return (
-    <div className={`df2-tabs df2-filter-tabs ${className}`.trim()} role="tablist" aria-label={ariaLabel}>
+    <div
+      className={`df2-tabs df2-filter-tabs ${disabled ? "is-disabled" : ""} ${className}`.trim()}
+      role="tablist"
+      aria-label={ariaLabel}
+      aria-disabled={disabled || undefined}
+    >
       {items.map((item) => (
         <button
           key={item.id}
@@ -32,7 +39,8 @@ export function FilterTabs<T extends string = string>({
           role="tab"
           aria-selected={value === item.id}
           className={`df2-tab ${value === item.id ? "active" : ""}`}
-          onClick={() => onChange(item.id)}
+          disabled={disabled}
+          onClick={() => !disabled && onChange(item.id)}
         >
           {item.icon}
           {item.label}

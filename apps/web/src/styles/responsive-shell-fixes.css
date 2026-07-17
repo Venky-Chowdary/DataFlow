@@ -39,20 +39,77 @@
   flex-direction: column;
 }
 
-/* ─── Fit pages: the scrollable content wrapper must fill the viewport so inner
-     panels can scroll independently instead of expanding the whole page ─── */
-.df2-content-fit {
+/* ─── Content scroll modes (explicit — never :has() with keep-alive screens) ─── */
+
+/* Document pages: natural height; .df2-main scrolls */
+.df2-content-document {
+  display: block;
+  min-height: min-content;
+  height: auto;
+  overflow: visible;
+}
+
+.df2-content-document > .df2-screen-panel {
+  display: block;
+  min-height: min-content;
+}
+
+.df2-content-document .df2-screen-keep.is-active {
+  display: block;
+  min-height: min-content;
+  height: auto;
+}
+
+/* Viewport-fit pages (Job Theater): lock height, inner panes scroll */
+.df2-content-viewport {
   display: flex;
   flex-direction: column;
+  height: calc(var(--df-viewport-h) - var(--df-header-height));
+  max-height: calc(var(--df-viewport-h) - var(--df-header-height));
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-content-viewport > .df2-screen-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-content-viewport .df2-screen-keep.is-active {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
   min-height: 0;
   height: 100%;
 }
 
-.df2-content-fit > .df2-screen-panel {
-  flex: 1;
+.df2-content-viewport .df2-page-fit {
+  flex: 1 1 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.df2-content-viewport .df2-page-fit > .df2-page-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Legacy alias — treat as document scroll */
+.df2-content-fit {
+  display: block;
+  min-height: min-content;
+  height: auto;
+  overflow: visible;
+}
+
+.df2-content-fit > .df2-screen-panel {
+  display: block;
+  min-height: min-content;
 }
 
 /* Pilot / flush screens need the same flex chain or the page collapses */
@@ -195,6 +252,72 @@
 
 .df2-pilot-metrics-skeleton {
   min-height: 20px;
+}
+
+/* ─── Transfer Studio: fill viewport and scroll step content ─── */
+.df2-content-inner.df2-content-studio {
+  height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
+  max-height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.df2-content-studio > .df2-screen-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-content-studio .df2-screen-keep.is-active {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.df2-content-studio .df2-page-transfer-studio {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.df2-content-studio .df2-transfer-studio-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-content-studio .df2-transfer-studio-chrome {
+  flex-shrink: 0;
+}
+
+.df2-content-studio .df2-transfer-studio-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.df2-content-studio .df2-transfer-main-panel {
+  flex: 1 1 auto;
+  min-height: min-content;
+  overflow: visible;
+}
+
+.df2-content-studio .df2-transfer-step-panel {
+  min-height: min-content;
+  overflow: visible;
 }
 
 /* ─── Transfer Studio: 12–14" laptops ─── */

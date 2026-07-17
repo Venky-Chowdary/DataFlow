@@ -184,17 +184,23 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const ddlLog = liveJob?.ddl_log ?? [];
 
   return (
-    <PageShell fit className="df2-page-jobs" title="Job Theater">
+    <PageShell
+      fit
+      className="df2-page-jobs"
+      title="Job Theater"
+      description="Live batch progress, phases, and proof for every transfer."
+    >
       <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
         {jobs.length === 0 ? (
           <EmptyState
+            page
             icon="jobs"
             title="No transfer jobs yet"
-            description="Run a transfer from Transfer Studio — live batch progress appears here."
+            description="Run a transfer from Transfer Studio — live batch progress, phases, and proof reports appear here."
             action={
               onStartTransfer ? (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onStartTransfer}>
-                  Open Transfer Studio
+                  <DtIcon name="transfer" size={14} /> Open Transfer Studio
                 </button>
               ) : undefined
             }

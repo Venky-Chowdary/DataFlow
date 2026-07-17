@@ -180,6 +180,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   return (
     <PageShell
       title="Data Pilot"
+      description="Natural-language triage on the same governed transfer engine."
       wide
       fit
       showHeader={false}

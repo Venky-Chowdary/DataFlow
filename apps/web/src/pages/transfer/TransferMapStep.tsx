@@ -121,7 +121,14 @@ export function TransferMapStep({
   return (
     <div className="df2-transfer-step-panel df2-map-step-panel">
       <div className="df2-card-head df2-map-step-head">
-        <h3 className="df2-card-title">Map columns</h3>
+        <div>
+          <h3 className="df2-card-title">Map columns</h3>
+          <p className="df2-card-sub">
+            {columnMappings.length} mappings · {approvedCount} ready
+            {mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}
+            {llmUsed ? " · semantic engine" : ""}
+          </p>
+        </div>
       </div>
 
       <div className="df2-card-body df2-map-step-body">

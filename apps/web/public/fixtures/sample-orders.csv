@@ -1,0 +1,6 @@
+order_id,customer_email,order_amt,order_date,status
+1001,alex@example.com,249.99,2026-01-15,completed
+1002,priya@example.com,89.50,2026-01-16,completed
+1003,jordan@example.com,1200.00,2026-01-17,pending
+1004,sam@example.com,45.00,2026-01-18,completed
+1005,taylor@example.com,310.25,2026-01-19,shipped
