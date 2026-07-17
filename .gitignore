@@ -22,6 +22,7 @@ apps/api/data/upload_registry.json
 apps/api/data/audit_events.jsonl
 apps/api/data/schema_registry_schemas.json
 apps/api/data/schema_registry_lineage.json
+apps/api/data/quality_profiles/
 apps/api/data/sync_cursors.json
 apps/api/data/jobs.json
 apps/api/data/tmp*
