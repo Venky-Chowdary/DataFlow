@@ -663,6 +663,12 @@ def verify_sqlite_table(
         checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
         conn.close()
         return int(count), checksum
+    except sqlite3.OperationalError as exc:
+        # Missing table means the target is empty, not that verification is
+        # unavailable. Return 0 so reconciliation can surface the mismatch.
+        if "no such table" in str(exc).lower():
+            return 0, ""
+        return -1, ""
     except Exception:
         return -1, ""
 
