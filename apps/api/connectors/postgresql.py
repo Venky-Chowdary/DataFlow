@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from connectors.base import ConnectResult
-from connectors.driver_guard import platform_driver_unavailable
 
 
 def test_postgresql(
@@ -18,24 +17,17 @@ def test_postgresql(
     ssl: bool,
 ) -> ConnectResult:
     try:
-        import psycopg2
-    except ImportError:
-        return _stub_fallback(host, database, username, connection_string)
+        from connectors.postgresql_conn import get_connection
 
-    try:
-        if connection_string.strip():
-            conn = psycopg2.connect(connection_string, connect_timeout=8)
-        else:
-            conn = psycopg2.connect(
-                host=host or "localhost",
-                port=port or 5432,
-                dbname=database,
-                user=username,
-                password=password,
-                connect_timeout=8,
-                sslmode="require" if ssl else "prefer",
-            )
-
+        conn = get_connection(
+            host=host or "localhost",
+            port=port or 5432,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -58,13 +50,3 @@ def test_postgresql(
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="psycopg2")
-
-
-def _stub_fallback(host: str, database: str, username: str, connection_string: str) -> ConnectResult:
-    del host, database, username, connection_string
-    return ConnectResult(
-        ok=False,
-        tables=[],
-        error=platform_driver_unavailable("PostgreSQL"),
-        driver="none",
-    )
