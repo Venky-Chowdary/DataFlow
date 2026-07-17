@@ -2,9 +2,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ..services.auth_service import auth_required, lookup_user, verify_token
-
 from services.platform_config import docs_enabled
+
+from ..services.auth_service import auth_required, lookup_user, verify_token
 
 _PUBLIC_PREFIXES = (
     "/health",

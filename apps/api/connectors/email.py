@@ -15,7 +15,13 @@ from email.mime.text import MIMEText
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
+from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import (
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    to_json_value,
+)
 from services.value_serializer import cell_to_string, json_default
 
 

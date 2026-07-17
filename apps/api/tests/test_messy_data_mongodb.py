@@ -21,9 +21,11 @@ from bson.decimal128 import Decimal128  # noqa: E402
 from pymongo import MongoClient  # noqa: E402
 
 from services.mapping_pipeline import run_mapping_pipeline  # noqa: E402
-from src.transfer.adapters import parse_file_content, write_destination_database  # noqa: E402
+from src.transfer.adapters import (  # noqa: E402
+    parse_file_content,
+    write_destination_database,
+)
 from src.transfer.models import EndpointConfig  # noqa: E402
-
 
 CSV_MESSY_TEXT = """order_id,amount,created_at,active,notes
 1,"$1,234.56","2024-06-01T12:00:00Z",yes,"Large payment"

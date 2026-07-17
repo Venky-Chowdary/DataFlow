@@ -20,7 +20,6 @@ if str(_API_ROOT) not in sys.path:
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
-
 COLUMNS = ["id", "amount", "note", "created", "active", "meta", "tags"]
 ROWS = [
     {"id": 1, "amount": "1000.00", "note": "hello", "created": "2024-01-15T00:00:00", "active": "true", "meta": '{"k":"v"}', "tags": '["a","b"]'},

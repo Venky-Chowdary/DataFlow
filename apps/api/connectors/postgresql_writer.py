@@ -11,7 +11,6 @@ from typing import Any, Callable
 
 from connectors.postgresql_conn import get_connection
 from connectors.writer_common import (
-    WriteResult as _WriteResult,
     CHUNK_SIZE,
     build_mapped_rows,
     dedupe_rows,
@@ -19,6 +18,9 @@ from connectors.writer_common import (
     row_checksum,
     sanitize_identifier,
     transform_error_policy,
+)
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
 )
 from services.type_system import ddl_type
 

@@ -82,8 +82,9 @@ def test_csv_to_dynamodb_upsert_updates_and_appends():
     assert result2.reconciliation.get("passed") is True
     assert result2.reconciliation.get("target_rows") == 3
 
-    import boto3
     from decimal import Decimal
+
+    import boto3
 
     client = boto3.client(
         "dynamodb",

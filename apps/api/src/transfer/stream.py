@@ -23,7 +23,11 @@ from connectors.writer_common import (  # noqa: E402
     row_fingerprints,
 )
 
-from .adapters import _introspect_table_schema, resolve_connector_config, resolve_dest_table
+from .adapters import (
+    _introspect_table_schema,
+    resolve_connector_config,
+    resolve_dest_table,
+)
 from .connector_capabilities import resolve_driver_type
 
 try:
@@ -100,7 +104,10 @@ def _read_batch_impl(
     redis_scan_state=None,
 ):
     if src_type == "postgresql" or src_type == "redshift":
-        from connectors.postgresql_reader import read_table_batch, read_table_cursor_batch
+        from connectors.postgresql_reader import (
+            read_table_batch,
+            read_table_cursor_batch,
+        )
 
         pg_port = int(cfg.get("port") or (5439 if src_type == "redshift" else 5432))
         if cursor_column:
@@ -169,7 +176,10 @@ def _read_batch_impl(
             known_total_rows=known_total_rows,
         )
     if src_type == "mongodb":
-        from connectors.mongodb_reader import read_collection_batch, read_collection_cursor_batch
+        from connectors.mongodb_reader import (
+            read_collection_batch,
+            read_collection_cursor_batch,
+        )
 
         if cursor_column:
             return read_collection_cursor_batch(
@@ -193,7 +203,10 @@ def _read_batch_impl(
             known_total_rows=known_total_rows,
         )
     if src_type == "snowflake":
-        from connectors.snowflake_reader import read_table_batch, read_table_cursor_batch
+        from connectors.snowflake_reader import (
+            read_table_batch,
+            read_table_cursor_batch,
+        )
 
         if cursor_column:
             return read_table_cursor_batch(
@@ -745,7 +758,11 @@ def stream_database_transfer(
         raise ValueError("S3 source requires bucket name in the database field")
 
     if src_type in ("s3", "gcs", "adls", "sftp"):
-        from services.object_streaming import download_for_object_store, download_object, stream_spilled_file_to_database
+        from services.object_streaming import (
+            download_for_object_store,
+            download_object,
+            stream_spilled_file_to_database,
+        )
 
         bucket = source.database or src_cfg.get("database", "")
         key = table
@@ -1438,7 +1455,10 @@ def stream_scd2_mirror_transfer(
             dest_summary["updated_rows"] = updated_total
 
         elif effective_sync in ("full_refresh_mirror", "mirror"):
-            from src.services.mirror_engine import _compute_active_checksum, _ensure_soft_delete_column
+            from src.services.mirror_engine import (
+                _compute_active_checksum,
+                _ensure_soft_delete_column,
+            )
 
             # Stream upsert staging → target.
             upsert_contract = [{"selected": True, "sync_mode": "upsert", "primary_key": contract.primary_key}] if contract else None

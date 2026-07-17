@@ -280,9 +280,11 @@ def log_job_notifications(job_id: str, results: list[dict[str, Any]]) -> bool:
     if not results:
         return False
     try:
-        from services.mongodb_service import get_mongodb_service
         from datetime import datetime, timezone
+
         from bson import ObjectId
+
+        from services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
         db = mongo.get_database()

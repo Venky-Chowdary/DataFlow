@@ -1,6 +1,9 @@
 """Tests for sample-driven mapping validation."""
 
-from services.sample_validator import refine_mapping_confidence, refine_mappings_with_samples
+from services.sample_validator import (
+    refine_mapping_confidence,
+    refine_mappings_with_samples,
+)
 
 
 def test_high_parse_rate_boosts_confidence():

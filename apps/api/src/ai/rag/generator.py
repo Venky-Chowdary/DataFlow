@@ -5,6 +5,7 @@ LLM prompt templates for schema analysis, mapping, and transformation.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 from .retriever import RetrievalResult
@@ -177,7 +178,10 @@ class DataTransferRAGGenerator:
         semantic_type: str | None = None,
     ) -> RAGResponse:
         """Suggest data transformations."""
-        from ..knowledge.type_conversions import suggest_type_conversion, get_compatible_types
+        from ..knowledge.type_conversions import (
+            get_compatible_types,
+            suggest_type_conversion,
+        )
 
         conversion = suggest_type_conversion(source_type, target_type)
         compatible = get_compatible_types(source_type)

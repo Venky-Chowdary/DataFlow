@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from src.main import app
 from src.services.contract_store import get_contract_store, reset_contract_store
-from src.services.data_contract import DataContract, ColumnRule
+from src.services.data_contract import ColumnRule, DataContract
 
 
 @pytest.fixture(autouse=True)

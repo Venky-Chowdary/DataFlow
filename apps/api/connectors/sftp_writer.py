@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
-from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
+from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import (
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    to_json_value,
+)
 from services.value_serializer import cell_to_string, json_default
 
 _API_ROOT = Path(__file__).resolve().parents[1]

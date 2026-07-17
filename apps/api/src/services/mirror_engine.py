@@ -50,8 +50,9 @@ def _ensure_soft_delete_column(
     qualified: str,
     soft_delete_column: str,
 ) -> None:
-    from connectors.writer_common import quote_sql_identifier
     import sqlalchemy as sa
+
+    from connectors.writer_common import quote_sql_identifier
 
     col_quoted = quote_sql_identifier(soft_delete_column)
     # Best-effort add.  Most dialects accept BOOLEAN DEFAULT FALSE; if they do
@@ -79,8 +80,9 @@ def _update_deleted_batch(
     delete_keys: list[str],
     soft_delete_column: str,
 ) -> tuple[int, int]:
-    from connectors.writer_common import quote_sql_identifier
     import sqlalchemy as sa
+
+    from connectors.writer_common import quote_sql_identifier
 
     pk_quoted = quote_sql_identifier(pk_column)
     col_quoted = quote_sql_identifier(soft_delete_column)
@@ -127,9 +129,10 @@ def _compute_active_checksum(
     batch_size: int,
 ) -> tuple[int, str]:
     """Read active rows and return an order-independent checksum."""
+    import sqlalchemy as sa
+
     from connectors.writer_common import quote_sql_identifier
     from services.reconciliation import canonical_checksum
-    import sqlalchemy as sa
 
     col_quoted = quote_sql_identifier(soft_delete_column)
     cols_quoted = ",".join(quote_sql_identifier(c) for c in target_cols)
@@ -198,8 +201,8 @@ def apply_inferred_soft_deletes(
     if not source_keys:
         raise ValueError("mirror sync could not build a non-empty source key set from the primary key")
 
+    from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from src.transfer.adapters import resolve_connector_config
-    from connectors.generic_sql import get_sqlalchemy_engine, get_sql_schema
 
     cfg = resolve_connector_config(endpoint)
     table = endpoint.table or endpoint.collection or "dt_import"

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from connectors.aws_common import boto3_client
-from services.object_streaming import download_for_object_store, download_object, read_rows_from_spill
+from services.object_streaming import (
+    download_for_object_store,
+    download_object,
+    read_rows_from_spill,
+)
 
 
 @dataclass

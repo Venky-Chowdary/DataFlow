@@ -18,9 +18,8 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string
-
 from connectors.schema_drift import add_missing_columns
+from services.value_serializer import cell_to_string
 
 try:
     import sqlalchemy as sa
@@ -50,7 +49,6 @@ except Exception:  # pragma: no cover
     TrinoTimestamp = None
 
 from connectors.writer_common import (
-    WriteResult as _WriteResult,
     CHUNK_SIZE,
     _rejected_row_count,
     build_mapped_rows_with_details,
@@ -58,6 +56,9 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
+)
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
 )
 
 

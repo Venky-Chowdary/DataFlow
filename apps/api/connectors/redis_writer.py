@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.redis_reader import _redis_client
-from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum, sanitize_identifier
+from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import (
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    sanitize_identifier,
+)
 
 
 @dataclass

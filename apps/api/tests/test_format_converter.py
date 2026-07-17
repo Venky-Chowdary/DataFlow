@@ -2,7 +2,7 @@
 
 import pytest
 
-from services.format_converter import can_convert, convert_rows, conversion_matrix
+from services.format_converter import can_convert, conversion_matrix, convert_rows
 
 
 def test_can_convert_same_format():

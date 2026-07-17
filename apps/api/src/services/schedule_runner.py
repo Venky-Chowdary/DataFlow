@@ -131,9 +131,14 @@ def _endpoint_from_connector(conn: dict, table: str):
 
 
 def _run_schedule(schedule_id: str) -> str | None:
-    from services.schedule_store import get_schedule, mark_schedule_running, mark_schedule_run
-    from ..transfer.engine import get_transfer_engine
+    from services.schedule_store import (
+        get_schedule,
+        mark_schedule_run,
+        mark_schedule_running,
+    )
+
     from ..transfer.background import run_transfer_async
+    from ..transfer.engine import get_transfer_engine
 
     sched = get_schedule(schedule_id)
     if not sched or not sched.enabled:
@@ -181,7 +186,12 @@ def _run_due_schedules() -> int:
 
 def _clear_stale_running_schedules() -> None:
     """On startup, clear running flags left by a previous crashed instance."""
-    from services.schedule_store import _load_all, _save_all, _is_running_stale, PipelineSchedule
+    from services.schedule_store import (
+        PipelineSchedule,
+        _is_running_stale,
+        _load_all,
+        _save_all,
+    )
 
     schedules = _load_all()
     changed = False

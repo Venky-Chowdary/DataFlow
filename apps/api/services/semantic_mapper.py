@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
+import pickle
 import re
+import sys
 from collections import Counter
 from difflib import SequenceMatcher
-import pickle
-import sys
 from pathlib import Path
 
 _model_cache = None

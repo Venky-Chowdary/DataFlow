@@ -11,7 +11,10 @@ import re
 import struct
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import date as _date, datetime as _datetime, time as _time, timezone
+from datetime import date as _date
+from datetime import datetime as _datetime
+from datetime import time as _time
+from datetime import timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
@@ -24,7 +27,12 @@ SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
 
-from services.transform_engine import _DATE_LIKE_RE, _parse_date, _parse_datetime, apply_transform
+from services.transform_engine import (
+    _DATE_LIKE_RE,
+    _parse_date,
+    _parse_datetime,
+    apply_transform,
+)
 
 
 @dataclass
@@ -717,6 +725,7 @@ def verify_mongodb_collection(
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
         from pymongo import MongoClient
+
         from connectors.mongodb_common import normalize_mongodb_connection_string
 
         conn_str = normalize_mongodb_connection_string(

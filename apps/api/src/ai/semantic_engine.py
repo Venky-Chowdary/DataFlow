@@ -11,10 +11,10 @@ This is the core AI engine that differentiates us from competitors:
 """
 
 import re
-from difflib import SequenceMatcher
-from typing import Optional
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from enum import Enum
+from typing import Optional
 
 
 class DataCategory(Enum):

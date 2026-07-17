@@ -11,7 +11,11 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.reconciliation import FingerprintAccumulator, _hash_fingerprints, fingerprint_checksum  # noqa: E402
+from services.reconciliation import (  # noqa: E402
+    FingerprintAccumulator,
+    _hash_fingerprints,
+    fingerprint_checksum,
+)
 
 
 def test_small_in_memory_checksum_matches_hash():

@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_region
-from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum, to_json_value
+from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import (
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+    to_json_value,
+)
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:

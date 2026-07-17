@@ -9,7 +9,12 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.aws_common import boto3_client
-from connectors.writer_common import WriteResult as _WriteResult, build_mapped_rows, resolve_target_columns, row_checksum
+from connectors.writer_common import WriteResult as _WriteResult
+from connectors.writer_common import (
+    build_mapped_rows,
+    resolve_target_columns,
+    row_checksum,
+)
 
 
 @dataclass

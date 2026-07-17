@@ -5,6 +5,7 @@ Mapping accuracy, PII detection recall, type inference accuracy.
 """
 
 from __future__ import annotations
+
 import time
 from dataclasses import dataclass, field
 

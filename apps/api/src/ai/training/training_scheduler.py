@@ -6,6 +6,7 @@ Runs independently from the customer-facing Copilot.
 """
 
 from __future__ import annotations
+
 import asyncio
 import logging
 

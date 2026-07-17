@@ -5,6 +5,7 @@ Generate training data from known patterns and industry schemas.
 """
 
 from __future__ import annotations
+
 import json
 import random
 import uuid

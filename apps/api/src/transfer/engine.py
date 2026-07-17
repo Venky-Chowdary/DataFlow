@@ -1,6 +1,7 @@
 """Universal transfer orchestrator — routes any source to any destination."""
 
 from __future__ import annotations
+
 import logging
 import os
 import resource
@@ -17,7 +18,16 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 try:
+    from services import lineage_telemetry as lineage
+    from services.error_handling import (
+        RetryBudget,
+        TransferCancelled,
+        classify_error,
+        with_retry,
+    )
+    from services.mirror_engine import apply_inferred_soft_deletes
     from services.mongodb_service import get_mongodb_service
+    from services.pipeline_explanation import build_pipeline_explanation
     from services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -25,15 +35,24 @@ try:
         run_file_preflight,
         run_transfer_policy_gates,
     )
-    from services import lineage_telemetry as lineage
-    from services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
-    from services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
-    from services.pipeline_explanation import build_pipeline_explanation
-    from services.mirror_engine import apply_inferred_soft_deletes
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
+    from services.sync_cursor import (
+        map_source_to_target,
+        requires_upsert,
+        resolve_sync_contract,
+    )
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
+    from src.services import lineage_telemetry as lineage
+    from src.services.error_handling import (
+        RetryBudget,
+        TransferCancelled,
+        classify_error,
+        with_retry,
+    )
+    from src.services.mirror_engine import apply_inferred_soft_deletes
     from src.services.mongodb_service import get_mongodb_service
+    from src.services.pipeline_explanation import build_pipeline_explanation
     from src.services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -41,29 +60,34 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
         run_file_preflight,
         run_transfer_policy_gates,
     )
-    from src.services import lineage_telemetry as lineage
-    from src.services.error_handling import classify_error, RetryBudget, TransferCancelled, with_retry
-    from src.services.sync_cursor import map_source_to_target, requires_upsert, resolve_sync_contract
-    from src.services.pipeline_explanation import build_pipeline_explanation
-    from src.services.mirror_engine import apply_inferred_soft_deletes
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
+    from src.services.sync_cursor import (
+        map_source_to_target,
+        requires_upsert,
+        resolve_sync_contract,
+    )
 from .adapters import (
     parse_file_content,
     read_source_database,
     write_destination_database,
     write_destination_file,
 )
-from .models import EndpointConfig, TransferRequest, TransferResult, transfer_request_to_dict
-from .reconcile_step import run_reconciliation
-from .registry import validate_transfer
+from .cdc_transfer import run_cdc_database_transfer
 from .file_stream import (
     peek_file_source,
     prepare_stream_content,
     should_stream_file,
     stream_file_to_database,
 )
-from .cdc_transfer import run_cdc_database_transfer
+from .models import (
+    EndpointConfig,
+    TransferRequest,
+    TransferResult,
+    transfer_request_to_dict,
+)
+from .reconcile_step import run_reconciliation
+from .registry import validate_transfer
 from .stream import (
     peek_stream_source,
     stream_database_transfer,
@@ -71,12 +95,17 @@ from .stream import (
     supports_streaming,
 )
 from .type_mapper import default_mappings
+
 try:
-    from .contract_engine import enforce_or_create_contract, finalize_contract
     from services.data_contract import ContractViolation
+
+    from .contract_engine import enforce_or_create_contract, finalize_contract
 except ImportError:  # pragma: no cover - compatibility for tests
-    from src.transfer.contract_engine import enforce_or_create_contract, finalize_contract
     from src.services.data_contract import ContractViolation
+    from src.transfer.contract_engine import (
+        enforce_or_create_contract,
+        finalize_contract,
+    )
 try:
     from ai.training.training_scheduler import schedule_training_on_transfer
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
@@ -84,11 +113,16 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from connectors.writer_common import CHUNK_SIZE
 from services.batch_progress import ThrottledCheckpoint
+
 try:
     from services import schema_registry
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import schema_registry
-from services.checkpoint_service import Checkpoint, CheckpointService, resume_or_create_checkpoint
+from services.checkpoint_service import (
+    Checkpoint,
+    CheckpointService,
+    resume_or_create_checkpoint,
+)
 
 logger = logging.getLogger("dataflow.transfer")
 
@@ -226,9 +260,10 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
     if destination.kind != "database":
         return False
     try:
-        from .connector_capabilities import resolve_driver_type
-        from .adapters import resolve_connector_config, resolve_dest_table
         from connectors.table_manager import drop_table
+
+        from .adapters import resolve_connector_config, resolve_dest_table
+        from .connector_capabilities import resolve_driver_type
 
         db_type = resolve_driver_type(destination.format)
         cfg = resolve_connector_config(destination)
@@ -242,8 +277,9 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
 def _schema_for_endpoint(destination: EndpointConfig) -> str | None:
     """Return the SQL schema name implied by a database endpoint config."""
     try:
-        from .adapters import resolve_connector_config
         from connectors.generic_sql import get_sql_schema
+
+        from .adapters import resolve_connector_config
 
         cfg = resolve_connector_config(destination)
         return get_sql_schema(cfg)
@@ -493,7 +529,11 @@ class UniversalTransferEngine:
         if result.success and not rejected:
             return
         try:
-            from services.notification_service import build_job_payload, log_job_notifications, notify_workspace
+            from services.notification_service import (
+                build_job_payload,
+                log_job_notifications,
+                notify_workspace,
+            )
             from services.platform_config import public_url, web_url
 
             status = "failed"
@@ -1776,8 +1816,9 @@ class UniversalTransferEngine:
         source_schema: dict[str, str] | None = None,
     ) -> dict:
         """Understand source + destination and recommend auto-creation plan."""
-        from .endpoint_intelligence import build_transfer_plan, introspect_endpoint
         from services.universal_router import analyze_route
+
+        from .endpoint_intelligence import build_transfer_plan, introspect_endpoint
 
         source_info = introspect_endpoint(source, sample_content, filename)
         if source_columns and not source_info.get("columns"):

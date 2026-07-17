@@ -6,7 +6,6 @@ import json
 import re
 from typing import Any
 
-
 from services.llm_policy import is_llm_enabled, is_pii_masking_enabled, mask_pii_samples
 
 
@@ -136,8 +135,8 @@ def llm_provider_available() -> bool:
     try:
         from src.ai.llm.provider import (
             DataTransferAnthropicProvider,
-            DataTransferOpenAIProvider,
             DataTransferOllamaProvider,
+            DataTransferOpenAIProvider,
         )
         return any(
             p.is_available()

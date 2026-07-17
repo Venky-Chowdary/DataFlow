@@ -12,7 +12,12 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.llm_policy import is_llm_enabled, is_pii_masking_enabled, mask_pii_samples, mask_pii_value
+from services.llm_policy import (
+    is_llm_enabled,
+    is_pii_masking_enabled,
+    mask_pii_samples,
+    mask_pii_value,
+)
 
 
 @pytest.fixture(autouse=True)

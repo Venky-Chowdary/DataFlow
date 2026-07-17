@@ -29,8 +29,8 @@ def test_postgresql_to_gcs():
     except ImportError:
         pytest.skip("psycopg2 not installed")
 
-    from google.auth.credentials import AnonymousCredentials
     from google.api_core.client_options import ClientOptions
+    from google.auth.credentials import AnonymousCredentials
     from google.cloud import storage
 
     bucket_name = "pg-to-gcs-" + uuid.uuid4().hex[:8]

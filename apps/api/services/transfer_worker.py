@@ -7,7 +7,12 @@ from typing import Any
 
 from services.jobs import job_store
 from services.reconciliation import reconcile, verify_target
-from services.workflow import WorkflowPhase, run_in_background, set_phase, simulate_chunk_delay
+from services.workflow import (
+    WorkflowPhase,
+    run_in_background,
+    set_phase,
+    simulate_chunk_delay,
+)
 
 
 def _wrap_checkpoint(job_id: str, inner):
@@ -33,8 +38,9 @@ def dispatch_file_to_database(
         job_store.set_workflow_phase(job_id, "transfer")
         try:
             import re
-            from services.file_parser import get_file, get_file_chunks
+
             from connectors.writer_common import row_checksum
+            from services.file_parser import get_file, get_file_chunks
             
             record = get_file(file_id)
             if not record:

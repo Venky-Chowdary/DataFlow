@@ -19,7 +19,6 @@ import src.transfer.engine as engine_mod  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 
-
 duckdb = pytest.importorskip("duckdb")
 
 

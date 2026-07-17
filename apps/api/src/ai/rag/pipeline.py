@@ -5,13 +5,14 @@ End-to-end RAG pipeline orchestrating ingestion, retrieval, and generation.
 """
 
 from __future__ import annotations
+
 from typing import Optional
 
 from .bootstrap import rebuild_vector_store
 from .document_ingestion import DataTransferDocumentIngestion
-from .retriever import DataTransferRetriever
-from .generator import DataTransferRAGGenerator, RAGResponse
 from .embedding_service import get_embedding_service
+from .generator import DataTransferRAGGenerator, RAGResponse
+from .retriever import DataTransferRetriever
 from .vector_store import get_vector_store
 
 _pipeline: Optional["DataTransferRAGPipeline"] = None

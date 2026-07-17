@@ -9,29 +9,29 @@ Core AI capabilities for intelligent data understanding:
 - Natural language queries
 """
 
-from .semantic_engine import (
-    analyze_column,
-    analyze_schema,
-    generate_mappings,
-    detect_pii,
-    SemanticAnalyzer,
-    SmartMapper,
-    ColumnAnalysis,
-    SchemaAnalysis,
-    MappingSuggestion,
-    DataCategory,
-    ComplianceFramework,
-)
 from .enhanced_engine import (
+    EnhancedColumnAnalysis,
+    EnhancedMappingSuggestion,
+    EnhancedSemanticAnalyzer,
+    EnhancedSmartMapper,
     analyze_column_enhanced,
     analyze_schema_enhanced,
     generate_mappings_enhanced,
-    query_natural_language,
     get_ai_capabilities,
-    EnhancedSemanticAnalyzer,
-    EnhancedSmartMapper,
-    EnhancedColumnAnalysis,
-    EnhancedMappingSuggestion,
+    query_natural_language,
+)
+from .semantic_engine import (
+    ColumnAnalysis,
+    ComplianceFramework,
+    DataCategory,
+    MappingSuggestion,
+    SchemaAnalysis,
+    SemanticAnalyzer,
+    SmartMapper,
+    analyze_column,
+    analyze_schema,
+    detect_pii,
+    generate_mappings,
 )
 
 __all__ = [

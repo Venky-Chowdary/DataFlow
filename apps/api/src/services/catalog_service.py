@@ -1,6 +1,7 @@
 """Connector catalog — searchable marketplace with honest capability enrichment."""
 
 from __future__ import annotations
+
 import json
 import os
 from functools import lru_cache

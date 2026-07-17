@@ -21,8 +21,8 @@ if str(_API_ROOT) not in sys.path:
 
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
-
-from tests.test_live_emulator_matrix import CASES as _CASES, _is_reachable
+from tests.test_live_emulator_matrix import CASES as _CASES
+from tests.test_live_emulator_matrix import _is_reachable
 
 
 def _prepare_destination(dest: EndpointConfig) -> EndpointConfig:

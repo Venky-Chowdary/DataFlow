@@ -6,6 +6,7 @@ Answers any data question and performs work in the app when asked.
 """
 
 from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 

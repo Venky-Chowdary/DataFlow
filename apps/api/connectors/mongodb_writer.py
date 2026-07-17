@@ -10,13 +10,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.writer_common import (
-    WriteResult as _WriteResult,
     CHUNK_SIZE,
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
     transform_error_policy,
+)
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
 )
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
@@ -183,9 +185,12 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
         
+        from datetime import date as _date
+        from datetime import datetime as _datetime
+        from datetime import time as _time
+
         from bson.binary import Binary
         from bson.decimal128 import Decimal128
-        from datetime import date as _date, datetime as _datetime, time as _time
 
         def _to_bson(value: Any, stype: str) -> Any:
             if value is None:

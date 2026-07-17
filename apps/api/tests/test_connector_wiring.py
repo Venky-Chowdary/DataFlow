@@ -24,7 +24,10 @@ from transfer.connector_capabilities import (  # noqa: E402
     transfer_live_driver_types,
     transfer_ready,
 )
-from transfer.connector_registry import CONNECTOR_MODULES, assert_registry_matches_capabilities  # noqa: E402
+from transfer.connector_registry import (  # noqa: E402
+    CONNECTOR_MODULES,
+    assert_registry_matches_capabilities,
+)
 from transfer.registry import (  # noqa: E402
     LIVE_DEST_DATABASES,
     LIVE_SOURCE_DATABASES,
@@ -92,7 +95,10 @@ def test_db_writer_has_write_mapped_rows(driver: str):
 
 
 def test_catalog_allowlist_honesty():
-    from transfer.connector_capabilities import TRANSFER_READY_CATALOG_IDS, enrich_catalog_entry
+    from transfer.connector_capabilities import (
+        TRANSFER_READY_CATALOG_IDS,
+        enrich_catalog_entry,
+    )
 
     fake_rds = enrich_catalog_entry({
         "id": "amazon_rds_postgresql",
@@ -140,7 +146,10 @@ def test_catalog_native_transfer_ready_only():
     import json
     from pathlib import Path
 
-    from transfer.connector_capabilities import enrich_catalog_entry, transfer_live_driver_types
+    from transfer.connector_capabilities import (
+        enrich_catalog_entry,
+        transfer_live_driver_types,
+    )
 
     catalog_path = Path(__file__).resolve().parents[1] / "data" / "connector_catalog.json"
     data = json.loads(catalog_path.read_text(encoding="utf-8"))

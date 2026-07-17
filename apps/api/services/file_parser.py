@@ -8,9 +8,8 @@ import uuid
 from pathlib import Path
 
 from services.csv_profiler import count_csv_rows, parse_csv_preview
-from services.schema_inference import infer_columns_from_rows
-
 from services.platform_config import data_dir, upload_dir
+from services.schema_inference import infer_columns_from_rows
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"

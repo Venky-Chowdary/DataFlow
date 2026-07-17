@@ -1,6 +1,6 @@
 """DataTransfer.space — Copilot / Data Pilot Module"""
 
-from .agent import DataTransferCopilotAgent, get_copilot_agent, CopilotResponse
+from .agent import CopilotResponse, DataTransferCopilotAgent, get_copilot_agent
 from .pilot_agent import DataPilotAgent, get_pilot_agent
 
 __all__ = [

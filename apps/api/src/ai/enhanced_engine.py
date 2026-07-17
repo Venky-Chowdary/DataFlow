@@ -6,20 +6,21 @@ Upgrades the base pattern engine with embedding similarity and retrieval.
 """
 
 from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 
+from .knowledge.semantic_patterns import get_pattern_count
+from .knowledge.synonyms import get_synonym_count, resolve_canonical
 from .semantic_engine import (
+    ColumnAnalysis,
+    ComplianceFramework,
+    DataCategory,
+    MappingSuggestion,
+    SchemaAnalysis,
     SemanticAnalyzer,
     SmartMapper,
-    ColumnAnalysis,
-    SchemaAnalysis,
-    MappingSuggestion,
-    DataCategory,
-    ComplianceFramework,
 )
-from .knowledge.synonyms import resolve_canonical, get_synonym_count
-from .knowledge.semantic_patterns import get_pattern_count
 
 
 @dataclass
@@ -258,8 +259,8 @@ def query_natural_language(query: str) -> dict:
 
 def get_ai_capabilities() -> dict:
     """Report AI system capabilities and status."""
-    from .rag.pipeline import get_rag_pipeline
     from .llm.fallback import DataTransferFallbackChain
+    from .rag.pipeline import get_rag_pipeline
 
     rag = get_rag_pipeline()
     fallback = DataTransferFallbackChain()

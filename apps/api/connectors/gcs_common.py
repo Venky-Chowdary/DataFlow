@@ -38,8 +38,8 @@ def _credentials(creds_ref: str, project: str | None):
 
 
 def gcs_client(cfg: dict[str, Any]):
-    from google.cloud import storage
     from google.api_core.client_options import ClientOptions
+    from google.cloud import storage
 
     project = (cfg.get("host") or "").strip() or None
     if project and project.startswith("http"):

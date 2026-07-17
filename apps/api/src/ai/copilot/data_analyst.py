@@ -6,6 +6,7 @@ about columns, values, PII, quality — not just transfer steps.
 """
 
 from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 

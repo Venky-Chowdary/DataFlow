@@ -13,7 +13,6 @@ from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import get_connection, normalize_account
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
-    WriteResult as _WriteResult,
     CHUNK_SIZE,
     build_mapped_rows,
     dedupe_rows,
@@ -21,6 +20,9 @@ from connectors.writer_common import (
     row_checksum,
     sanitize_identifier,
     transform_error_policy,
+)
+from connectors.writer_common import (
+    WriteResult as _WriteResult,
 )
 from services.type_system import ddl_type
 

@@ -227,7 +227,11 @@ def download_adls_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
 
 
 def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
-    from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
+    from connectors.sftp_common import (
+        connect_sftp,
+        parse_sftp_config,
+        split_remote_path,
+    )
 
     merged = dict(cfg)
     if bucket:

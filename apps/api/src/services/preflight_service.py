@@ -21,7 +21,11 @@ from preflight.models import (
     SourceConfig,
     TransferPlan,
 )
-from services.connector_capability_registry import classify_payload, recommended_batch_size
+
+from services.connector_capability_registry import (
+    classify_payload,
+    recommended_batch_size,
+)
 from services.validation_plan import build_validation_plan
 
 
@@ -422,7 +426,10 @@ def run_file_preflight(
     dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
     dest_table_exists = destination_table_exists if destination_table_exists is not None else False
 
-    from services.ddl_compatibility import _normalize_dest_kind, evaluate_ddl_compatibility
+    from services.ddl_compatibility import (
+        _normalize_dest_kind,
+        evaluate_ddl_compatibility,
+    )
     from services.schema_drift import detect_schema_drift
 
     dest_kind = _normalize_dest_kind(destination_db_type)

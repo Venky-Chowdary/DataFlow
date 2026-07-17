@@ -139,6 +139,7 @@ def _fetch_current_rows(
 ) -> dict[str, str]:
     """Return {key: row_hash} for current rows whose key is in ``keys``."""
     import sqlalchemy as sa
+
     from connectors.writer_common import quote_sql_identifier
 
     if not keys:
@@ -184,6 +185,7 @@ def _expire_rows(
 ) -> int:
     """Mark the current versions of ``keys`` as historical."""
     import sqlalchemy as sa
+
     from connectors.writer_common import quote_sql_identifier
 
     if not keys:
@@ -218,6 +220,7 @@ def _active_checksum(
 ) -> tuple[int, str]:
     """Read all current rows and compute an order-independent checksum."""
     import sqlalchemy as sa
+
     from connectors.writer_common import quote_sql_identifier
     from services.reconciliation import canonical_checksum
 
@@ -269,7 +272,7 @@ def apply_scd2(
     ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
     """
 
-    from connectors.generic_sql import get_sqlalchemy_engine, get_sql_schema
+    from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from connectors.writer_common import build_mapped_rows
     from src.transfer.adapters import records_to_matrix, resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type

@@ -11,7 +11,11 @@ _FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "a
 
 def _live_db_drivers(live_fn_name: str = "transfer_live_driver_types") -> list[str]:
     try:
-        from .connector_capabilities import transfer_live_driver_types, source_live_driver_types, dest_live_driver_types
+        from .connector_capabilities import (
+            dest_live_driver_types,
+            source_live_driver_types,
+            transfer_live_driver_types,
+        )
     except ImportError:
         # Support loading this file directly (e.g. test_registry.py)
         import importlib.util
@@ -70,7 +74,7 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 
     def _source_only_supported(fmt: str) -> bool:
         try:
-            from .connector_capabilities import get_capabilities, _source_only_ready
+            from .connector_capabilities import _source_only_ready, get_capabilities
             caps = get_capabilities(fmt, fmt)
             return _source_only_ready(caps)
         except Exception:
@@ -124,11 +128,13 @@ def get_capabilities() -> dict:
     from .connector_capabilities import (
         _source_only_ready,
         dest_ready,
-        get_capabilities as _caps,
         manifest_summary,
         resolve_driver_type,
         source_ready,
         transfer_live_driver_types,
+    )
+    from .connector_capabilities import (
+        get_capabilities as _caps,
     )
 
     combos = []

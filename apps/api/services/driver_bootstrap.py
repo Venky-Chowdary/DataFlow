@@ -8,6 +8,6 @@ startup.
 
 from __future__ import annotations
 
-from src.services.driver_bootstrap import ensure_platform_drivers, driver_status
+from src.services.driver_bootstrap import driver_status, ensure_platform_drivers
 
 __all__ = ["ensure_platform_drivers", "driver_status"]

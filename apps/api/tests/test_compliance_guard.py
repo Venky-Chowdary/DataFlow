@@ -9,7 +9,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.compliance_guard import detect_pii_fields, score_compliance_risk  # noqa: E402
+from services.compliance_guard import (  # noqa: E402
+    detect_pii_fields,
+    score_compliance_risk,
+)
 
 
 def test_detects_pii_columns_from_names_and_values() -> None:

@@ -5,12 +5,13 @@ Multi-step reasoning for complex schema analysis and mapping.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
-from .provider import DataTransferLLMProvider, DataTransferLocalProvider
-from ..knowledge.synonyms import resolve_canonical, are_synonyms
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
+from ..knowledge.synonyms import are_synonyms, resolve_canonical
 from ..knowledge.type_conversions import suggest_type_conversion
+from .provider import DataTransferLLMProvider, DataTransferLocalProvider
 
 
 @dataclass

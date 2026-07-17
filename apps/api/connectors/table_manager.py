@@ -27,8 +27,9 @@ def drop_table(
 
 
 def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
-    from connectors.postgresql_conn import get_connection
     from psycopg2 import sql
+
+    from connectors.postgresql_conn import get_connection
 
     try:
         conn = get_connection(
@@ -150,8 +151,9 @@ def delete_by_primary_keys(
 
 
 def _delete_postgresql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[str], schema: str | None) -> int:
-    from connectors.postgresql_conn import get_connection
     from psycopg2 import sql
+
+    from connectors.postgresql_conn import get_connection
 
     try:
         conn = get_connection(

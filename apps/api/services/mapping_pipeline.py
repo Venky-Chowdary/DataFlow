@@ -252,7 +252,10 @@ def run_mapping_pipeline(
         enabled=use_llm,
     )
 
-    from services.mapping_constraints import enforce_destination_constraints, mapping_plan_summary
+    from services.mapping_constraints import (
+        enforce_destination_constraints,
+        mapping_plan_summary,
+    )
 
     pruned, constraint_dropped, invented_blocked = enforce_destination_constraints(
         pruned,
@@ -292,7 +295,10 @@ def run_mapping_pipeline(
         target_schemas=target_schemas,
     )
 
-    from services.mapping_quality import detect_cross_field_issues, refine_mappings_with_quality
+    from services.mapping_quality import (
+        detect_cross_field_issues,
+        refine_mappings_with_quality,
+    )
 
     enriched_mappings = refine_mappings_with_quality(
         enriched_mappings,
@@ -322,7 +328,10 @@ def run_mapping_pipeline(
                 if issue not in quality_issues:
                     quality_issues.append(issue)
 
-    from services.type_coercion_validator import coerce_blocks_transfer, validate_mapping_coercions
+    from services.type_coercion_validator import (
+        coerce_blocks_transfer,
+        validate_mapping_coercions,
+    )
 
     coercion_issues = validate_mapping_coercions(
         enriched_mappings,

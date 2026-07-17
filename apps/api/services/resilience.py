@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .checkpoint_service import Checkpoint, CheckpointService
-from .error_handling import RetryBudget, classify_error, quarantine_record, should_quarantine
+from .error_handling import (
+    RetryBudget,
+    classify_error,
+    quarantine_record,
+    should_quarantine,
+)
 
 logger = logging.getLogger(__name__)
 

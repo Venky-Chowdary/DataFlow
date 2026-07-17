@@ -1,6 +1,7 @@
 """Read/write adapters for universal transfer — files, databases, warehouses."""
 
 from __future__ import annotations
+
 import csv
 import io
 import json
@@ -82,7 +83,11 @@ def parse_file_route_sample(
     """Headers + schema for route analysis without loading entire files."""
     ftype = FileParser.detect_file_type(filename, content)
     if ftype in ("csv", "tsv"):
-        from services.csv_profiler import count_csv_rows, detect_encoding, parse_csv_preview
+        from services.csv_profiler import (
+            count_csv_rows,
+            detect_encoding,
+            parse_csv_preview,
+        )
 
         enc = detect_encoding(content)
         headers, rows, _enc, _delim = parse_csv_preview(content, encoding=enc, preview_rows=preview_rows)

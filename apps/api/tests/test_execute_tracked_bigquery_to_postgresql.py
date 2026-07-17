@@ -26,8 +26,8 @@ def test_bigquery_to_postgresql():
     except OSError as exc:
         pytest.skip(f"Emulator not reachable: {exc}")
 
-    from google.auth.credentials import AnonymousCredentials
     from google.api_core.client_options import ClientOptions
+    from google.auth.credentials import AnonymousCredentials
     from google.cloud import bigquery
 
     src_table = "bq_to_pg_src_" + uuid.uuid4().hex[:8]

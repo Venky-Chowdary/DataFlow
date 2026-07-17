@@ -226,7 +226,10 @@ def _introspect_object_store(
     key = table or ""
     prefix = schema or ""
     try:
-        from services.object_store_introspect import introspect_gcs_object, introspect_s3_object
+        from services.object_store_introspect import (
+            introspect_gcs_object,
+            introspect_s3_object,
+        )
 
         if store_type == "gcs":
             result = introspect_gcs_object(cfg, bucket=bucket, key=key or None, prefix=prefix)
@@ -661,8 +664,9 @@ def _widen_mongodb_type(current: str, observed: str) -> str:
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
-        from connectors.mongodb_common import normalize_mongodb_connection_string
         from pymongo import MongoClient
+
+        from connectors.mongodb_common import normalize_mongodb_connection_string
 
         conn_str = normalize_mongodb_connection_string(
             kwargs.get("connection_string", ""),
@@ -703,7 +707,11 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     if not table:
         return {"ok": False, "error": "DynamoDB table name required", "columns": [], "tables": []}
     try:
-        from connectors.dynamodb_reader import describe_table_schema, estimate_item_count, list_tables
+        from connectors.dynamodb_reader import (
+            describe_table_schema,
+            estimate_item_count,
+            list_tables,
+        )
 
         cfg = {
             "host": kwargs.get("host") or "us-east-1",

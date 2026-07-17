@@ -11,8 +11,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.row_filter import apply_row_filter, apply_row_filter_to_matrix  # noqa: E402
-
+from services.row_filter import (  # noqa: E402
+    apply_row_filter,
+    apply_row_filter_to_matrix,
+)
 
 RECORDS = [
     {"id": "1", "status": "active", "amount": "100"},

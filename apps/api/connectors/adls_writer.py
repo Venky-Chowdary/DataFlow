@@ -11,6 +11,8 @@ from typing import Any, Callable
 from connectors.adls_common import blob_service_client
 from connectors.writer_common import (
     WriteResult as _WriteResult,
+)
+from connectors.writer_common import (
     build_mapped_rows,
     resolve_target_columns,
     row_checksum,

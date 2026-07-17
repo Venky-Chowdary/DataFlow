@@ -30,6 +30,7 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     from decimal import InvalidOperation
 
     from bson.decimal128 import Decimal128
+
     from services.cdc_engine import WatermarkType, infer_watermark_type
 
     if not value:

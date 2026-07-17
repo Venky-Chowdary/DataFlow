@@ -13,8 +13,6 @@ sys.path.insert(0, str(API_ROOT.parents[1] / "packages" / "preflight" / "src"))
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-
 from preflight import PreflightEngine, TransferPlan
 from preflight.models import (
     ColumnMapping,
@@ -22,18 +20,12 @@ from preflight.models import (
     DestinationConfig,
     SourceConfig,
 )
+from pydantic import BaseModel, Field
 
 from connectors import test_database_connection
 from registry import DATABASE_TYPES, FILE_FORMATS, DataOperation, infer_operation
-from services.connector_factory import generate_connector_from_openapi
-from services.file_parser import get_file, store_upload
-from services.jobs import job_store
-from services.mapping_pipeline import run_mapping_pipeline
-from services.object_store import storage_status
-from services.preflight_runtime import RuntimePreflightContext, compute_capacity
-from services.schema_introspect import introspect_schema
-from services.semantic_mapper import map_columns
 from services.connector_catalog import list_catalog as list_connector_catalog
+from services.connector_factory import generate_connector_from_openapi
 from services.connector_store import (
     create_connector,
     delete_connector,
@@ -43,8 +35,15 @@ from services.connector_store import (
     mask_connector,
     update_connector,
 )
-from services.semantic_analyzer import analyze_schema
+from services.file_parser import get_file, store_upload
+from services.jobs import job_store
+from services.mapping_pipeline import run_mapping_pipeline
 from services.migration_worker import dispatch_postgresql_migration
+from services.object_store import storage_status
+from services.preflight_runtime import RuntimePreflightContext, compute_capacity
+from services.schema_introspect import introspect_schema
+from services.semantic_analyzer import analyze_schema
+from services.semantic_mapper import map_columns
 from services.transfer_worker import dispatch_file_to_database
 from services.workflow import WorkflowPhase, get_phase, set_phase
 

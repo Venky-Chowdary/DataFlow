@@ -15,7 +15,6 @@ import requests
 
 from connectors.saas_common import ReadBatch, base_url, token
 
-
 COMMON_DATA_PATHS = ["data", "results", "items", "records", "values", "contacts", "accounts", "list", "objects"]
 COMMON_TOTAL_PATHS = ["total", "count", "total_count", "meta.total_count", "meta.count", "page.total_elements"]
 COMMON_NEXT_PATHS = ["next", "paging.next", "meta.next", "links.next"]

@@ -6,8 +6,9 @@ Works without API keys using local reasoning.
 """
 
 from __future__ import annotations
-import os
+
 import json
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -204,7 +205,10 @@ class DataTransferOllamaProvider(DataTransferLLMProvider):
     name = "ollama"
 
     def __init__(self, model: str | None = None, base_url: str | None = None):
-        from services.integrations_store import resolve_ollama_base_url, resolve_provider_model
+        from services.integrations_store import (
+            resolve_ollama_base_url,
+            resolve_provider_model,
+        )
 
         self.model = model or resolve_provider_model("ollama", "llama3.2")
         self.base_url = base_url or resolve_ollama_base_url()
@@ -258,8 +262,8 @@ class DataTransferLocalProvider(DataTransferLLMProvider):
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         """Generate structured response using local knowledge."""
-        from ..knowledge.synonyms import resolve_canonical
         from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
+        from ..knowledge.synonyms import resolve_canonical
 
         reasoning_steps = []
         answer_parts = []

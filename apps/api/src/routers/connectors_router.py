@@ -6,17 +6,28 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import os
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form, BackgroundTasks
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
 from pymongo.errors import PyMongoError
-from ..services.mongodb_service import get_mongodb_service
+
+from services.team_store import can_read_workspace, can_write_workspace
+
 from ..services.file_parser import FileParser
+from ..services.mongodb_service import get_mongodb_service
 from ..transfer.connector_capabilities import resolve_driver_type
 from ..transfer.connector_registry import run_probe
-from services.team_store import can_read_workspace, can_write_workspace
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
@@ -766,9 +777,9 @@ async def transfer_data(
 ):
     """Universal file transfer — delegates to UniversalTransferEngine."""
     try:
+        from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
         from ..transfer.models import EndpointConfig, TransferRequest
-        from ..transfer.background import run_transfer_async
 
         workspace_id = _require_write_workspace(request, workspace_id)
 

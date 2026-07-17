@@ -23,8 +23,8 @@ def _parquet_bytes(rows: list[dict]) -> bytes:
         import pandas as pd
     except ImportError as exc:
         pytest.skip(f"pandas not installed: {exc}")
-    import pyarrow.parquet as pq
     import pyarrow as pa
+    import pyarrow.parquet as pq
     table = pa.Table.from_pandas(pd.DataFrame(rows))
     buf = io.BytesIO()
     pq.write_table(table, buf)

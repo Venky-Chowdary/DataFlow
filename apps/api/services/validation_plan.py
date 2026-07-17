@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.preflight_rules import PREFLIGHT_GATE_RULES
 from services.connector_capability_registry import get_connector_capability
+from services.preflight_rules import PREFLIGHT_GATE_RULES
 
 
 class ValidationGate:

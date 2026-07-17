@@ -5,12 +5,13 @@ Semantic search over known patterns, synonyms, and type mappings.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 
-from ..knowledge.synonyms import resolve_canonical, are_synonyms, CANONICAL_FORMS
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
-from .vector_store import VectorDocument, get_vector_store
+from ..knowledge.synonyms import CANONICAL_FORMS, are_synonyms, resolve_canonical
 from .document_ingestion import DataTransferDocumentIngestion
+from .vector_store import VectorDocument, get_vector_store
 
 
 @dataclass

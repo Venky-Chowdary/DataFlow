@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 try:
     from services.contract_store import get_contract_store
     from services.data_contract import (

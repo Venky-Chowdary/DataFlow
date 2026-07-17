@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from connectors.aws_common import boto3_client, is_local_endpoint, resolve_endpoint_url, resolve_region
+from connectors.aws_common import (
+    boto3_client,
+    is_local_endpoint,
+    resolve_endpoint_url,
+    resolve_region,
+)
 from connectors.base import ConnectResult
 
 

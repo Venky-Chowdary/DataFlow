@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from connectors.postgresql_conn import get_connection
 from connectors.driver_guard import require_driver
+from connectors.postgresql_conn import get_connection
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:

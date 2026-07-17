@@ -5,6 +5,7 @@ Validation patterns and quality checks for data columns.
 """
 
 from __future__ import annotations
+
 import re
 from typing import Any
 

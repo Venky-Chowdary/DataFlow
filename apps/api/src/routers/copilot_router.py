@@ -4,9 +4,10 @@ DataTransfer.space — Copilot API Router
 Customer-facing chat + separate training agent endpoints.
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
 
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
 
@@ -162,8 +163,8 @@ async def train_status():
 async def copilot_status():
     """Copilot and training agent health."""
     from ..ai.copilot import get_copilot_agent
-    from ..ai.training.training_agent import get_training_agent
     from ..ai.rag.pipeline import get_rag_pipeline
+    from ..ai.training.training_agent import get_training_agent
 
     rag = get_rag_pipeline()
     training = get_training_agent()

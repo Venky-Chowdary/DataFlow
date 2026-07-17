@@ -366,8 +366,9 @@ class FileParser:
     @staticmethod
     def parse_avro(content: bytes, max_rows: int = 100_000) -> ParseResult:
         try:
-            import fastavro
             import io
+
+            import fastavro
 
             reader = fastavro.reader(io.BytesIO(content))
             records = []
@@ -400,8 +401,9 @@ class FileParser:
     @staticmethod
     def parse_orc(content: bytes, max_rows: int = 100_000) -> ParseResult:
         try:
-            import pyarrow.orc as orc
             import io
+
+            import pyarrow.orc as orc
 
             table = orc.read_table(io.BytesIO(content))
             df = table.to_pandas().head(max_rows)

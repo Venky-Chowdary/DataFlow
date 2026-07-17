@@ -11,7 +11,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.pipeline_explanation import _sync_mode_note, build_pipeline_explanation  # noqa: E402
+from services.pipeline_explanation import (  # noqa: E402
+    _sync_mode_note,
+    build_pipeline_explanation,
+)
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 
 

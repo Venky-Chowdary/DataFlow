@@ -64,8 +64,9 @@ def _write_parquet_bytes(headers: list[str], rows: list[list[str]]) -> tuple[byt
 
 
 def _write_avro_bytes(headers: list[str], rows: list[list[str]]) -> tuple[bytes, str]:
-    import fastavro
     import io
+
+    import fastavro
 
     fields = [{"name": h, "type": ["null", "string"]} for h in headers]
     schema = {

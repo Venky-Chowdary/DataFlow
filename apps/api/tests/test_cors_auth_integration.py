@@ -22,6 +22,7 @@ def client(monkeypatch):
     monkeypatch.setattr(auth_mod, "_REAUTH_SECRET", "cors-test-secret-value")
 
     from fastapi.testclient import TestClient
+
     from src.main import app
 
     return TestClient(app)

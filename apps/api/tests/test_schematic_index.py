@@ -11,7 +11,7 @@ if str(_API_ROOT) not in sys.path:
 
 
 def test_schematic_index_scale():
-    from services.schematic_index import schematic_count, lookup_schematic
+    from services.schematic_index import lookup_schematic, schematic_count
 
     count = schematic_count()
     assert count >= 1_000_000, f"Expected 1M+ schematics, got {count}"

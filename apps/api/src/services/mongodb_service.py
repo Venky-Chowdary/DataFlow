@@ -6,9 +6,10 @@ Handles all MongoDB operations for persistence and data transfer
 from __future__ import annotations
 
 import os
-from pymongo import MongoClient
-from typing import Optional, Any
 from datetime import datetime, timezone
+from typing import Any, Optional
+
+from pymongo import MongoClient
 
 
 def _as_object_id(job_id: str):
@@ -203,7 +204,10 @@ class MongoDBService:
         """Build MongoClient from saved connector config (file store or platform MongoDB)."""
         from pymongo import MongoClient
 
-        from ..transfer.adapters import _lookup_saved_connector, mongodb_connection_string
+        from ..transfer.adapters import (
+            _lookup_saved_connector,
+            mongodb_connection_string,
+        )
 
         connector = _lookup_saved_connector(connector_id) or self.get_connector(connector_id)
         if not connector:
@@ -311,7 +315,12 @@ class MongoDBService:
         message = kwargs.get("message", "")
         if phase_label:
             try:
-                from services.job_phases import advance_phase, complete_phases, initial_phases, phase_from_engine_label
+                from services.job_phases import (
+                    advance_phase,
+                    complete_phases,
+                    initial_phases,
+                    phase_from_engine_label,
+                )
 
                 existing = collection.find_one({"_id": oid}, {"phases": 1})
                 phases = (existing or {}).get("phases") or initial_phases()
@@ -501,7 +510,12 @@ class MemoryMongoDBService:
         phase_label = kwargs.get("phase")
         if phase_label:
             try:
-                from services.job_phases import advance_phase, complete_phases, initial_phases, phase_from_engine_label
+                from services.job_phases import (
+                    advance_phase,
+                    complete_phases,
+                    initial_phases,
+                    phase_from_engine_label,
+                )
 
                 phases = rec.get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))

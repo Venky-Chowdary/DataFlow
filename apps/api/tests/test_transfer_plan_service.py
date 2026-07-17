@@ -2,8 +2,8 @@
 
 import pytest
 
-from services.transfer_plan_store import create_plan, get_plan
 from services.transfer_plan_service import patch_plan, sync_plan_mappings
+from services.transfer_plan_store import create_plan, get_plan
 
 
 @pytest.fixture(autouse=True)

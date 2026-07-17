@@ -37,6 +37,7 @@ def test_saved_connector_test_success_updates_card_status(monkeypatch, tmp_path:
     monkeypatch.setattr("src.transfer.connector_registry.run_probe", _fake_probe_ok)
 
     from fastapi.testclient import TestClient
+
     from src.main import app
 
     client = TestClient(app)

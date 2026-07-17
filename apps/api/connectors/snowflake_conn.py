@@ -63,8 +63,9 @@ def get_connection(
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
     if _is_local_account(kwargs["account"]):
-        import fakesnow
         import unittest.mock
+
+        import fakesnow
 
         # fakesnow cannot be nested, so reuse an active patch in this thread.
         already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)

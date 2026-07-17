@@ -39,6 +39,7 @@ def _missing_drivers() -> list[tuple[str, str, str]]:
 
 def _auto_install_enabled() -> bool:
     import os
+
     from services.platform_config import is_production
 
     default = "0" if is_production() else "1"

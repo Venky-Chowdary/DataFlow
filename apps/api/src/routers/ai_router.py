@@ -4,14 +4,16 @@ DataTransfer.space — AI API Router
 REST endpoints for AI semantic analysis capabilities.
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+
 from ..ai import (
+    ComplianceFramework,
     analyze_column,
     analyze_schema,
     generate_mappings,
-    ComplianceFramework,
 )
 
 router = APIRouter(prefix="/ai", tags=["AI Semantic Engine"])
