@@ -37,13 +37,22 @@
 .df2-docs-illustration {
   display: block;
   width: 100%;
-  max-width: 520px;
-  max-height: 260px;
+  max-width: min(720px, 100%);
+  max-height: none;
   height: auto;
   margin: 0 auto;
   border-radius: 12px;
   border: 1px solid var(--df-line, #e2e8f0);
   box-shadow: none;
+  object-fit: contain;
+}
+
+.df2-docs-architecture {
+  overflow: visible;
+}
+
+.df2-docs-architecture-svg {
+  max-height: none;
 }
 
 .df2-docs-arch-sub tspan {

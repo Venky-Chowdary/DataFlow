@@ -233,9 +233,48 @@
 }
 
 .df2-query-editor-hint {
-  margin-left: auto;
   font-size: 12px;
   color: var(--df-text-muted, #64748b);
+}
+
+.df2-query-editor-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.df2-query-editor-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--df-text-secondary, #475569);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.df2-query-editor-action:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-query-editor-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.df2-query-editor-action--clear:hover:not(:disabled) {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .df2-query-editor-wrap {
@@ -444,6 +483,7 @@
   white-space: pre !important;
   overflow: auto !important;
   tab-size: 2;
+  min-height: 16rem !important;
 }
 
 .df2-query-editor-wrap--powered .df2-query-editor-pre {
@@ -463,10 +503,10 @@
 
 .df2-query-editor-wrap--powered .df2-query-editor-textarea::placeholder {
   color: #64748b;
+  opacity: 1;
 }
 
 .df2-query-editor-dialect-pill {
-  margin-left: auto;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 10px;

@@ -35,16 +35,15 @@
   padding: 0 !important;
 }
 
-.df2-content-flush .df2-page-pilot > .df2-page-body > .df2-page-workspace,
 .df2-content-flush .df2-pilot-workspace.df2-pilot-v2 {
   flex: 1 1 0 !important;
   min-height: 0 !important;
-  height: 100% !important;
+  height: auto !important;
   display: flex !important;
   flex-direction: column !important;
   gap: 0 !important;
   overflow: hidden !important;
-  background: #f8fafc;
+  background: #fff;
   border: none;
   padding: 0;
 }
@@ -143,11 +142,20 @@
   flex-direction: column !important;
 }
 
-.df2-pilot-v2 .df2-pilot-main-inner,
-.df2-pilot-v2 .df2-pilot-thread {
+.df2-pilot-v2 .df2-pilot-main-scroll {
   flex: 1 1 0 !important;
   min-height: 0 !important;
   overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.df2-pilot-v2 .df2-pilot-main-inner,
+.df2-pilot-v2 .df2-pilot-thread {
+  flex: 0 0 auto !important;
+  min-height: 0 !important;
+  overflow: visible !important;
 }
 
 .df2-pilot-v2 .df2-pilot-title {
@@ -173,7 +181,7 @@
 
 .df2-pilot-v2 .df2-pilot-idea:hover {
   border-color: rgba(15, 118, 110, 0.4);
-  box-shadow: var(--df-shadow-sm);
+  box-shadow: none;
 }
 
 .df2-pilot-v2 .df2-pilot-composer-bar {
@@ -1397,7 +1405,7 @@
 }
 
 .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
-  padding-top: 16px !important;
+  padding-top: 0 !important;
 }
 
 .df2-content-inner.df2-content-studio {
@@ -1426,7 +1434,8 @@
   padding: 8px 12px;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: 12px;
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  background: #fff;
+  box-shadow: none;
   box-sizing: border-box;
 }
 
@@ -1470,9 +1479,9 @@
   border-radius: 9px;
   background: #fff;
   color: var(--df-text-muted, #64748b);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  box-shadow: none;
   box-sizing: border-box;
-  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease;
   cursor: text;
 }
 
@@ -1698,19 +1707,58 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .df2-catalog-filter-row .df2-filter-bar {
-  flex: 1 1 auto;
-  min-width: min(100%, 520px);
+  flex: 0 1 auto;
+  min-width: min(100%, 420px);
   max-width: 100%;
 }
 
-.df2-catalog-filter-row .df2-search {
+.df2-catalog-filter-row .df2-search,
+.df2-catalog-filter-row .df2-toolbar-search,
+.df2-catalog-filter-row .df2-catalog-search {
   flex: 1 1 240px;
   min-width: 200px;
-  max-width: 360px;
+  max-width: 280px;
+  width: min(280px, 100%);
+  margin-bottom: 0;
+}
+
+.df2-catalog-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-catalog-main .df2-search {
+  margin-bottom: 0;
+}
+
+.df2-catalog-meta {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--df-text-secondary, #64748b);
+}
+
+.df2-catalog-empty {
+  margin: 0;
+  font-size: 14px;
+  color: var(--df-text-secondary, #64748b);
+}
+
+.df2-connectors-catalog {
+  padding: 4px 0 16px;
+}
+
+.df2-connectors-catalog .df2-catalog-layout {
+  width: 100%;
+}
+
+.df2-connectors-catalog .df2-connector-grid {
+  width: 100%;
 }
 .df2-toolbar .df2-btn,
 .df2-toolbar .df2-btn.df2-btn-sm {
@@ -1924,32 +1972,14 @@
 }
 
 .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
-  padding-top: 12px !important;
+  padding-top: 0 !important;
 }
 
-/* Pilot: scroll area + pinned composer */
-.df2-pilot-v2 .df2-pilot-main {
-  display: flex !important;
-  flex-direction: column !important;
-  min-height: 0 !important;
-  overflow: hidden !important;
-}
-
-.df2-pilot-v2 .df2-pilot-main-scroll {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-}
-
-.df2-pilot-v2 .df2-pilot-main-inner {
-  padding-bottom: 8px !important;
-}
-
+/* Pilot: pinned composer — scroll lives on .df2-pilot-main-scroll only */
 .df2-pilot-v2 .df2-pilot-composer-sticky {
   flex: 0 0 auto !important;
   margin: 0 !important;
-  padding: 12px 24px 20px !important;
+  padding: 10px 24px 16px !important;
   border-top: 1px solid var(--df-border, #e5e7eb);
   background: #fff !important;
   z-index: 3;
@@ -1959,6 +1989,7 @@
   margin: 0 auto !important;
   max-width: 720px;
   width: 100%;
+  box-shadow: none !important;
 }
 
 /* MCP endpoint card */
@@ -4512,7 +4543,7 @@
   background: #fff;
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: var(--df-radius-panel, 12px);
-  box-shadow: var(--df-shadow-xs);
+  box-shadow: none;
   padding: 18px;
 }
 
@@ -4526,7 +4557,7 @@
   font-weight: 700;
 }
 
-/* Remaining authenticated pages — shared calm canvas */
+/* Remaining authenticated pages — same flat white canvas as Overview */
 .df2-page-pipelines,
 .df2-page-query,
 .df2-page-pilot,
@@ -4535,10 +4566,9 @@
 .df2-page-benchmarks,
 .df2-page-settings,
 .df2-page-connectors,
-.df2-page-jobs {
-  background:
-    radial-gradient(720px 260px at 0% 0%, rgba(13, 148, 136, 0.035), transparent 55%),
-    var(--df-bg-canvas, #f4f6f8);
+.df2-page-jobs,
+.df2-page-schedules {
+  background: transparent;
 }
 
 .df2-page-pipelines .df2-glass-panel,
@@ -4549,7 +4579,7 @@
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: var(--df-radius-panel, 12px);
   background: #fff;
-  box-shadow: var(--df-shadow-xs);
+  box-shadow: none;
 }
 
 /* Login — align with product brand */
@@ -4764,25 +4794,6 @@
   max-width: 100%;
 }
 
-.df2-toolbar {
-  flex-wrap: wrap;
-  height: auto !important;
-  min-height: var(--df-toolbar-h, 36px);
-  max-height: none !important;
-  padding-block: 8px;
-  gap: 8px;
-}
-
-.df2-toolbar-start,
-.df2-toolbar-center,
-.df2-toolbar-end,
-.df2-toolbar-filters {
-  flex-wrap: wrap;
-  min-width: 0;
-  height: auto !important;
-  max-height: none !important;
-}
-
 /* Topbar — keep actions from crushing search */
 .df2-topbar-left {
   flex-wrap: wrap;
@@ -4967,7 +4978,7 @@
 /* ─── Overview v3 — analytics dashboard (shell owns navigation) ─── */
 
 .df2-page-overview-v3 {
-  background: var(--df-bg-canvas, #f4f6f8);
+  background: transparent;
 }
 
 .df2-overview-v3 {
@@ -5434,5 +5445,144 @@
 .df2-jobs-v3-failure-message {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   App page canvas — flat surfaces, matched radii, no shadow bleed
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-app .df2-toolbar,
+.df2-app .df2-page-section-card,
+.df2-app .df2-card.df2-page-section-card {
+  box-shadow: none !important;
+  border-radius: 12px;
+}
+
+.df2-app .df2-page-section-card,
+.df2-app .df2-card.df2-page-section-card {
+  overflow: visible;
+}
+
+.df2-app .df2-section-body {
+  overflow: visible;
+}
+
+.df2-toolbar-filters .df2-filter-bar-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+  min-height: var(--df-toolbar-h, 36px);
+}
+
+.df2-catalog-search {
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   FLUSH PAGE SURFACE — one equal white page, no inner frame/gap
+   No wrapper shadow. No per-card square shadows.
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-app .df2-content {
+  background: #fff;
+}
+
+.df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
+  padding: 0 !important;
+  background: #fff;
+}
+
+.df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) > .df2-screen-panel {
+  background: transparent;
+  border: none !important;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  box-shadow: none !important;
+  filter: none !important;
+  overflow: visible;
+}
+
+.df2-app .df2-content-inner.df2-content-document > .df2-screen-panel,
+.df2-app .df2-content-inner.df2-content-viewport > .df2-screen-panel {
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0;
+}
+
+/* Same canvas on every page — no gray inset behind cards */
+.df2-app .df2-page-overview-v3,
+.df2-app .df2-screen-panel .df2-page-workspace {
+  background: transparent;
+  box-shadow: none !important;
+}
+
+/* Zero drop shadows on workspace surfaces (floating UI excluded below) */
+.df2-app .df2-screen-panel :is(
+  .df2-card,
+  .df2-stat,
+  .df2-ops-card,
+  .df2-rail-panel,
+  .df2-policy-option,
+  .df2-pipeline,
+  .df2-mcp-tile,
+  .df2-job-item,
+  .df2-table-wrap,
+  .df2-glass-panel,
+  .df2-glass-panel-deep,
+  .df2-overview-v3-card,
+  .df2-chart-panel,
+  .df2-toolbar,
+  .df2-mcp-panel,
+  .df2-settings-section,
+  .df2-connectors-feature-card,
+  .df2-connector-card,
+  .df2-pipeline-card,
+  .df2-metric-glass,
+  .df2-control-metric,
+  .df2-empty-page,
+  .df2-query-editor-shell,
+  .df2-preflight,
+  .df2-glance-tile,
+  .df2-docs-panel,
+  .df2-cadence-tile,
+  .df2-dest-connector-card,
+  .df2-connector-tile,
+  .df2-page-section,
+  .df2-page-section-card,
+  .df2-connection-panel,
+  .df2-transfer-panel,
+  .df2-topology-card,
+  .df2-settings-panel,
+  .df2-mcp-endpoint-card,
+  .df2-pilot-status-bar,
+  .df2-overview-kpis .df2-stat
+),
+.df2-app .df2-screen-panel [class*="df2-"][class*="-card"] {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.df2-app .df2-screen-panel :is(
+  .df2-card,
+  .df2-stat,
+  .df2-glance-tile,
+  .df2-pipeline-card,
+  .df2-connector-card,
+  .df2-metric-glass,
+  .df2-glass-panel,
+  .df2-glass-panel-deep,
+  .df2-cadence-tile,
+  .df2-connector-tile,
+  .df2-pipeline-card,
+  .df2-overview-v3-card,
+  .df2-chart-panel,
+  .df2-mcp-tile,
+  .df2-job-item
+):hover,
+.df2-app .df2-screen-panel [class*="df2-"][class*="-card"]:hover {
+  box-shadow: none !important;
+  transform: none;
 }
 

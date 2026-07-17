@@ -7,6 +7,7 @@ import { CadenceTiles } from "../components/ui/CadenceTiles";
 import { EmptyState } from "../components/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
+import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -183,7 +184,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
           searchPlaceholder="Search pipelines by name, table, or cadence…"
           filters={
             schedules.length > 0 ? (
-              <>
+              <FilterBar variant="inline" ariaLabel="Filter pipelines">
                 {showForm ? (
                   <span className="df2-toolbar-status" role="status">
                     Creating pipeline
@@ -200,7 +201,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
                     { id: "paused", label: "Paused", count: pausedCount },
                   ]}
                 />
-              </>
+              </FilterBar>
             ) : showForm ? (
               <span className="df2-toolbar-status" role="status">
                 Creating your first pipeline
@@ -213,7 +214,6 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
                 size="sm"
                 variant="primary"
                 onClick={() => setShowForm(true)}
-                leadingIcon={<DtIcon name="plus" size={14} />}
               >
                 New pipeline
               </Button>
@@ -301,7 +301,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
             action={
               !showForm ? (
                 <Button variant="primary" onClick={() => setShowForm(true)}>
-                  <DtIcon name="plus" size={14} /> Create pipeline
+                  Create pipeline
                 </Button>
               ) : undefined
             }

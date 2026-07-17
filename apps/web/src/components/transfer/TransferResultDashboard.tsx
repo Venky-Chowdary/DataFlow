@@ -334,7 +334,7 @@ export function TransferResultDashboard({
 
       <div className="df2-result-actions">
         <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
-          <DtIcon name="plus" size={14} /> New transfer
+          New transfer
         </button>
         {onViewJobs && (
           <button type="button" className="df2-btn" onClick={onViewJobs}>

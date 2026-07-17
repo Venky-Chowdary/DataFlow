@@ -5,12 +5,13 @@
 }
 
 .df2-page-benchmarks-workspace {
-  max-width: 1100px;
+  width: 100%;
+  max-width: none;
 }
 
 .df2-page-benchmarks .df2-page-section-card {
-  max-width: 1100px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
 }
 
 .df2-page-benchmarks-intro {

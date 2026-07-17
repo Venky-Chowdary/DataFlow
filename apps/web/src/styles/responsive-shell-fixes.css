@@ -121,28 +121,52 @@
 }
 
 /* Pilot / flush screens need the same flex chain or the page collapses */
+
+/* ─── Pilot: single scroll surface, stable viewport ─── */
+.df2-main .df2-content {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: clip;
+}
+
+.df2-main .df2-content:has(.df2-content-flush),
+.df2-main .df2-content:has(.df2-content-studio) {
+  overflow: hidden !important;
+}
+
+.df2-content-inner.df2-content-flush {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: none !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+}
+
 .df2-content-flush > .df2-screen-panel {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-/* ─── Pilot: single scroll surface, stable viewport ─── */
-.df2-content-inner.df2-content-flush {
-  height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
-  max-height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
-  overflow: hidden !important;
+.df2-content-flush .df2-screen-keep.is-active {
+  flex: 1 1 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  overflow: hidden;
 }
 
 .df2-content-flush .df2-page-pilot {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
-  height: 100%;
+  height: auto;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -154,7 +178,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
 }
 
 .df2-pilot-status-bar {
@@ -264,12 +288,13 @@
 
 /* ─── Transfer Studio: fill viewport and scroll step content ─── */
 .df2-content-inner.df2-content-studio {
-  height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
-  max-height: calc(var(--df-viewport-h) - var(--df-header-height)) !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: none !important;
   overflow: hidden !important;
   display: flex;
   flex-direction: column;
-  min-height: 0;
 }
 
 .df2-content-studio > .df2-screen-panel {

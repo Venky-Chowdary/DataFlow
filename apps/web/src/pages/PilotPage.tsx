@@ -280,7 +280,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               )}
 
               <div className="df2-pilot-ideas">
-                {ideas.slice(0, 6).map((idea) => (
+                {ideas.slice(0, 4).map((idea) => (
                   <button key={idea.id} type="button" className="df2-pilot-idea" onClick={() => send(idea.prompt)}>
                     <span className="df2-pilot-idea-cat">{idea.category.replace("_", " ")}</span>
                     <span className="df2-pilot-idea-title">{idea.title}</span>

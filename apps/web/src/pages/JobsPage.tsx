@@ -7,6 +7,7 @@ import { EmptyState } from "../components/EmptyState";
 import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
@@ -212,17 +213,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
               onSearchChange={setJobSearch}
               searchPlaceholder="Search route, type, status, job id…"
               filters={
-                <FilterTabs
-                  ariaLabel="Filter jobs by status"
-                  value={filter}
-                  onChange={setFilter}
-                  items={([
-                    { id: "all", label: "All", count: counts.all },
-                    { id: "running", label: "Running", count: counts.running },
-                    { id: "completed", label: "Completed", count: counts.completed },
-                    { id: "failed", label: "Failed", count: counts.failed },
-                  ] as const)}
-                />
+                <FilterBar variant="inline" ariaLabel="Filter jobs by status">
+                  <FilterTabs
+                    ariaLabel="Filter jobs by status"
+                    value={filter}
+                    onChange={setFilter}
+                    items={([
+                      { id: "all", label: "All", count: counts.all },
+                      { id: "running", label: "Running", count: counts.running },
+                      { id: "completed", label: "Completed", count: counts.completed },
+                      { id: "failed", label: "Failed", count: counts.failed },
+                    ] as const)}
+                  />
+                </FilterBar>
               }
               actions={
                 onRefresh ? (

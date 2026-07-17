@@ -51,7 +51,13 @@ function ArchitectureDiagram() {
 
   return (
     <div className="df2-docs-architecture" aria-label="DataFlow architecture diagram">
-      <svg viewBox={`0 0 ${width} ${height}`} className="df2-docs-architecture-svg" role="img" aria-label="Data pipeline flow">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="df2-docs-architecture-svg"
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-label="Data pipeline flow"
+      >
         <defs>
           <marker id="df2-docs-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
             <path d="M0,0 L0,6 L9,3 z" fill="var(--df-brand, #2563eb)" />

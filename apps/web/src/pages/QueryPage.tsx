@@ -163,12 +163,19 @@ export function QueryPage({ connectors }: QueryPageProps) {
               connectorType={selected?.type}
               placeholder={queryPlaceholder}
               disabled={queryLoading || exportLoading}
-              height="18rem"
+              height="22rem"
             />
             <p className="df2-label-hint">SQL mode supports SELECT, CTEs (WITH), EXPLAIN, SHOW, and subqueries. MongoDB mode accepts a JSON filter or an aggregate pipeline array.</p>
           </div>
 
           <div className="df2-query-actions">
+            <Button
+              variant="secondary"
+              disabled={queryLoading || exportLoading || !query.trim()}
+              onClick={() => setQuery("")}
+            >
+              Clear query
+            </Button>
             <Button
               variant="primary"
               loading={queryLoading}

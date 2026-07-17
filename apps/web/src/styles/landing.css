@@ -25,7 +25,8 @@
   color: var(--lp-ink);
   font-family: var(--lp-font);
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
+  overflow-x: clip;
+  overflow-y: visible;
 }
 
 .lp * { box-sizing: border-box; }
@@ -2729,10 +2730,19 @@
   min-height: 60px;
 }
 
-/* ─── Subpages: flat cards — reserve depth/shadow for home landing only ─── */
+/* ─── Subpages: flat cards, flush page — no inner frame or card shadows ─── */
 .lp.lp-subpage {
-  background: #f8fafb;
+  background: #fff;
   --lp-card-shadow: none;
+}
+
+.lp.lp-subpage .lp-mkt-page {
+  margin: 0;
+  background: #fff;
+  border: none;
+  border-radius: 0;
+  box-shadow: none !important;
+  overflow: visible;
 }
 
 .lp.lp-subpage .lp-mkt-hero-band {

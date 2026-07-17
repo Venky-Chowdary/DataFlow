@@ -5,8 +5,11 @@
   flex-direction: column;
   gap: 0;
   padding: 0;
-  background: #f8fafc;
+  background: #fff;
   border: none;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: hidden;
 }
 
 .df2-pilot-v2 .df2-pilot-status-bar {
@@ -54,30 +57,39 @@
 
 .df2-pilot-v2 .df2-pilot-main-inner {
   flex: 1;
-  overflow-y: auto;
-  padding: 24px 24px 0;
-  max-width: 900px;
+  overflow: visible;
+  padding: 12px 24px 8px;
+  max-width: 768px;
   margin: 0 auto;
   width: 100%;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
+  justify-content: center;
+  gap: 12px;
+  min-height: min(100%, 100%);
+  box-sizing: border-box;
 }
 
 .df2-pilot-v2 .df2-pilot-hero {
   text-align: center;
-  margin: 0 0 24px;
+  margin: 0;
 }
 
 .df2-pilot-v2 .df2-pilot-title {
-  font-size: 26px;
-  margin-bottom: 6px;
+  font-size: 22px;
+  margin-bottom: 4px;
+  line-height: 1.25;
 }
 
 .df2-pilot-v2 .df2-pilot-subtitle {
-  font-size: 14px;
-  max-width: 520px;
+  font-size: 13px;
+  max-width: 480px;
   margin: 0 auto;
+  line-height: 1.45;
+}
+
+.df2-pilot-v2 .df2-pilot-hero-icon {
+  margin-bottom: 8px;
 }
 
 .df2-pilot-v2 .df2-pilot-categories {
@@ -102,9 +114,9 @@
   border: 1px solid #e2e8f0;
   border-radius: 16px;
   background: #fff;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+  box-shadow: none;
   max-width: 720px;
-  margin: auto auto 0 auto;
+  margin: 0 auto;
   width: 100%;
 }
 
@@ -152,22 +164,24 @@
 }
 
 .df2-pilot-v2 .df2-pilot-composer-sticky {
-  padding: 12px 24px 24px;
+  padding: 10px 24px 16px;
   border: none;
-  background: transparent;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
   flex-shrink: 0;
 }
 
 .df2-pilot-v2 .df2-pilot-thread {
-  flex: 1;
-  overflow-y: auto;
-  padding: 24px;
-  max-width: 900px;
+  flex: 0 0 auto;
+  overflow: visible;
+  padding: 16px 24px;
+  max-width: 768px;
   margin: 0 auto;
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  box-sizing: border-box;
 }
 
 .df2-pilot-v2 .df2-pilot-msg {
@@ -216,13 +230,22 @@
 
 .df2-pilot-v2 .df2-pilot-ideas {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
   margin-bottom: 0;
 }
 
 .df2-pilot-v2 .df2-pilot-idea {
-  padding: 12px;
+  padding: 10px 12px;
+}
+
+.df2-pilot-v2 .df2-pilot-idea-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .df2-pilot-v2 .df2-section-label {
@@ -284,13 +307,16 @@
   }
 }
 
-/* Full viewport chat layout — flex chain from the PageShell down to the scroll pane */
+/* Full viewport chat — flex chain, scroll only in message column */
 .df2-content-flush .df2-page-pilot.df2-page-fluid {
   display: flex;
   flex-direction: column;
   padding: 0;
-  height: 100%;
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .df2-content-flush .df2-page-pilot.df2-page-fluid > .df2-page-body {
@@ -299,26 +325,18 @@
   display: flex;
   flex-direction: column;
   padding: 0;
+  overflow: hidden;
 }
 
-.df2-pilot-workspace.df2-pilot-v2 {
+.df2-pilot-v2 .df2-pilot-main-scroll {
   flex: 1 1 0;
   min-height: 0;
-}
-
-.df2-pilot-v2 .df2-pilot-body {
-  flex: 1 1 0;
-  min-height: 0;
-}
-
-.df2-pilot-v2 .df2-pilot-main {
-  flex: 1 1 0;
-  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .df2-pilot-v2 .df2-pilot-main-inner,
 .df2-pilot-v2 .df2-pilot-thread {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
 }

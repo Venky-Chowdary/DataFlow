@@ -5,6 +5,7 @@ import { EmptyState } from "../components/EmptyState";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
+import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
@@ -160,7 +161,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
           searchPlaceholder="Search saved connections…"
           filters={
-            <>
+            <FilterBar variant="inline" ariaLabel="Connector page filters">
               <FilterTabs
                 ariaLabel="Connector views"
                 value={tab}
@@ -194,7 +195,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                   ]}
                 />
               )}
-            </>
+            </FilterBar>
           }
           actions={
             <>
@@ -214,7 +215,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 size="sm"
                 variant="primary"
                 onClick={() => onAdd()}
-                leadingIcon={<DtIcon name="plus" size={14} />}
               >
                 New connection
               </Button>
@@ -237,7 +237,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                         <DtIcon name="search" size={14} /> Browse catalog
                       </button>
                       <button type="button" className="df2-btn df2-btn-ghost" onClick={() => onAdd()}>
-                        <DtIcon name="plus" size={14} /> Add connection
+                        Add connection
                       </button>
                     </div>
                   }
@@ -299,12 +299,8 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
             </div>
             )
           ) : (
-            <div className="df2-connectors-pane">
-              <div className="df2-card">
-                <div className="df2-card-body">
-                  <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
-                </div>
-              </div>
+            <div className="df2-connectors-pane df2-connectors-catalog">
+              <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
             </div>
           )}
         </div>

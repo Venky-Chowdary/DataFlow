@@ -256,8 +256,17 @@ function AppShell({
 
   useEffect(() => {
     const scrollHost = document.querySelector<HTMLElement>(".df2-content");
-    scrollHost?.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" } as ScrollToOptions);
-  }, [screen]);
+    if (!scrollHost) return;
+
+    scrollHost.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" } as ScrollToOptions);
+
+    // Force scroll host to recognize content height after route / keep-alive swap
+    const raf = window.requestAnimationFrame(() => {
+      scrollHost.style.overflowY = "auto";
+      void scrollHost.offsetHeight;
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [screen, bootLoading]);
 
   const showCopilotRail = screen !== "pilot" && copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
@@ -420,7 +429,6 @@ function AppShell({
               <Button
                 variant="primary"
                 onClick={() => setScreen("transfer")}
-                leadingIcon={<DtIcon name="plus" size={16} />}
               >
                 <span className="df2-topbar-btn-text">New transfer</span>
               </Button>
@@ -544,15 +552,19 @@ function AppShell({
                 </PageErrorBoundary>
                 </div>
               )}
-              {screen === "docs" && (
+              {mountedScreens.has("docs") && (
+                <div className={`df2-screen-keep ${showScreen("docs")}`} hidden={screen !== "docs"} aria-hidden={screen !== "docs"}>
                 <PageErrorBoundary label="Docs">
                   <DocsPage />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "benchmarks" && (
+              {mountedScreens.has("benchmarks") && (
+                <div className={`df2-screen-keep ${showScreen("benchmarks")}`} hidden={screen !== "benchmarks"} aria-hidden={screen !== "benchmarks"}>
                 <PageErrorBoundary label="Benchmarks">
                   <BenchmarksPage />
                 </PageErrorBoundary>
+                </div>
               )}
               {mountedScreens.has("settings") && (
                 <div className={`df2-screen-keep ${showScreen("settings")}`} hidden={screen !== "settings"} aria-hidden={screen !== "settings"}>
