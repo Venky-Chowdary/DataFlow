@@ -163,10 +163,31 @@ def _profile_key(source: dict[str, Any], destination: dict[str, Any]) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
+def _profile_collection():
+    """Return the MongoDB quality_profiles collection if available."""
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        mongo = get_mongodb_service()
+        if mongo and getattr(mongo, "client", None) and type(mongo).__name__ != "MemoryMongoDBService":
+            return mongo.get_database().get("quality_profiles")
+    except Exception:
+        pass
+    return None
+
+
 def _profile_path(key: str) -> Path:
     base = data_dir() / "quality_profiles"
     base.mkdir(parents=True, exist_ok=True)
     return base / f"{key}.json"
+
+
+def _serialize_profile(profile: dict[str, ColumnProfile]) -> dict[str, Any]:
+    return {name: asdict(col) for name, col in profile.items()}
+
+
+def _deserialize_profile(data: dict[str, Any]) -> dict[str, ColumnProfile]:
+    return {name: ColumnProfile(**col) for name, col in data.items()}
 
 
 def load_historical_profile(
@@ -174,12 +195,22 @@ def load_historical_profile(
     destination: dict[str, Any],
 ) -> dict[str, ColumnProfile] | None:
     """Load the most recent saved profile for a source/destination route."""
-    path = _profile_path(_profile_key(source, destination))
+    key = _profile_key(source, destination)
+    coll = _profile_collection()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": key}, sort=[("captured_at", -1)])
+            if doc:
+                return _deserialize_profile(doc.get("columns", {}))
+        except Exception:
+            pass
+
+    path = _profile_path(key)
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return {name: ColumnProfile(**col) for name, col in data.get("columns", {}).items()}
+        return _deserialize_profile(data.get("columns", {}))
     except Exception:
         return None
 
@@ -189,12 +220,22 @@ def save_profile(
     destination: dict[str, Any],
     profile: dict[str, ColumnProfile],
 ) -> None:
-    """Persist a profile as the new baseline."""
+    """Persist a profile as the new baseline in MongoDB (preferred) or local file."""
+    key = _profile_key(source, destination)
     payload = {
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "columns": {name: asdict(col) for name, col in profile.items()},
+        "columns": _serialize_profile(profile),
     }
-    write_json_atomic(_profile_path(_profile_key(source, destination)), payload, default=str)
+
+    coll = _profile_collection()
+    if coll is not None:
+        try:
+            coll.replace_one({"_id": key}, {"_id": key, **payload}, upsert=True)
+            return
+        except Exception:
+            pass
+
+    write_json_atomic(_profile_path(key), payload, default=str)
 
 
 def detect_anomalies(
