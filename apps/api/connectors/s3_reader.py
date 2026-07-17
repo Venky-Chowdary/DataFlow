@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.aws_common import boto3_client
-from services.object_streaming import download_object, read_rows_from_spill
+from services.object_streaming import download_for_object_store, download_object, read_rows_from_spill
 
 
 @dataclass
@@ -17,15 +17,6 @@ class ReadBatch:
     rows: list[list[str]]
     offset: int = 0
     total_rows: int = 0
-
-
-def _download_s3_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
-    client = boto3_client("s3", cfg)
-    obj = client.get_object(Bucket=bucket, Key=key)
-    with open(path, "wb") as f:
-        for chunk in obj["Body"].iter_chunks(chunk_size=8 * 1024 * 1024):
-            if chunk:
-                f.write(chunk)
 
 
 def read_object(
@@ -38,7 +29,10 @@ def read_object(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     cache_key = f"s3:{bucket}:{key}"
-    path = download_object(cache_key, lambda p: _download_s3_object(p, cfg, bucket, key))
+    path = download_object(
+        cache_key,
+        lambda p: download_for_object_store("s3", p, cfg, bucket, key),
+    )
     headers, rows, total = read_rows_from_spill(
         path,
         key,

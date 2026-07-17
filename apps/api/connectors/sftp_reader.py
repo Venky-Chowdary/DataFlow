@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
-from services.object_streaming import download_object, read_rows_from_spill
+from services.object_streaming import download_for_object_store, download_object, read_rows_from_spill
 
 
 @dataclass
@@ -17,29 +17,6 @@ class ReadBatch:
     rows: list[list[str]]
     offset: int = 0
     total_rows: int = 0
-
-
-def _download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
-    sftp_cfg = parse_sftp_config(**cfg)
-    if not sftp_cfg.host:
-        raise ValueError("SFTP host is required")
-    if not sftp_cfg.path:
-        if bucket and key:
-            sftp_cfg.path = f"{bucket.rstrip('/')}/{key.lstrip('/')}"
-        else:
-            raise ValueError("SFTP remote path is required (connection_string, database, or table)")
-
-    directory, filename = split_remote_path(sftp_cfg.path)
-    remote_path = sftp_cfg.path if directory else f"/{filename}"
-    remote_name = filename or sftp_cfg.path
-
-    transport, sftp = connect_sftp(sftp_cfg)
-    try:
-        with open(path, "wb") as f:
-            sftp.getfo(remote_path, f)
-    finally:
-        sftp.close()
-        transport.close()
 
 
 def read_object(
@@ -64,7 +41,10 @@ def read_object(
     remote_name = filename or sftp_cfg.path
 
     cache_key = f"sftp:{sftp_cfg.host}:{sftp_cfg.port}:{sftp_cfg.path}"
-    path = download_object(cache_key, lambda p: _download_sftp_object(p, cfg, bucket, key))
+    path = download_object(
+        cache_key,
+        lambda p: download_for_object_store("sftp", p, cfg, bucket, key),
+    )
     headers, rows, total = read_rows_from_spill(
         path,
         remote_name,

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.adls_common import blob_service_client
-from services.object_streaming import download_object, read_rows_from_spill
+from services.object_streaming import download_for_object_store, download_object, read_rows_from_spill
 
 
 @dataclass
@@ -18,15 +18,6 @@ class ReadBatch:
     rows: list[list[str]]
     offset: int = 0
     total_rows: int = 0
-
-
-def _download_adls_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
-    client = blob_service_client(cfg)
-    blob = client.get_blob_client(bucket, key)
-    with open(path, "wb") as f:
-        for chunk in blob.download_blob().chunks():
-            if chunk:
-                f.write(chunk)
 
 
 def read_object(
@@ -39,7 +30,10 @@ def read_object(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     cache_key = f"adls:{bucket}:{key}"
-    path = download_object(cache_key, lambda p: _download_adls_object(p, cfg, bucket, key))
+    path = download_object(
+        cache_key,
+        lambda p: download_for_object_store("adls", p, cfg, bucket, key),
+    )
     headers, rows, total = read_rows_from_spill(
         path,
         key,
