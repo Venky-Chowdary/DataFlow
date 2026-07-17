@@ -3,23 +3,10 @@
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
 from typing import Any
 
 from connectors.adls_common import blob_service_client
-from services.object_streaming import (
-    download_for_object_store,
-    download_object,
-    read_rows_from_spill,
-)
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int = 0
+from connectors.object_store_common import ReadBatch, read_object_from_store
 
 
 def read_object(
@@ -31,19 +18,9 @@ def read_object(
     limit: int = 500,
     known_total_rows: int | None = None,
 ) -> ReadBatch:
-    cache_key = f"adls:{bucket}:{key}"
-    path = download_object(
-        cache_key,
-        lambda p: download_for_object_store("adls", p, cfg, bucket, key),
+    return read_object_from_store(
+        "adls", cfg, bucket, key, offset=offset, limit=limit, known_total_rows=known_total_rows
     )
-    headers, rows, total = read_rows_from_spill(
-        path,
-        key,
-        offset=offset,
-        limit=limit,
-        known_total=known_total_rows,
-    )
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
