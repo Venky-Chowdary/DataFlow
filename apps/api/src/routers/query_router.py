@@ -9,7 +9,10 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from connectors.mongodb_common import normalize_mongodb_connection_string
+from connectors.mongodb_common import (
+    mongodb_database_from_uri,
+    normalize_mongodb_connection_string,
+)
 from services import connector_store
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -303,7 +306,7 @@ def _run_mongodb_query(connector, body):
 
     conn_str = connector.connection_string or _build_mongodb_connection_string(connector)
     client = pymongo.MongoClient(conn_str)
-    db_name = body.database or connector.database or "test"
+    db_name = body.database or connector.database or mongodb_database_from_uri(conn_str) or "test"
     db = client[db_name]
     coll_name = body.collection or "data"
     coll = db[coll_name]
