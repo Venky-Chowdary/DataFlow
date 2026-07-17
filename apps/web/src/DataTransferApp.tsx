@@ -16,7 +16,7 @@ import { clearSession, readSession, writeSession } from "./lib/session";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
-import { LandingPage } from "./pages/LandingPage";
+import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PilotPage } from "./pages/PilotPage";
 import { TransferPage } from "./pages/TransferPage";
@@ -30,24 +30,33 @@ import { DocsPage } from "./pages/DocsPage";
 import { BenchmarksPage } from "./pages/BenchmarksPage";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
-import { metaForLogin, metaForScreen } from "./lib/seo";
-import { usePageMeta } from "./lib/usePageMeta";
 import { readAppHash, writeAppHash } from "./lib/appNavigation";
+import {
+  PUBLIC_PAGE_META,
+  publicRouteFromHash,
+  type PublicRoute,
+  writePublicHash,
+} from "./lib/publicNavigation";
 import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
+import { usePageMeta } from "./lib/usePageMeta";
+import { metaForLogin, metaForScreen } from "./lib/seo";
 
-const NAV: { id: Screen; label: string; icon: string; desc: string }[] = [
-  { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology" },
-  { id: "transfer", label: "Transfer Studio", icon: "transfer", desc: "Move any data anywhere" },
-  { id: "query", label: "Query", icon: "search", desc: "Run and export ad-hoc queries" },
-  { id: "pilot", label: "Data Pilot", icon: "sparkle", desc: "AI agent · natural language" },
-  { id: "connectors", label: "Connectors", icon: "connectors", desc: "Sources & destinations" },
-  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs" },
-  { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress" },
-  { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code" },
-  { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works" },
-  { id: "benchmarks", label: "Benchmarks", icon: "speed", desc: "Scale proofs vs Fivetran & Airbyte" },
-  { id: "settings", label: "Settings", icon: "settings", desc: "Security & team" },
+const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "developers" }[] = [
+  { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology", group: "platform" },
+  { id: "transfer", label: "Transfer Studio", icon: "transfer", desc: "Move any data anywhere", group: "platform" },
+  { id: "query", label: "Query", icon: "search", desc: "Run and export ad-hoc queries", group: "platform" },
+  { id: "pilot", label: "Data Pilot", icon: "sparkle", desc: "AI agent · natural language", group: "platform" },
+  { id: "connectors", label: "Connectors", icon: "connectors", desc: "Sources & destinations", group: "platform" },
+  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs", group: "platform" },
+  { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress", group: "platform" },
+  { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code", group: "developers" },
+  { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works", group: "developers" },
+  { id: "benchmarks", label: "Benchmarks", icon: "speed", desc: "Scale proofs vs Fivetran & Airbyte", group: "developers" },
+  { id: "settings", label: "Settings", icon: "settings", desc: "Security & team", group: "developers" },
 ];
+
+const PLATFORM_NAV = NAV.filter((item) => item.group === "platform");
+const DEVELOPER_NAV = NAV.filter((item) => item.group === "developers");
 
 function readStoredUser() {
   return readSession()?.email ?? "";
@@ -236,6 +245,29 @@ function AppShell({
     setShowModal(true);
   };
 
+  const contentInnerClass =
+    screen === "pilot"
+      ? "df2-content-flush"
+      : screen === "transfer"
+        ? "df2-content-studio"
+        : screen === "jobs"
+          ? "df2-content-viewport"
+          : "df2-content-document";
+
+  useEffect(() => {
+    const scrollHost = document.querySelector<HTMLElement>(".df2-content");
+    if (!scrollHost) return;
+
+    scrollHost.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" } as ScrollToOptions);
+
+    // Force scroll host to recognize content height after route / keep-alive swap
+    const raf = window.requestAnimationFrame(() => {
+      scrollHost.style.overflowY = "auto";
+      void scrollHost.offsetHeight;
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [screen, bootLoading]);
+
   const showCopilotRail = screen !== "pilot" && copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
   const envLabel = apiEnvLabel(apiOnline);
@@ -251,8 +283,8 @@ function AppShell({
 
       <aside className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Main navigation">
         <div className="df2-sidebar-brand">
-          <DtLogo size={36} />
-          <div>
+          <DtLogo size={40} />
+          <div className="df2-sidebar-brand-copy">
             <div className="df2-brand-name">DataFlow</div>
             <div className="df2-brand-tag">Universal data platform</div>
           </div>
@@ -269,7 +301,7 @@ function AppShell({
 
         <nav className="df2-nav">
           <div className="df2-nav-group-label">Platform</div>
-          {NAV.slice(0, 6).map((item) => (
+          {PLATFORM_NAV.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -291,7 +323,7 @@ function AppShell({
           ))}
 
           <div className="df2-nav-group-label">Developers</div>
-          {NAV.slice(6).map((item) => (
+          {DEVELOPER_NAV.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -397,7 +429,6 @@ function AppShell({
               <Button
                 variant="primary"
                 onClick={() => setScreen("transfer")}
-                leadingIcon={<DtIcon name="plus" size={16} />}
               >
                 <span className="df2-topbar-btn-text">New transfer</span>
               </Button>
@@ -422,13 +453,7 @@ function AppShell({
           </div>
         )}
         <div
-          className={`df2-content-inner ${
-            screen === "pilot"
-              ? "df2-content-flush"
-              : screen === "transfer"
-                ? "df2-content-studio"
-                : "df2-content-fit"
-          } ${bootLoading ? "is-booting" : ""} ${firstScreenPaint ? "is-first-screen" : ""}`}
+          className={`df2-content-inner ${contentInnerClass} ${bootLoading ? "is-booting" : ""} ${firstScreenPaint ? "is-first-screen" : ""}`}
         >
           <div className="df2-screen-panel">
             {mountedScreens.has("dashboard") && (
@@ -527,15 +552,19 @@ function AppShell({
                 </PageErrorBoundary>
                 </div>
               )}
-              {screen === "docs" && (
+              {mountedScreens.has("docs") && (
+                <div className={`df2-screen-keep ${showScreen("docs")}`} hidden={screen !== "docs"} aria-hidden={screen !== "docs"}>
                 <PageErrorBoundary label="Docs">
                   <DocsPage />
                 </PageErrorBoundary>
+                </div>
               )}
-              {screen === "benchmarks" && (
+              {mountedScreens.has("benchmarks") && (
+                <div className={`df2-screen-keep ${showScreen("benchmarks")}`} hidden={screen !== "benchmarks"} aria-hidden={screen !== "benchmarks"}>
                 <PageErrorBoundary label="Benchmarks">
                   <BenchmarksPage />
                 </PageErrorBoundary>
+                </div>
               )}
               {mountedScreens.has("settings") && (
                 <div className={`df2-screen-keep ${showScreen("settings")}`} hidden={screen !== "settings"} aria-hidden={screen !== "settings"}>
@@ -569,7 +598,7 @@ function AppShell({
         />
       )}
 
-      {screen !== "pilot" && !copilotOpen && (
+      {screen !== "pilot" && screen !== "transfer" && !copilotOpen && (
         <button
           type="button"
           className="df2-copilot-fab"
@@ -609,9 +638,44 @@ export function DataTransferApp() {
 }
 
 function DataTransferAppInner() {
-  const [stage, setStage] = useState<"landing" | "login" | "app">(() => readStoredUser() ? "app" : "landing");
-  const [entryScreen, setEntryScreen] = useState<Screen>("dashboard");
+  const [stage, setStage] = useState<"landing" | "login" | "app">(() => {
+    if (readStoredUser()) return "app";
+    return "landing";
+  });
+  const [publicRoute, setPublicRoute] = useState<PublicRoute>(() => publicRouteFromHash(window.location.hash) ?? "home");
+  const [entryScreen, setEntryScreen] = useState<Screen>(() => readAppHash() ?? "dashboard");
   const [userEmail, setUserEmail] = useState(readStoredUser);
+
+  useEffect(() => {
+    const syncFromHash = () => {
+      const hash = window.location.hash;
+      const screen = readAppHash();
+      const pub = publicRouteFromHash(hash);
+      const session = readStoredUser();
+
+      if (session && screen) {
+        setEntryScreen(screen);
+        setStage("app");
+        return;
+      }
+      if (pub) {
+        setPublicRoute(pub);
+        setStage("landing");
+        return;
+      }
+      if (screen && !session) {
+        setEntryScreen(screen);
+        setStage("login");
+        return;
+      }
+      setPublicRoute("home");
+      setStage(session ? "app" : "landing");
+    };
+
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => window.removeEventListener("hashchange", syncFromHash);
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -642,6 +706,12 @@ function DataTransferAppInner() {
     setStage(userEmail ? "app" : "login");
   };
 
+  const navigatePublic = (route: PublicRoute) => {
+    setPublicRoute(route);
+    setStage("landing");
+    writePublicHash(route);
+  };
+
   const handleAuthenticated = (email: string) => {
     setUserEmail(email);
     writeAppHash(entryScreen, true);
@@ -652,11 +722,23 @@ function DataTransferAppInner() {
     clearSession();
     setUserEmail("");
     setEntryScreen("dashboard");
-    setStage("login");
+    setPublicRoute("home");
+    writePublicHash("home", true);
+    setStage("landing");
   };
 
+  const marketingMeta = PUBLIC_PAGE_META[publicRoute];
   const publicMeta =
-    stage === "landing" ? metaForScreen("landing") : stage === "login" ? metaForLogin() : metaForScreen("dashboard");
+    stage === "landing"
+      ? {
+          title: marketingMeta.title,
+          description: marketingMeta.description,
+          keywords: "DataFlow, data transfer, migration, ETL, Transfer Studio",
+          ogType: "website" as const,
+        }
+      : stage === "login"
+        ? metaForLogin()
+        : metaForScreen(entryScreen);
   usePageMeta(publicMeta);
 
   useEffect(() => {
@@ -668,19 +750,23 @@ function DataTransferAppInner() {
   return (
     <>
       {stage === "landing" && (
-      <LandingPage
-          onEnterApp={() => requestApp("dashboard")}
-          onStartTransfer={() => requestApp("transfer")}
-          onOpenPilot={() => requestApp("pilot")}
-          onOpenMcp={() => requestApp("mcp")}
-      />
+        <MarketingSite
+          route={publicRoute}
+          onNavigate={navigatePublic}
+          onLogin={() => requestApp("dashboard")}
+          onGetStarted={() => requestApp("transfer")}
+        />
       )}
 
       {stage === "login" && (
         <LoginPage
           target={entryScreen}
           onAuthenticated={handleAuthenticated}
-          onBack={() => setStage("landing")}
+          onBack={() => {
+            setPublicRoute("home");
+            writePublicHash("home", true);
+            setStage("landing");
+          }}
         />
       )}
 

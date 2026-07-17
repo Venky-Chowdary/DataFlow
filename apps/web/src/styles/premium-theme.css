@@ -299,13 +299,13 @@
 .df2-card {
   border-radius: var(--df-premium-radius);
   border: 1px solid var(--df-line);
-  box-shadow: var(--df-premium-shadow-sm);
-  transition: box-shadow 0.2s, border-color 0.2s;
+  box-shadow: none;
+  transition: border-color 0.2s;
   animation: df-premium-rise 0.5s var(--df-premium-ease) both;
 }
 
 .df2-card-elevated {
-  box-shadow: var(--df-premium-shadow-md);
+  box-shadow: none;
 }
 
 .df2-card:hover {
@@ -313,7 +313,8 @@
 }
 
 .df2-card-elevated:hover {
-  box-shadow: var(--df-premium-shadow-lg);
+  box-shadow: none;
+  border-color: #cbd5e1;
 }
 
 /* ─── Dashboard command center ─── */

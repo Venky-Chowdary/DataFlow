@@ -7,6 +7,7 @@ import { CadenceTiles } from "../components/ui/CadenceTiles";
 import { EmptyState } from "../components/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
+import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -168,46 +169,70 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
   };
 
   return (
-    <PageShell wide className="df2-page-pipelines" title="Pipelines">
+    <PageShell
+      wide
+      className="df2-page-pipelines"
+      title="Pipelines"
+      description="Schedule recurring syncs with the same governed transfer engine."
+    >
       <PageFrame className="df2-pipeline-page">
       {!loading && (
         <PageToolbar
+          className={showForm ? "df2-toolbar--creating" : ""}
           searchValue={schedules.length > 0 ? pipelineSearch : undefined}
-          onSearchChange={schedules.length > 0 ? setPipelineSearch : undefined}
+          onSearchChange={schedules.length > 0 && !showForm ? setPipelineSearch : undefined}
           searchPlaceholder="Search pipelines by name, table, or cadence…"
           filters={
             schedules.length > 0 ? (
-              <FilterTabs
-                ariaLabel="Filter pipelines"
-                value={filter}
-                onChange={setFilter}
-                items={[
-                  { id: "all", label: "All", count: schedules.length },
-                  { id: "active", label: "Active", count: enabledCount },
-                  { id: "paused", label: "Paused", count: pausedCount },
-                ]}
-              />
+              <FilterBar variant="inline" ariaLabel="Filter pipelines">
+                {showForm ? (
+                  <span className="df2-toolbar-status" role="status">
+                    Creating pipeline
+                  </span>
+                ) : null}
+                <FilterTabs
+                  ariaLabel="Filter pipelines"
+                  value={filter}
+                  onChange={setFilter}
+                  disabled={showForm}
+                  items={[
+                    { id: "all", label: "All", count: schedules.length },
+                    { id: "active", label: "Active", count: enabledCount },
+                    { id: "paused", label: "Paused", count: pausedCount },
+                  ]}
+                />
+              </FilterBar>
+            ) : showForm ? (
+              <span className="df2-toolbar-status" role="status">
+                Creating your first pipeline
+              </span>
             ) : undefined
           }
           actions={
-            <Button
-              size="sm"
-              variant={showForm ? "secondary" : "primary"}
-              onClick={() => setShowForm((v) => !v)}
-              leadingIcon={<DtIcon name={showForm ? "x" : "plus"} size={14} />}
-            >
-              {showForm ? "Cancel" : "New pipeline"}
-            </Button>
+            !showForm ? (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => setShowForm(true)}
+              >
+                New pipeline
+              </Button>
+            ) : undefined
           }
         />
       )}
 
       {showForm && (
-        <form className="df2-pipeline-form" onSubmit={handleCreate}>
+        <form className="df2-pipeline-form is-active" onSubmit={handleCreate}>
         <PageSection
           title="Create recurring sync"
           subtitle="Schedule source → destination with your saved connectors"
-          elevated
+          className="df2-pipeline-form-card"
+          actions={
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setShowForm(false)}>
+              Cancel
+            </button>
+          }
         >
             <div className="df2-field">
               <label className="df2-label" htmlFor="sched-name">Pipeline name</label>
@@ -265,17 +290,20 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
       <div className="df2-pipeline-workspace">
       {loading ? (
         <SectionLoader title="Loading pipelines" hint="Fetching scheduled syncs…" />
-      ) : (
+      ) : showForm && schedules.length === 0 ? null : (
       <div className="df2-pipeline-grid df2-pipeline-scroll">
         {schedules.length === 0 ? (
           <EmptyState
+            page
             icon="activity"
             title="No scheduled pipelines"
-            description="Create a recurring sync to keep source and destination in step."
+            description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
             action={
-              <Button variant="primary" onClick={() => setShowForm(true)}>
-                Create pipeline
-              </Button>
+              !showForm ? (
+                <Button variant="primary" onClick={() => setShowForm(true)}>
+                  Create pipeline
+                </Button>
+              ) : undefined
             }
           />
         ) : filteredSchedules.length === 0 ? (

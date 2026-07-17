@@ -4,12 +4,14 @@ const SCREENS: Screen[] = [
   "dashboard",
   "transfer",
   "pilot",
+  "query",
   "connectors",
   "schedules",
   "jobs",
   "mcp",
   "settings",
   "docs",
+  "benchmarks",
 ];
 
 export function screenFromHash(hash: string): Screen | null {

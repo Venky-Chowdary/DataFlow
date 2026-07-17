@@ -47,3 +47,93 @@
   font-size: 13px;
   color: var(--df-text-muted, #64748b);
 }
+
+/* ═══════════════════════════════════════════════════════════
+   CANONICAL FLAT WORKSPACE — final layer, all app pages match Overview
+   No square card shadows. One equal white surface. No inner frame.
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-app .df2-content,
+.df2-app .df2-content-inner,
+.df2-app .df2-content-inner > .df2-screen-panel {
+  background: #fff;
+}
+
+.df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
+  padding: 0 !important;
+}
+
+.df2-app .df2-content-inner > .df2-screen-panel {
+  border: none !important;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+/* Every authenticated page — same flat canvas (not only Overview) */
+.df2-app .df2-page,
+.df2-app [class*="df2-page-"] {
+  background: transparent;
+}
+
+/* Kill decorative drop shadows on all df2 blocks in main workspace */
+.df2-app .df2-main .df2-screen-panel [class*="df2-"]:not(.df2-btn):not(.df2-input):not(.df2-select):not(.df2-dropdown):not(.df2-modal):not(.df2-toast):not(.df2-popover):not(.df2-command-palette):not(.df2-nav-item):not(.df2-alert):not(.df2-toolbar-search):not(.df2-query-editor-textarea) {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.df2-app .df2-main .df2-screen-panel [class*="df2-"]:not(.df2-btn):not(.df2-input):not(.df2-select):not(.df2-dropdown):not(.df2-modal):not(.df2-toast):not(.df2-popover):not(.df2-command-palette):not(.df2-nav-item):not(.df2-alert):not(.df2-toolbar-search):not(.df2-query-editor-textarea):hover {
+  box-shadow: none !important;
+}
+
+/* Floating UI keeps elevation */
+.df2-app .df2-dropdown,
+.df2-app .df2-popover,
+.df2-app .df2-modal,
+.df2-app .df2-toast,
+.df2-app .df2-command-palette,
+.df2-app [role="menu"],
+.df2-app [role="listbox"] {
+  box-shadow: var(--df-shadow-md, 0 8px 24px rgba(15, 23, 42, 0.12)) !important;
+}
+
+/* Marketing sub-pages — flat like app (home landing keeps its own depth) */
+.lp.lp-subpage .lp-mkt-page,
+.lp.lp-subpage [class*="lp-mkt-"][class*="card"],
+.lp.lp-subpage .lp-mkt-feature-card,
+.lp.lp-subpage .lp-mkt-price-card,
+.lp.lp-subpage .lp-mkt-quote,
+.lp.lp-subpage .lp-trust-card,
+.lp.lp-subpage .lp-testimonial-card {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.lp.lp-subpage [class*="lp-mkt-"][class*="card"]:hover,
+.lp.lp-subpage .lp-mkt-feature-card:hover,
+.lp.lp-subpage .lp-mkt-price-card:hover {
+  box-shadow: none !important;
+  transform: none;
+}
+
+/* ═══ Data Pilot — ChatGPT-style viewport: NO page scroll ═══ */
+.df2-main .df2-content:has(.df2-content-flush) {
+  overflow: hidden !important;
+}
+
+.df2-content-flush .df2-page-pilot > .df2-page-body > .df2-page-workspace {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.df2-pilot-v2 .df2-pilot-main-scroll {
+  scrollbar-gutter: stable;
+}
+
+/* Hide scrollbar on empty hero when content fits (WebKit) */
+.df2-pilot-v2 .df2-pilot-main-scroll:not(:has(.df2-pilot-msg)) {
+  overflow-y: auto;
+}

@@ -8,6 +8,7 @@ import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTil
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
+import { FilterBar } from "../components/ui/FilterBar";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, Spinner } from "../components/LoadingState";
@@ -57,6 +58,9 @@ import {
   TransferResult,
   JobProgress,
 } from "../lib/types";
+import { parseCsvTextForPreview } from "../lib/csvPreview";
+import { runLocalFileExport } from "../lib/localFileExport";
+import { runLocalPreflight } from "../lib/localPreflight";
 
 interface TransferPageProps {
   connectors: Connector[];
@@ -835,7 +839,23 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setLlmMappingUsed(false);
     setUploading(true);
     try {
-      const data = await uploadFile(selected);
+      let data: ParsedUpload;
+      try {
+        data = await uploadFile(selected);
+      } catch (uploadErr) {
+        const ext = fileExtension(selected.name);
+        if (ext === "csv" || ext === "tsv") {
+          const text = await selected.text();
+          data = parseCsvTextForPreview(text);
+          toast({
+            title: "Profiled locally",
+            message: "API unavailable — preview uses browser parsing. Start the API for full preflight and write.",
+            tone: "warning",
+          });
+        } else {
+          throw uploadErr;
+        }
+      }
       if (!data.columns?.length) {
         throw new Error("No columns detected — ensure JSON is an array of objects with field names.");
       }
@@ -884,6 +904,23 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setDragOver(false);
     const selected = e.dataTransfer.files?.[0];
     if (selected) processFile(selected);
+  };
+
+  const loadSampleDataset = async () => {
+    if (uploading) return;
+    try {
+      const res = await fetch("/fixtures/sample-orders.csv");
+      if (!res.ok) throw new Error("Sample file not found");
+      const blob = await res.blob();
+      const sample = new File([blob], "sample-orders.csv", { type: "text/csv" });
+      await processFile(sample);
+    } catch (e) {
+      toast({
+        title: "Could not load sample",
+        message: e instanceof Error ? e.message : "Try uploading your own CSV instead.",
+        tone: "error",
+      });
+    }
   };
 
   const explainSourceGap = () => {
@@ -1020,21 +1057,30 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
     setAnalyzing(true);
+    const bump = (pct: number, phase: string) => {
+      setMappingProgress(pct);
+      setMappingPhase(phase);
+    };
     try {
+      bump(8, "Preparing schema context…");
       if (destKindMode === "database") {
+        bump(22, "Loading destination schema…");
         await loadDestinationSchema();
       }
+      bump(42, "Building transfer plan…");
       await loadTransferPlan();
       if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
+          bump(58, "Profiling source columns…");
           await runSourceColumnAnalysis(parsed);
-        } else {
-          await applyPipelineMappings(
-            destColumns.length ? destColumns : undefined,
-            destSchemaMap,
-          );
         }
+        bump(72, "Matching source to destination fields…");
+        await applyPipelineMappings(
+          destColumns.length ? destColumns : undefined,
+          destSchemaMap,
+        );
       } else if (analysis?.columns.length || currentSourceColumns.length) {
+        bump(65, "Matching source to destination fields…");
         await applyPipelineMappings(
           destColumns.length ? destColumns : undefined,
           destSchemaMap,
@@ -1046,13 +1092,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           tone: "warning",
         });
         setStep(STEP_SOURCE);
+        return;
       }
+      bump(100, "Mapping ready");
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
       toast({ title: "Mapping setup failed", message, tone: "error" });
       console.error(e);
     } finally {
       setAnalyzing(false);
+      setMappingProgress(0);
+      setMappingPhase("Preparing schema context…");
     }
   };
 
@@ -1200,54 +1250,81 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
       const planId = await ensurePersistedPlan();
       if (planId) {
-        await syncTransferPlanMappings(planId, mappings);
-        const pf = await preflightTransferPlan(planId);
-        if (pf.passed) {
-          await approveTransferPlan(planId);
+        try {
+          await syncTransferPlanMappings(planId, mappings);
+          const pf = await preflightTransferPlan(planId);
+          if (pf.passed) {
+            await approveTransferPlan(planId);
+          }
+          setPreflight(pf);
+          if (!pf.passed) {
+            toast({
+              title: "Validation incomplete",
+              message: pf.blockers?.[0]?.message ?? `${pf.blockers?.length ?? 0} check(s) failed — use the fix actions below.`,
+              tone: "warning",
+            });
+          } else {
+            setStep(STEP_RUN);
+            toast({
+              title: "Ready to transfer",
+              message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved — moved to Run step.`,
+              tone: "success",
+            });
+          }
+          return;
+        } catch (planErr) {
+          if (!(sourceKind === "file" && destKindMode === "file_export" && parsed)) {
+            throw planErr;
+          }
         }
-        setPreflight(pf);
-        if (!pf.passed) {
+      }
+
+      let pf: PreflightResult;
+      try {
+        pf = await runPreflight({
+          columns,
+          column_types: columnTypes,
+          row_count: rowCount,
+          mappings,
+          dest_kind: destKindMode,
+          connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
+          source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
+          dest_type: destKindMode === "database" && !connectorId ? destType : undefined,
+          dest_host: destKindMode === "database" && !connectorId ? destHost : undefined,
+          dest_port: destKindMode === "database" && !connectorId ? destPort : undefined,
+          dest_database: destKindMode === "database" && !connectorId ? targetDb : undefined,
+          dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
+          dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
+          dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
+          dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
+          dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          sample_rows: sampleRows,
+          estimated_bytes: estimatedBytes,
+          sync_mode: syncMode,
+          schema_policy: schemaPolicy,
+          validation_mode: validationOverride ?? validationMode,
+          backfill_new_fields: backfillNewFields,
+          stream_contracts: streamContracts,
+        });
+      } catch (apiErr) {
+        if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
+          pf = runLocalPreflight({
+            columns,
+            rowCount,
+            mappings: activeMappings.length ? activeMappings : columnMappings,
+            sampleRows,
+            confidenceThreshold: threshold,
+            destKind: destKindMode,
+          });
           toast({
-            title: "Validation incomplete",
-            message: pf.blockers?.[0]?.message ?? `${pf.blockers?.length ?? 0} check(s) failed — use the fix actions below.`,
+            title: "Validated locally",
+            message: "API unavailable — browser preflight passed for file export demo.",
             tone: "warning",
           });
         } else {
-          setStep(STEP_RUN);
-          toast({
-            title: "Ready to transfer",
-            message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved — moved to Run step.`,
-            tone: "success",
-          });
+          throw apiErr;
         }
-        return;
       }
-
-      const pf = await runPreflight({
-        columns,
-        column_types: columnTypes,
-        row_count: rowCount,
-        mappings,
-        dest_kind: destKindMode,
-        connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
-        source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
-        dest_type: destKindMode === "database" && !connectorId ? destType : undefined,
-        dest_host: destKindMode === "database" && !connectorId ? destHost : undefined,
-        dest_port: destKindMode === "database" && !connectorId ? destPort : undefined,
-        dest_database: destKindMode === "database" && !connectorId ? targetDb : undefined,
-        dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
-        dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
-        dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-        dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
-        dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
-        sample_rows: sampleRows,
-        estimated_bytes: estimatedBytes,
-        sync_mode: syncMode,
-        schema_policy: schemaPolicy,
-        validation_mode: validationOverride ?? validationMode,
-        backfill_new_fields: backfillNewFields,
-        stream_contracts: streamContracts,
-      });
       setPreflight(pf);
       if (!pf.passed) {
         toast({
@@ -1264,9 +1341,36 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         });
       }
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Validation could not complete.";
-      toast({ title: "Preflight failed", message, tone: "error" });
-      console.error(e);
+      if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
+        const threshold = confidenceThresholdForMode(validationOverride ?? validationMode);
+        const pf = runLocalPreflight({
+          columns: parsed.columns,
+          rowCount: parsed.row_count,
+          mappings: overrideMappings ?? columnMappings,
+          sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, 100),
+          confidenceThreshold: threshold,
+          destKind: destKindMode,
+        });
+        setPreflight(pf);
+        if (pf.passed) {
+          setStep(STEP_RUN);
+          toast({
+            title: "Validated locally",
+            message: "API unavailable — browser preflight passed for file export demo.",
+            tone: "warning",
+          });
+        } else {
+          toast({
+            title: "Validation incomplete",
+            message: pf.blockers[0]?.message ?? "Local validation failed.",
+            tone: "warning",
+          });
+        }
+      } else {
+        const message = e instanceof Error ? e.message : "Validation could not complete.";
+        toast({ title: "Preflight failed", message, tone: "error" });
+        console.error(e);
+      }
     } finally {
       setPreflighting(false);
     }
@@ -1316,12 +1420,16 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
+    setRunStartupProgress(12);
+    setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     const transferMappings = columnMappings.length
       ? buildPreflightMappings(analysis?.columns ?? [], columnMappings)
       : analysis
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
+      setRunStartupProgress(28);
+      setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
         sourceKind: sourceKind === "cloud" ? "database" : sourceKind,
@@ -1359,7 +1467,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         streamContracts,
         planId: persistedPlanId ?? undefined,
       });
+      setRunStartupProgress(88);
+      setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       if (data.job_id && (data as { async?: boolean }).async) {
+        setRunStartupProgress(100);
         setActiveJobId(data.job_id);
         setTransferring(false);
         toast({
@@ -1370,11 +1481,37 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         return;
       }
       setResult(data);
+      setRunStartupProgress(100);
       setStep(STEP_RUN);
       if (data.success) onTransferComplete();
-    } catch {
-      setResult({ success: false, error: "Transfer failed" });
-      toast({ title: "Transfer failed", message: "See details below or check Job Theater.", tone: "error" });
+    } catch (transferErr) {
+      if (
+        sourceKind === "file"
+        && destKindMode === "file_export"
+        && parsed
+        && columnMappings.length > 0
+      ) {
+        const rows = parsed.data ?? parsed.sample_data ?? [];
+        const localResult = runLocalFileExport({
+          sourceFilename: file?.name ?? "export",
+          rows,
+          mappings: columnMappings,
+          format: exportFormat,
+          outputBasename: targetCollection || undefined,
+        });
+        setResult(localResult);
+        setRunStartupProgress(100);
+        setStep(STEP_RUN);
+        onTransferComplete();
+        toast({
+          title: "Exported locally",
+          message: `${localResult.records_transferred?.toLocaleString() ?? 0} rows saved — start the API for governed Job Theater proof.`,
+          tone: "success",
+        });
+      } else {
+        setResult({ success: false, error: transferErr instanceof Error ? transferErr.message : "Transfer failed" });
+        toast({ title: "Transfer failed", message: "See details below or check Job Theater.", tone: "error" });
+      }
     }
     setTransferring(false);
   };
@@ -1517,61 +1654,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
 
   useEffect(() => {
-    if (!(step === STEP_MAP && analyzing)) {
-      setMappingProgress(0);
-      setMappingPhase("Preparing schema context…");
-      return;
-    }
-
-    const phaseForProgress = (value: number) => {
-      if (value < 25) return "Preparing schema context…";
-      if (value < 55) return "Profiling semantic intent…";
-      if (value < 80) return "Matching source to destination fields…";
-      if (value < 95) return "Scoring confidence and policy checks…";
-      return "Finalizing mapping editor…";
-    };
-
-    setMappingProgress(10);
-    setMappingPhase(phaseForProgress(10));
-
-    const timer = window.setInterval(() => {
-      setMappingProgress((prev) => {
-        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 8)), 96);
-        setMappingPhase(phaseForProgress(next));
-        return next;
-      });
-    }, 260);
-
-    return () => window.clearInterval(timer);
-  }, [step, analyzing]);
-
-  useEffect(() => {
     const isLaunching = step === STEP_RUN && transferring && !activeJobId && !result;
     if (!isLaunching) {
       setRunStartupProgress(0);
       setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
-      return;
     }
-
-    const phaseForProgress = (value: number) => {
-      if (value < 25) return RUN_LAUNCH_STAGES[0];
-      if (value < 50) return RUN_LAUNCH_STAGES[1];
-      if (value < 75) return RUN_LAUNCH_STAGES[2];
-      return RUN_LAUNCH_STAGES[3];
-    };
-
-    setRunStartupProgress(12);
-    setRunStartupPhase(phaseForProgress(12));
-
-    const timer = window.setInterval(() => {
-      setRunStartupProgress((prev) => {
-        const next = Math.min(prev + Math.max(2, Math.round(Math.random() * 6)), 94);
-        setRunStartupPhase(phaseForProgress(next));
-        return next;
-      });
-    }, 280);
-
-    return () => window.clearInterval(timer);
   }, [step, transferring, activeJobId, result]);
 
   return (
@@ -1580,7 +1667,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       showHeader={false}
       className="df2-page-transfer-studio"
       title="Transfer Studio"
-      description="Source → Destination → Map → Validate → Run"
+      description="Governed path: source → destination → map → preflight → run → proof"
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
       <header className="df2-transfer-studio-chrome">
@@ -1660,9 +1747,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       )}
 
       {step === STEP_MAP && analyzing && (
-        <div className="df2-transfer-step-panel">
+        <div className="df2-transfer-step-panel df2-transfer-analyzing-panel">
           <div className="df2-card-body df2-analyzing">
-            <Spinner />
+            <Spinner size="lg" premium />
             <p className="df2-analyzing-title">Mapping source to destination…</p>
             <div className="df2-mapping-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={mappingProgress}>
               <div className="df2-mapping-progress-meta">
@@ -1738,6 +1825,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                   ))}
                 </div>
               </div>
+              {!parsed && !uploading && (
+                <div className="df2-upload-sample-row">
+                  <span className="df2-label-hint">New to DataFlow?</span>
+                  <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void loadSampleDataset()}>
+                    <DtIcon name="sparkle" size={14} /> Load sample orders CSV
+                  </button>
+                </div>
+              )}
               {file && parsed && (
                 <>
                   <div className="df2-upload-result">
@@ -1911,36 +2006,38 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         <div className="df2-card-body">
           <div className="df2-field">
             <label className="df2-label">Destination Mode</label>
-            <FilterTabs
-              ariaLabel="Destination mode"
-              className="df2-filter-tabs--field"
-              value={destKindMode}
-              onChange={(mode) => {
-                setDestKindMode(mode);
-                setTransferPlan(null);
-                if (mode === "file_export") void loadTransferPlan();
-              }}
-              items={[
-                { id: "database", label: "Database / Warehouse" },
-                { id: "file_export", label: "File Export" },
-              ]}
-            />
+            <FilterBar ariaLabel="Destination mode">
+              <FilterTabs
+                ariaLabel="Destination mode"
+                value={destKindMode}
+                onChange={(mode) => {
+                  setDestKindMode(mode);
+                  setTransferPlan(null);
+                  if (mode === "file_export") void loadTransferPlan();
+                }}
+                items={[
+                  { id: "database", label: "Database / Warehouse" },
+                  { id: "file_export", label: "File Export" },
+                ]}
+              />
+            </FilterBar>
           </div>
 
           {destKindMode === "file_export" ? (
             <>
               <div className="df2-field">
                 <label className="df2-label">Export Format</label>
-                <FilterTabs
-                  ariaLabel="Export format"
-                  className="df2-filter-tabs--field"
-                  value={exportFormat}
-                  onChange={(format) => {
-                    setExportFormat(format);
-                    setTransferPlan(null);
-                  }}
-                  items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-                />
+                <FilterBar ariaLabel="Export format">
+                  <FilterTabs
+                    ariaLabel="Export format"
+                    value={exportFormat}
+                    onChange={(format) => {
+                      setExportFormat(format);
+                      setTransferPlan(null);
+                    }}
+                    items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
+                  />
+                </FilterBar>
               </div>
               <div className="df2-field">
                 <label className="df2-label">Output path (optional)</label>
@@ -2131,13 +2228,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <div className="df2-policy-toolbar">
               <div className="df2-field">
                 <label className="df2-label">Validation</label>
-                <FilterTabs
-                  ariaLabel="Validation mode"
-                  className="df2-filter-tabs--field"
-                  value={validationMode}
-                  onChange={setValidationMode}
-                  items={VALIDATION_MODES.map((mode) => ({ id: mode.id, label: mode.label }))}
-                />
+                <FilterBar ariaLabel="Validation mode">
+                  <FilterTabs
+                    ariaLabel="Validation mode"
+                    value={validationMode}
+                    onChange={setValidationMode}
+                    items={VALIDATION_MODES.map((mode) => ({ id: mode.id, label: mode.label }))}
+                  />
+                </FilterBar>
               </div>
               <label className="df2-policy-toggle">
                 <input
@@ -2162,50 +2260,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 <strong>Streams and fields</strong>
                 <span>{currentSourceColumns.length} discovered fields</span>
               </div>
-              <div className="df2-stream-cards" aria-label="Stream contract">
-                <article className="df2-stream-card">
-                  <header className="df2-stream-card-head">
-                    <strong>{sourceStreamName}</strong>
-                    <span className="df2-badge df2-badge-live df2-badge-xs">{syncModeLabel}</span>
-                  </header>
-                  <dl className="df2-stream-card-meta">
-                    <div><dt>Fields</dt><dd>{currentSourceColumns.length || "—"}</dd></div>
-                    <div><dt>Policy</dt><dd>{schemaPolicyLabel}</dd></div>
-                    <div><dt>Status</dt><dd>{currentSourceColumns.length ? "Ready" : "Pending schema"}</dd></div>
-                  </dl>
-                  <div className="df2-stream-card-fields">
-                    <label className="df2-label">Cursor field</label>
-                    <select
-                      className="df2-input df2-select df2-stream-select"
-                      value={requiresCursor ? cursorField : ""}
-                      disabled={!requiresCursor || currentSourceColumns.length === 0}
-                      onChange={(e) => setCursorField(e.target.value)}
-                    >
-                      <option value="">{requiresCursor ? "Select cursor" : "Not required"}</option>
-                      {currentSourceColumns.map((col) => (
-                        <option key={col} value={col}>
-                          {col}{currentSourceSchema[col] ? ` · ${currentSourceSchema[col]}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                    <label className="df2-label">Primary key</label>
-                    <select
-                      className="df2-input df2-select df2-stream-select"
-                      value={requiresPrimaryKey ? primaryKeyField : ""}
-                      disabled={!requiresPrimaryKey || currentSourceColumns.length === 0}
-                      onChange={(e) => setPrimaryKeyField(e.target.value)}
-                    >
-                      <option value="">{requiresPrimaryKey ? "Select key" : "Not required"}</option>
-                      {currentSourceColumns.map((col) => (
-                        <option key={col} value={col}>
-                          {col}{currentSourceSchema[col] ? ` · ${currentSourceSchema[col]}` : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </article>
-              </div>
-              <div className="df2-stream-table-wrap df2-stream-table-desktop">
+              <div className="df2-stream-table-wrap">
                 <table className="df2-stream-table">
                   <thead>
                     <tr>

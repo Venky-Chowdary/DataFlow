@@ -7,6 +7,7 @@ import { EmptyState } from "../components/EmptyState";
 import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
@@ -184,17 +185,23 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const ddlLog = liveJob?.ddl_log ?? [];
 
   return (
-    <PageShell fit className="df2-page-jobs" title="Job Theater">
+    <PageShell
+      fit
+      className="df2-page-jobs"
+      title="Job Theater"
+      description="Live batch progress, phases, and proof for every transfer."
+    >
       <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
         {jobs.length === 0 ? (
           <EmptyState
+            page
             icon="jobs"
             title="No transfer jobs yet"
-            description="Run a transfer from Transfer Studio — live batch progress appears here."
+            description="Run a transfer from Transfer Studio — live batch progress, phases, and proof reports appear here."
             action={
               onStartTransfer ? (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onStartTransfer}>
-                  Open Transfer Studio
+                  <DtIcon name="transfer" size={14} /> Open Transfer Studio
                 </button>
               ) : undefined
             }
@@ -206,17 +213,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
               onSearchChange={setJobSearch}
               searchPlaceholder="Search route, type, status, job id…"
               filters={
-                <FilterTabs
-                  ariaLabel="Filter jobs by status"
-                  value={filter}
-                  onChange={setFilter}
-                  items={([
-                    { id: "all", label: "All", count: counts.all },
-                    { id: "running", label: "Running", count: counts.running },
-                    { id: "completed", label: "Completed", count: counts.completed },
-                    { id: "failed", label: "Failed", count: counts.failed },
-                  ] as const)}
-                />
+                <FilterBar variant="inline" ariaLabel="Filter jobs by status">
+                  <FilterTabs
+                    ariaLabel="Filter jobs by status"
+                    value={filter}
+                    onChange={setFilter}
+                    items={([
+                      { id: "all", label: "All", count: counts.all },
+                      { id: "running", label: "Running", count: counts.running },
+                      { id: "completed", label: "Completed", count: counts.completed },
+                      { id: "failed", label: "Failed", count: counts.failed },
+                    ] as const)}
+                  />
+                </FilterBar>
               }
               actions={
                 onRefresh ? (
@@ -354,6 +363,39 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       {liveJob.completed_at && <div><dt>Completed</dt><dd>{new Date(liveJob.completed_at).toLocaleString()}</dd></div>}
                     </dl>
 
+                    {liveJob.error && (
+                      <div className="df2-jobs-v3-failure-panel" role="alert">
+                        <header className="df2-jobs-v3-failure-head">
+                          <DtIcon name="alert" size={18} />
+                          <div>
+                            <strong>What went wrong</strong>
+                            <span>Job stopped before completion — review the failure below and quarantined rows if any.</span>
+                          </div>
+                        </header>
+                        <p className="df2-jobs-v3-failure-message">{liveJob.error}</p>
+                        <dl className="df2-jobs-v3-failure-meta">
+                          {liveJob.phase && (
+                            <div>
+                              <dt>Failed phase</dt>
+                              <dd>{liveJob.phase}</dd>
+                            </div>
+                          )}
+                          {(liveJob.rejected_rows ?? 0) > 0 && (
+                            <div>
+                              <dt>Quarantined rows</dt>
+                              <dd>{liveJob.rejected_rows!.toLocaleString()} — validation failures isolated, not silently dropped</dd>
+                            </div>
+                          )}
+                          {liveJob.records_processed != null && liveJob.records_processed > 0 && (
+                            <div>
+                              <dt>Progress before failure</dt>
+                              <dd>{liveJob.records_processed.toLocaleString()} rows processed</dd>
+                            </div>
+                          )}
+                        </dl>
+                      </div>
+                    )}
+
                     {(jobMappings.length > 0 || Object.keys(columnTypes).length > 0) && (
                       <div className="df2-jobs-v3-mappings">
                         <div className="df2-jobs-v3-mappings-head">
@@ -409,13 +451,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       <div className="df2-jobs-v3-log">
                         <h3>DDL log</h3>
                         <pre>{ddlLog.join("\n")}</pre>
-                      </div>
-                    )}
-
-                    {liveJob.error && (
-                      <div className="df2-jobs-v3-alert error">
-                        <DtIcon name="alert" size={16} />
-                        <p>{liveJob.error}</p>
                       </div>
                     )}
 

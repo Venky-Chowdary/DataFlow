@@ -44,10 +44,23 @@
   color: #0f172a;
 }
 
+.df2-mcp-endpoint-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: #fff;
+}
+
 .df2-mcp-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: 12px;
+  align-items: start;
 }
 
 .df2-mcp-panel {
@@ -57,29 +70,54 @@
   overflow: visible;
 }
 
+.df2-mcp-panel--integrations {
+  height: fit-content;
+  align-self: start;
+}
+
+.df2-mcp-panel--logs {
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  max-height: min(480px, calc(100vh - 260px));
+}
+
+.df2-mcp-panel--logs .df2-mcp-panel-body--flush {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-mcp-panel--logs .df2-mcp-logs-table-wrap {
+  flex: 1;
+  min-height: 160px;
+  max-height: none;
+}
+
 .df2-mcp-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px 18px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--df-line, #e2e8f0);
 }
 
 .df2-mcp-panel-head h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 650;
 }
 
 .df2-mcp-panel-body {
-  padding: 16px 18px;
+  padding: 12px 14px;
 }
 
 .df2-mcp-integration-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .df2-mcp-integration-row {
@@ -87,10 +125,10 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 10px 12px;
   border: 1px solid var(--df-line, #e2e8f0);
-  border-radius: 10px;
-  background: #fafbfc;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .df2-mcp-integration-row .df2-cell-main {
@@ -115,27 +153,28 @@
 }
 
 .df2-mcp-tools-section {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .df2-mcp-tools-section h2 {
-  margin: 0 0 14px;
-  font-size: 15px;
+  margin: 0 0 10px;
+  font-size: 14px;
   font-weight: 650;
 }
 
 .df2-mcp-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
 }
 
 .df2-mcp-tile {
-  padding: 14px 16px;
+  padding: 10px 12px;
   border: 1px solid var(--df-line, #e2e8f0);
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fff;
-  min-height: 96px;
+  min-height: 0;
+  height: fit-content;
 }
 
 .df2-mcp-tile code {

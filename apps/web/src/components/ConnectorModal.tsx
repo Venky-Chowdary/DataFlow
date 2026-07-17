@@ -463,19 +463,20 @@ export function ConnectorModal({
   const catalogItem = CONNECTOR_CATALOG.find((c) => c.id === type);
 
   return (
-    <div className="dt-modal-overlay" onClick={onClose} role="presentation">
+    <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
-        className={`dt-modal ${step === "pick" ? "df2-modal-xl" : "dt-modal-lg"}`}
+        className={`df2-modal ${step === "pick" ? "df2-modal-xl" : "df2-modal-lg"}`}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
+        aria-labelledby="df2-connector-modal-title"
       >
-        <div className="dt-modal-header">
+        <div className="df2-modal-header">
           <div>
-            <h2 className="dt-modal-title">
+            <h2 id="df2-connector-modal-title" className="df2-modal-title">
               {step === "pick" ? "Choose a connector" : editing ? "Edit connection" : "Configure connection"}
             </h2>
-            <p className="dt-modal-subtitle">
+            <p className="df2-modal-subtitle">
               {step === "pick"
                 ? "Transfer-ready connectors support full migration. Test-only entries save credentials but cannot transfer yet."
                 : `${catalogItem?.label ?? formConfig.label ?? type} · choose the authentication mode that matches your environment`}
@@ -486,7 +487,7 @@ export function ConnectorModal({
           </button>
         </div>
 
-        <div className="dt-modal-body">
+        <div className="df2-modal-body">
           {step === "pick" ? (
             <ConnectorCatalogPanel
               role="all"
@@ -571,7 +572,7 @@ export function ConnectorModal({
               )}
 
               {fieldError && (
-                <p style={{ color: "#dc2626", fontSize: 13, margin: "8px 0" }} role="alert">
+                <p className="df2-field-error-text" role="alert">
                   {fieldError}
                 </p>
               )}
@@ -588,7 +589,7 @@ export function ConnectorModal({
         </div>
 
         {step === "configure" && (
-          <div className="df2-card-footer">
+          <div className="df2-modal-footer">
             <button
               type="button"
               className="df2-btn"

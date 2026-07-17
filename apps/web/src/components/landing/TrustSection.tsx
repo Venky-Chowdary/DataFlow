@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { useRevealOnScroll } from "../../hooks/useRevealOnScroll";
 import { DtIcon } from "../DtIcon";
 
@@ -21,7 +22,7 @@ export function TrustSection() {
       </div>
       <div className="lp-trust-grid">
         {BADGES.map((b, i) => (
-          <article key={b.title} className="lp-trust-card" style={{ "--reveal-i": i } as React.CSSProperties}>
+          <article key={b.title} className="lp-trust-card" style={{ "--reveal-i": i } as CSSProperties}>
             <span className="lp-trust-card-icon" aria-hidden>
               <DtIcon name={b.icon} size={22} />
             </span>

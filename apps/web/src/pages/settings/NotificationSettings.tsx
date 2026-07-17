@@ -206,7 +206,7 @@ export function NotificationSettings() {
           <p>Route job failure and quarantine alerts to Slack, Teams, email, ServiceNow, or a webhook.</p>
         </div>
       </div>
-      <div className="df2-settings-section-body">
+        <div className="df2-settings-section-body">
         {workspaces.length > 1 && (
           <div className="df2-settings-field df2-mb-md">
             <label>Workspace</label>
@@ -218,7 +218,8 @@ export function NotificationSettings() {
           </div>
         )}
 
-        <div className="df2-settings-grid df2-mb-md" style={{ alignItems: "end" }}>
+        <div className="df2-settings-channel-form df2-mb-md">
+          <div className="df2-settings-grid df2-settings-grid--channel">
           <div className="df2-settings-field">
             <label>Channel type</label>
             <select className="df2-select" value={kind} onChange={(e) => { setKind(e.target.value as ChannelKind); resetForm(); }}>
@@ -293,16 +294,19 @@ export function NotificationSettings() {
           )}
 
           {kind === "email" && (
-            <div className="df2-settings-field df2-settings-field--full" style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 12 }}>
+            <div className="df2-settings-field df2-settings-field--full df2-settings-field--inline">
               <label className="df2-switch-label" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                 <input type="checkbox" checked={useCustomSmtp} onChange={(e) => setUseCustomSmtp(e.target.checked)} />
                 Use custom SMTP (optional; platform mailer is used otherwise)
               </label>
             </div>
           )}
+          </div>
 
           {kind === "email" && useCustomSmtp && (
-            <>
+            <div className="df2-settings-smtp-block">
+              <p className="df2-settings-smtp-label">Custom SMTP server</p>
+              <div className="df2-settings-grid df2-settings-grid--smtp">
               <div className="df2-settings-field">
                 <label>SMTP host</label>
                 <input className="df2-input" value={smtpHost} onChange={(e) => setSmtpHost(e.target.value)} placeholder="smtp.company.com" />
@@ -319,17 +323,20 @@ export function NotificationSettings() {
                 <label>SMTP password</label>
                 <input type="password" className="df2-input" value={smtpPassword} onChange={(e) => setSmtpPassword(e.target.value)} />
               </div>
-              <div className="df2-settings-field">
+              <div className="df2-settings-field df2-settings-field--full">
                 <label>From address</label>
                 <input className="df2-input" value={fromAddress} onChange={(e) => setFromAddress(e.target.value)} placeholder="dataflow@company.com" />
               </div>
-            </>
+              </div>
+            </div>
           )}
-        </div>
 
-        <button type="button" className="df2-btn df2-btn-primary df2-mb-md" disabled={!canAdd || saving} onClick={() => void add()}>
-          <DtIcon name="plus" size={14} /> {saving ? "Saving…" : "Add channel"}
-        </button>
+          <div className="df2-settings-channel-form-actions">
+            <button type="button" className="df2-btn df2-btn-primary" disabled={!canAdd || saving} onClick={() => void add()}>
+              <DtIcon name="plus" size={14} /> {saving ? "Saving…" : "Add channel"}
+            </button>
+          </div>
+        </div>
 
         {loading ? (
           <SectionLoader title="Loading channels" hint="Fetching notification channels…" />

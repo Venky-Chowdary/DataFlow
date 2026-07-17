@@ -1,5 +1,6 @@
 import { EmptyState } from "./EmptyState";
 import { FilterTabs } from "./ui/FilterTabs";
+import { FilterBar } from "./ui/FilterBar";
 import { Connector } from "../lib/types";
 import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
 import { connectorHealthLabel, jobStatusBadgeClass } from "../lib/uiUtils";
@@ -53,13 +54,14 @@ export function ConnectionWorkbench({
         </div>
       </div>
 
-      <FilterTabs
-        ariaLabel="Connection sections"
-        className="df2-filter-tabs--wrap"
-        value={connectionTab}
-        onChange={setConnectionTab}
-        items={CONNECTION_TABS.map((item) => ({ id: item, label: item }))}
-      />
+      <FilterBar ariaLabel="Connection sections">
+        <FilterTabs
+          ariaLabel="Connection sections"
+          value={connectionTab}
+          onChange={setConnectionTab}
+          items={CONNECTION_TABS.map((item) => ({ id: item, label: item }))}
+        />
+      </FilterBar>
 
       <div className="df2-connection-panel">
         {connectionTab === "Status" && (

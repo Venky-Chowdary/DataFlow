@@ -25,6 +25,7 @@ interface PageShellProps {
  */
 export function PageShell({
   title,
+  description,
   actions,
   className,
   fit,
@@ -49,6 +50,9 @@ export function PageShell({
     >
       {/* Always expose title for a11y / document outline; never visually duplicate topbar */}
       <h1 className="df2-sr-only" id="df2-page-title">{title}</h1>
+      {description ? (
+        <p className="df2-sr-only" id="df2-page-description">{description}</p>
+      ) : null}
 
       {showHeader && hasActions && (
         <div className="df2-page-actionbar" aria-label={`${title} actions`}>

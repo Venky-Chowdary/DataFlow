@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Skeleton } from "./LoadingState";
+import { FilterTabs } from "./ui/FilterTabs";
+import { FilterBar } from "./ui/FilterBar";
 import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 
@@ -17,6 +19,8 @@ const CATEGORY_LABELS: Record<string, string> = {
   marketing: "Marketing",
   logistics: "Logistics",
 };
+
+const STATIC_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
 const STATUS_FILTERS = [
   { id: "live", label: "Transfer ready" },
@@ -117,16 +121,19 @@ export function ConnectorCatalogPanel({
 
   const categoryNav = useMemo(() => {
     const items = [{ id: "", label: "All categories" }];
-    for (const c of categories) {
+    const source = categories.length > 0 ? categories : STATIC_CATEGORIES;
+    for (const c of source) {
       items.push({ id: c, label: CATEGORY_LABELS[c] || c.replace(/_/g, " ") });
     }
     return items;
   }, [categories]);
 
+  const showSidebar = !compact;
+
   return (
     <div className={`df2-catalog-layout ${compact ? "df2-catalog-compact" : ""}`}>
-      {!compact && (
-        <nav className="df2-catalog-nav" aria-label="Categories">
+      {showSidebar && (
+        <nav className="df2-catalog-nav" aria-label="Connector categories">
           {categoryNav.map((item) => (
             <button
               key={item.id || "all"}
@@ -140,37 +147,12 @@ export function ConnectorCatalogPanel({
         </nav>
       )}
 
-      <div>
-        <div className="df2-search">
-          <span className="df2-search-icon"><DtIcon name="search" size={16} /></span>
-          <input
-            type="search"
-            placeholder="Search connectors…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search connector catalog"
-            autoFocus={compact}
-          />
-        </div>
-
-        <div className="df2-chips" role="group" aria-label="Filter by capability">
-          {STATUS_FILTERS.map((f) => (
-            <button
-              key={f.id || "all"}
-              type="button"
-              className={`df2-chip ${status === f.id ? "active" : ""}`}
-              onClick={() => setStatus(f.id)}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        {compact && categoryNav.length > 1 && (
-          <div className="df2-chips" style={{ marginTop: 10 }} role="group" aria-label="Filter by category">
-            {categoryNav.slice(0, 8).map((item) => (
+      <div className="df2-catalog-main">
+        {compact && (
+          <div className="df2-chips" role="group" aria-label="Connector categories">
+            {categoryNav.map((item) => (
               <button
-                key={item.id || "all-cat"}
+                key={item.id || "all"}
                 type="button"
                 className={`df2-chip ${category === item.id ? "active" : ""}`}
                 onClick={() => setCategory(item.id)}
@@ -179,6 +161,36 @@ export function ConnectorCatalogPanel({
               </button>
             ))}
           </div>
+        )}
+
+        <div className="df2-catalog-filter-row">
+          <label className="df2-toolbar-search df2-catalog-search" aria-label="Search connector catalog">
+            <DtIcon name="search" size={15} />
+            <input
+              type="search"
+              placeholder="Search connectors…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              autoFocus={compact}
+            />
+          </label>
+
+          <FilterBar ariaLabel="Catalog capability filters" className="df2-catalog-filter-bar">
+            <FilterTabs
+              ariaLabel="Filter by capability"
+              value={status}
+              onChange={setStatus}
+              items={STATUS_FILTERS.map((f) => ({ id: f.id, label: f.label }))}
+            />
+          </FilterBar>
+        </div>
+
+        {!error && !loading && (
+          <p className="df2-catalog-meta">
+            {filtered.toLocaleString()} shown
+            {total > 0 && ` · ${total.toLocaleString()} in catalog`}
+            {transferLive > 0 && ` · ${transferLive.toLocaleString()} transfer-ready`}
+          </p>
         )}
 
         {error ? (
@@ -195,7 +207,7 @@ export function ConnectorCatalogPanel({
             ))}
           </div>
         ) : connectors.length === 0 ? (
-          <p style={{ color: "#64748b" }}>No connectors match. Try &quot;Transfer ready&quot; or a different search.</p>
+          <p className="df2-catalog-empty">No connectors match. Try &quot;Transfer ready&quot; or a different search.</p>
         ) : (
           <div className="df2-connector-grid">
             {connectors.map((item) => {

@@ -7,13 +7,19 @@ interface EmptyStateProps {
   description?: string;
   action?: ReactNode;
   compact?: boolean;
+  /** Center in the page viewport — Job Theater, Connectors zero-state */
+  page?: boolean;
 }
 
 /** Standard empty state — icon, title, description, optional CTA */
-export function EmptyState({ icon = "activity", title, description, action, compact }: EmptyStateProps) {
+export function EmptyState({ icon = "activity", title, description, action, compact, page }: EmptyStateProps) {
   return (
     <div
-      className={`df2-empty ${compact ? "df2-empty-compact" : ""}`}
+      className={[
+        "df2-empty",
+        compact ? "df2-empty-compact" : "",
+        page ? "df2-empty-page" : "",
+      ].filter(Boolean).join(" ")}
       role="status"
       aria-label={title}
     >

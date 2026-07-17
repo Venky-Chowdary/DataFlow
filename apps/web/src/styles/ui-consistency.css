@@ -22,7 +22,9 @@
 
 .df2-app .df2-field {
   min-width: 0;
-  width: 100%;
+  /* Do not force width:100% — breaks form-row / toolbar flex layouts (Query, Pipelines).
+     Inputs already fill their field via width:100% on .df2-input / select. */
+  max-width: 100%;
 }
 
 .df2-app .df2-input:focus,
@@ -74,7 +76,7 @@
   border-radius: var(--df-radius-card, 12px);
   border: 1px solid var(--df-border, #e2e8f0);
   background: #fff;
-  box-shadow: var(--df-shadow-xs, 0 1px 2px rgba(15, 23, 42, 0.04));
+  box-shadow: none;
 }
 
 .df2-metric-glass {
@@ -245,6 +247,62 @@
 .df2-app button:focus:not(:focus-visible),
 .df2-app [role="button"]:focus:not(:focus-visible) {
   outline: none;
+}
+
+/* ─── Page-level empty states (Jobs, Connectors) ─── */
+.df2-empty-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: min(420px, calc(100vh - 240px));
+  padding: 40px 24px;
+  margin: 0 auto;
+  max-width: 520px;
+}
+
+.df2-empty-page .df2-empty-icon {
+  margin-bottom: 16px;
+}
+
+.df2-empty-page .df2-empty-title {
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.df2-empty-page .df2-empty-desc {
+  font-size: 14px;
+  line-height: 1.55;
+  color: #475569;
+  max-width: 42ch;
+}
+
+.df2-empty-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+/* Form rows — wrap on narrow viewports, no overlap */
+.df2-app .df2-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+}
+
+.df2-app .df2-form-row > .df2-field,
+.df2-app .df2-form-row > .df2-field-flex {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.df2-app .df2-form-row > .df2-field-md {
+  flex: 0 1 240px;
 }
 
 /* Respect reduced motion for UI polish */

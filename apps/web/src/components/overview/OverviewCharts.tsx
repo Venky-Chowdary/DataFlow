@@ -2,10 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import type { DayThroughput, JobStatusSlice } from "../../lib/overviewAnalytics";
 
-const CHART_HEIGHT = 152;
+const CHART_HEIGHT = 200;
 
 interface ThroughputChartProps {
   series: DayThroughput[];
+}
+
+/** Zero-state chart — keeps axes/grid so the dashboard still reads as analytics-first. */
+export function ThroughputChartPlaceholder({ series }: ThroughputChartProps) {
+  const zeroSeries = series.map((s) => ({ ...s, rows: 0 }));
+  return (
+    <div className="df2-chart-placeholder-wrap">
+      <ThroughputChart series={zeroSeries} />
+      <p className="df2-chart-placeholder-caption">No throughput yet — completed transfers fill this chart.</p>
+    </div>
+  );
 }
 
 function formatAxisValue(n: number): string {

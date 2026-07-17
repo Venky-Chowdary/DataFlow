@@ -3,10 +3,11 @@ import {
   dialectForLanguage,
   highlightCode,
 } from "../../lib/queryHighlight";
+import { DtIcon } from "../DtIcon";
 
 /**
- * Powerful dialect-aware query editor for any connector syntax.
- * Overlay highlighter (no Prism / react-simple-code-editor required).
+ * Dialect-aware query editor — zero external editor deps (works without node_modules extras).
+ * Overlay highlighter + line gutter, VS Code–style tab/enter behavior.
  */
 
 export type QueryLanguage =
@@ -136,6 +137,21 @@ function validateQuery(language: QueryLanguage, code: string): string | null {
   return null;
 }
 
+function leadingIndent(line: string): string {
+  const m = line.match(/^(\s*)/);
+  return m ? m[1] : "";
+}
+
+function insertAtCursor(
+  value: string,
+  start: number,
+  end: number,
+  insert: string,
+): { next: string; cursor: number } {
+  const next = value.slice(0, start) + insert + value.slice(end);
+  return { next, cursor: start + insert.length };
+}
+
 const SQL_SNIPPETS = [
   { label: "SELECT *", text: "SELECT * FROM table_name" },
   { label: "WHERE", text: "WHERE column = 'value'" },
@@ -153,7 +169,7 @@ const MONGO_SNIPPETS = [
   { label: "Range", text: '{"created_at": {"$gte": "2024-01-01", "$lte": "2024-12-31"}}' },
 ];
 
-export function QueryEditor({ value, onChange, connectorType, placeholder, disabled, height = "18rem" }: QueryEditorProps) {
+export function QueryEditor({ value, onChange, connectorType, placeholder, disabled, height = "20rem" }: QueryEditorProps) {
   const [lang, setLang] = useState<QueryLanguage>(() => guessLanguage(connectorType));
   const [cursor, setCursor] = useState({ start: 0, end: 0 });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -173,6 +189,7 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
   const lineCount = Math.max(1, (value.match(/\n/g)?.length ?? 0) + 1);
   const isMongoLike = lang === "json" || lang === "javascript";
   const snippets = isMongoLike ? MONGO_SNIPPETS : SQL_SNIPPETS;
+  const hasContent = value.trim().length > 0;
 
   const syncScroll = () => {
     const ta = textareaRef.current;
@@ -183,6 +200,21 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
     }
     if (gutterRef.current) {
       gutterRef.current.scrollTop = ta.scrollTop;
+    }
+  };
+
+  const handleClear = () => {
+    onChange("");
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  const handleFormat = () => {
+    if (lang !== "json" || !value.trim()) return;
+    try {
+      const parsed = JSON.parse(value);
+      onChange(JSON.stringify(parsed, null, 2));
+    } catch {
+      /* validation banner handles invalid JSON */
     }
   };
 
@@ -202,6 +234,38 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
         setCursor({ start: newCursor, end: newCursor });
       }
     }, 0);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget;
+    const { selectionStart, selectionEnd } = ta;
+    if (selectionStart == null || selectionEnd == null) return;
+
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const { next, cursor: pos } = insertAtCursor(value, selectionStart, selectionEnd, "  ");
+      onChange(next);
+      window.setTimeout(() => {
+        ta.setSelectionRange(pos, pos);
+        setCursor({ start: pos, end: pos });
+      }, 0);
+      return;
+    }
+
+    if (e.key === "Enter" && !isMongoLike) {
+      const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+      const currentLine = value.slice(lineStart, selectionStart);
+      const indent = leadingIndent(currentLine);
+      const extra = /(\(|\[\s*$|,\s*$)/.test(currentLine.trimEnd()) ? "  " : "";
+      const insert = `\n${indent}${extra}`;
+      e.preventDefault();
+      const { next, cursor: pos } = insertAtCursor(value, selectionStart, selectionEnd, insert);
+      onChange(next);
+      window.setTimeout(() => {
+        ta.setSelectionRange(pos, pos);
+        setCursor({ start: pos, end: pos });
+      }, 0);
+    }
   };
 
   return (
@@ -225,8 +289,32 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
           {label} · {hint}
         </span>
         <span className="df2-query-editor-dialect-pill" title="Active highlighter">
-          {dialect.toUpperCase()}
+          {lang === "json" ? "JSON" : lang === "javascript" ? "JS" : "SQL"}
         </span>
+        <div className="df2-query-editor-toolbar-actions">
+          {lang === "json" && (
+            <button
+              type="button"
+              className="df2-query-editor-action"
+              onClick={handleFormat}
+              disabled={disabled || !hasContent}
+              title="Format JSON (pretty print)"
+            >
+              <DtIcon name="code" size={14} />
+              Format
+            </button>
+          )}
+          <button
+            type="button"
+            className="df2-query-editor-action df2-query-editor-action--clear"
+            onClick={handleClear}
+            disabled={disabled || !hasContent}
+            title="Clear editor"
+          >
+            <DtIcon name="x" size={14} />
+            Clear
+          </button>
+        </div>
       </div>
 
       <div className="df2-query-editor-wrap df2-query-editor-wrap--powered" data-disabled={disabled}>
@@ -241,7 +329,7 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
             className={`df2-query-editor-pre qe-pre qe-pre--${dialect}`}
             aria-hidden
             dangerouslySetInnerHTML={{
-              __html: `${highlighted}${(value.endsWith("\n") || !value) ? "\n" : ""}`,
+              __html: `${highlighted}${value.endsWith("\n") || !value ? "\n" : ""}`,
             }}
           />
           <textarea
@@ -250,6 +338,7 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onScroll={syncScroll}
+            onKeyDown={handleKeyDown}
             onSelect={(e) => {
               const t = e.currentTarget;
               setCursor({ start: t.selectionStart ?? 0, end: t.selectionEnd ?? 0 });
@@ -257,6 +346,9 @@ export function QueryEditor({ value, onChange, connectorType, placeholder, disab
             placeholder={placeholder}
             disabled={disabled}
             spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
             aria-label="Query editor"
             style={{ minHeight: height }}
           />

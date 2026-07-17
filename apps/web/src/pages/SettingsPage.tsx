@@ -47,6 +47,7 @@ export function SettingsPage() {
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
+  const [modelCapabilitiesLoaded, setModelCapabilitiesLoaded] = useState(false);
   const [ssoConfigs, setSsoConfigs] = useState<Record<SsoType, SsoConfig> | null>(null);
   const [ssoEditor, setSsoEditor] = useState<SsoType | null>(null);
   const [ssoDraft, setSsoDraft] = useState<SsoConfig | null>(null);
@@ -76,7 +77,32 @@ export function SettingsPage() {
   }, [tab, loadPosture]);
 
   useEffect(() => {
-    fetchModelCapabilities().then(setModelCapabilities).catch(() => setModelCapabilities(null));
+    fetchModelCapabilities()
+      .then(setModelCapabilities)
+      .catch(() =>
+        setModelCapabilities({
+          active_provider: "local",
+          active_model: "deterministic",
+          agent_mode: "local_tools",
+          fallback_order: ["local"],
+          providers: [
+            {
+              provider: "local",
+              label: "Local engine",
+              default_model: "deterministic",
+              tier: "local",
+              roles: ["mapping", "preflight", "triage"],
+              best_for: "Works offline without cloud API keys",
+              configured: true,
+              package_installed: true,
+              available: true,
+              status: "ready",
+            },
+          ],
+          guarantees: [],
+        }),
+      )
+      .finally(() => setModelCapabilitiesLoaded(true));
     fetchSsoConfigs().then(setSsoConfigs).catch(() => setSsoConfigs(null));
     fetchWorkspaceSettings()
       .then((ws) => {
@@ -291,7 +317,12 @@ export function SettingsPage() {
   };
 
   return (
-    <PageShell wide className="df2-page-settings" title="Settings">
+    <PageShell
+      wide
+      className="df2-page-settings"
+      title="Settings"
+      description="Workspace security, SSO, team access, and audit controls."
+    >
       <PageFrame className="df2-settings-workspace">
         <PageMetricsRow
           compact
@@ -391,9 +422,7 @@ export function SettingsPage() {
                   {postureLoading && <p className="df2-cell-meta">Loading security posture…</p>}
                   {!postureLoading && posture && (
                     <>
-                      <div className="df2-settings-section-head" style={{ marginBottom: 12 }}>
-                        <h3>Posture</h3>
-                      </div>
+                      <h3 className="df2-settings-subhead">Posture</h3>
                       <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>
                         {[
                           { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest },
@@ -415,9 +444,7 @@ export function SettingsPage() {
                         ))}
                       </div>
 
-                      <div className="df2-settings-section-head" style={{ marginBottom: 12 }}>
-                        <h3>Compliance roadmap</h3>
-                      </div>
+                      <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Compliance roadmap</h3>
                       <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>
                         {posture.compliance.map((c) => (
                           <div key={c.framework} className="df2-settings-policy-row">
@@ -432,9 +459,7 @@ export function SettingsPage() {
                         ))}
                       </div>
 
-                      <div className="df2-settings-section-head" style={{ marginBottom: 12 }}>
-                        <h3>BYOK / key management</h3>
-                      </div>
+                      <h3 className="df2-settings-subhead df2-settings-subhead--spaced">BYOK / key management</h3>
                       <div className="df2-settings-policy-grid">
                         <div className="df2-settings-policy-row">
                           <div>
@@ -481,7 +506,33 @@ export function SettingsPage() {
                     </div>
                   )}
                   {!postureLoading && !posture && (
-                    <EmptyState compact icon="shield" title="Security posture unavailable" description="Could not load posture from the backend." />
+                    <>
+                      <EmptyState
+                        compact
+                        icon="shield"
+                        title="Security posture unavailable"
+                        description="Start the API to load live compliance status. Policy controls below reflect your workspace defaults."
+                      />
+                      <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Policy controls</h3>
+                      <div className="df2-settings-policy-grid">
+                        {[
+                          { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts." },
+                          { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access." },
+                          { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review." },
+                          { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges." },
+                          { title: "Session timeout", desc: "Automatically sign out idle workspace sessions." },
+                          { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles." },
+                        ].map((item) => (
+                          <div key={item.title} className="df2-settings-policy-row">
+                            <div>
+                              <h3>{item.title}</h3>
+                              <p>{item.desc}</p>
+                            </div>
+                            <span className="df2-badge df2-badge-muted">API offline</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </div>
               </section>
@@ -564,10 +615,15 @@ export function SettingsPage() {
                 </section>
 
                 <div className="df2-model-grid">
-                  {!modelCapabilities ? (
-                    <p className="df2-cell-meta">Loading model providers…</p>
-                  ) : modelCapabilities.providers.length === 0 ? (
-                    <p className="df2-cell-meta">No model providers reported by the API.</p>
+                  {!modelCapabilitiesLoaded ? (
+                    <SectionLoader title="Loading model providers" hint="Fetching AI routing configuration…" />
+                  ) : !modelCapabilities || modelCapabilities.providers.length === 0 ? (
+                    <EmptyState
+                      compact
+                      icon="sparkle"
+                      title="No model providers"
+                      description="Configure Anthropic, OpenAI, or Ollama credentials when the API is online."
+                    />
                   ) : modelCapabilities.providers.map((provider) => (
                     <article key={provider.provider} className={`df2-model-card ${provider.available ? "ready" : ""}`}>
                       <div className="df2-model-card-head">

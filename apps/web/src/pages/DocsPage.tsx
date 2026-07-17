@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { StatCard } from "../components/ui/StatCard";
@@ -18,9 +19,9 @@ interface CatalogStats {
 }
 
 function RevealSection({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  const { ref, className: revealClass } = useRevealOnScroll();
+  const { ref, visible } = useRevealOnScroll();
   return (
-    <div ref={ref} className={`${revealClass} ${className}`}>
+    <div ref={ref} className={`df2-docs-reveal ${visible ? "df2-docs-reveal--in" : ""} ${className}`.trim()}>
       {children}
     </div>
   );
@@ -50,7 +51,13 @@ function ArchitectureDiagram() {
 
   return (
     <div className="df2-docs-architecture" aria-label="DataFlow architecture diagram">
-      <svg viewBox={`0 0 ${width} ${height}`} className="df2-docs-architecture-svg" role="img" aria-label="Data pipeline flow">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="df2-docs-architecture-svg"
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-label="Data pipeline flow"
+      >
         <defs>
           <marker id="df2-docs-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
             <path d="M0,0 L0,6 L9,3 z" fill="var(--df-brand, #2563eb)" />
@@ -281,7 +288,13 @@ export function DocsPage() {
   const planned = stats?.planned ?? 600;
 
   return (
-    <PageShell title="Docs" fit={false} className="df2-page-docs">
+    <PageShell
+      title="Docs"
+      description="How DataFlow plans, maps, validates, and proves every transfer."
+      fit={false}
+      className="df2-page-docs"
+    >
+      <PageFrame className="df2-docs-workspace">
       <div className="df2-docs dt-stagger">
         <RevealSection>
           <PageSection title="Architecture" subtitle="One canonical pipeline for every source and destination" asCard>
@@ -405,6 +418,7 @@ export function DocsPage() {
           </PageSection>
         </RevealSection>
       </div>
+      </PageFrame>
     </PageShell>
   );
 }

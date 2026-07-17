@@ -16,7 +16,7 @@ export function StatCard({ label, value, tone = "default", sub, icon }: StatCard
     : tone === "teal" ? "teal"
     : "";
   return (
-    <div className="df2-stat">
+    <div className="df2-stat df2-stat--animated">
       {icon && (
         <div className="df2-stat-icon">
           <DtIcon name={icon} size={16} />

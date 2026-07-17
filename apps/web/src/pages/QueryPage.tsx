@@ -101,8 +101,25 @@ export function QueryPage({ connectors }: QueryPageProps) {
   };
 
   return (
-    <PageShell wide className="df2-page-query" title="Query Playground">
+    <PageShell
+      wide
+      className="df2-page-query"
+      title="Query Playground"
+      description="Run ad-hoc queries and export results to files or destinations."
+    >
       <PageFrame className="df2-query-page">
+        {connectors.length === 0 ? (
+          <EmptyState
+            page
+            icon="search"
+            title="Add a connector to run queries"
+            description="Save a PostgreSQL, MySQL, MongoDB, or warehouse connection first — then run read-only SQL or aggregation pipelines and export results."
+            action={
+              <p className="df2-label-hint">Open Connectors from the sidebar to browse the catalog.</p>
+            }
+          />
+        ) : (
+        <>
         <div className="df2-query-form df2-card">
           <div className="df2-card-head">
             <div>
@@ -146,12 +163,19 @@ export function QueryPage({ connectors }: QueryPageProps) {
               connectorType={selected?.type}
               placeholder={queryPlaceholder}
               disabled={queryLoading || exportLoading}
-              height="18rem"
+              height="22rem"
             />
             <p className="df2-label-hint">SQL mode supports SELECT, CTEs (WITH), EXPLAIN, SHOW, and subqueries. MongoDB mode accepts a JSON filter or an aggregate pipeline array.</p>
           </div>
 
           <div className="df2-query-actions">
+            <Button
+              variant="secondary"
+              disabled={queryLoading || exportLoading || !query.trim()}
+              onClick={() => setQuery("")}
+            >
+              Clear query
+            </Button>
             <Button
               variant="primary"
               loading={queryLoading}
@@ -264,6 +288,8 @@ export function QueryPage({ connectors }: QueryPageProps) {
               )}
             </div>
           </div>
+        )}
+        </>
         )}
       </PageFrame>
     </PageShell>

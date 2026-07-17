@@ -5,6 +5,7 @@ import { EmptyState } from "../components/EmptyState";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
+import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
@@ -148,14 +149,19 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   };
 
   return (
-    <PageShell wide className="df2-page-connectors" title="Connectors">
+    <PageShell
+      wide
+      className="df2-page-connectors"
+      title="Connectors"
+      description="Saved connections and the transfer-ready catalog."
+    >
       <PageFrame className="df2-connectors-page">
         <PageToolbar
           searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
           searchPlaceholder="Search saved connections…"
           filters={
-            <div className="df2-toolbar-filters df2-toolbar-filter-stack">
+            <FilterBar variant="inline" ariaLabel="Connector page filters">
               <FilterTabs
                 ariaLabel="Connector views"
                 value={tab}
@@ -189,7 +195,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                   ]}
                 />
               )}
-            </div>
+            </FilterBar>
           }
           actions={
             <>
@@ -209,7 +215,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 size="sm"
                 variant="primary"
                 onClick={() => onAdd()}
-                leadingIcon={<DtIcon name="plus" size={14} />}
               >
                 New connection
               </Button>
@@ -219,21 +224,43 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
 
         <div className="df2-connectors-workspace">
           {tab === "connections" ? (
-            <>
+            connectors.length === 0 ? (
+              <div className="df2-connectors-empty">
+                <EmptyState
+                  page
+                  icon="connectors"
+                  title="No connections yet"
+                  description="Browse the catalog, enter credentials once, and reuse connections across Transfer Studio, Pipelines, and Data Pilot."
+                  action={
+                    <div className="df2-empty-actions-row">
+                      <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
+                        <DtIcon name="search" size={14} /> Browse catalog
+                      </button>
+                      <button type="button" className="df2-btn df2-btn-ghost" onClick={() => onAdd()}>
+                        Add connection
+                      </button>
+                    </div>
+                  }
+                />
+                <div className="df2-connectors-empty-features" aria-label="Connection capabilities">
+                  {[
+                    { icon: "activity" as const, title: "Streams & sync", desc: "Track pipelines and transfer jobs per connection." },
+                    { icon: "sparkle" as const, title: "Schema drift", desc: "Review column changes before they hit production." },
+                    { icon: "gate" as const, title: "Policy settings", desc: "Residency, RBAC, and audit for enterprise workspaces." },
+                  ].map((item) => (
+                    <article key={item.title} className="df2-connectors-feature-card">
+                      <span className="df2-connectors-feature-icon" aria-hidden>
+                        <DtIcon name={item.icon} size={18} />
+                      </span>
+                      <h3>{item.title}</h3>
+                      <p>{item.desc}</p>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ) : (
             <div className="df2-connectors-layout">
               <aside className="df2-connectors-list">
-                {connectors.length === 0 ? (
-                  <EmptyState
-                    icon="connectors"
-                    title="No connections yet"
-                    description="Browse the catalog, enter credentials once, and reuse connections across every transfer."
-                    action={
-                      <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
-                        Browse catalog
-                      </button>
-                    }
-                  />
-                ) : (
                   <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
                     {filteredConnectors.map((c) => (
                       <ConnectorCard
@@ -258,7 +285,6 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                       />
                     )}
                   </div>
-                )}
               </aside>
               <section className="df2-connectors-detail">
                 <ConnectionWorkbench
@@ -271,14 +297,10 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 />
               </section>
             </div>
-            </>
+            )
           ) : (
-            <div className="df2-connectors-pane">
-              <div className="df2-card">
-                <div className="df2-card-body">
-                  <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
-                </div>
-              </div>
+            <div className="df2-connectors-pane df2-connectors-catalog">
+              <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
             </div>
           )}
         </div>
