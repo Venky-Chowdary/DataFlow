@@ -29,6 +29,7 @@ from connectors.writer_common import (
 from services.type_system import ddl_type
 
 COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "2000"))
+MAX_BIND_INSERT_ROWS = int(os.getenv("DATAFLOW_SF_BIND_INSERT_ROWS", "1000"))
 
 
 @dataclass
@@ -51,6 +52,50 @@ def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]
 
 def _is_json_type(sf_type: str) -> bool:
     return sf_type and sf_type.split("(")[0].upper() in {"VARIANT", "JSON", "OBJECT", "ARRAY"}
+
+
+def _batch_insert_rows(
+    cur: Any,
+    table_name: str,
+    target_cols: list[str],
+    target_types: list[str],
+    batch: list[tuple],
+) -> int:
+    """Batch INSERT for rows below the COPY threshold, including VARIANT/JSON.
+
+    Snowflake's Python connector does not support array binds inside a
+    ``SELECT ... FROM VALUES`` subquery (SNOW-940628) and ``VALUES`` clauses do
+    not allow function calls such as ``PARSE_JSON``.  We build one
+    ``INSERT INTO ... SELECT ... FROM VALUES (%s,...), (%s,...)`` statement per
+    sub-batch, stringify JSON-typed values so ``PARSE_JSON(columnN)`` can parse
+    them, and bind all values as positional parameters.
+    """
+    col_list = ", ".join(f'"{c}"' for c in target_cols)
+    select_items = []
+    for i, t in enumerate(target_types, start=1):
+        if _is_json_type(t):
+            select_items.append(f"PARSE_JSON(column{i})")
+        else:
+            select_items.append(f"column{i}")
+    select_sql = ", ".join(select_items)
+
+    written = 0
+    for offset in range(0, len(batch), MAX_BIND_INSERT_ROWS):
+        sub = batch[offset : offset + MAX_BIND_INSERT_ROWS]
+        row_placeholders: list[str] = []
+        params: list[Any] = []
+        for row in sub:
+            converted = [
+                cell_to_string(v) if _is_json_type(t) else v
+                for v, t in zip(row, target_types)
+            ]
+            params.extend(converted)
+            row_placeholders.append(f"({', '.join(['%s'] * len(target_cols))})")
+        values_sql = ", ".join(row_placeholders)
+        sql = f'INSERT INTO "{table_name}" ({col_list}) SELECT {select_sql} FROM VALUES {values_sql}'
+        cur.execute(sql, params)
+        written += len(sub)
+    return written
 
 
 def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str], target_types: list[str]) -> int:
@@ -332,17 +377,9 @@ def write_mapped_rows(
                     else:
                         has_json = any(_is_json_type(t) for t in target_types)
                         if has_json:
-                            # VALUES clause does not allow PARSE_JSON, and
-                            # executemany cannot rewrite SELECT statements, so we
-                            # execute one SELECT row at a time for VARIANT/JSON.
-                            select_items = ", ".join(
-                                f'PARSE_JSON(%s)' if _is_json_type(t) else '%s'
-                                for c, t in zip(target_cols, target_types)
+                            written += _batch_insert_rows(
+                                cur, table_name, target_cols, target_types, batch
                             )
-                            insert_sql = f'INSERT INTO "{table_name}" ({col_list}) SELECT {select_items}'
-                            for row in batch:
-                                cur.execute(insert_sql, row)
-                                written += 1
                         else:
                             value_placeholders = ", ".join(["%s"] * len(target_cols))
                             insert_sql = f'INSERT INTO "{table_name}" ({col_list}) VALUES ({value_placeholders})'
