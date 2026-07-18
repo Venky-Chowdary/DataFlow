@@ -387,6 +387,21 @@ def run_file_preflight(
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
+    # If the caller did not supply rich source types, infer them from the sample
+    # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
+    # being treated as all-VARCHAR against a typed warehouse target.
+    if sample_rows and columns:
+        generic_types = {"", "varchar", "text", "string"}
+        if not column_types or all((column_types.get(c) or "").lower() in generic_types for c in columns):
+            try:
+                from services.file_parser import FileParser
+
+                inferred = FileParser.infer_schema(sample_rows)
+                if inferred:
+                    column_types = {**column_types, **{c: inferred.get(c, column_types.get(c, "VARCHAR")) for c in columns}}
+            except Exception:
+                pass
+
     source_cols = [
         ColumnSchema(name=c, inferred_type=column_types.get(c, "VARCHAR").upper())
         for c in columns

@@ -182,7 +182,12 @@ async def query_export(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    rows, columns, schema, _ = _run_query(connector, body)
+    try:
+        rows, columns, schema, _ = _run_query(connector, body)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return QueryExportResult(success=False, error=f"Query execution failed: {exc}", format=body.format)
     if not rows:
         return QueryExportResult(success=True, row_count=0, format=body.format)
 

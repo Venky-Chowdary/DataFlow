@@ -11,6 +11,7 @@ from .adapters import (
 from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
+from services.value_serializer import cell_to_string
 
 
 def introspect_endpoint(
@@ -287,22 +288,46 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
         fmt = (endpoint.format or "").lower()
 
         if fmt == "mongodb":
+            import json
+
             from pymongo import MongoClient
+
+            from services.schema_inference import infer_type
 
             coll_name = endpoint.collection
             if not coll_name:
                 return
-            client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
-            db = client[endpoint.database or cfg["database"] or "test"]
-            coll = db[coll_name]
-            records = list(coll.find().limit(sample_limit))
+            try:
+                client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
+                db = client[endpoint.database or cfg["database"] or "test"]
+                coll = db[coll_name]
+                cursor = coll.find().max_time_ms(5000).limit(sample_limit)
+                records = list(cursor)
+            except Exception as exc:
+                out["message"] = f"Collection sample failed: {exc}"
+                return
+            # Serialize MongoDB-native types to JSON-safe scalars so the
+            # introspection response can be returned without FastAPI serialization errors.
+            safe_records = []
             for r in records:
-                if "_id" in r:
-                    r["_id"] = str(r["_id"])
-            columns = list(records[0].keys()) if records else []
+                safe_records.append(json.loads(json.dumps(r, default=str)))
+            columns = list(safe_records[0].keys()) if safe_records else []
+            # Infer logical types from the raw sampled values (not just "string").
+            # cell_to_string normalizes ObjectId, datetime, Decimal128, and nested
+            # documents into canonical strings so the statistical inferrer can detect
+            # INTEGER, DECIMAL, BOOLEAN, TIMESTAMP, JSON, etc.
+            schema = {}
+            for col in columns:
+                samples = [cell_to_string(r.get(col)) for r in records[:100] if r.get(col) is not None]
+                schema[col] = infer_type(samples, field_name=col) if samples else "VARCHAR"
             out["columns"] = columns
-            out["schema"] = {c: "string" for c in columns}
-            out["row_estimate"] = coll.estimated_document_count() if columns else 0
+            out["schema"] = schema
+            out["sample_data"] = safe_records[:10]
+            out["data"] = safe_records[:10]
+            try:
+                out["row_estimate"] = coll.estimated_document_count() if columns else 0
+            except Exception:
+                out["row_estimate"] = len(records)
             out["table_exists"] = bool(columns)
             client.close()
             return

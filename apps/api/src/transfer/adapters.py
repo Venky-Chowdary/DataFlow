@@ -338,8 +338,14 @@ def _lookup_saved_connector(
         return None
 
 
-def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, headers: list[str]) -> dict[str, str]:
-    """Load column types from INFORMATION_SCHEMA when the driver is available."""
+def _introspect_table_schema(
+    db_type: str,
+    cfg: dict[str, Any],
+    table: str,
+    headers: list[str],
+    records: list[dict] | None = None,
+) -> dict[str, str]:
+    """Load column types from INFORMATION_SCHEMA or infer from sample records."""
     if db_type == "generic_sql":
         try:
             from connectors.generic_sql import introspect_table_schema
@@ -369,6 +375,19 @@ def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, head
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
+
+    # Fallback: infer logical types from the sample records we already have in hand.
+    # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
+    # stored values may be strings but whose content is numeric, boolean, JSON, etc.
+    if records:
+        try:
+            from services.file_parser import FileParser
+
+            inferred = FileParser.infer_schema(records)
+            if inferred:
+                return {h: inferred.get(h, "TEXT") for h in headers}
+        except Exception:
+            pass
     return {h: "TEXT" for h in headers}
 
 
@@ -418,7 +437,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema("postgresql", cfg, table, batch.headers)
+        schema = _introspect_table_schema("postgresql", cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "mongodb":
@@ -444,7 +463,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, "mongodb", coll_name)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema("mongodb", cfg, coll_name, batch.headers)
+        schema = _introspect_table_schema("mongodb", cfg, coll_name, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "mysql":
@@ -468,7 +487,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "bigquery":
@@ -494,7 +513,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "snowflake":
@@ -519,7 +538,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "gcs":
@@ -624,7 +643,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "generic_sql":
@@ -649,7 +668,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "sftp":

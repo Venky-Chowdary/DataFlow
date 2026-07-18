@@ -637,7 +637,12 @@ async def run_universal_transfer(
     _residency_check(request, destination, region)
 
     engine = get_transfer_engine()
-    job_id = engine._create_pending_job(request_obj)
+    try:
+        job_id = engine._create_pending_job(request_obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
 
     try:
         from services.audit_log import actor_from_request, append_audit_event
