@@ -66,6 +66,10 @@ class MongoContractStore(ContractStore):
                 from services.mongodb_service import get_mongodb_service
 
                 self.mongo = get_mongodb_service()
+            # The in-memory fallback returns an empty dict, not a real MongoDB
+            # database, so fall back to the in-memory contract store instead.
+            if type(self.mongo).__name__ == "MemoryMongoDBService":
+                return None
             return self.mongo.get_database()
         except Exception:
             return None

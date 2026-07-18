@@ -40,7 +40,10 @@ class WorkerLeaseStore:
             from services.mongodb_service import get_mongodb_service
 
             mongo = get_mongodb_service()
-            if mongo and getattr(mongo, "client", None):
+            # The in-memory fallback is not a real persistence backend; skip it.
+            if not mongo or type(mongo).__name__ == "MemoryMongoDBService":
+                return None
+            if getattr(mongo, "client", None):
                 db = mongo.get_database()
                 if db is not None:
                     return db["worker_leases"]
