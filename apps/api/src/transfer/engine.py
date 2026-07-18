@@ -74,6 +74,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 from .adapters import (
     parse_file_content,
     read_source_database,
+    resolve_connector_config,
     write_destination_database,
     write_destination_file,
 )
@@ -1873,10 +1874,24 @@ class UniversalTransferEngine:
         if source_info.get("columns"):
             plan["source_columns"] = source_info["columns"]
             plan["source_schema"] = source_info["schema"]
-        src_fmt = source.format or ("csv" if source.kind == "file" else source.format or "")
-        dst_fmt = destination.format or ("mongodb" if destination.kind == "database" else "json")
+        src_fmt = self._resolved_format(source)
+        dst_fmt = self._resolved_format(destination)
         plan["route_analysis"] = analyze_route(source.kind, src_fmt, destination.kind, dst_fmt)
         return plan
+
+    def _resolved_format(self, endpoint: EndpointConfig) -> str:
+        """Return the canonical driver format, preferring saved connector type."""
+        if endpoint.connector_id:
+            try:
+                cfg = resolve_connector_config(endpoint)
+                return (cfg.get("type") or endpoint.format or "").lower()
+            except Exception:
+                pass
+        if endpoint.kind == "file":
+            return (endpoint.format or "csv").lower()
+        if endpoint.kind == "file_export":
+            return (endpoint.format or "json").lower()
+        return (endpoint.format or "").lower()
 
 
 _engine: Optional[UniversalTransferEngine] = None
