@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, ReactNode } from "react";
+import { createContext, useContext, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 
 import { ActiveDataContext } from "./types";
 
@@ -6,7 +6,7 @@ export type { ActiveDataContext };
 
 interface DataContextValue {
   activeData: ActiveDataContext | null;
-  setActiveData: (data: ActiveDataContext | null) => void;
+  setActiveData: Dispatch<SetStateAction<ActiveDataContext | null>>;
 }
 
 const DataContext = createContext<DataContextValue>({

@@ -203,3 +203,54 @@ def test_integrity_audit_returns_structured_report():
     assert report["checks_run"] >= 5
     assert "summary" in report
     assert isinstance(report["passed"], bool)
+
+
+# ── Encoding / format-control characters ─────────────────────────────────────
+
+def test_encoding_blocks_strict_mode():
+    zwsp = "hello\u200bworld"
+    report = run_integrity_audit(
+        source_columns=["title"],
+        mappings=[{"source": "title", "target": "title", "confidence": 0.99}],
+        sample_rows=[{"title": zwsp}],
+        validation_mode="strict",
+    )
+    enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)
+    assert enc is not None
+    assert enc["blocks_transfer"] is True
+    assert report["blocks_transfer"] is True
+    assert any("format-control" in str(i).lower() for i in enc["issues"])
+
+
+def test_encoding_warns_balanced_mode():
+    zwsp = "hello\u200bworld"
+    report = run_integrity_audit(
+        source_columns=["title"],
+        mappings=[{"source": "title", "target": "title", "confidence": 0.99}],
+        sample_rows=[{"title": zwsp}],
+        validation_mode="balanced",
+    )
+    enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)
+    assert enc is not None
+    assert enc["blocks_transfer"] is False
+    assert enc["passed"] is True
+    assert enc["warnings"]
+    assert "format-control" in " ".join(enc["warnings"]).lower()
+
+
+def test_strip_controls_clears_encoding_block():
+    zwsp = "hello\u200bworld"
+    cleaned, err = apply_transform(zwsp, "strip_controls")
+    assert err is None
+    assert cleaned == "hello world" or cleaned == "helloworld" or "\u200b" not in str(cleaned)
+
+    report = run_integrity_audit(
+        source_columns=["title"],
+        mappings=[{"source": "title", "target": "title", "confidence": 0.99, "transform": "strip_controls"}],
+        sample_rows=[{"title": zwsp}],
+        validation_mode="strict",
+    )
+    enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)
+    assert enc is not None
+    assert enc["blocks_transfer"] is False
+    assert not enc["issues"]

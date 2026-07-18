@@ -367,30 +367,91 @@ def _check_mapping_confidence(
     }
 
 
-def _check_encoding_anomalies(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Flag replacement chars and non-normalized unicode that break downstream systems."""
-    issues: list[str] = []
+def _format_control_chars(text: str) -> list[str]:
+    """Return U+XXXX codes for format/control chars that warehouses often reject."""
+    found: list[str] = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat == "Cf" or (cat == "Cc" and ch not in "\t\n\r"):
+            code = f"U+{ord(ch):04X}"
+            if code not in found:
+                found.append(code)
+            if len(found) >= 6:
+                break
+    return found
+
+
+def _check_encoding_anomalies(
+    rows: list[dict[str, Any]],
+    *,
+    validation_mode: str = "strict",
+    mappings: list[dict] | None = None,
+) -> dict[str, Any]:
+    """Flag replacement / format-control chars that break warehouse loads.
+
+    Balanced/review modes warn (industry default: sanitize at write); strict/maximum
+    block until the operator applies ``strip_controls`` or cleans the source.
+    Columns already mapped with ``strip_controls`` / ``normalize_unicode`` are skipped.
+    """
+    sanitized_cols = {
+        str(m.get("source"))
+        for m in (mappings or [])
+        if str(m.get("transform") or "").lower() in {"strip_controls", "normalize_unicode"}
+    }
+    findings: list[dict[str, Any]] = []
     checked = 0
-    for row in rows[:200]:
-        for val in row.values():
+    for row_idx, row in enumerate(rows[:200], start=1):
+        if not isinstance(row, dict):
+            continue
+        for col, val in row.items():
             if val is None:
                 continue
+            if str(col) in sanitized_cols:
+                continue
             text = cell_to_string(val)
-            if "\ufffd" in text:
-                issues.append("replacement character () detected — encoding mismatch")
-                break
-            if any(unicodedata.category(ch) == "Cf" for ch in text):
-                issues.append("format-control character detected — normalize before transfer")
-                break
             checked += 1
-        if issues:
+            if "\ufffd" in text:
+                findings.append({
+                    "column": str(col),
+                    "row": row_idx,
+                    "message": "replacement character (U+FFFD) detected — encoding mismatch",
+                    "chars": ["U+FFFD"],
+                    "sample": text[:80],
+                    "suggested_fix": "Re-encode the source as UTF-8, or apply strip_controls and quarantine remaining bad cells.",
+                    "suggested_transform": "strip_controls",
+                })
+                continue
+            bad = _format_control_chars(text)
+            if bad:
+                findings.append({
+                    "column": str(col),
+                    "row": row_idx,
+                    "message": f"format-control character detected ({', '.join(bad)}) — normalize before transfer",
+                    "chars": bad,
+                    "sample": text[:80],
+                    "suggested_fix": (
+                        f"Column '{col}' contains invisible format/control characters "
+                        f"({', '.join(bad)}). Apply strip_controls to sanitize (warehouse-safe) "
+                        "or quarantine affected rows — never drop silently."
+                    ),
+                    "suggested_transform": "strip_controls",
+                })
+        if len(findings) >= 12:
             break
+
+    mode = (validation_mode or "strict").strip().lower()
+    # Balanced/review: warn so Mongo/CMS extracts aren't hard-blocked; strict blocks.
+    blocks = bool(findings) and mode in {"strict", "maximum"}
+    issue_payload: list[Any] = findings[:12] if findings else []
     return {
         "check": "encoding_anomalies",
-        "passed": len(issues) == 0,
-        "blocks_transfer": len(issues) > 0,
-        "issues": issues[:5],
+        "passed": not blocks,
+        "blocks_transfer": blocks,
+        "issues": issue_payload,
+        "warnings": [] if blocks else [f.get("message", "") for f in findings[:8]],
         "values_checked": checked,
+        "affected_columns": sorted({f["column"] for f in findings}),
+        "suggested_transform": "strip_controls" if findings else None,
     }
 
 
@@ -466,7 +527,9 @@ def run_integrity_audit(
         checks.append(_check_sample_quality(source_columns, rows, source_types, validation_mode, dest_kind=dest_kind))
 
     if rows:
-        checks.append(_check_encoding_anomalies(rows))
+        checks.append(
+            _check_encoding_anomalies(rows, validation_mode=validation_mode, mappings=mappings)
+        )
 
     # Industry-standard expectation suite (dbt/GX patterns)
     if rows and source_columns:
@@ -498,6 +561,10 @@ def run_integrity_audit(
     failed_checks = [c for c in checks if not c.get("passed")]
     blocks = any(c.get("blocks_transfer") for c in checks)
     all_issues = [issue for c in failed_checks for issue in c.get("issues", [])]
+    all_warnings: list[str] = []
+    for c in checks:
+        for w in c.get("warnings") or []:
+            all_warnings.append(str(w))
 
     return {
         "passed": not blocks,
@@ -508,6 +575,7 @@ def run_integrity_audit(
         "checks_failed": len(failed_checks),
         "checks": checks,
         "issues": all_issues[:30],
+        "warnings": all_warnings[:20],
         "summary": (
             f"{len(passed_checks)}/{len(checks)} integrity checks passed"
             if checks

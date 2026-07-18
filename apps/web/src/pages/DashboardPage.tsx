@@ -21,6 +21,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageContextBar } from "../components/ui/PageContextBar";
 import { ProgressCell } from "../components/ui/ProgressCell";
+import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
 interface DashboardPageProps {
@@ -305,6 +306,7 @@ export function DashboardPage({
                       <thead>
                         <tr>
                           <th>Route</th>
+                          <th>Job ID</th>
                           <th>Status</th>
                           <th className="df2-col-progress">Progress</th>
                           <th>Rows</th>
@@ -319,6 +321,7 @@ export function DashboardPage({
                                 {job.source_type} → {job.destination_type}
                               </div>
                             </td>
+                            <td><CopyIdChip id={job._id} label="Job" compact /></td>
                             <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                             <td className="df2-col-progress"><JobProgressCell job={job} /></td>
                             <td className="df2-overview-rows">{job.records_processed?.toLocaleString() ?? "—"}</td>

@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
+import { CopyIdChip } from "./ui/CopyIdChip";
 import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
 import { cancelJob, streamJobProgress } from "../lib/api";
+import { useActiveData } from "../lib/DataContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { useToast } from "./Toast";
@@ -73,6 +75,7 @@ export function JobTheater({
   onCancelled,
 }: JobTheaterProps) {
   const { toast } = useToast();
+  const { setActiveData } = useActiveData();
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
   const [log, setLog] = useState<string[]>([]);
@@ -82,6 +85,22 @@ export function JobTheater({
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
+
+  useEffect(() => {
+    setActiveData((prev) => ({
+      name: prev?.name || sourceLabel || "transfer",
+      filename: prev?.filename,
+      columns: prev?.columns || [],
+      row_count: job?.records_processed ?? prev?.row_count ?? 0,
+      samples: prev?.samples,
+      schema: prev?.schema,
+      preflight_run_id: preflight?.run_id || prev?.preflight_run_id,
+      job_id: jobId,
+      validation_status: job?.status || prev?.validation_status,
+      route: `${sourceLabel || "source"} → ${destLabel || "destination"}`,
+      blockers: job?.error ? [job.error] : prev?.blockers,
+    }));
+  }, [destLabel, job?.error, job?.records_processed, job?.status, jobId, preflight?.run_id, setActiveData, sourceLabel]);
 
   useEffect(() => {
     startRef.current = Date.now();
@@ -328,7 +347,7 @@ export function JobTheaterView({
             {isRunning ? "Live" : isQuarantine ? "Quarantine" : isComplete ? "Finalized" : isCancelled ? "Cancelled" : "Attention"}
           </span>
           <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
-          <span className="df2-theater-v3-job-id" title={jobId}>#{jobId.slice(0, 8)}</span>
+          <CopyIdChip id={jobId} label="Job" compact />
           {isRunning && onCancel && (
             <button
               type="button"

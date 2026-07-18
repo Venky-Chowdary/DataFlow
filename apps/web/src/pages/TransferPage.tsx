@@ -21,6 +21,7 @@ import { ValidateDashboard } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import { useActiveData } from "../lib/DataContext";
+import { useStudioActions, type StudioAction } from "../lib/StudioActionsContext";
 import {
   analyzeDbTransfer,
   analyzeFileTransfer,
@@ -190,6 +191,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
   const { setActiveData } = useActiveData();
+  const { registerStudioHandler } = useStudioActions();
   const [step, setStep] = useState(STEP_SOURCE);
   const [sourceKind, setSourceKind] = useState<SourceKind>("file");
   const [sourceConnectorId, setSourceConnectorId] = useState("");
@@ -1334,6 +1336,43 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     cast_boolean: "cast_boolean",
     json: "parse_json",
     parse_json: "parse_json",
+    strip_controls: "strip_controls",
+    normalize_unicode: "strip_controls",
+  };
+
+  const stripControlCharsAndRerun = async () => {
+    const typed = new Set<MappingTransform>([
+      "cast_number",
+      "cast_boolean",
+      "date_iso",
+      "parse_json",
+      "hash_pii",
+    ]);
+    let applied = 0;
+    const next = columnMappings.map((m) => {
+      if (m.transform && typed.has(m.transform)) {
+        return { ...m, approved: true };
+      }
+      applied += 1;
+      return { ...m, transform: "strip_controls" as MappingTransform, approved: true };
+    });
+    setColumnMappings(next);
+    toast({
+      title: "Strip controls applied",
+      message: `Applied strip_controls to ${applied} text mapping${applied === 1 ? "" : "s"}. Re-running validation…`,
+      tone: "success",
+    });
+    await executePreflight(next);
+  };
+
+  const quarantineAndRerun = async () => {
+    setValidationMode("balanced");
+    toast({
+      title: "Quarantine posture",
+      message: "Switched to balanced validation so control-character findings warn and quarantine instead of hard-blocking. Re-running…",
+      tone: "info",
+    });
+    await executePreflight(undefined, "balanced");
   };
 
   /** Map an AI `suggested_action` onto the real Studio controls. */
@@ -1363,6 +1402,13 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         });
         break;
       }
+      case "normalize_control_chars": {
+        void stripControlCharsAndRerun();
+        break;
+      }
+      case "open_bad_data_fix":
+        // ValidateDashboard opens the drawer; keep as no-op fallback.
+        break;
       case "add_transform": {
         const uiTransform = action.transform ? ENGINE_TO_UI_TRANSFORM[action.transform] : undefined;
         if (!uiTransform) {
@@ -1941,6 +1987,81 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         ? `Existing ${destType} collection schema — ${destColumns.length} fields introspected`
         : `New schema will be created in ${targetDb}.${targetCollection || "collection"}`;
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
+
+  // Keep Data Pilot fed with the active validation/job IDs for NL triage & remediations.
+  useEffect(() => {
+    if (!preflight && !activeJobId) return;
+    setActiveData((prev) => {
+      const base = prev ?? {
+        name: sourceLabel || "transfer",
+        columns: columnMappings.map((m) => m.source),
+        row_count: parsed?.row_count ?? sourceRowEstimate ?? 0,
+      };
+      return {
+        ...base,
+        name: base.name || sourceLabel || "transfer",
+        columns: base.columns?.length ? base.columns : columnMappings.map((m) => m.source),
+        row_count: base.row_count || parsed?.row_count || sourceRowEstimate || 0,
+        preflight_run_id: preflight?.run_id || base.preflight_run_id,
+        job_id: activeJobId || base.job_id,
+        validation_status: preflighting
+          ? "running"
+          : preflight
+            ? preflight.passed
+              ? "passed"
+              : "blocked"
+            : base.validation_status,
+        route: `${sourceLabel} → ${mapDestRouteLabel}`,
+        blockers: (preflight?.blockers || []).map((b) => b.message).slice(0, 8),
+      };
+    });
+  }, [
+    activeJobId,
+    columnMappings,
+    mapDestRouteLabel,
+    parsed?.row_count,
+    preflight,
+    preflighting,
+    setActiveData,
+    sourceLabel,
+    sourceRowEstimate,
+  ]);
+
+  useEffect(() => {
+    const handler = async (action: StudioAction) => {
+      switch (action.kind) {
+        case "normalize_control_chars":
+          setStep(STEP_VALIDATE);
+          await stripControlCharsAndRerun();
+          break;
+        case "quarantine_and_rerun":
+          setStep(STEP_VALIDATE);
+          await quarantineAndRerun();
+          break;
+        case "open_bad_data_fix":
+          setStep(STEP_VALIDATE);
+          toast({
+            title: "Fix bad data",
+            message: action.run_id
+              ? `Opened Validate for run ${action.run_id}. Use Fix bad data on the Dry-run gate.`
+              : "Opened Validate — use Fix bad data on the blocked Dry-run gate.",
+            tone: "info",
+          });
+          break;
+        case "review_mappings":
+          setStep(STEP_MAP);
+          break;
+        case "rerun_preflight":
+          setStep(STEP_VALIDATE);
+          await executePreflight();
+          break;
+        default:
+          break;
+      }
+    };
+    registerStudioHandler(handler);
+    return () => registerStudioHandler(null);
+  });
 
   const handleSaveAsContract = async () => {
     if (!preflight) {
@@ -2783,6 +2904,8 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}
             onApplyAction={applySuggestedAction}
+            onStripControlChars={stripControlCharsAndRerun}
+            onQuarantineAndRerun={quarantineAndRerun}
           />
         </div>
       )}

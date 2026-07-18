@@ -171,6 +171,13 @@ export interface ActiveDataContext {
   row_count: number;
   samples?: Record<string, string[]>;
   schema?: Record<string, string>;
+  /** Validation run ID (pf_…) — Data Pilot can look this up. */
+  preflight_run_id?: string;
+  /** Live transfer job ID once Execute starts. */
+  job_id?: string;
+  validation_status?: "passed" | "blocked" | "running" | string;
+  route?: string;
+  blockers?: string[];
 }
 
 export interface ColumnAnalysis {
@@ -280,6 +287,8 @@ export interface PreflightResult {
   passed_count: number;
   total_gates: number;
   readiness_score: number;
+  /** Stable ID for this validation run — surface in UI and feed Data Pilot. */
+  run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
   proof_bundle?: PreflightProofBundle;
@@ -292,7 +301,9 @@ export type ValidationActionKind =
   | "add_transform"
   | "review_mappings"
   | "rerun_mapping"
-  | "check_connection";
+  | "check_connection"
+  | "normalize_control_chars"
+  | "open_bad_data_fix";
 
 export interface ValidationSuggestedAction {
   kind: ValidationActionKind | string;

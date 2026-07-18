@@ -261,11 +261,14 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "examples": ["A new 'status' column appeared in the source."],
     },
     {
-        "keywords": ["replacement character", "encoding"],
-        "gate": "g9_data_integrity",
-        "why": "The data contains replacement characters or control characters that can corrupt downstream systems.",
-        "fix": "Re-encode the source file as UTF-8, normalize the text, or use a binary target for non-text payloads.",
-        "examples": ["'\ufffd' detected in a customer name."],
+        "keywords": ["replacement character", "encoding", "format-control character"],
+        "gate": "g5_dry_run",
+        "why": "The sample contains replacement characters or invisible format/control characters (zero-width spaces, null bytes, etc.) that warehouses often reject.",
+        "fix": "Open Fix bad data and choose Strip control characters (applies strip_controls), or quarantine affected rows. In balanced mode this is a warning; strict mode blocks until sanitized.",
+        "examples": [
+            "Zero-width space U+200B in a MongoDB string field.",
+            "Null byte U+0000 in a scraped HTML description (also breaks Postgres COPY).",
+        ],
     },
     {
         "keywords": ["magnitude shift"],

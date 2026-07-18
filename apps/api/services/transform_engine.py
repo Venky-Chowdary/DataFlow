@@ -495,7 +495,21 @@ KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
+    "strip_controls", "normalize_unicode",
 })
+
+
+def _strip_format_controls(text: str) -> str:
+    """Remove format/control chars warehouses reject; keep tab/newline/carriage return."""
+    cleaned: list[str] = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat == "Cf":
+            continue
+        if cat == "Cc" and ch not in "\t\n\r":
+            continue
+        cleaned.append(ch)
+    return "".join(cleaned)
 
 
 def _parse_binary(value: str) -> str | None:
@@ -678,6 +692,16 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
     if transform in {"trim", "trim_id"}:
         cleaned = re.sub(r"\s+", " ", text)
+        return cleaned, None
+
+    if transform == "strip_controls":
+        cleaned = _strip_format_controls(text)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned, None
+
+    if transform == "normalize_unicode":
+        cleaned = unicodedata.normalize("NFKC", _strip_format_controls(text))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned, None
 
     if transform == "uuid":

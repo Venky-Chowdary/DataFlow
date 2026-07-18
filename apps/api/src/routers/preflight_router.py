@@ -187,7 +187,7 @@ async def run_preflight(body: PreflightRequest):
         destination_can_create=dest_meta.get("can_create_table"),
         destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
     )
-    return apply_policy_gates(
+    gated = apply_policy_gates(
         result,
         run_transfer_policy_gates(
             sync_mode=body.sync_mode,
@@ -198,6 +198,52 @@ async def run_preflight(body: PreflightRequest):
         ),
         validation_mode=body.validation_mode,
     )
+    from services.preflight_run_store import save_preflight_run
+
+    dest_label = (
+        body.dest_table
+        or body.dest_collection
+        or body.dest_database
+        or body.dest_type
+        or body.dest_kind
+        or "destination"
+    )
+    return save_preflight_run(
+        gated,
+        source_label=body.source_type or body.source_kind or "source",
+        dest_label=str(dest_label),
+        validation_mode=body.validation_mode,
+        route={
+            "source_kind": body.source_kind,
+            "source_type": body.source_type,
+            "source_connector_id": body.source_connector_id,
+            "dest_kind": body.dest_kind,
+            "dest_type": body.dest_type,
+            "dest_connector_id": body.connector_id,
+            "dest_table": body.dest_table,
+            "dest_collection": body.dest_collection,
+            "row_count": body.row_count,
+        },
+    )
+
+
+@router.get("/runs")
+async def list_preflight_runs(limit: int = 20):
+    """List recent validation runs (IDs Data Pilot / Jobs can reference)."""
+    from services.preflight_run_store import list_preflight_runs as _list
+
+    return {"runs": _list(limit=limit), "count": min(limit, 100)}
+
+
+@router.get("/runs/{run_id}")
+async def get_preflight_run(run_id: str):
+    """Fetch a stored validation run by ID for Pilot triage and audit."""
+    from services.preflight_run_store import get_preflight_run as _get
+
+    record = _get(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Preflight run '{run_id}' not found")
+    return record
 
 
 class ExplainRequest(BaseModel):

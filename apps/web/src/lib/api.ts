@@ -255,6 +255,9 @@ export interface CopilotAction {
   screen?: string;
   route?: string;
   label?: string;
+  /** Studio remediation kind when type === "studio". */
+  kind?: string;
+  run_id?: string;
 }
 
 export interface CopilotChatResponse {
@@ -326,6 +329,11 @@ export async function copilotChat(
       columns: dataContext.columns,
       row_count: dataContext.row_count,
       samples: dataContext.samples,
+      preflight_run_id: dataContext.preflight_run_id,
+      job_id: dataContext.job_id,
+      validation_status: dataContext.validation_status,
+      route: dataContext.route,
+      blockers: dataContext.blockers,
     };
   }
   const res = await apiFetch(`${API_BASE}/copilot/chat`, {
@@ -1781,6 +1789,78 @@ export async function createByokKey(body: { label: string; provider: ByokKey["pr
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create BYOK key"));
+  return res.json();
+}
+
+export type ProofLedger = {
+  generated_at: string;
+  headline: string;
+  metrics: {
+    unique_transfer_drivers: number;
+    transfer_live_drivers: string[];
+    catalog_transfer_ready_aliases?: number;
+    live_route_combinations?: number;
+    production_sku_routes: number;
+    fidelity_proofs_on_disk: number;
+    fidelity_proofs_passed: number;
+    planned_catalog_entries?: number;
+  };
+  production_sku: {
+    source_kind: string;
+    source_format: string;
+    dest_kind: string;
+    dest_format: string;
+    route: string;
+    status: string;
+  }[];
+  recent_proofs: {
+    id: string;
+    path: string;
+    mtime: string;
+    tier?: string;
+    route?: string;
+    success?: boolean;
+    rows?: number;
+    checks?: string[];
+    elapsed_ms?: number;
+  }[];
+  vs_airbyte: {
+    dimension: string;
+    dataflow: string;
+    airbyte: string;
+    proof: string;
+  }[];
+  how_to_verify: string[];
+};
+
+export type FidelityProofResult = {
+  success: boolean;
+  tier: string;
+  route: string;
+  rows: number;
+  records_transferred?: number;
+  elapsed_ms?: number;
+  error?: string;
+  checks?: string[];
+  check_detail?: Record<string, boolean>;
+  spot?: Record<string, unknown>;
+  proof_id?: string;
+  proof_file?: string;
+  vs_airbyte?: string;
+};
+
+export async function fetchProofLedger(): Promise<ProofLedger> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/ledger`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load proof ledger"));
+  return res.json();
+}
+
+export async function runFidelityProof(): Promise<FidelityProofResult> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/fidelity`, {
+    method: "POST",
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Fidelity proof failed"));
   return res.json();
 }
 

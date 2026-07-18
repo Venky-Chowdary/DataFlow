@@ -5,6 +5,7 @@ import { JobTheater } from "../components/JobTheater";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
+import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageContextBar } from "../components/ui/PageContextBar";
@@ -12,6 +13,7 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
+import { useActiveData } from "../lib/DataContext";
 import { cancelJob, fetchJob, retryJob, resumeJob } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
@@ -58,6 +60,7 @@ function statusIcon(status: string) {
 
 export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: JobsPageProps) {
   const { toast } = useToast();
+  const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -120,6 +123,26 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
       setSelectedId(filtered[0]._id);
     }
   }, [filter, filtered, jobs, counts.failed, selectedId]);
+
+  // Feed the selected job into Data Pilot so NL triage uses the real job ID.
+  useEffect(() => {
+    const job = jobs.find((j) => j._id === selectedId);
+    if (!job) return;
+    const dest = job.destination_collection || job.destination_database || job.destination_type || "destination";
+    setActiveData((prev) => ({
+      name: prev?.name || job.source_name || "job",
+      filename: prev?.filename,
+      columns: prev?.columns || [],
+      row_count: job.records_processed ?? prev?.row_count ?? 0,
+      samples: prev?.samples,
+      schema: prev?.schema,
+      preflight_run_id: prev?.preflight_run_id,
+      job_id: job._id,
+      validation_status: job.status,
+      route: `${job.source_name} → ${dest}`,
+      blockers: job.error ? [job.error] : prev?.blockers,
+    }));
+  }, [jobs, selectedId, setActiveData]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -370,6 +393,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                                 minute: "2-digit",
                               })}
                             </span>
+                            <code className="df2-job-row-id" title={job._id}>{job._id.slice(0, 8)}…</code>
                           </div>
                           {isLive && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
@@ -425,7 +449,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                           <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
                         </div>
                       </div>
-                      <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                      <div className="df2-jobs-v3-summary-ids">
+                        <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                        <CopyIdChip id={selected._id} label="Job" />
+                      </div>
                     </header>
 
                     <div className="df2-jobs-v3-summary-metrics">

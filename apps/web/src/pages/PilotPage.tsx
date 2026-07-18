@@ -11,9 +11,11 @@ import {
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
+import { useStudioActions } from "../lib/StudioActionsContext";
 import { Screen } from "../lib/types";
 import { useToast } from "../components/Toast";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
+import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageShell } from "../components/ui/PageShell";
@@ -59,6 +61,7 @@ function newSession(): Session {
 export function PilotPage({ onNavigate }: PilotPageProps) {
   const { toast } = useToast();
   const { activeData } = useActiveData();
+  const { dispatchStudioAction } = useStudioActions();
   const [sessions, setSessions] = useState<Session[]>([newSession()]);
   const [activeId, setActiveId] = useState(sessions[0].id);
   const [input, setInput] = useState("");
@@ -104,6 +107,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
   const applyActions = (actions?: CopilotAction[]) => {
     actions?.forEach((a) => {
+      if (a.type === "studio" && a.kind) {
+        dispatchStudioAction({ kind: a.kind, label: a.label, run_id: a.run_id });
+      }
       const screen = a.screen || a.route;
       if (a.type === "navigate" && screen) onNavigate(screen as Screen);
     });
@@ -193,6 +199,22 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               <span className="df2-pilot-status-dot" aria-hidden />
               {pilotInsightPill}
             </span>
+            {(activeData?.job_id || activeData?.preflight_run_id || activeData?.route) && (
+              <div className="df2-pilot-tracking">
+                {activeData.job_id && <CopyIdChip id={activeData.job_id} label="Job" compact />}
+                {activeData.preflight_run_id && (
+                  <CopyIdChip id={activeData.preflight_run_id} label="Run" compact />
+                )}
+                {activeData.route && (
+                  <span className="df2-pilot-tracking-route" title={activeData.route}>
+                    {activeData.route}
+                  </span>
+                )}
+                {activeData.validation_status && (
+                  <span className="df2-pilot-tracking-status">{activeData.validation_status}</span>
+                )}
+              </div>
+            )}
           </div>
           {pilotOnline && modelCapabilities && !anyCloudReady && (
             <div className="df2-page-actions-group">

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
@@ -10,6 +10,7 @@ import type {
   ValidationExplanation,
   ValidationSuggestedAction,
 } from "../../lib/types";
+import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 
 interface GateMeta {
   key: string;
@@ -99,6 +100,66 @@ interface ValidateDashboardProps {
   validationMode?: string;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
+  /** Apply strip_controls across mappings and re-run preflight. */
+  onStripControlChars?: () => void | Promise<void>;
+  /** Soften to quarantine-friendly posture and re-run. */
+  onQuarantineAndRerun?: () => void | Promise<void>;
+}
+
+function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
+  if (!preflight) return [];
+  const out: BadDataIssue[] = [];
+  const pushFrom = (items: unknown[]) => {
+    for (const item of items) {
+      if (typeof item === "string") {
+        if (/format-control|replacement character|encoding|control/i.test(item)) {
+          out.push({ message: item });
+        }
+        continue;
+      }
+      if (item && typeof item === "object") {
+        const row = item as Record<string, unknown>;
+        const message = String(row.message ?? row.error ?? "");
+        if (!message && !row.chars) continue;
+        if (message && !/format-control|replacement|encoding|control/i.test(message) && !row.chars) {
+          continue;
+        }
+        out.push({
+          column: row.column != null ? String(row.column) : undefined,
+          row: typeof row.row === "number" ? row.row : undefined,
+          message: message || "Encoding / control-character issue",
+          chars: Array.isArray(row.chars) ? row.chars.map(String) : undefined,
+          sample: row.sample != null ? String(row.sample) : undefined,
+        });
+      }
+    }
+  };
+  for (const b of preflight.blockers) {
+    const details = b.details || {};
+    if (Array.isArray(details.errors)) pushFrom(details.errors);
+    if (Array.isArray(details.issues)) pushFrom(details.issues);
+    if (Array.isArray(details.encoding_issues)) pushFrom(details.encoding_issues);
+    if (/format-control|replacement character/i.test(b.message)) {
+      out.push({ message: b.message });
+    }
+  }
+  for (const g of preflight.gates) {
+    const details = g.details || {};
+    if (Array.isArray(details.encoding_issues)) pushFrom(details.encoding_issues);
+    if (g.status === "block") {
+      if (Array.isArray(details.errors)) pushFrom(details.errors);
+      if (Array.isArray(details.issues)) pushFrom(details.issues);
+    }
+    if (Array.isArray(details.warnings)) pushFrom(details.warnings);
+  }
+  // Dedupe by message+column
+  const seen = new Set<string>();
+  return out.filter((i) => {
+    const key = `${i.column ?? ""}|${i.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 const SEVERITY_LABEL: Record<string, string> = {
@@ -113,6 +174,8 @@ const ACTION_ICON: Record<string, string> = {
   review_mappings: "sparkle",
   rerun_mapping: "transfer",
   check_connection: "server",
+  normalize_control_chars: "layers",
+  open_bad_data_fix: "shield",
 };
 
 /** Per-column value-aware coercion table with expandable offending-value rows. */
@@ -265,17 +328,49 @@ export function ValidateDashboard({
   destType,
   validationMode,
   onApplyAction,
+  onStripControlChars,
+  onQuarantineAndRerun,
 }: ValidateDashboardProps) {
   const [progress, setProgress] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
   const [explaining, setExplaining] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
+  const [badDataOpen, setBadDataOpen] = useState(false);
+  const [remediating, setRemediating] = useState(false);
+  const [assistExpanded, setAssistExpanded] = useState(true);
+  const [copiedRunId, setCopiedRunId] = useState(false);
+  const badDataIssues = useMemo(() => extractBadDataIssues(preflight), [preflight]);
+  const hasEncodingIssue = badDataIssues.length > 0;
+  const runId = preflight?.run_id;
+  const encodingBlocks = Boolean(
+    preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
+    || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
+  );
+
+  // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
+  useEffect(() => {
+    if (!running && encodingBlocks && hasEncodingIssue) {
+      setBadDataOpen(true);
+    }
+  }, [running, encodingBlocks, hasEncodingIssue, preflight?.passed_count, preflight?.blockers?.length]);
 
   // A new preflight run invalidates any prior explanation.
   useEffect(() => {
     setExplain(null);
     setExplainError(null);
+    setAssistExpanded(true);
   }, [preflight]);
+
+  const copyRunId = async () => {
+    if (!runId) return;
+    try {
+      await navigator.clipboard.writeText(runId);
+      setCopiedRunId(true);
+      window.setTimeout(() => setCopiedRunId(false), 1600);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const runExplain = async () => {
     if (!preflight) return;
@@ -336,9 +431,8 @@ export function ValidateDashboard({
   const sampleCompare = reconciliation?.sample_compare;
   const mismatches = sampleCompare?.mismatches ?? [];
 
-  // While validating we don't have real gate results yet, so animate the rules
-  // sequentially with the progress bar — one "running" at a time reads far
-  // cleaner than a wall of 12 spinners.
+  // While validating, never fake a "pass" — that caused the flip-flop UX where
+  // cards looked green for minutes then Dry-run suddenly blocked.
   const activeRuleIndex = Math.floor((progress / 100) * GATE_META.length);
 
   const statusForGate = (
@@ -346,7 +440,7 @@ export function ValidateDashboard({
     index: number,
   ): { status: string; message: string; issues: string[] } => {
     const gate = gateByKey.get(meta.key);
-    if (gate) {
+    if (gate && !running) {
       return {
         status: gate.status,
         message: gate.message,
@@ -354,11 +448,44 @@ export function ValidateDashboard({
       };
     }
     if (running) {
-      if (index < activeRuleIndex) return { status: "pass", message: "Checked", issues: [] };
       if (index === activeRuleIndex) return { status: "running", message: "Evaluating rule…", issues: [] };
-      return { status: "pending", message: "Queued", issues: [] };
+      return { status: "pending", message: "Waiting for engine result…", issues: [] };
     }
     return { status: "pending", message: "Awaiting validation run.", issues: [] };
+  };
+
+  const runStrip = async () => {
+    if (!onStripControlChars) return;
+    setRemediating(true);
+    try {
+      await onStripControlChars();
+      setBadDataOpen(false);
+    } finally {
+      setRemediating(false);
+    }
+  };
+
+  const runQuarantine = async () => {
+    if (!onQuarantineAndRerun) return;
+    setRemediating(true);
+    try {
+      await onQuarantineAndRerun();
+      setBadDataOpen(false);
+    } finally {
+      setRemediating(false);
+    }
+  };
+
+  const handleSuggestedAction = (action: ValidationSuggestedAction) => {
+    if (action.kind === "open_bad_data_fix" || action.kind === "normalize_control_chars") {
+      if (action.kind === "normalize_control_chars" && onStripControlChars) {
+        void runStrip();
+        return;
+      }
+      setBadDataOpen(true);
+      return;
+    }
+    onApplyAction?.(action);
   };
 
   return (
@@ -430,81 +557,154 @@ export function ValidateDashboard({
       )}
 
       {!running && preflight && (
-        <div className="df2-vd-assist">
+        <div className={`df2-vd-assist${assistExpanded ? " is-expanded" : " is-collapsed"}`}>
           <div className="df2-vd-assist-head">
-            <div className="df2-vd-assist-title">
+            <button
+              type="button"
+              className="df2-vd-assist-title df2-vd-assist-toggle"
+              onClick={() => setAssistExpanded((v) => !v)}
+              aria-expanded={assistExpanded}
+            >
               <span className="df2-vd-assist-icon"><DtIcon name="sparkle" size={16} /></span>
               <div>
                 <strong>Explain &amp; fix with AI</strong>
-                <span>Turn the validation result into a plain-language explanation with one-click fixes.</span>
+                <span>
+                  {assistExpanded
+                    ? "Turn the validation result into a plain-language explanation with one-click fixes."
+                    : explain
+                      ? "Analysis ready — expand to review fixes."
+                      : "Collapsed — expand to analyze or remediate."}
+                </span>
               </div>
+              <span className={`df2-vd-assist-chevron${assistExpanded ? " is-open" : ""}`} aria-hidden>
+                <DtIcon name="chevron-down" size={14} />
+              </span>
+            </button>
+            <div className="df2-vd-assist-head-actions">
+              {assistExpanded && (
+                <Button
+                  variant={explain ? "ghost" : "primary"}
+                  onClick={() => void runExplain()}
+                  loading={explaining}
+                  loadingLabel="Analyzing…"
+                  leadingIcon={<DtIcon name="sparkle" size={14} />}
+                >
+                  {explain ? "Re-analyze" : "Explain & fix with AI"}
+                </Button>
+              )}
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm"
+                onClick={() => {
+                  setAssistExpanded(false);
+                  setExplain(null);
+                  setExplainError(null);
+                }}
+                aria-label="Close AI analysis"
+                title="Close"
+              >
+                <DtIcon name="x" size={14} />
+              </button>
             </div>
-            <Button
-              variant={explain ? "ghost" : "primary"}
-              onClick={() => void runExplain()}
-              loading={explaining}
-              loadingLabel="Analyzing…"
-              leadingIcon={<DtIcon name="sparkle" size={14} />}
-            >
-              {explain ? "Re-analyze" : "Explain & fix with AI"}
-            </Button>
           </div>
 
-          {explainError && (
-            <div className="df2-vd-assist-error" role="alert">
-              <DtIcon name="alert" size={14} />
-              <span>{explainError}</span>
-            </div>
-          )}
-
-          {explaining && !explain && (
-            <div className="df2-vd-assist-loading">
-              <Spinner size="sm" label="" /> Reviewing gates, columns, and offending values…
-            </div>
-          )}
-
-          {explain && (
-            <div className="df2-vd-assist-body">
-              <div className="df2-vd-assist-meta">
-                <span className={`df2-vd-provider provider-${explain.assistant_provider === "deterministic" ? "det" : "llm"}`}>
-                  <DtIcon name={explain.assistant_provider === "deterministic" ? "shield" : "sparkle"} size={11} />
-                  {explain.assistant_provider === "deterministic" ? "deterministic" : explain.assistant_provider}
-                </span>
-                <span className="df2-vd-assist-summary">{explain.summary}</span>
-              </div>
-              {explain.narrative && (
-                <div className="df2-vd-assist-narrative">
-                  {explain.narrative.split("\n").filter(Boolean).map((line, i) => (
-                    <p key={i}>{line}</p>
-                  ))}
+          {assistExpanded && (
+            <>
+              {runId && (
+                <div className="df2-vd-run-id">
+                  <DtIcon name="activity" size={13} />
+                  <span>Validation run</span>
+                  <code>{runId}</code>
+                  <button type="button" className="df2-vd-run-id-copy" onClick={() => void copyRunId()}>
+                    {copiedRunId ? "Copied" : "Copy for Pilot"}
+                  </button>
                 </div>
               )}
-              {explain.suggested_actions.length > 0 && (
-                <div className="df2-vd-assist-actions">
-                  <span className="df2-vd-assist-actions-title">Suggested fixes</span>
+
+              {explainError && (
+                <div className="df2-vd-assist-error" role="alert">
+                  <DtIcon name="alert" size={14} />
+                  <span>{explainError}</span>
+                </div>
+              )}
+
+              {hasEncodingIssue && (
+                <div className="df2-vd-assist-actions df2-vd-assist-remediate">
+                  <span className="df2-vd-assist-actions-title">Bad data remediation</span>
                   <div className="df2-vd-chip-row">
-                    {explain.suggested_actions.map((action, i) => (
+                    <button
+                      type="button"
+                      className="df2-vd-chip kind-open_bad_data_fix"
+                      onClick={() => setBadDataOpen(true)}
+                    >
+                      <DtIcon name="shield" size={13} />
+                      Fix bad data…
+                    </button>
+                    {onStripControlChars && (
                       <button
-                        key={`${action.kind}-${action.column ?? ""}-${i}`}
                         type="button"
-                        className={`df2-vd-chip kind-${action.kind}`}
-                        onClick={() => onApplyAction?.(action)}
-                        disabled={!onApplyAction}
-                        title={action.label}
+                        className="df2-vd-chip kind-normalize_control_chars"
+                        onClick={() => void runStrip()}
+                        disabled={remediating}
                       >
-                        <DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={13} />
-                        {action.label}
+                        <DtIcon name="layers" size={13} />
+                        Strip controls &amp; re-run
                       </button>
-                    ))}
+                    )}
                   </div>
                 </div>
               )}
-              {explain.suggested_actions.length === 0 && explain.passed && (
-                <p className="df2-vd-assist-clean">
-                  <DtIcon name="check" size={13} /> No fixes needed — all gates passed.
-                </p>
+
+              {explaining && !explain && (
+                <div className="df2-vd-assist-loading">
+                  <Spinner size="sm" label="" /> Reviewing gates, columns, and offending values…
+                </div>
               )}
-            </div>
+
+              {explain && (
+                <div className="df2-vd-assist-body">
+                  <div className="df2-vd-assist-meta">
+                    <span className={`df2-vd-provider provider-${explain.assistant_provider === "deterministic" ? "det" : "llm"}`}>
+                      <DtIcon name={explain.assistant_provider === "deterministic" ? "shield" : "sparkle"} size={11} />
+                      {explain.assistant_provider === "deterministic" ? "deterministic" : explain.assistant_provider}
+                    </span>
+                    <span className="df2-vd-assist-summary">{explain.summary}</span>
+                  </div>
+                  {explain.narrative && (
+                    <div className="df2-vd-assist-narrative">
+                      {explain.narrative.split("\n").filter(Boolean).map((line, i) => (
+                        <p key={i}>{line}</p>
+                      ))}
+                    </div>
+                  )}
+                  {explain.suggested_actions.length > 0 && (
+                    <div className="df2-vd-assist-actions">
+                      <span className="df2-vd-assist-actions-title">Suggested fixes</span>
+                      <div className="df2-vd-chip-row">
+                        {explain.suggested_actions.map((action, i) => (
+                          <button
+                            key={`${action.kind}-${action.column ?? ""}-${i}`}
+                            type="button"
+                            className={`df2-vd-chip kind-${action.kind}`}
+                            onClick={() => handleSuggestedAction(action)}
+                            disabled={!onApplyAction && action.kind !== "open_bad_data_fix" && action.kind !== "normalize_control_chars"}
+                            title={action.label}
+                          >
+                            <DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={13} />
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {explain.suggested_actions.length === 0 && explain.passed && (
+                    <p className="df2-vd-assist-clean">
+                      <DtIcon name="check" size={13} /> No fixes needed — all gates passed.
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -663,12 +863,37 @@ export function ValidateDashboard({
                   {b.guidance?.why && (
                     <span className="df2-vd-blocker-why">{b.guidance.why}</span>
                   )}
+                  {(b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
+                    <div className="df2-vd-blocker-actions">
+                      <button
+                        type="button"
+                        className="df2-vd-chip kind-open_bad_data_fix"
+                        onClick={() => setBadDataOpen(true)}
+                      >
+                        <DtIcon name="shield" size={13} />
+                        Fix bad data…
+                      </button>
+                    </div>
+                  )}
                 </li>
               );
             })}
           </ul>
         </div>
       )}
+
+      <BadDataFixDrawer
+        open={badDataOpen}
+        onClose={() => setBadDataOpen(false)}
+        issues={badDataIssues.length ? badDataIssues : [{ message: "format-control character detected — normalize before transfer" }]}
+        applying={remediating}
+        onStripControls={() => void runStrip()}
+        onQuarantineContinue={() => void runQuarantine()}
+        onExplainWithAI={() => {
+          setBadDataOpen(false);
+          void runExplain();
+        }}
+      />
     </section>
   );
 }

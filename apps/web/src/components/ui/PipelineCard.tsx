@@ -4,6 +4,7 @@ import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import { Button } from "./Button";
+import { CopyIdChip } from "./CopyIdChip";
 
 interface PipelineCardProps {
   schedule: PipelineSchedule;
@@ -77,6 +78,7 @@ export function PipelineCard({
         <div className="df2-pipe-card-copy">
           <h3 className="df2-pipe-card-title" title={sched.name}>{sched.name}</h3>
           <p className="df2-pipe-card-sub">Last run {formatWhen(sched.last_run_at)}</p>
+          <CopyIdChip id={sched.id} label="Pipeline" compact className="df2-pipe-card-id" />
         </div>
         <div className="df2-pipe-card-badges">
           {isRunning && (

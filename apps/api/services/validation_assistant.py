@@ -75,6 +75,20 @@ def _suggested_actions(
                 })
 
     gate_ids = {b.get("id") or b.get("gate") for b in blockers}
+    blocker_text = " ".join(
+        str(b.get("message") or "") + " " + str(b.get("details") or "")
+        for b in blockers
+    ).lower()
+    if "format-control" in blocker_text or "replacement character" in blocker_text or "encoding" in blocker_text:
+        actions.append({
+            "kind": "normalize_control_chars",
+            "transform": "strip_controls",
+            "label": "Strip control characters on all mapped columns",
+        })
+        actions.append({
+            "kind": "open_bad_data_fix",
+            "label": "Open Fix bad data dialog",
+        })
     if "g4_mapping_confidence" in gate_ids:
         actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
     if "schema_drift" in gate_ids:

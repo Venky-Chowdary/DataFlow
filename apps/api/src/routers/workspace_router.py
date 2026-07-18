@@ -695,6 +695,30 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@router.get("/proofs/ledger")
+async def get_proof_ledger():
+    """Customer-visible migration proof ledger (SKU + fidelity + vs Airbyte)."""
+    from services.proof_ledger import build_proof_ledger
+
+    return JSONResponse(build_proof_ledger())
+
+
+@router.post("/proofs/fidelity")
+async def run_fidelity_proof():
+    """Run the rich-type CSV→SQLite fidelity proof and persist an artifact."""
+    from services.proof_ledger import run_fidelity_proof as _run
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "fidelity", "route": "csv→sqlite"},
+            status_code=500,
+        )
+    status = 200 if result.get("success") else 422
+    return JSONResponse(result, status_code=status)
+
+
 @router.post("/benchmark")
 async def run_workspace_benchmark(body: BenchmarkRequest):
     """Run a reproducible local benchmark and return a standardized report.

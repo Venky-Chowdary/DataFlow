@@ -156,6 +156,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     passed_count: passedCount,
     total_gates: totalGates,
     readiness_score: passed ? Math.round(Math.min(99, 82 + avgConfidence * 18)) : Math.round(avgConfidence * 60),
+    run_id: `pf_local_${Math.random().toString(16).slice(2, 10)}`,
     gates,
     blockers,
     proof_bundle: {

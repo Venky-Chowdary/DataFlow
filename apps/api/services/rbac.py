@@ -112,6 +112,9 @@ _PUBLIC_PATHS = {
 # Method "*" matches any method.
 _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/admin/", Permission.WORKSPACE_MANAGE),
+    # Proof ledger is readable by any workspace member; fidelity runs need job.run.
+    ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
+    ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),

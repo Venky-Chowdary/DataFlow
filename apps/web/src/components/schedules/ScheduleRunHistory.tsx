@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
+import { CopyIdChip } from "../ui/CopyIdChip";
 import { fetchScheduleHistory } from "../../lib/api";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
@@ -109,11 +110,14 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob }: ScheduleRunHistory
               <span role="cell" data-label="Rows">{(run.records_transferred ?? 0).toLocaleString()}</span>
               <span role="cell" data-label="Rejected" className={rejected > 0 ? "df2-sched-num-warn" : ""}>{rejected.toLocaleString()}</span>
               <span role="cell" data-label="Coerced NULL" className={coerced > 0 ? "df2-sched-num-warn" : ""}>{coerced.toLocaleString()}</span>
-              <span role="cell" data-label="Job">
+              <span role="cell" data-label="Job" className="df2-sched-job-cell">
                 {run.job_id ? (
-                  <button type="button" className="df2-sched-job-link" onClick={() => onOpenJob?.(run.job_id)} title="Open job in Jobs">
-                    View <DtIcon name="arrow-up-right" size={12} />
-                  </button>
+                  <>
+                    <CopyIdChip id={run.job_id} label="Job" compact />
+                    <button type="button" className="df2-sched-job-link" onClick={() => onOpenJob?.(run.job_id)} title="Open job in Jobs">
+                      View <DtIcon name="arrow-up-right" size={12} />
+                    </button>
+                  </>
                 ) : "—"}
               </span>
             </div>

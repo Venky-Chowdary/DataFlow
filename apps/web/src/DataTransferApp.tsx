@@ -11,6 +11,7 @@ import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
+import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -805,7 +806,9 @@ function DataTransferAppInner() {
 
       {stage === "app" && (
         <DataProvider>
-          <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+          <StudioActionsProvider>
+            <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+          </StudioActionsProvider>
         </DataProvider>
       )}
     </>

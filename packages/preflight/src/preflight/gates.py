@@ -255,6 +255,10 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
 
     # Layer the data integrity audit into G5 so it runs without creating a 9th gate.
     integrity = gate_g9_data_integrity(ctx)
+    encoding_issues = list(integrity.details.get("encoding_issues") or [])
+    if encoding_issues:
+        details["encoding_issues"] = encoding_issues
+        details["issues"] = encoding_issues
     if integrity.status == GateStatus.BLOCK:
         integrity_issues = integrity.details.get("issues", []) or []
         details["errors"].extend(integrity_issues)
@@ -268,6 +272,8 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
         )
     if integrity.status == GateStatus.PASS:
         details["integrity_checks_passed"] = integrity.details.get("checks_passed", 0)
+        if integrity.details.get("warnings"):
+            details["warnings"] = list(integrity.details.get("warnings") or [])
 
     if not passed:
         details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
@@ -498,6 +504,11 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     report = audit()
+    encoding = next(
+        (c for c in (report.get("checks") or []) if c.get("check") == "encoding_anomalies"),
+        None,
+    )
+    encoding_issues = (encoding or {}).get("issues") or []
     if report.get("blocks_transfer"):
         issues = report.get("issues", [])[:15]
         return _block(
@@ -508,13 +519,21 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
                 "issues": issues,
                 "issue_texts": [_issue_text(i) for i in issues],
                 "checks_failed": report.get("checks_failed", 0),
+                "encoding_issues": encoding_issues[:12],
             },
         )
+    warnings = list(report.get("warnings") or [])
+    if encoding_issues and not warnings:
+        warnings = [str(i.get("message") if isinstance(i, dict) else i) for i in encoding_issues[:8]]
     return _pass(
         GateId.G9_DATA_INTEGRITY,
         report.get("summary", "Data integrity checks passed"),
         start,
-        {"checks_passed": report.get("checks_passed", 0)},
+        {
+            "checks_passed": report.get("checks_passed", 0),
+            "warnings": warnings[:12],
+            "encoding_issues": encoding_issues[:12],
+        },
     )
 
 

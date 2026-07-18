@@ -11,9 +11,10 @@ from typing import Any, Callable
 from connectors.aws_common import boto3_client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    build_mapped_rows,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
+    transform_error_policy,
 )
 
 
@@ -82,7 +83,8 @@ def write_mapped_rows(
     endpoint_url: str = "",
     **_kwargs: Any,
 ) -> WriteResult:
-    del schema, ssl, error_policy, backfill_new_fields
+    del schema, ssl, backfill_new_fields
+    policy = transform_error_policy(error_policy)
     table = table_name or database
     cfg = {
         "host": host,
@@ -94,7 +96,7 @@ def write_mapped_rows(
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    mapped_rows, errors = build_mapped_rows(
+    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
@@ -102,6 +104,7 @@ def write_mapped_rows(
         column_types=column_types,
         dest_types=dest_types,
         preserve_case=True,
+        error_policy=policy,
     )
 
     client = boto3_client("dynamodb", cfg)
@@ -152,7 +155,8 @@ def write_mapped_rows(
             checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
             warnings=errors[:10],
-            rejected_rows=len(errors),
+            rejected_rows=len({d["row"] for d in rejected_details}),
+            rejected_details=rejected_details[:100],
         )
     except Exception as exc:
         return WriteResult(

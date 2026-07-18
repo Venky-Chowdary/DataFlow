@@ -141,6 +141,21 @@ class DataPilotAgent:
         # Local agent: infer tools + data analyst + compose
         return self._local_agent(message, history or [], ctx, data_context)
 
+    @staticmethod
+    def _append_tool_actions(turn: PilotTurn, tr: ToolResult) -> None:
+        if not tr.success:
+            return
+        if tr.name == "navigate" and isinstance(tr.output, dict):
+            turn.actions.append({"type": "navigate", "screen": tr.output.get("screen")})
+        if tr.name == "remediate_validation" and isinstance(tr.output, dict):
+            turn.actions.append({
+                "type": "studio",
+                "kind": tr.output.get("kind"),
+                "label": tr.output.get("label"),
+                "run_id": tr.output.get("run_id"),
+            })
+            turn.actions.append({"type": "navigate", "screen": "transfer"})
+
     def _anthropic_agent_loop(
         self,
         message: str,
@@ -198,8 +213,7 @@ class DataPilotAgent:
                 })
                 tr = self.tools.execute(tc["name"], tc.get("input") or {})
                 turn.tool_results.append(tr)
-                if tr.name == "navigate" and tr.success:
-                    turn.actions.append({"type": "navigate", "screen": tr.output.get("screen")})
+                self._append_tool_actions(turn, tr)
                 tool_results_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
@@ -228,8 +242,7 @@ class DataPilotAgent:
         for name, args in planned:
             tr = self.tools.execute(name, args)
             turn.tool_results.append(tr)
-            if tr.name == "navigate" and tr.success:
-                turn.actions.append({"type": "navigate", "screen": tr.output.get("screen")})
+            self._append_tool_actions(turn, tr)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -279,8 +292,7 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
         for name, args in planned:
             tr = self.tools.execute(name, args)
             turn.tool_results.append(tr)
-            if tr.name == "navigate" and tr.success:
-                turn.actions.append({"type": "navigate", "screen": tr.output.get("screen")})
+            self._append_tool_actions(turn, tr)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
         history_text = "\n".join(
@@ -327,8 +339,29 @@ Respond as Data Pilot — grounded in tool results."""
         for name, args in infer_tools_from_message(message):
             tr = self.tools.execute(name, args)
             turn.tool_results.append(tr)
-            if tr.name == "navigate" and tr.success:
-                turn.actions.append({"type": "navigate", "screen": tr.output.get("screen")})
+            self._append_tool_actions(turn, tr)
+
+        # Ground answers in active session IDs when the user asks about failure/status
+        # without pasting an ID (Jobs / Validate feed these into data_context).
+        lower = message.lower()
+        wants_triage = any(
+            w in lower
+            for w in ("fail", "error", "blocked", "why", "status", "fix", "quarantine", "integrity")
+        )
+        if data_context and wants_triage:
+            have_job = any(tr.name == "get_job" for tr in turn.tool_results)
+            have_pf = any(tr.name == "get_preflight_run" for tr in turn.tool_results)
+            if not have_job and data_context.get("job_id"):
+                tr = self.tools.execute("get_job", {"job_id": str(data_context["job_id"])})
+                turn.tool_results.append(tr)
+                self._append_tool_actions(turn, tr)
+            if not have_pf and data_context.get("preflight_run_id"):
+                tr = self.tools.execute(
+                    "get_preflight_run",
+                    {"run_id": str(data_context["preflight_run_id"])},
+                )
+                turn.tool_results.append(tr)
+                self._append_tool_actions(turn, tr)
 
         # Data analysis from session or dataset hint (skip if listing all data)
         list_only = any(tr.name == "list_datasets" for tr in turn.tool_results)
@@ -398,12 +431,52 @@ Respond as Data Pilot — grounded in tool results."""
                     lines = ["Here are your **recent transfer jobs**:"]
                     for j in jobs[:5]:
                         lines.append(
-                            f"• {j.get('source', '?')} → {j.get('destination', '?')}: "
+                            f"• `{j.get('id', '?')}` · {j.get('source', '?')} → {j.get('destination', '?')}: "
                             f"**{j.get('status')}** ({j.get('records', 0):,} records)"
                         )
                     parts.append("\n".join(lines))
                 else:
                     parts.append("No transfer jobs yet. Start one from **New Transfer**.")
+            elif tr.name == "get_job" and tr.success:
+                job = tr.output or {}
+                lines = [
+                    f"Job **`{job.get('id')}`** — **{job.get('status', '?').upper()}** · "
+                    f"{job.get('source', '?')} → {job.get('destination', '?')}.",
+                    f"Rows processed: {(job.get('records_processed') or 0):,} · "
+                    f"rejected: {job.get('rejected_rows') or 0} · "
+                    f"coerced NULL: {job.get('coerced_null_rows') or 0}.",
+                ]
+                if job.get("error"):
+                    lines.append(f"Error: {job['error']}")
+                for rem in (job.get("suggested_remediations") or [])[:4]:
+                    lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
+                parts.append("\n".join(lines))
+            elif tr.name == "get_preflight_run" and tr.success:
+                run = tr.output or {}
+                lines = [
+                    f"Validation run **`{run.get('run_id')}`** — "
+                    f"{'PASSED' if run.get('passed') else 'BLOCKED'} "
+                    f"({run.get('passed_count', '?')}/{run.get('total_gates', '?')} gates, "
+                    f"{run.get('readiness_score', '?')}% ready).",
+                ]
+                route = run.get("route") or {}
+                if run.get("source_label") or run.get("dest_label"):
+                    lines.append(
+                        f"Route: {run.get('source_label', '?')} → {run.get('dest_label', '?')}"
+                        + (f" · {route.get('row_count'):,} rows" if route.get("row_count") else "")
+                    )
+                for b in (run.get("blockers") or [])[:4]:
+                    lines.append(f"• Blocker `{b.get('id')}`: {b.get('message')}")
+                    if b.get("fix"):
+                        lines.append(f"  Fix: {b['fix']}")
+                for rem in (run.get("suggested_remediations") or [])[:3]:
+                    lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
+                parts.append("\n".join(lines))
+            elif tr.name == "remediate_validation" and tr.success:
+                parts.append(
+                    f"Applying Studio remediation: **{tr.output.get('label')}**. "
+                    "Opening Transfer Studio so the Validate step can run the fix."
+                )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
                 if conns:

@@ -9,6 +9,7 @@ import {
   PilotToolRegistry,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
+import { useStudioActions } from "../lib/StudioActionsContext";
 import { Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 
@@ -58,6 +59,7 @@ const FALLBACK_TOOL_REGISTRY: PilotToolRegistry = {
 
 export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
+  const { dispatchStudioAction } = useStudioActions();
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -67,7 +69,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace.",
+      text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
     },
   ]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -86,11 +88,18 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   }, [messages, loading]);
 
   const applyActions = (actions?: CopilotAction[]) => {
-    if (!actions?.length || !onNavigate) return;
+    if (!actions?.length) return;
     for (const action of actions) {
-      if (action.type === "navigate" && action.screen) {
+      if (action.type === "studio" && action.kind) {
+        dispatchStudioAction({
+          kind: action.kind,
+          label: action.label,
+          run_id: action.run_id,
+        });
+      }
+      if (action.type === "navigate" && action.screen && onNavigate) {
         onNavigate(action.screen as Screen);
-      } else if (action.route) {
+      } else if (action.route && onNavigate) {
         onNavigate(action.route as Screen);
       }
     }
@@ -141,9 +150,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         <div>
           <div style={{ fontWeight: 600, fontSize: 14 }}>Data Pilot</div>
           <div style={{ fontSize: 12, color: "#64748b" }}>
-            {activeData
-              ? `Context: ${activeData.filename || activeData.name}`
-              : "Any data question · app actions"}
+            {activeData?.preflight_run_id
+              ? `Run ${activeData.preflight_run_id}`
+              : activeData
+                ? `Context: ${activeData.filename || activeData.name}`
+                : "Any data question · app actions"}
           </div>
         </div>
         <button
@@ -159,7 +170,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       {activeData && (
         <div className="df2-copilot-context">
           <DtIcon name="zap" size={12} />
-          {activeData.columns.length} cols · {activeData.row_count.toLocaleString()} rows in context
+          {(activeData.columns?.length ?? 0).toLocaleString()} cols
+          {activeData.row_count != null ? ` · ${activeData.row_count.toLocaleString()} rows` : ""}
+          {activeData.preflight_run_id ? ` · ${activeData.preflight_run_id}` : ""}
+          {activeData.job_id ? ` · job ${activeData.job_id}` : ""}
+          {activeData.validation_status ? ` · ${activeData.validation_status}` : ""}
         </div>
       )}
 
@@ -231,7 +246,13 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
 
       <div className="df2-copilot-input-row">
         <input
-          placeholder={activeData ? `Ask about ${activeData.name}…` : "Move data, analyze, or navigate…"}
+          placeholder={
+            activeData?.preflight_run_id
+              ? `Ask about ${activeData.preflight_run_id} or say “strip controls”…`
+              : activeData
+                ? `Ask about ${activeData.name}…`
+                : "Ask about jobs, pf_ run IDs, or say strip controls…"
+          }
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}

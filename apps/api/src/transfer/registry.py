@@ -231,21 +231,26 @@ def get_capabilities() -> dict:
         if dest_ready(caps):
             dest_dbs.append(cid)
 
+    drivers = transfer_live_driver_types()
     return {
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
         "destination_databases": dest_dbs,
         "destination_file_formats": LIVE_DEST_FILE_FORMATS,
         "source_databases": source_dbs,
-        "transfer_live_drivers": transfer_live_driver_types(),
+        "transfer_live_drivers": drivers,
         "transfer_live_count": summary["transfer_live_count"],
+        "unique_transfer_drivers": len(drivers),
+        "production_sku_routes": len(PRODUCTION_SKU),
         "connect_only_count": summary["connect_only_count"],
         "live_route_combinations": summary["live_route_combinations"],
         "operations": ["upload", "migration", "convert", "dump", "transfer"],
         "auto_ddl": True,
         "description": (
-            f"{summary['transfer_live_count']} drivers support full transfer. "
-            f"{summary['live_route_combinations']} route combinations are live. "
+            f"{len(drivers)} unique transfer-ready drivers "
+            f"({summary['transfer_live_count']} catalog aliases). "
+            f"{len(PRODUCTION_SKU)} PRODUCTION_SKU routes committed in CI; "
+            f"{summary['live_route_combinations']} capability combinations. "
             "Catalog roadmap entries require driver implementation before production use."
         ),
     }

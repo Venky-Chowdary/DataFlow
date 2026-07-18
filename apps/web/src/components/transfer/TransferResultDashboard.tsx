@@ -1,7 +1,9 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
+import { CopyIdChip } from "../ui/CopyIdChip";
 import { readJobEventLog } from "../../lib/jobEventLog";
+import { useActiveData } from "../../lib/DataContext";
 import type { TransferResult } from "../../lib/types";
 import { QuarantinePanel } from "./QuarantinePanel";
 
@@ -31,6 +33,7 @@ export function TransferResultDashboard({
   onViewJobs,
   onSchedule,
 }: TransferResultDashboardProps) {
+  const { setActiveData } = useActiveData();
   const ds = result.destination_summary;
   const rec = result.records_transferred ?? 0;
   const rejected = ds?.rejected_rows ?? result.reconciliation?.rejected_rows ?? 0;
@@ -47,6 +50,23 @@ export function TransferResultDashboard({
     if (result.job_id) return readJobEventLog(result.job_id);
     return [];
   }, [result.event_log, result.job_id]);
+
+  useEffect(() => {
+    if (!result.job_id) return;
+    setActiveData((prev) => ({
+      name: prev?.name || sourceLabel,
+      filename: prev?.filename,
+      columns: prev?.columns || [],
+      row_count: rec || prev?.row_count || 0,
+      samples: prev?.samples,
+      schema: prev?.schema,
+      preflight_run_id: prev?.preflight_run_id,
+      job_id: result.job_id,
+      validation_status: result.success ? (hasIntegrityLoss ? "completed_with_quarantine" : "completed") : "failed",
+      route: `${sourceLabel} → ${destLabel}`,
+      blockers: result.error ? [result.error] : prev?.blockers,
+    }));
+  }, [destLabel, hasIntegrityLoss, rec, result.error, result.job_id, result.success, setActiveData, sourceLabel]);
 
   const destinationLine =
     ds?.table ? `${ds.schema || ds.database || "default"}.${ds.table}` :
@@ -183,9 +203,7 @@ export function TransferResultDashboard({
             <header className="df2-result-proof-head">
               <DtIcon name="check" size={16} />
               <strong>Proof summary</strong>
-              {result.job_id && (
-                <span className="df2-theater-v3-job-id" title={result.job_id}>Job #{result.job_id.slice(0, 8)}</span>
-              )}
+              {result.job_id && <CopyIdChip id={result.job_id} label="Job" compact />}
             </header>
             <dl className="df2-result-proof-dl">
               <div>
@@ -282,9 +300,7 @@ export function TransferResultDashboard({
             <DtIcon name="activity" size={14} />
             <strong>Job log</strong>
             <span className="df2-job-log-count">{eventLog.length} events</span>
-            {result.job_id && (
-              <span className="df2-theater-v3-job-id" title={result.job_id}>#{result.job_id.slice(0, 8)}</span>
-            )}
+            {result.job_id && <CopyIdChip id={result.job_id} label="Job" compact />}
           </div>
         </header>
         <div className="df2-job-log-panel-body" role="log">

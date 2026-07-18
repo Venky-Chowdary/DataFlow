@@ -82,6 +82,11 @@ export function ValidateActionsRail({
             <p>
               <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
             </p>
+            {preflight.run_id && (
+              <p className="df2-validate-rail-runid" title="Paste into Data Pilot to triage this validation">
+                Run <code>{preflight.run_id}</code>
+              </p>
+            )}
 
             {(preflight.proof_bundle || preflight.blockers.length > 0) && (
               <div className="df2-validate-rail-details-body">

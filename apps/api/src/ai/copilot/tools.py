@@ -67,13 +67,27 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_jobs",
-        "description": "List recent transfer jobs with status and record counts.",
+        "description": "List recent transfer jobs with status, IDs, and record counts.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "Max jobs to return", "default": 10},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "get_job",
+        "description": (
+            "Fetch a transfer job by exact ID (24-char hex ObjectId or job_id string). "
+            "Use when the user pastes a job ID or asks why a specific transfer failed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Transfer job ID"},
+            },
+            "required": ["job_id"],
         },
     },
     {
@@ -93,6 +107,44 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": ["screen"],
+        },
+    },
+    {
+        "name": "get_preflight_run",
+        "description": (
+            "Look up a validation/preflight run by ID (pf_…) — blockers, gates, remediations. "
+            "Use when the user pastes a run ID or asks why Validate failed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "description": "Preflight run ID, e.g. pf_a1b2c3d4e5f6"},
+            },
+            "required": ["run_id"],
+        },
+    },
+    {
+        "name": "remediate_validation",
+        "description": (
+            "Propose a Studio remediation for the active Validate step: strip control characters, "
+            "open Fix bad data, quarantine posture, or review mappings. Returns an action the UI applies."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "normalize_control_chars",
+                        "open_bad_data_fix",
+                        "quarantine_and_rerun",
+                        "review_mappings",
+                        "rerun_preflight",
+                    ],
+                },
+                "run_id": {"type": "string"},
+            },
+            "required": ["kind"],
         },
     },
     {
@@ -218,8 +270,8 @@ TOOL_FAMILIES: list[dict] = [
     {
         "id": "operate",
         "label": "Operate",
-        "tools": ["list_jobs", "navigate"],
-        "generated_actions": 80,
+        "tools": ["list_jobs", "get_job", "navigate", "get_preflight_run", "remediate_validation"],
+        "generated_actions": 160,
     },
 ]
 
@@ -266,8 +318,11 @@ class DataPilotTools:
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
             "list_jobs": self._list_jobs,
+            "get_job": self._get_job,
             "get_transfer_capabilities": self._get_capabilities,
             "navigate": self._navigate,
+            "get_preflight_run": self._get_preflight_run,
+            "remediate_validation": self._remediate_validation,
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
@@ -358,11 +413,57 @@ class DataPilotTools:
                 "destination": j.get("destination_collection") or j.get("destination_type", ""),
                 "status": j.get("status"),
                 "records": j.get("records_processed", 0),
+                "rejected_rows": j.get("rejected_rows", 0),
+                "error": (j.get("error") or "")[:240] or None,
                 "created_at": str(j.get("created_at", "")),
             }
             for j in jobs
         ]
         return ToolResult(name="list_jobs", success=True, output={"jobs": summary, "count": len(summary)})
+
+    def _get_job(self, job_id: str = "") -> ToolResult:
+        from ...services.mongodb_service import get_mongodb_service
+
+        job = get_mongodb_service().get_job((job_id or "").strip())
+        if not job:
+            return ToolResult(
+                name="get_job",
+                success=False,
+                output=None,
+                error=f"Job '{job_id}' not found. Ask the user for the job ID shown on Jobs / Job Theater.",
+            )
+        remediations: list[dict[str, str]] = []
+        err = str(job.get("error") or "").lower()
+        status = str(job.get("status") or "").lower()
+        if status in {"failed", "cancelled"} or job.get("rejected_rows"):
+            if "format-control" in err or "encoding" in err or "control" in err:
+                remediations.append({
+                    "kind": "normalize_control_chars",
+                    "label": "Strip control characters and re-run validation",
+                })
+            remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
+            remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
+        return ToolResult(
+            name="get_job",
+            success=True,
+            output={
+                "id": str(job.get("_id", job.get("id", job_id))),
+                "status": job.get("status"),
+                "source": job.get("source_name") or job.get("source_type"),
+                "destination": job.get("destination_collection") or job.get("destination_database") or job.get("destination_type"),
+                "source_type": job.get("source_type"),
+                "destination_type": job.get("destination_type"),
+                "records_processed": job.get("records_processed", 0),
+                "rejected_rows": job.get("rejected_rows", 0),
+                "coerced_null_rows": job.get("coerced_null_rows", 0),
+                "progress_pct": job.get("progress_pct"),
+                "error": job.get("error"),
+                "created_at": str(job.get("created_at", "")),
+                "completed_at": str(job.get("completed_at", "")),
+                "sync_mode": (job.get("transfer_request") or {}).get("sync_mode") or job.get("operation"),
+                "suggested_remediations": remediations,
+            },
+        )
 
     def _get_capabilities(self) -> ToolResult:
         from ...transfer.registry import get_capabilities
@@ -373,6 +474,52 @@ class DataPilotTools:
         if screen not in valid:
             return ToolResult(name="navigate", success=False, output=None, error=f"Invalid screen: {screen}")
         return ToolResult(name="navigate", success=True, output={"screen": screen, "action": "navigate"})
+
+    def _get_preflight_run(self, run_id: str = "") -> ToolResult:
+        from services.preflight_run_store import get_preflight_run
+
+        record = get_preflight_run(run_id)
+        if not record:
+            return ToolResult(
+                name="get_preflight_run",
+                success=False,
+                output=None,
+                error=f"Preflight run '{run_id}' not found. Ask the user for the pf_… ID shown on Validate.",
+            )
+        return ToolResult(name="get_preflight_run", success=True, output=record)
+
+    def _remediate_validation(self, kind: str = "", run_id: str = "") -> ToolResult:
+        allowed = {
+            "normalize_control_chars",
+            "open_bad_data_fix",
+            "quarantine_and_rerun",
+            "review_mappings",
+            "rerun_preflight",
+        }
+        if kind not in allowed:
+            return ToolResult(
+                name="remediate_validation",
+                success=False,
+                output=None,
+                error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
+            )
+        labels = {
+            "normalize_control_chars": "Strip control characters & re-run validation",
+            "open_bad_data_fix": "Open Fix bad data dialog",
+            "quarantine_and_rerun": "Quarantine bad cells & re-run (balanced)",
+            "review_mappings": "Open Map step to review mappings",
+            "rerun_preflight": "Re-run Validate",
+        }
+        return ToolResult(
+            name="remediate_validation",
+            success=True,
+            output={
+                "action": "studio",
+                "kind": kind,
+                "label": labels[kind],
+                "run_id": run_id or None,
+            },
+        )
 
     def _compare_datasets(self, dataset_a: str = "", dataset_b: str = "") -> ToolResult:
         sa = self.analyst.resolve_dataset(dataset_a)
@@ -588,6 +735,27 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     if any(w in lower for w in ("jobs", "transfers", "history")) and "dataset" not in lower:
         planned.append(("list_jobs", {"limit": 10}))
+
+    pf_match = re.search(r"\bpf_[a-f0-9]{8,}\b", lower)
+    if pf_match or any(w in lower for w in ("preflight run", "validation run", "why did validate", "why validation failed")):
+        if pf_match:
+            planned.append(("get_preflight_run", {"run_id": pf_match.group(0)}))
+
+    # Mongo ObjectId (24 hex) or explicit job_… tokens
+    job_match = re.search(r"\b([a-f0-9]{24})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
+    if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)):
+        planned.append(("get_job", {"job_id": job_match.group(1)}))
+    elif any(w in lower for w in ("why did this job fail", "why did the transfer fail", "job failed", "transfer failed", "analyze job")):
+        planned.append(("list_jobs", {"limit": 5}))
+
+    if any(w in lower for w in ("strip control", "strip controls", "fix bad data", "format-control", "normalize control", "quarantine bad")):
+        kind = "normalize_control_chars"
+        if "quarantine" in lower:
+            kind = "quarantine_and_rerun"
+        elif "fix bad data" in lower or "open fix" in lower:
+            kind = "open_bad_data_fix"
+        planned.append(("remediate_validation", {"kind": kind}))
+        planned.append(("navigate", {"screen": "transfer"}))
 
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
         planned.append(("get_transfer_capabilities", {}))

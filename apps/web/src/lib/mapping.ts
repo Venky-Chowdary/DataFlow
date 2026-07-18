@@ -9,11 +9,13 @@ export type MappingTransform =
   | "hash_pii"
   | "cast_number"
   | "cast_boolean"
-  | "parse_json";
+  | "parse_json"
+  | "strip_controls";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
   { id: "trim", label: "Trim", detail: "Strip leading/trailing whitespace" },
+  { id: "strip_controls", label: "Strip controls", detail: "Remove zero-width / null / format-control chars (warehouse-safe)" },
   { id: "upper", label: "Uppercase", detail: "Normalize to UPPER CASE" },
   { id: "lower", label: "Lowercase", detail: "Normalize to lower case" },
   { id: "date_iso", label: "Date → ISO", detail: "Parse dates to ISO-8601" },
@@ -86,6 +88,7 @@ export function buildPreflightMappings(
     if (!t || t === "none") return undefined;
     const map: Partial<Record<MappingTransform, string>> = {
       trim: "trim",
+      strip_controls: "strip_controls",
       upper: "upper",
       lower: "lower",
       date_iso: "datetime",
@@ -125,8 +128,10 @@ export function buildPreflightMappings(
 export function engineTransformToUi(engine?: string): MappingTransform {
   if (!engine) return "none";
   const map: Record<string, MappingTransform> = {
-    trim: "none",
-    trim_id: "none",
+    trim: "trim",
+    trim_id: "trim",
+    strip_controls: "strip_controls",
+    normalize_unicode: "strip_controls",
     uuid: "none",
     upper: "upper",
     lower: "lower",
