@@ -978,7 +978,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     return false;
   };
 
-  const introspectConnectorSource = async (): Promise<boolean> => {
+  const introspectConnectorSource = useCallback(async (): Promise<boolean> => {
     if (!sourceConnector) return false;
     const isMongo = sourceConnector.type === "mongodb";
     const tableOrPath = sourceKind === "cloud"
@@ -1010,8 +1010,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (intro.row_estimate != null && intro.row_estimate > 0) {
       setSourceRowEstimate(intro.row_estimate);
     }
+    const sampleRows = intro.data ?? intro.sample_data ?? [];
     const columnSamples = Object.fromEntries(
-      intro.columns.map((col) => [col, intro.schema?.[col] ? [String(intro.schema[col])] : []]),
+      intro.columns.map((col) => [
+        col,
+        sampleRows.slice(0, 8).map((row) => String(row[col] ?? "")).filter((v) => v.length > 0),
+      ]),
     );
     const dbAnalysis = await analyzeSchemaEnhanced(columnSamples);
     setAnalysis(dbAnalysis);
@@ -1041,7 +1045,27 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       file_type: sourceConnector.type,
     });
     return true;
-  };
+  }, [sourceConnector, sourceKind, sourceCollection, sourceTable, cloudPath, sourceConnectorId, toast, setActiveData]);
+
+  // Auto-introspect connector sources as soon as the user enters a table or
+  // collection, so the preview panel renders before they click Continue.
+  useEffect(() => {
+    if (sourceKind !== "database" && sourceKind !== "cloud") return;
+    if (!sourceConnectorId || sourceIntrospecting || analyzing) return;
+    const tableOrPath = sourceKind === "cloud"
+      ? cloudPath.trim()
+      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    if (!tableOrPath) return;
+    const t = window.setTimeout(() => {
+      setSourceIntrospecting(true);
+      setAnalyzing(true);
+      introspectConnectorSource().finally(() => {
+        setSourceIntrospecting(false);
+        setAnalyzing(false);
+      });
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceCollection, sourceTable, cloudPath, introspectConnectorSource]);
 
   const proceedToDestination = async () => {
     if (explainSourceGap()) return;
@@ -1969,6 +1993,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 dbConnectors={dbSourceConnectors}
                 cloudConnectors={cloudSourceConnectors}
                 uploading={uploading}
+                sourceIntrospecting={sourceIntrospecting}
               />
             </div>
           </div>
