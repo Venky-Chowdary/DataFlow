@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from connectors.saas_common import ReadBatch, humanize_http_error
+from services.value_serializer import cell_to_string
 
 
 def _url(host: str, port: int, ssl: bool) -> str:
@@ -50,7 +51,7 @@ def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
             series = series_list[0]
             columns = series.get("columns") or []
             values = series.get("values") or []
-            rows = [[str(v) for v in row] for row in values]
+            rows = [[cell_to_string(v) for v in row] for row in values]
             return list(columns), rows
     return [], []
 

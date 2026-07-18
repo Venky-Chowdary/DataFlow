@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from connectors.base import ReadBatch
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -103,7 +104,7 @@ def read_keys_batch(
                         seen.add(key)
                         fieldnames.append(key)
             headers = fieldnames
-            rows = [[str(obj.get(field, "")) for field in fieldnames] for obj in object_values]
+            rows = [[cell_to_string(obj.get(field, "")) for field in fieldnames] for obj in object_values]
 
         total = known_total_rows if known_total_rows is not None else state.keys_seen
         return ReadBatch(headers=headers, rows=rows, offset=state.keys_seen, total_rows=total), state
