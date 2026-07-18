@@ -59,6 +59,11 @@ def introspect_endpoint(
         return out
 
     cfg = resolve_connector_config(endpoint)
+    # When a saved connector is used, its stored driver type is authoritative;
+    # ignore an inline format string that may have been sent as a placeholder.
+    resolved_fmt = cfg.get("type") or endpoint.format
+    fmt = (resolved_fmt or "").lower()
+    out["format"] = resolved_fmt
 
     if fmt == "postgresql":
         from connectors.postgresql import test_postgresql

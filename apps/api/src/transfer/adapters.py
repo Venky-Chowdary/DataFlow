@@ -414,7 +414,8 @@ def read_source_database(
 ) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
     cfg = resolve_connector_config(endpoint)
-    db_type = resolve_driver_type(endpoint.format)
+    # Prefer the saved connector's driver type over any inline format string.
+    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
@@ -722,8 +723,9 @@ def write_destination_database(
     conflict_columns: list[str] | None = None,
 ) -> tuple[int, list[str], dict]:
     from .connector_capabilities import resolve_driver_type
-    db_type = resolve_driver_type(endpoint.format)
     cfg = resolve_connector_config(endpoint)
+    # Prefer the saved connector's driver type over any inline format string.
+    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
     ddl_log: list[str] = []
 
     from connectors.writer_common import transform_error_policy_for_validation_mode
