@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from connectors.mongodb_common import (
@@ -149,14 +150,23 @@ async def query_execute(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    rows, columns, schema, truncated = _run_query(connector, body)
-    return QueryResult(
-        columns=columns,
-        rows=rows,
-        column_schema=schema,
-        row_count=len(rows),
-        truncated=truncated,
-    )
+    try:
+        rows, columns, schema, truncated = _run_query(connector, body)
+        return QueryResult(
+            columns=columns,
+            rows=rows,
+            column_schema=schema,
+            row_count=len(rows),
+            truncated=truncated,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Defensive: prevent an unhandled ExceptionGroup from crashing the worker.
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Query execution failed: {exc}"},
+        )
 
 
 @router.post("/export", response_model=QueryExportResult)
@@ -295,6 +305,8 @@ def _export_to_connector(
 def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequest):
     if connector.type == "mongodb":
         return _run_mongodb_query(connector, body)
+    if connector.type == "snowflake":
+        return _run_snowflake_query(connector, body)
     return _run_sql_query(connector, body)
 
 
@@ -383,7 +395,12 @@ def _run_sql_query(connector, body):
         "warehouse": connector.warehouse,
         "ssl": connector.ssl,
     }
-    engine = get_sqlalchemy_engine(cfg)
+    try:
+        engine = get_sqlalchemy_engine(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create database engine: {exc}") from exc
 
     # Append a safe limit unless the user already supplied one or the query is metadata.
     clean_query = raw_query.rstrip(";")
@@ -412,3 +429,69 @@ def _run_sql_query(connector, body):
         return rows, columns, schema, False
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
+
+
+def _run_snowflake_query(connector, body):
+    """Run a read-only Snowflake query using the native connector.
+
+    Avoids the snowflake-sqlalchemy dependency in production while still
+    allowing the query playground to preview Snowflake data.
+    """
+    raw_query = body.query.strip()
+    if not raw_query:
+        raise HTTPException(status_code=400, detail="SQL query is required")
+    if not _is_safe_sql(raw_query):
+        raise HTTPException(status_code=400, detail="Only safe read/metadata queries are allowed in the playground")
+
+    try:
+        import snowflake.connector
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Snowflake driver unavailable: {exc}") from exc
+
+    account = connector.host or connector.connection_string or ""
+    # Strip the well-known domain suffix if the user entered the full host.
+    if account.endswith(".snowflakecomputing.com"):
+        account = account[: -len(".snowflakecomputing.com")]
+    database = body.database or connector.database or ""
+    schema = connector.schema or "PUBLIC"
+    warehouse = connector.warehouse or ""
+    role = getattr(connector, "auth_role", "")
+
+    try:
+        conn = snowflake.connector.connect(
+            account=account,
+            user=connector.username or "",
+            password=connector.password or "",
+            database=database,
+            schema=schema,
+            warehouse=warehouse,
+            role=role or None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not connect to Snowflake: {exc}") from exc
+
+    try:
+        clean_query = raw_query.rstrip(";")
+        upper = clean_query.upper()
+        append_limit = (
+            not upper.startswith(("SHOW", "DESCRIBE", "EXPLAIN", "ANALYZE"))
+            and " LIMIT " not in upper
+        )
+        if append_limit:
+            clean_query = f"{clean_query} LIMIT {body.limit}"
+
+        with conn.cursor() as cur:
+            cur.execute(clean_query)
+            description = cur.description or []
+            columns = [desc[0] for desc in description]
+            rows = []
+            for i, row in enumerate(cur.fetchall()):
+                if i >= body.limit:
+                    break
+                rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
+        schema = {c: "string" for c in columns}
+        return rows, columns, schema, False
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
+    finally:
+        conn.close()
