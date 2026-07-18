@@ -20,6 +20,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from services.value_serializer import json_default
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
@@ -69,7 +70,7 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
             id_input = json.dumps(
                 {k: v for k, v in doc.items() if k != "_id"},
                 sort_keys=True,
-                default=str,
+                default=json_default,
             )
             doc["_id"] = hashlib.sha256(id_input.encode("utf-8")).hexdigest()
 

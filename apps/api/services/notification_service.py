@@ -21,6 +21,7 @@ from services.notification_store import (
     get_channel_decrypted,
     list_channels,
 )
+from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +244,7 @@ def _send_webhook(channel: NotificationChannel, payload: dict[str, Any]) -> dict
 
 
 def _payload_text(payload: dict[str, Any]) -> str:
-    return payload.get("text") or json.dumps(payload, default=str, indent=2)
+    return payload.get("text") or json.dumps(payload, default=json_default, indent=2)
 
 
 def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:

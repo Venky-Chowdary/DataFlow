@@ -14,7 +14,7 @@ from typing import Any
 from services.csv_profiler import count_csv_rows, detect_delimiter, parse_csv_preview
 from services.platform_config import data_dir, upload_dir
 from services.schema_inference import infer_columns_from_rows, infer_type
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, json_default
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"
@@ -757,7 +757,7 @@ class FileParser:
                 for sub_k, sub_v in v.items():
                     out[f"{k}.{sub_k}"] = sub_v
             elif isinstance(v, list):
-                out[k] = json.dumps(v, default=str)
+                out[k] = json.dumps(v, default=json_default)
             else:
                 out[k] = v
         return out

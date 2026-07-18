@@ -11,6 +11,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from services.value_serializer import json_default
+
 logger = logging.getLogger(__name__)
 
 
@@ -230,7 +232,7 @@ class JsonFileJobStore(MemoryJobStore):
             with self._lock:
                 snapshot = [asdict(job) for job in self._jobs.values()]
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-            tmp.write_text(json.dumps(snapshot, indent=2, default=str), encoding="utf-8")
+            tmp.write_text(json.dumps(snapshot, indent=2, default=json_default), encoding="utf-8")
             tmp.replace(self._path)
         except Exception:
             pass

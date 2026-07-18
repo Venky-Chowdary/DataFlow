@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.schema_inference import infer_type
+from services.value_serializer import json_default
 from services.transform_engine import (
     _parse_boolean,
     _parse_date,
@@ -36,7 +37,7 @@ def _as_str(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return base64.b64encode(bytes(value)).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(value, default=str)
+        return json.dumps(value, default=json_default)
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):

@@ -8,6 +8,8 @@ import json
 import xml.sax.saxutils as saxutils
 from typing import Any
 
+from services.value_serializer import json_default
+
 _ALL_FORMATS = {"csv", "tsv", "json", "jsonl", "excel", "parquet", "avro", "orc", "xml"}
 SUPPORTED_CONVERSIONS: dict[str, set[str]] = {fmt: _ALL_FORMATS - {fmt} for fmt in _ALL_FORMATS}
 
@@ -145,12 +147,12 @@ def convert_rows(
 
     if tgt == "json":
         objects = _rows_to_objects(headers, rows)
-        return json.dumps(objects, indent=2, default=str).encode("utf-8"), "application/json"
+        return json.dumps(objects, indent=2, default=json_default).encode("utf-8"), "application/json"
 
     if tgt == "jsonl":
         lines = []
         for row in rows:
-            lines.append(json.dumps(dict(zip(headers, row)), ensure_ascii=False, default=str))
+            lines.append(json.dumps(dict(zip(headers, row)), ensure_ascii=False, default=json_default))
         return ("\n".join(lines) + "\n").encode("utf-8"), "application/x-ndjson"
 
     if tgt == "excel":

@@ -14,6 +14,7 @@ from connectors.writer_common import (
     row_checksum,
     sanitize_identifier,
 )
+from services.value_serializer import json_default
 
 
 @dataclass
@@ -69,7 +70,7 @@ def write_mapped_rows(
             doc = dict(zip(target_cols, row))
             key_id = doc.get(id_col) or str(i)
             key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
-            client.set(key, json.dumps(doc, default=str))
+            client.set(key, json.dumps(doc, default=json_default))
             written += 1
         if on_checkpoint:
             on_checkpoint(1, 1, written)
