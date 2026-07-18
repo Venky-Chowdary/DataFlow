@@ -290,7 +290,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
     """Bounded schema discovery — safe for million-row tables."""
     try:
         cfg = resolve_connector_config(endpoint)
-        fmt = (endpoint.format or "").lower()
+        # Use the resolved saved-connector driver type if available, otherwise
+        # fall back to the inline format string.
+        fmt = (cfg.get("type") or endpoint.format or "").lower()
 
         if fmt == "mongodb":
             import json
