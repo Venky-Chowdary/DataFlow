@@ -85,10 +85,16 @@ def _batch_insert_rows(
         row_placeholders: list[str] = []
         params: list[Any] = []
         for row in sub:
-            converted = [
-                cell_to_string(v) if _is_json_type(t) else v
-                for v, t in zip(row, target_types)
-            ]
+            converted: list[Any] = []
+            for v, t in zip(row, target_types):
+                if _is_json_type(t):
+                    # JSON-typed cells must be valid JSON strings (or SQL NULL).
+                    # cell_to_string(None) would produce '', which PARSE_JSON('')
+                    # treats as NULL in real Snowflake but errors in DuckDB/fakesnow.
+                    s = cell_to_string(v)
+                    converted.append(None if s == "" else s)
+                else:
+                    converted.append(v)
             params.extend(converted)
             row_placeholders.append(f"({', '.join(['%s'] * len(target_cols))})")
         values_sql = ", ".join(row_placeholders)
@@ -272,6 +278,7 @@ def write_mapped_rows(
             rejected_details=rejected_details,
         )
 
+    conn = None
     try:
         conn = get_connection(
             account=account,
@@ -388,7 +395,6 @@ def write_mapped_rows(
                     if on_checkpoint:
                         on_checkpoint(chunk_idx + 1, chunks, written)
 
-        conn.close()
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -412,3 +418,9 @@ def write_mapped_rows(
             error=str(exc),
             rejected_details=rejected_details,
         )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass

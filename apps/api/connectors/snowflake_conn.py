@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 
@@ -69,16 +70,22 @@ def get_connection(
 
         # fakesnow cannot be nested, so reuse an active patch in this thread.
         already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
+        patch_cm = None
         if not already_patched:
             patch_cm = fakesnow.patch(
                 db_path=_fakesnow_db_path(),
                 nop_regexes=[r"^USE WAREHOUSE"],
             )
             patch_cm.__enter__()
-        else:
-            patch_cm = None
 
-        conn = snowflake.connector.connect(**kwargs)
+        try:
+            conn = snowflake.connector.connect(**kwargs)
+        except Exception:
+            # Ensure the fakesnow patch is undone if connection fails, otherwise
+            # every subsequent test that patches the connector will error out.
+            if patch_cm is not None:
+                patch_cm.__exit__(*sys.exc_info())
+            raise
         orig_close = conn.close
 
         def _close() -> None:

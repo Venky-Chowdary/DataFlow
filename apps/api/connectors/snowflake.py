@@ -28,8 +28,8 @@ def test_snowflake(
             error="Provide account (host) + username or a Snowflake connection string",
         )
 
+    conn = None
     try:
-
         conn = get_connection(
             account=account,
             username=username,
@@ -54,7 +54,6 @@ def test_snowflake(
                 (schema or "PUBLIC",),
             )
             tables = [row[0] for row in cur.fetchall()]
-        conn.close()
         return ConnectResult(
             ok=True,
             tables=tables or ["(no tables in schema)"],
@@ -63,3 +62,9 @@ def test_snowflake(
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="snowflake-connector-python")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass

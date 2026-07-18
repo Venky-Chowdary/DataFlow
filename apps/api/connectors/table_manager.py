@@ -65,6 +65,7 @@ def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -
 def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
     from connectors.snowflake_conn import get_connection, normalize_account
 
+    conn = None
     try:
         conn = get_connection(
             account=normalize_account(cfg.get("host", "")),
@@ -83,10 +84,15 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
                 except Exception:
                     pass
             cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-        conn.close()
         return True
     except Exception:
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
