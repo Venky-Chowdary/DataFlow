@@ -539,7 +539,7 @@ def run_file_preflight(
             {
                 "name": c,
                 "inferred_type": column_types.get(c, "VARCHAR").upper(),
-                "samples": [str(row.get(c, "")) for row in (sample_rows or [])[:20] if row.get(c) is not None],
+                "samples": [cell_to_string(row.get(c, "")) for row in (sample_rows or [])[:20] if row.get(c) is not None],
             }
             for c in columns
         ],
