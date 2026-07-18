@@ -6,23 +6,39 @@ import { useEffect, useState } from "react";
 const GATE_LABELS: Record<string, string> = {
   g1_source: "Source readable",
   g2_destination: "Destination reachable",
-  g3_schema: "Schema contract",
-  g4_mapping: "Column mappings",
-  g5_transform: "Dry-run transform",
-  g9_data_integrity: "Data integrity",
-  g6_ddl: "Target DDL",
+  g3_schema_contract: "Schema contract",
+  g4_mapping_confidence: "Column mappings",
+  g5_dry_run: "Dry-run / integrity",
+  g6_target_ddl: "Target DDL",
   g7_capacity: "Staging capacity",
   g8_reconciliation: "Reconciliation (post-transfer)",
   g9_sync_contract: "Sync contract",
   g10_schema_policy: "Schema change policy",
   g11_validation_posture: "Validation posture",
+  // legacy aliases
+  g3_schema: "Schema contract",
+  g4_mapping: "Column mappings",
+  g5_transform: "Dry-run / integrity",
+  g6_ddl: "Target DDL",
+  g9_data_integrity: "Dry-run / integrity",
 };
 
-const GATE_ORDER = Object.keys(GATE_LABELS);
+const GATE_ORDER = [
+  "g1_source",
+  "g2_destination",
+  "g3_schema_contract",
+  "g4_mapping_confidence",
+  "g5_dry_run",
+  "g6_target_ddl",
+  "g7_capacity",
+  "g8_reconciliation",
+  "g9_sync_contract",
+  "g10_schema_policy",
+  "g11_validation_posture",
+];
 
 function gateLabel(id: string): string {
-  const entry = Object.entries(GATE_LABELS).find(([key]) => id.includes(key));
-  return entry ? entry[1] : id.replace(/^g\d+_/, "").replace(/_/g, " ");
+  return GATE_LABELS[id] ?? id.replace(/^g\d+_/, "").replace(/_/g, " ");
 }
 
 interface PreflightTimelineProps {

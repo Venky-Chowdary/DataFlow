@@ -224,20 +224,45 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _issue_text(issue: Any) -> str:
+    if isinstance(issue, str):
+        return issue
+    if isinstance(issue, dict):
+        for key in ("message", "error", "reason", "detail"):
+            val = issue.get(key)
+            if val:
+                col = issue.get("column") or issue.get("source") or issue.get("field")
+                return f"{col}: {val}" if col else str(val)
+        return str(issue)
+    return str(issue)
+
+
+def _block_message(prefix: str, issues: list[Any]) -> str:
+    texts = [_issue_text(i) for i in issues if i]
+    texts = [t for t in texts if t]
+    if not texts:
+        return f"{prefix} — unknown issue"
+    head = texts[0]
+    if len(texts) == 1:
+        return f"{prefix}: {head}"
+    return f"{prefix}: {head} (+{len(texts) - 1} more)"
+
+
 def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     passed, errors = ctx.run_dry_run()
-    details: dict[str, Any] = {"errors": errors[:20]}
+    details: dict[str, Any] = {"errors": list(errors[:20])}
 
     # Layer the data integrity audit into G5 so it runs without creating a 9th gate.
     integrity = gate_g9_data_integrity(ctx)
     if integrity.status == GateStatus.BLOCK:
-        integrity_issues = integrity.details.get("issues", [])
+        integrity_issues = integrity.details.get("issues", []) or []
         details["errors"].extend(integrity_issues)
         details["integrity_checks_failed"] = integrity.details.get("checks_failed", 0)
+        details["issue_texts"] = [_issue_text(i) for i in details["errors"][:20]]
         return _block(
             GateId.G5_DRY_RUN,
-            f"Dry-run / integrity failed — {len(details['errors'])} issue(s)",
+            _block_message("Dry-run / integrity failed", details["errors"]),
             start,
             details,
         )
@@ -245,9 +270,10 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
         details["integrity_checks_passed"] = integrity.details.get("checks_passed", 0)
 
     if not passed:
+        details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
         return _block(
             GateId.G5_DRY_RUN,
-            f"Dry-run failed — {len(errors)} error(s)",
+            _block_message("Dry-run failed", errors),
             start,
             details,
         )
@@ -476,9 +502,13 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
         issues = report.get("issues", [])[:15]
         return _block(
             GateId.G9_DATA_INTEGRITY,
-            f"Data integrity failed — {len(issues)} issue(s)",
+            _block_message("Data integrity failed", issues),
             start,
-            {"issues": issues, "checks_failed": report.get("checks_failed", 0)},
+            {
+                "issues": issues,
+                "issue_texts": [_issue_text(i) for i in issues],
+                "checks_failed": report.get("checks_failed", 0),
+            },
         )
     return _pass(
         GateId.G9_DATA_INTEGRITY,

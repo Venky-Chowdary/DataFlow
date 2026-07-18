@@ -1,8 +1,15 @@
-"""MCP Server — expose Data Pilot tools to Cursor, Claude, VS Code, and external agents."""
+"""MCP Server — expose Data Pilot tools to Cursor, Claude, VS Code, and external agents.
 
+Supports:
+  - Native Streamable HTTP at ``POST/GET /api/v1/mcp`` (Cursor ``url`` config)
+  - Legacy REST bridge at ``/manifest``, ``/tools``, ``/tools/call``
+"""
+
+import json
 import time
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
@@ -13,6 +20,80 @@ class ToolCallRequest(BaseModel):
     arguments: dict = Field(default_factory=dict)
 
 
+def _mcp_authenticated(http_request: Request) -> bool:
+    return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
+
+
+@router.api_route("", methods=["GET", "POST", "DELETE"], include_in_schema=True)
+@router.api_route("/", methods=["GET", "POST", "DELETE"], include_in_schema=False)
+async def mcp_streamable(http_request: Request):
+    """Cursor-native MCP Streamable HTTP endpoint."""
+    from services.mcp_protocol import handle_jsonrpc, new_session_id
+
+    if http_request.method == "DELETE":
+        return Response(status_code=204)
+
+    if http_request.method == "GET":
+        # Optional SSE stream — keep-alive so clients that open GET succeed.
+        async def _sse():
+            yield ": dataflow-mcp ready\n\n"
+
+        return StreamingResponse(
+            _sse(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+
+    try:
+        payload = await http_request.json()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {exc}"}},
+        )
+
+    from src.services.auth_service import auth_required
+
+    authenticated = _mcp_authenticated(http_request)
+    # When platform auth is off (local/dev), tools are callable without a Bearer token.
+    allow_unauth_tools = not auth_required()
+    session_id = http_request.headers.get("mcp-session-id") or new_session_id()
+
+    messages = payload if isinstance(payload, list) else [payload]
+    results: list[dict] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
+            continue
+        out = handle_jsonrpc(
+            message,
+            authenticated=authenticated,
+            allow_unauth_tools=allow_unauth_tools,
+        )
+        if out is not None:
+            results.append(out)
+
+    headers = {"Mcp-Session-Id": session_id}
+
+    # Notifications-only → 202 Accepted with empty body
+    if not results:
+        return Response(status_code=202, headers=headers)
+
+    body = results if isinstance(payload, list) else results[0]
+    accept = http_request.headers.get("accept", "")
+    if "text/event-stream" in accept and "application/json" not in accept:
+        data = json.dumps(body, default=str)
+        return StreamingResponse(
+            iter([f"event: message\ndata: {data}\n\n"]),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+    return JSONResponse(content=body, headers=headers)
+
+
 @router.get("/manifest")
 async def mcp_manifest(http_request: Request):
     """MCP-compatible manifest for IDE and agent integrations."""
@@ -20,12 +101,14 @@ async def mcp_manifest(http_request: Request):
 
     base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
-        "name": "datatransfer",
-        "title": "DataTransfer.space MCP Server",
-        "version": "1.0.0",
+        "name": "dataflow",
+        "title": "DataFlow MCP Server",
+        "version": "2.0.0",
         "description": "Universal data movement — analyze, transfer, and query any dataset via AI agents.",
-        "protocol": "rest-bridge",
+        "protocol": "streamable-http",
+        "legacy_protocol": "rest-bridge",
         "endpoints": {
+            "mcp": base,
             "manifest": f"{base}/manifest",
             "tools": f"{base}/tools",
             "call": f"{base}/tools/call",
@@ -33,7 +116,14 @@ async def mcp_manifest(http_request: Request):
         },
         "tools": TOOL_DEFINITIONS,
         "integrations": [
-            {"id": "cursor", "label": "Cursor", "install_hint": "Add MCP URL in Cursor Settings → MCP"},
+            {
+                "id": "cursor",
+                "label": "Cursor",
+                "install_hint": (
+                    'Add to mcp.json: {"url": "' + base + '", '
+                    '"headers": {"Authorization": "Bearer <workspace-api-key>"}}'
+                ),
+            },
             {"id": "claude", "label": "Claude Desktop", "install_hint": "Add server URL to claude_desktop_config.json"},
             {"id": "vscode", "label": "VS Code", "install_hint": "Use MCP extension with server URL"},
             {"id": "chatgpt", "label": "ChatGPT", "install_hint": "Custom GPT action pointing to /mcp/tools/call"},

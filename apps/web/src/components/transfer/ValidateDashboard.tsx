@@ -18,15 +18,14 @@ interface GateMeta {
   rule: string;
 }
 
-/** The full set of validation rules the engine enforces, in execution order. */
+/** Labels for engine gate IDs — keys MUST match backend GateId values exactly. */
 const GATE_META: GateMeta[] = [
   { key: "g1_source", label: "Source readable", icon: "database", rule: "Source endpoint connects and rows can be read." },
   { key: "g2_destination", label: "Destination reachable", icon: "server", rule: "Destination accepts a connection and is writable." },
-  { key: "g3_schema", label: "Schema contract", icon: "layers", rule: "Source and target schemas are compatible." },
-  { key: "g4_mapping", label: "Column mappings", icon: "sparkle", rule: "Every column maps above the confidence threshold." },
-  { key: "g5_transform", label: "Dry-run transform", icon: "code", rule: "Sample rows pass all transform functions cleanly." },
-  { key: "g9_data_integrity", label: "Data integrity", icon: "shield", rule: "Types, nulls, and constraints hold on sampled data." },
-  { key: "g6_ddl", label: "Target DDL", icon: "scan", rule: "Any required CREATE / ALTER statements are valid." },
+  { key: "g3_schema_contract", label: "Schema contract", icon: "layers", rule: "Source and target schemas are compatible." },
+  { key: "g4_mapping_confidence", label: "Column mappings", icon: "sparkle", rule: "Every column maps above the confidence threshold." },
+  { key: "g5_dry_run", label: "Dry-run / integrity", icon: "code", rule: "Sample rows pass transforms and integrity checks cleanly." },
+  { key: "g6_target_ddl", label: "Target DDL", icon: "scan", rule: "Any required CREATE / ALTER statements are valid." },
   { key: "g7_capacity", label: "Staging capacity", icon: "trend", rule: "Destination has headroom for the row volume." },
   { key: "g8_reconciliation", label: "Reconciliation", icon: "activity", rule: "Post-transfer checksums are compared source ↔ target." },
   { key: "g9_sync_contract", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
@@ -35,14 +34,53 @@ const GATE_META: GateMeta[] = [
 ];
 
 function metaForGate(id: string): GateMeta {
-  return (
-    GATE_META.find((m) => id.includes(m.key)) ?? {
-      key: id,
-      label: id.replace(/^g\d+_/, "").replace(/_/g, " "),
-      icon: "gate",
-      rule: "Validation rule enforced before transfer.",
-    }
-  );
+  const exact = GATE_META.find((m) => m.key === id);
+  if (exact) return exact;
+  // Legacy aliases from older UI keys
+  const aliases: Record<string, string> = {
+    g3_schema: "g3_schema_contract",
+    g4_mapping: "g4_mapping_confidence",
+    g5_transform: "g5_dry_run",
+    g6_ddl: "g6_target_ddl",
+    g9_data_integrity: "g5_dry_run",
+  };
+  const mapped = aliases[id];
+  if (mapped) {
+    const hit = GATE_META.find((m) => m.key === mapped);
+    if (hit) return hit;
+  }
+  return {
+    key: id,
+    label: id.replace(/^g\d+_/, "").replace(/_/g, " "),
+    icon: "gate",
+    rule: "Validation rule enforced before transfer.",
+  };
+}
+
+function issueTextsFromDetails(details?: Record<string, unknown> | null): string[] {
+  if (!details) return [];
+  const typed = details.issue_texts;
+  if (Array.isArray(typed)) {
+    return typed.map((t) => String(t)).filter(Boolean).slice(0, 12);
+  }
+  const errors = details.errors;
+  if (Array.isArray(errors)) {
+    return errors.map((e) => {
+      if (typeof e === "string") return e;
+      if (e && typeof e === "object") {
+        const row = e as Record<string, unknown>;
+        const msg = String(row.message ?? row.error ?? row.reason ?? "");
+        const col = String(row.column ?? row.source ?? row.field ?? "");
+        return col && msg ? `${col}: ${msg}` : msg || JSON.stringify(e);
+      }
+      return String(e);
+    }).filter(Boolean).slice(0, 12);
+  }
+  const issues = details.issues;
+  if (Array.isArray(issues)) {
+    return issues.map((e) => (typeof e === "string" ? e : String((e as { message?: string })?.message ?? e))).filter(Boolean).slice(0, 12);
+  }
+  return [];
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -278,10 +316,15 @@ export function ValidateDashboard({
 
   const gateByKey = new Map<string, PreflightGate>();
   for (const gate of preflight?.gates ?? []) {
+    gateByKey.set(gate.id, gate);
     gateByKey.set(metaForGate(gate.id).key, gate);
   }
   const blockedCount = (preflight?.gates ?? []).filter((g) => g.status === "block").length;
   const skippedCount = (preflight?.gates ?? []).filter((g) => g.status === "skip").length;
+  /** Prefer live engine gates so PENDING cards aren't shown for rules that never ran. */
+  const displayGates: GateMeta[] = (preflight?.gates?.length && !running)
+    ? preflight.gates.map((g) => metaForGate(g.id))
+    : GATE_META;
 
   const decisionTone = decision === "block" ? "block" : decision === "review" ? "review" : "approve";
   const heroTone = running ? "live" : preflight ? decisionTone : "idle";
@@ -298,15 +341,24 @@ export function ValidateDashboard({
   // cleaner than a wall of 12 spinners.
   const activeRuleIndex = Math.floor((progress / 100) * GATE_META.length);
 
-  const statusForGate = (meta: GateMeta, index: number): { status: string; message: string } => {
+  const statusForGate = (
+    meta: GateMeta,
+    index: number,
+  ): { status: string; message: string; issues: string[] } => {
     const gate = gateByKey.get(meta.key);
-    if (gate) return { status: gate.status, message: gate.message };
-    if (running) {
-      if (index < activeRuleIndex) return { status: "pass", message: "Checked" };
-      if (index === activeRuleIndex) return { status: "running", message: "Evaluating rule…" };
-      return { status: "pending", message: "Queued" };
+    if (gate) {
+      return {
+        status: gate.status,
+        message: gate.message,
+        issues: gate.status === "block" ? issueTextsFromDetails(gate.details) : [],
+      };
     }
-    return { status: "pending", message: "Awaiting validation run." };
+    if (running) {
+      if (index < activeRuleIndex) return { status: "pass", message: "Checked", issues: [] };
+      if (index === activeRuleIndex) return { status: "running", message: "Evaluating rule…", issues: [] };
+      return { status: "pending", message: "Queued", issues: [] };
+    }
+    return { status: "pending", message: "Awaiting validation run.", issues: [] };
   };
 
   return (
@@ -468,10 +520,10 @@ export function ValidateDashboard({
           <span>{totalGates} checks enforced before write · threshold {(confidenceThreshold * 100).toFixed(0)}%</span>
         </div>
         <div className="df2-vd-rules-grid">
-          {GATE_META.map((meta, index) => {
-            const { status, message } = statusForGate(meta, index);
+          {displayGates.map((meta, index) => {
+            const { status, message, issues } = statusForGate(meta, index);
             return (
-              <article key={meta.key} className={`df2-vd-rule status-${status}`}>
+              <article key={`${meta.key}-${index}`} className={`df2-vd-rule status-${status}`}>
                 <div className="df2-vd-rule-top">
                   <span className="df2-vd-rule-icon"><DtIcon name={meta.icon} size={15} /></span>
                   <span className={`df2-vd-rule-status status-${status}`}>
@@ -484,6 +536,14 @@ export function ValidateDashboard({
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
                 <p className="df2-vd-rule-desc">{meta.rule}</p>
                 {status !== "pending" && message && <p className="df2-vd-rule-msg">{message}</p>}
+                {issues.length > 0 && (
+                  <ul className="df2-vd-rule-issues">
+                    {issues.slice(0, 4).map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                    {issues.length > 4 && <li>+{issues.length - 4} more</li>}
+                  </ul>
+                )}
               </article>
             );
           })}
@@ -553,13 +613,59 @@ export function ValidateDashboard({
             <span>{preflight.blockers.length}</span>
           </div>
           <ul>
-            {preflight.blockers.map((b) => (
-              <li key={b.id}>
-                <strong>{metaForGate(b.id).label}</strong>
-                <span>{b.message}</span>
-                {b.guidance?.fix && <span className="df2-vd-blocker-fix"><DtIcon name="check" size={12} /> {b.guidance.fix}</span>}
-              </li>
-            ))}
+            {preflight.blockers.map((b) => {
+              const issues = issueTextsFromDetails(b.details);
+              const blockingCols = (preflight.coercion_report?.columns ?? []).filter((c) => c.severity === "block");
+              return (
+                <li key={b.id}>
+                  <strong>{metaForGate(b.id).label}</strong>
+                  <span>{b.message}</span>
+                  {issues.length > 0 && (
+                    <ul className="df2-vd-blocker-issues">
+                      {issues.slice(0, 6).map((issue) => (
+                        <li key={issue}>{issue}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {blockingCols.length > 0 && b.id.includes("dry_run") && (
+                    <div className="df2-vd-blocker-actions">
+                      <span className="df2-vd-assist-actions-title">One-click type fixes</span>
+                      <div className="df2-vd-chip-row">
+                        {blockingCols.slice(0, 6).map((col) => (
+                          <button
+                            key={`${col.source}-${col.target}`}
+                            type="button"
+                            className="df2-vd-chip kind-change_target_type"
+                            disabled={!onApplyAction || !col.suggested_target_type}
+                            title={col.suggested_fix || `Widen ${col.source}`}
+                            onClick={() =>
+                              onApplyAction?.({
+                                kind: "change_target_type",
+                                label: `${col.source} → ${col.suggested_target_type}`,
+                                column: col.source,
+                                target: col.target,
+                                to_type: col.suggested_target_type ?? undefined,
+                              })
+                            }
+                          >
+                            <DtIcon name="layers" size={13} />
+                            {col.source} → {col.suggested_target_type ?? "VARCHAR"}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {b.guidance?.fix && (
+                    <span className="df2-vd-blocker-fix">
+                      <DtIcon name="check" size={12} /> {b.guidance.fix}
+                    </span>
+                  )}
+                  {b.guidance?.why && (
+                    <span className="df2-vd-blocker-why">{b.guidance.why}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

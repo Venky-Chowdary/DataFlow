@@ -154,7 +154,7 @@ def has_permission(user: dict[str, str] | None, permission: str) -> bool:
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
-    for prefix in ("/api/v1/auth/sso/", "/api/v1/catalog/"):
+    for prefix in ("/api/v1/auth/sso/", "/api/v1/catalog/", "/api/v1/mcp"):
         if path.startswith(prefix):
             return True
     return False

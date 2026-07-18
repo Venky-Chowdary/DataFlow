@@ -107,12 +107,25 @@ export function ValidateActionsRail({
                 )}
                 {preflight.blockers.length > 0 && (
                   <ul className="df2-validate-rail-blockers">
-                    {preflight.blockers.slice(0, 4).map((b) => (
-                      <li key={b.id}>
-                        {b.message}
-                        {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
-                      </li>
-                    ))}
+                    {preflight.blockers.slice(0, 4).map((b) => {
+                      const details = b.details || {};
+                      const issueTexts = Array.isArray(details.issue_texts)
+                        ? (details.issue_texts as string[])
+                        : Array.isArray(details.errors)
+                          ? (details.errors as unknown[]).map((e) =>
+                              typeof e === "string" ? e : String((e as { message?: string })?.message ?? e),
+                            )
+                          : [];
+                      return (
+                        <li key={b.id}>
+                          {b.message}
+                          {issueTexts.slice(0, 3).map((issue) => (
+                            <span key={issue} className="df2-validate-rail-issue">{issue}</span>
+                          ))}
+                          {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
                 {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
