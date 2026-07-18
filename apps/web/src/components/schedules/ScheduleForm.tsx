@@ -25,6 +25,8 @@ const SYNC_MODE_META: Record<string, { label: string; detail: string }> = {
   full_refresh_append: { label: "Full append", detail: "Snapshot appended to destination history." },
   incremental: { label: "Incremental", detail: "Cursor-based sync of new / changed rows." },
   cdc: { label: "CDC", detail: "Change data capture with cursor + key contract." },
+  scd2: { label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
+  mirror: { label: "Mirror", detail: "Keep destination in sync with inferred deletes; requires primary key." },
 };
 
 const VALIDATION_MODES = [
@@ -56,7 +58,7 @@ const COMMON_TIMEZONES = [
   "Australia/Sydney",
 ];
 
-const DEFAULT_SYNC_MODES = ["full_refresh_overwrite", "full_refresh_append", "incremental", "cdc"];
+const DEFAULT_SYNC_MODES = ["full_refresh_overwrite", "full_refresh_append", "incremental", "cdc", "scd2", "mirror"];
 
 function formatWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -105,6 +107,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
 
   const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODES;
   const showCursor = syncMode === "incremental" || syncMode === "cdc";
+  const showPrimaryKey = showCursor || syncMode === "scd2" || syncMode === "mirror";
 
   const sourceConnector = connectors.find((c) => c.id === sourceId);
   const destConnector = connectors.find((c) => c.id === destId);
@@ -145,7 +148,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       schema_policy: schemaPolicy,
       backfill_new_fields: backfill,
       cursor_column: showCursor ? cursorColumn.trim() : "",
-      primary_key: showCursor ? primaryKey.trim() : "",
+      primary_key: showPrimaryKey ? primaryKey.trim() : "",
       max_retries: maxRetries,
       retry_backoff_seconds: retryBackoff,
       notify_on_failure: notifyFailure,
@@ -267,18 +270,35 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           })}
         </div>
 
-        {showCursor && (
+        {(showCursor || showPrimaryKey) && (
           <div className="df2-form-row df2-sched-cursor-row">
-            <div className="df2-field">
-              <label className="df2-label" htmlFor="sched-cursor">Cursor column</label>
-              <input id="sched-cursor" className="df2-input" value={cursorColumn} onChange={(e) => setCursorColumn(e.target.value)} placeholder="updated_at" />
-              <span className="df2-field-hint">Watermark column tracked between runs for incremental / CDC sync.</span>
-            </div>
-            <div className="df2-field">
-              <label className="df2-label" htmlFor="sched-pk">Primary key</label>
-              <input id="sched-pk" className="df2-input" value={primaryKey} onChange={(e) => setPrimaryKey(e.target.value)} placeholder="id" />
-              <span className="df2-field-hint">Enables dedupe / upsert into the destination.</span>
-            </div>
+            {showCursor && (
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="sched-cursor">Cursor column</label>
+                <input id="sched-cursor" className="df2-input" value={cursorColumn} onChange={(e) => setCursorColumn(e.target.value)} placeholder="updated_at" />
+                <span className="df2-field-hint">Watermark column tracked between runs for incremental / CDC sync.</span>
+              </div>
+            )}
+            {showPrimaryKey && (
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="sched-pk">Primary key{syncMode === "scd2" || syncMode === "mirror" ? " (required)" : ""}</label>
+                <input
+                  id="sched-pk"
+                  className="df2-input"
+                  value={primaryKey}
+                  onChange={(e) => setPrimaryKey(e.target.value)}
+                  placeholder="id"
+                  required={syncMode === "scd2" || syncMode === "mirror"}
+                />
+                <span className="df2-field-hint">
+                  {syncMode === "scd2"
+                    ? "Required for SCD2 versioning — identifies which business key to expire and reopen."
+                    : syncMode === "mirror"
+                      ? "Required for mirror sync — identifies rows to soft-delete when missing from source."
+                      : "Enables dedupe / upsert into the destination."}
+                </span>
+              </div>
+            )}
           </div>
         )}
 

@@ -8,6 +8,16 @@ export function isJobSuccess(status: string | undefined): boolean {
   return status === "completed" || status === "completed_with_quarantine";
 }
 
+/** True when the job will no longer emit progress (success, failure, or cancel). */
+export function isJobTerminal(status: string | undefined): boolean {
+  return (
+    status === "completed"
+    || status === "completed_with_quarantine"
+    || status === "failed"
+    || status === "cancelled"
+  );
+}
+
 /** Human-readable label for a job status (never surface the raw enum). */
 export function jobStatusLabel(status: string): string {
   switch (status) {

@@ -71,7 +71,8 @@ def test_poll_parses_binlog_events(base_cfg: dict) -> None:
     stream.__iter__ = MagicMock(return_value=iter([write, update, delete]))
     stream.close = MagicMock()
 
-    with patch("pymysqlreplication.BinLogStreamReader", return_value=stream):
+    with patch("pymysqlreplication.BinLogStreamReader", return_value=stream), \
+         patch.object(cdc, "_ensure_decode_schema", return_value={}):
         changes = list(cdc.poll())
 
     assert len(changes) == 1

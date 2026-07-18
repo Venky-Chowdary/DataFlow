@@ -11,7 +11,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
-import { ButtonLoader, Spinner } from "../components/LoadingState";
+import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
@@ -28,6 +28,7 @@ import {
   analyzeSchemaEnhanced,
   approveTransferPlan,
   buildColumnSamples,
+  createContractFromTransfer,
   createSchedule,
   createTransferPlan,
   fetchTransferCapabilities,
@@ -67,9 +68,16 @@ import { runLocalPreflight } from "../lib/localPreflight";
 
 interface TransferPageProps {
   connectors: Connector[];
+  /** True while the first connectors fetch has not settled yet. */
+  connectorsLoading?: boolean;
   onTransferComplete: () => void;
   onOpenSchedules?: () => void;
 }
+
+/** File formats are never listed as database sources. */
+const FILE_FORMAT_SOURCE_TYPES = new Set([
+  "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+]);
 
 const STEP_SOURCE = 1;
 const STEP_DESTINATION = 2;
@@ -96,7 +104,6 @@ const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_
 
 const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
 const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl"] as const;
-const FALLBACK_SOURCE_DBS = ["mongodb", "postgresql", "snowflake", "mysql", "bigquery"] as const;
 
 const ACCEPTED_UPLOAD_EXTENSIONS = new Set(["csv", "json", "jsonl", "tsv", "parquet"]);
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
@@ -108,7 +115,14 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type SyncMode = "full_refresh_overwrite" | "full_refresh_append" | "incremental_append" | "incremental_deduped" | "cdc";
+type SyncMode =
+  | "full_refresh_overwrite"
+  | "full_refresh_append"
+  | "incremental_append"
+  | "incremental_deduped"
+  | "cdc"
+  | "scd2"
+  | "mirror";
 type SchemaPolicy = "manual_review" | "propagate_columns" | "propagate_all" | "pause_on_change";
 type ValidationMode = "balanced" | "strict" | "maximum";
 
@@ -118,6 +132,8 @@ const SYNC_MODES: { id: SyncMode; label: string; detail: string }[] = [
   { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new-row sync." },
   { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor plus key-backed final table." },
   { id: "cdc", label: "CDC", detail: "Change stream with cursor and key contract." },
+  { id: "scd2", label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
+  { id: "mirror", label: "Mirror", detail: "Keep destination in sync with inferred deletes; requires primary key." },
 ];
 
 const SCHEMA_POLICIES: { id: SchemaPolicy; label: string; detail: string }[] = [
@@ -168,7 +184,7 @@ function analysisFromPipeline(
   };
 }
 
-export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }: TransferPageProps) {
+export function TransferPage({ connectors, connectorsLoading = false, onTransferComplete, onOpenSchedules }: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
@@ -191,7 +207,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
+  /** Prevents auto-introspect from looping after timeout/error for the same source. */
+  const sourceIntrospectGateRef = useRef<{ key: string; status: "idle" | "running" | "ok" | "error" }>({
+    key: "",
+    status: "idle",
+  });
+  const sourceIntrospectGenRef = useRef(0);
   const [preflighting, setPreflighting] = useState(false);
+  const [savingContract, setSavingContract] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -233,7 +256,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [liveExportFormats, setLiveExportFormats] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_EXPORT_FORMATS.map((id) => ({ id, label: id.toUpperCase() })),
   );
-  const [liveSourceDbs, setLiveSourceDbs] = useState<string[]>([...FALLBACK_SOURCE_DBS]);
   const [liveRouteCount, setLiveRouteCount] = useState<number | null>(null);
   const [transferLaunch, setTransferLaunch] = useState<{ jobId: string; rows: number } | null>(null);
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
@@ -306,14 +328,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       .then((caps) => {
         const dbs = (caps.destination_databases as string[] | undefined) ?? [];
         const exports = (caps.destination_file_formats as string[] | undefined) ?? [];
-        const sources = (caps.source_databases as string[] | undefined) ?? [];
         if (dbs.length) {
           setLiveDestTypes(dbs.map((id) => ({ id, label: getConnectorDefaults(id).label })));
         }
         if (exports.length) {
           setLiveExportFormats(exports.map((id) => ({ id, label: id.toUpperCase() })));
         }
-        if (sources.length) setLiveSourceDbs(sources);
         if (typeof caps.live_route_combinations === "number") {
           setLiveRouteCount(caps.live_route_combinations);
         }
@@ -330,12 +350,20 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const destConnectors = connectors.filter((c) => getGenericSqlGroup(c.type) === getGenericSqlGroup(destType));
   const testedDestConnectors = destConnectors.filter((c) => c.last_test_ok !== false);
   const selectedDestConnector = destConnectors.find((c) => c.id === connectorId);
-  const dbSourceConnectors = connectors.filter((c) => liveSourceDbs.includes(c.type));
+  // Show every saved non-cloud, non-file connector. Capabilities must not hide
+  // connections the user already saved (catalog brand IDs ≠ connector.type).
+  const dbSourceConnectors = connectors.filter((c) => {
+    if (CLOUD_SOURCE_TYPES.has(c.type)) return false;
+    const driver = resolveDriverType(c.type);
+    if (FILE_FORMAT_SOURCE_TYPES.has(driver)) return false;
+    return true;
+  });
   const cloudSourceConnectors = connectors.filter((c) => CLOUD_SOURCE_TYPES.has(c.type));
   const sourceConnector =
     sourceKind === "cloud"
       ? cloudSourceConnectors.find((c) => c.id === sourceConnectorId)
-      : dbSourceConnectors.find((c) => c.id === sourceConnectorId);
+      : dbSourceConnectors.find((c) => c.id === sourceConnectorId)
+        ?? connectors.find((c) => c.id === sourceConnectorId && !CLOUD_SOURCE_TYPES.has(c.type));
   const isConnectorSource = sourceKind === "database" || sourceKind === "cloud";
   const currentSourceColumns = sourceKind === "file"
     ? parsed?.columns ?? []
@@ -361,7 +389,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     /key/i,
   ]);
   const requiresCursor = syncMode === "incremental_append" || syncMode === "incremental_deduped" || syncMode === "cdc";
-  const requiresPrimaryKey = syncMode === "incremental_deduped" || syncMode === "cdc";
+  const requiresPrimaryKey =
+    syncMode === "incremental_deduped"
+    || syncMode === "cdc"
+    || syncMode === "scd2"
+    || syncMode === "mirror";
   const sourceStreamName = sourceKind === "file"
     ? file?.name.replace(/\.[^/.]+$/, "") || "uploaded_file"
     : sourceKind === "cloud"
@@ -1025,8 +1057,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         sampleRows.slice(0, 8).map((row) => String(row[col] ?? "")).filter((v) => v.length > 0),
       ]),
     );
-    const dbAnalysis = await analyzeSchemaEnhanced(columnSamples);
-    setAnalysis(dbAnalysis);
+    // Apply live schema immediately — do not block the Source step on AI.
     setTransferPlan((prev) => ({
       supported: prev?.supported ?? true,
       message: intro.message,
@@ -1043,8 +1074,6 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       samples: columnSamples,
       schema: intro.schema ?? {},
     });
-    // Populate parsed so the SourceStepAside preview table (samplePreviewRows)
-    // renders live connector samples the same way it does for file uploads.
     setParsed({
       columns: intro.columns,
       schema: intro.schema ?? {},
@@ -1052,38 +1081,139 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       data: intro.data ?? intro.sample_data ?? [],
       file_type: sourceConnector.type,
     });
+    const fallbackAnalysis = analysisFromPipeline(
+      intro.columns,
+      intro.schema ?? {},
+      intro.columns.map((col) => ({ source: col, target: col, confidence: 0.75, reasoning: "Inferred from live connector schema" })),
+    );
+    setAnalysis(fallbackAnalysis);
+    // Enrich with AI when available; never fail the source read if AI times out.
+    try {
+      const dbAnalysis = await analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 });
+      setAnalysis(dbAnalysis);
+    } catch (aiErr) {
+      console.warn("AI schema enrichment skipped after successful introspect:", aiErr);
+    }
     return intro;
   }, [sourceConnector, sourceKind, sourceCollection, sourceTable, cloudPath, sourceConnectorId, toast, setActiveData]);
 
-  // Auto-introspect connector sources as soon as the user enters a table or
-  // collection, so the preview panel renders before they click Continue.
+  const introspectConnectorSourceRef = useRef(introspectConnectorSource);
+  introspectConnectorSourceRef.current = introspectConnectorSource;
+
+  // Auto-introspect when the user enters a table/collection. Same key is never
+  // auto-retried after success or error — change the name or click Retry.
   useEffect(() => {
     if (sourceKind !== "database" && sourceKind !== "cloud") return;
-    if (!sourceConnectorId || sourceIntrospecting || analyzing) return;
+    if (!sourceConnectorId || !sourceConnector) return;
     const tableOrPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    if (!tableOrPath) return;
+      : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    if (!tableOrPath?.trim()) return;
+
+    const key = `${sourceKind}|${sourceConnectorId}|${tableOrPath.trim()}`;
+    const gate = sourceIntrospectGateRef.current;
+    if (gate.key === key && (gate.status === "ok" || gate.status === "error" || gate.status === "running")) {
+      return;
+    }
+
+    const gen = ++sourceIntrospectGenRef.current;
+    sourceIntrospectGateRef.current = { key, status: "running" };
+    let started = false;
     const t = window.setTimeout(() => {
+      started = true;
       setSourceIntrospecting(true);
       setSourceIntrospectError(null);
       setAnalyzing(true);
-      introspectConnectorSource()
+      void introspectConnectorSourceRef.current()
         .then((res) => {
-          setSourceIntrospectError(
-            res ? null : "Could not read the source schema. Verify the table or collection name and connector credentials.",
-          );
+          if (gen !== sourceIntrospectGenRef.current) return;
+          if (res) {
+            sourceIntrospectGateRef.current = { key, status: "ok" };
+            setSourceIntrospectError(null);
+          } else {
+            sourceIntrospectGateRef.current = { key, status: "error" };
+            setSourceIntrospectError(
+              "Could not read the source schema. Verify the table or collection name and connector credentials.",
+            );
+          }
         })
         .catch((e) => {
+          if (gen !== sourceIntrospectGenRef.current) return;
+          sourceIntrospectGateRef.current = { key, status: "error" };
           setSourceIntrospectError(e instanceof Error ? e.message : "Source introspection failed.");
         })
         .finally(() => {
+          if (gen !== sourceIntrospectGenRef.current) return;
           setSourceIntrospecting(false);
           setAnalyzing(false);
         });
-    }, 300);
-    return () => window.clearTimeout(t);
-  }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceCollection, sourceTable, cloudPath, introspectConnectorSource]);
+    }, 400);
+    return () => {
+      window.clearTimeout(t);
+      // Only release the gate if the timer never fired — never interrupt an
+      // in-flight attempt or we will restart analysis on every parent re-render.
+      if (!started && sourceIntrospectGateRef.current.key === key && sourceIntrospectGateRef.current.status === "running") {
+        sourceIntrospectGateRef.current = { key: "", status: "idle" };
+      }
+    };
+  }, [
+    sourceKind,
+    sourceConnectorId,
+    sourceConnector?.type,
+    sourceCollection,
+    sourceTable,
+    cloudPath,
+  ]);
+
+  const retrySourceIntrospect = useCallback(() => {
+    sourceIntrospectGateRef.current = { key: "", status: "idle" };
+    sourceIntrospectGenRef.current += 1;
+    setSourceIntrospectError(null);
+    setSourceIntrospecting(false);
+    setAnalyzing(false);
+    // Nudge effect by clearing then relying on current collection key — force via
+    // a microtask re-entry of the same inputs.
+    const tableOrPath = sourceKind === "cloud"
+      ? cloudPath.trim()
+      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    if (!sourceConnectorId || !tableOrPath?.trim()) return;
+    const key = `${sourceKind}|${sourceConnectorId}|${tableOrPath.trim()}`;
+    const gen = ++sourceIntrospectGenRef.current;
+    sourceIntrospectGateRef.current = { key, status: "running" };
+    setSourceIntrospecting(true);
+    setAnalyzing(true);
+    void introspectConnectorSource()
+      .then((res) => {
+        if (gen !== sourceIntrospectGenRef.current) return;
+        if (res) {
+          sourceIntrospectGateRef.current = { key, status: "ok" };
+          setSourceIntrospectError(null);
+        } else {
+          sourceIntrospectGateRef.current = { key, status: "error" };
+          setSourceIntrospectError(
+            "Could not read the source schema. Verify the table or collection name and connector credentials.",
+          );
+        }
+      })
+      .catch((e) => {
+        if (gen !== sourceIntrospectGenRef.current) return;
+        sourceIntrospectGateRef.current = { key, status: "error" };
+        setSourceIntrospectError(e instanceof Error ? e.message : "Source introspection failed.");
+      })
+      .finally(() => {
+        if (gen !== sourceIntrospectGenRef.current) return;
+        setSourceIntrospecting(false);
+        setAnalyzing(false);
+      });
+  }, [
+    sourceKind,
+    sourceConnectorId,
+    sourceConnector?.type,
+    sourceCollection,
+    sourceTable,
+    cloudPath,
+    introspectConnectorSource,
+  ]);
 
   const proceedToDestination = async () => {
     if (explainSourceGap()) return;
@@ -1812,6 +1942,58 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         : `New schema will be created in ${targetDb}.${targetCollection || "collection"}`;
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
 
+  const handleSaveAsContract = async () => {
+    if (!preflight) {
+      toast({ title: "Run preflight first", message: "Validate gates before saving a contract.", tone: "warning" });
+      return;
+    }
+    setSavingContract(true);
+    try {
+      const mappings = columnMappings.map((m) => ({
+        source: m.source,
+        target: m.target,
+        confidence: m.confidence,
+        transform: m.transform && m.transform !== "none" ? m.transform : undefined,
+        source_type: m.inferredType || currentSourceSchema[m.source],
+        target_type: m.destType || m.inferredType || currentSourceSchema[m.source],
+      }));
+      const name =
+        `${sourceLabel || "source"} → ${mapDestRouteLabel || "destination"}`.slice(0, 180)
+        || `contract-${Date.now()}`;
+      const contract = await createContractFromTransfer({
+        name,
+        source: buildSourceEndpoint() as Record<string, unknown>,
+        destination: (destKindMode === "file_export"
+          ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
+          : buildDestinationEndpoint()) as Record<string, unknown>,
+        mappings,
+        column_types: currentSourceSchema,
+        preflight_gates: (preflight.gates || []) as unknown as Record<string, unknown>[],
+        quality_rules: (preflight.blockers || []).map((b) => ({
+          name: b.id,
+          expectation: b.message,
+          severity: "block",
+        })),
+        strict: true,
+        metadata: {
+          sync_mode: syncMode,
+          validation_mode: validationMode,
+          schema_policy: schemaPolicy,
+          readiness_score: preflight.readiness_score,
+        },
+      });
+      toast({
+        title: "Contract saved",
+        message: `${contract.name} (${contract.status}) — open Contracts to sign or export.`,
+        tone: "success",
+      });
+    } catch (e) {
+      toast({ title: "Could not save contract", message: (e as Error).message, tone: "error" });
+    } finally {
+      setSavingContract(false);
+    }
+  };
+
   useEffect(() => {
     const isLaunching = step === STEP_RUN && transferring && !activeJobId && !result;
     if (!isLaunching) {
@@ -2027,7 +2209,13 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
               )}
             </>
           ) : sourceKind === "cloud" ? (
-            cloudSourceConnectors.length === 0 ? (
+            connectorsLoading && cloudSourceConnectors.length === 0 ? (
+              <LoadingBlock
+                title="Loading cloud connectors"
+                hint="Fetching saved S3, GCS, and Azure connections…"
+                size="sm"
+              />
+            ) : cloudSourceConnectors.length === 0 ? (
               <EmptyState
                 icon="connectors"
                 title="No cloud storage connectors"
@@ -2060,6 +2248,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 </p>
               </>
             )
+          ) : connectorsLoading && dbSourceConnectors.length === 0 ? (
+            <LoadingBlock
+              title="Loading database connectors"
+              hint="Fetching your saved MongoDB, PostgreSQL, and warehouse connections…"
+              size="sm"
+            />
           ) : dbSourceConnectors.length === 0 ? (
             <EmptyState
               icon="connectors"
@@ -2120,6 +2314,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 uploading={uploading}
                 sourceIntrospecting={sourceIntrospecting}
                 sourceIntrospectError={sourceIntrospectError}
+                onRetrySourceIntrospect={retrySourceIntrospect}
                 sourceObjectLabel={
                   sourceKind === "cloud"
                     ? cloudPath.trim()
@@ -2494,7 +2689,15 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             ) : (
               <p className="df2-label-hint" style={{ margin: "8px 0 0" }}>
                 Defaults: append to existing data · manual schema approval · balanced validation.
-                Open Advanced mode for overwrite, CDC, incremental cursors, and drift policies.
+                Open Advanced mode for overwrite, CDC, SCD2, mirror, incremental cursors, and drift policies.
+              </p>
+            )}
+            {(syncMode === "scd2" || syncMode === "mirror") && (
+              <p className="df2-label-hint" style={{ margin: "8px 0 0" }}>
+                {syncMode === "scd2"
+                  ? "SCD Type 2 requires a primary key to version rows (valid-from / valid-to)."
+                  : "Mirror sync requires a primary key to detect and soft-delete rows missing from the source."}
+                {requiresPrimaryKey && !primaryKeyField ? " Select a primary key in Advanced mode before running." : ""}
               </p>
             )}
           </div>
@@ -2700,11 +2903,13 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           mappingReviewCount={mappingReviewCount}
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           transferLaunch={transferLaunch}
+          savingContract={savingContract}
           onBack={() => setStep(STEP_MAP)}
           onRunPreflight={() => void executePreflight()}
           onApproveMappings={() => void approveAllAndPreflight()}
           onExecute={() => void executeTransfer()}
           onOpenJobTheater={openJobTheater}
+          onSaveAsContract={() => void handleSaveAsContract()}
         />
       )}
       </div>

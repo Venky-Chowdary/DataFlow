@@ -84,7 +84,9 @@ def test_poll_parses_slot_changes() -> None:
     conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
     with patch("connectors.postgresql_change_stream.get_connection", return_value=conn), \
-         patch.object(cdc, "_ensure_slot"):
+         patch.object(cdc, "_ensure_slot"), \
+         patch.object(cdc, "_ensure_decode_schema", return_value={}), \
+         patch.object(cdc, "_maybe_record_schema_change"):
         changes = list(cdc.poll())
 
     assert len(changes) == 1

@@ -709,13 +709,14 @@ def read_source_database(
         from connectors.sdk import sdk_read_as_matrix
 
         stream = endpoint.table or endpoint.collection or "stream"
-        headers, rows, schema = sdk_read_as_matrix(
+        result = sdk_read_as_matrix(
             "singer_tap",
             cfg,
             stream,
             offset=0,
             limit=limit or 1000,
         )
+        headers, rows, schema = result[0], result[1], result[2]
         records = [dict(zip(headers, row)) for row in rows]
         return records, headers, schema or {c: "string" for c in headers}
 

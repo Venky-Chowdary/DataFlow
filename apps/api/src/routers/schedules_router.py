@@ -20,7 +20,7 @@ from services.schedule_store import (
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
 
-SyncMode = Literal["full_refresh_overwrite", "full_refresh_append", "incremental", "cdc"]
+SyncMode = Literal["full_refresh_overwrite", "full_refresh_append", "incremental", "cdc", "scd2", "mirror"]
 IntervalPreset = Literal["hourly", "daily", "weekly"]
 
 

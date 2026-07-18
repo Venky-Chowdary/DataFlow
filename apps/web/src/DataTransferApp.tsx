@@ -23,6 +23,7 @@ import { TransferPage } from "./pages/TransferPage";
 import { ConnectorsPage } from "./pages/ConnectorsPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
 import { JobsPage } from "./pages/JobsPage";
+import { ContractsPage } from "./pages/ContractsPage";
 import { McpPage } from "./pages/McpPage";
 import { QueryPage } from "./pages/QueryPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -45,6 +46,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Health, throughput, and recent jobs", group: "platform" },
   { id: "transfer", label: "Transfer", icon: "transfer", desc: "Move data with preflight gates", group: "platform" },
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
+  { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
   { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring syncs", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
@@ -96,6 +98,8 @@ function AppShell({
   const [jobs, setJobs] = useState<TransferJob[]>([]);
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
+  /** False until the first connectors fetch settles — prevents false “no connectors” empty states. */
+  const [connectorsReady, setConnectorsReady] = useState(false);
   const [apiOnline, setApiOnline] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState("");
@@ -154,6 +158,8 @@ function AppShell({
       if (notifyOnError) {
         toast({ title: "Could not load connectors", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in.", tone: "error" });
       }
+    } finally {
+      setConnectorsReady(true);
     }
   }, [toast]);
 
@@ -179,18 +185,12 @@ function AppShell({
     let cancelled = false;
     (async () => {
       setBootLoading(true);
-      const timeout = window.setTimeout(() => {
-        if (!cancelled) setBootLoading(false);
-      }, 2500);
       await Promise.allSettled([
         loadConnectors(false),
         loadJobs(false),
         loadSchedules(),
       ]);
-      if (!cancelled) {
-        window.clearTimeout(timeout);
-        setBootLoading(false);
-      }
+      if (!cancelled) setBootLoading(false);
     })();
     return () => { cancelled = true; };
   }, [loadConnectors, loadJobs, loadSchedules]);
@@ -504,6 +504,7 @@ function AppShell({
                 <PageErrorBoundary label="Transfer Studio">
                   <TransferPage
                     connectors={connectors}
+                    connectorsLoading={!connectorsReady}
                     onOpenSchedules={() => setScreen("schedules")}
                     onTransferComplete={() => {
                       loadJobs();
@@ -526,6 +527,7 @@ function AppShell({
                 <PageErrorBoundary label="Connectors">
                   <ConnectorsPage
                     connectors={connectors}
+                    connectorsLoading={!connectorsReady}
                     jobs={jobs}
                     schedules={schedules}
                     onAdd={openModal}
@@ -566,6 +568,13 @@ function AppShell({
                     onStartTransfer={() => setScreen("transfer")}
                     initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
                   />
+                </PageErrorBoundary>
+                </div>
+              )}
+              {mountedScreens.has("contracts") && (
+                <div className={`df2-screen-keep ${showScreen("contracts")}`} hidden={screen !== "contracts"} aria-hidden={screen !== "contracts"}>
+                <PageErrorBoundary label="Contracts">
+                  <ContractsPage />
                 </PageErrorBoundary>
                 </div>
               )}

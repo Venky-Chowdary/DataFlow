@@ -12,7 +12,7 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
-import { fetchJob, retryJob, resumeJob } from "../lib/api";
+import { cancelJob, fetchJob, retryJob, resumeJob } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -51,7 +51,7 @@ type JobFilter = "all" | "running" | "completed" | "failed";
 function statusIcon(status: string) {
   if (status === "completed") return "check";
   if (status === "completed_with_quarantine") return "alert";
-  if (status === "failed") return "x";
+  if (status === "failed" || status === "cancelled") return "x";
   if (status === "running" || status === "pending") return "activity";
   return "jobs";
 }
@@ -63,6 +63,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
 
@@ -127,11 +128,26 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
       return;
     }
     setDetailLoading(true);
+    const listed = jobs.find((j) => j._id === selectedId);
+    // Optimistic hydrate from list so the detail pane never goes blank on slow/404 get.
+    if (listed) {
+      setLiveJob({
+        ...(listed as unknown as JobDetailRecord),
+        _id: listed._id,
+        status: listed.status,
+        progress_pct: listed.progress_pct ?? 0,
+        records_processed: listed.records_processed ?? 0,
+        message: listed.message || listed.error || "",
+      });
+    }
     fetchJob(selectedId)
       .then(setLiveJob)
-      .catch(() => setLiveJob(null))
+      .catch(() => {
+        // Keep list snapshot if detail endpoint fails (workspace/isolation edge cases).
+        if (!listed) setLiveJob(null);
+      })
       .finally(() => setDetailLoading(false));
-  }, [selectedId]);
+  }, [selectedId, jobs]);
 
   const selected = jobs.find((j) => j._id === selectedId);
   const isLive = selected?.status === "running" || selected?.status === "pending";
@@ -171,7 +187,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     if (!selectedId || !liveJob?.checkpoint) return;
     setResuming(true);
     try {
-      const result = await resumeJob(selectedId);
+      await resumeJob(selectedId);
       toast({ title: "Resume started", message: `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`, tone: "success" });
       onRefresh?.();
     } catch (e) {
@@ -187,6 +203,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     }
   }, [selectedId, liveJob?.checkpoint, onRefresh, onStartTransfer, toast]);
 
+  const handleCancel = useCallback(async () => {
+    if (!selectedId) return;
+    setCancelling(true);
+    try {
+      await cancelJob(selectedId);
+      toast({ title: "Cancellation requested", message: "The job will stop at the next checkpoint.", tone: "info" });
+      onRefresh?.();
+    } catch (e) {
+      toast({ title: "Could not cancel job", message: e instanceof Error ? e.message : "Cancel failed", tone: "error" });
+    } finally {
+      setCancelling(false);
+    }
+  }, [selectedId, onRefresh, toast]);
 
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
@@ -358,15 +387,28 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                 {detailLoading ? (
                   <LoadingBlock title="Loading job details" size="md" variant="glass" />
                 ) : isLive && selected ? (
-                  <JobTheater
-                    jobId={selectedId!}
-                    sourceLabel={selected.source_name}
-                    destLabel={`${selected.destination_database}.${selected.destination_collection}`}
-                    sourceType={selected.source_type}
-                    destType={selected.destination_type}
-                    onComplete={handleComplete}
-                    onFailed={handleComplete}
-                  />
+                  <div className="df2-jobs-v3-live">
+                    <div className="df2-jobs-v3-live-actions">
+                      <button
+                        type="button"
+                        className="df2-btn df2-btn-sm df2-btn-ghost"
+                        onClick={() => void handleCancel()}
+                        disabled={cancelling}
+                      >
+                        {cancelling ? <ButtonLoader label="Cancelling…" /> : <><DtIcon name="x" size={14} /> Cancel job</>}
+                      </button>
+                    </div>
+                    <JobTheater
+                      jobId={selectedId!}
+                      sourceLabel={selected.source_name}
+                      destLabel={`${selected.destination_database}.${selected.destination_collection}`}
+                      sourceType={selected.source_type}
+                      destType={selected.destination_type}
+                      onComplete={handleComplete}
+                      onFailed={handleComplete}
+                      onCancelled={handleComplete}
+                    />
+                  </div>
                 ) : liveJob && selected ? (
                   <div className={`df2-jobs-v3-summary ${selected.status === "failed" ? "is-failed" : "is-done"}`}>
                     <header className="df2-jobs-v3-summary-head">

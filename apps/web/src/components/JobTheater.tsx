@@ -3,9 +3,10 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
-import { streamJobProgress } from "../lib/api";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { cancelJob, streamJobProgress } from "../lib/api";
+import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
+import { useToast } from "./Toast";
 
 interface JobTheaterProps {
   jobId: string;
@@ -16,6 +17,7 @@ interface JobTheaterProps {
   preflight?: PreflightResult;
   onComplete?: (job: JobProgress) => void;
   onFailed?: (job: JobProgress) => void;
+  onCancelled?: (job: JobProgress) => void;
 }
 
 const PHASES = [
@@ -37,7 +39,7 @@ const PHASE_LABELS: Record<string, string> = {
 
 function phaseIndex(phase?: string, status?: string): number {
   if (isJobSuccess(status)) return 5;
-  if (status === "failed") return -1;
+  if (status === "failed" || status === "cancelled") return -1;
   const idx = PHASES.findIndex((p) => p.id === (phase || "queued"));
   return idx >= 0 ? idx : 0;
 }
@@ -68,10 +70,13 @@ export function JobTheater({
   preflight,
   onComplete,
   onFailed,
+  onCancelled,
 }: JobTheaterProps) {
+  const { toast } = useToast();
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
   const [log, setLog] = useState<string[]>([]);
+  const [cancelling, setCancelling] = useState(false);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
@@ -131,14 +136,32 @@ export function JobTheater({
           append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
           onFailed?.(update);
         }
+        if (!doneRef.current && update.status === "cancelled") {
+          doneRef.current = true;
+          append("Job cancelled by user");
+          onCancelled?.(update);
+        }
       },
       () => {
         append("Live stream interrupted — connection lost");
-        setJob((j) => (j ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : null));
+        setJob((j) => (j && !isJobTerminal(j.status) ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : j));
       },
     );
     return stop;
-  }, [jobId, onComplete, onFailed]);
+  }, [jobId, onComplete, onFailed, onCancelled]);
+
+  const handleCancel = async () => {
+    if (cancelling || doneRef.current) return;
+    setCancelling(true);
+    try {
+      await cancelJob(jobId);
+      toast({ title: "Cancellation requested", message: "The job will stop at the next checkpoint.", tone: "info" });
+    } catch (e) {
+      toast({ title: "Could not cancel job", message: (e as Error).message, tone: "error" });
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   if (!job) {
     return (
@@ -161,6 +184,8 @@ export function JobTheater({
       log={log}
       startedAtFallback={startRef.current}
       preflight={preflight}
+      cancelling={cancelling}
+      onCancel={handleCancel}
     />
   );
 }
@@ -176,6 +201,8 @@ interface JobTheaterViewProps {
   log: string[];
   startedAtFallback?: number;
   preflight?: PreflightResult;
+  cancelling?: boolean;
+  onCancel?: () => void;
 }
 
 /** Presentational live-transfer theater. Pure — driven entirely by props. */
@@ -189,6 +216,8 @@ export function JobTheaterView({
   throughput,
   log,
   startedAtFallback,
+  cancelling,
+  onCancel,
 }: JobTheaterViewProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -200,9 +229,10 @@ export function JobTheaterView({
   const processed = job.records_processed ?? 0;
   const currentPhase = phaseIndex(job.phase, job.status);
   const isFailed = job.status === "failed";
+  const isCancelled = job.status === "cancelled";
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
-  const isRunning = !isFailed && !isComplete;
+  const isRunning = !isFailed && !isComplete && !isCancelled;
 
   // Reconcile reported progress with row-derived progress so the bar never
   // looks frozen while a large batch is being written.
@@ -249,16 +279,17 @@ export function JobTheaterView({
     }
 
     return PHASES.map((phase, i) => {
-      const state = isFailed && i === currentPhase ? "failed"
+      const state = (isFailed || isCancelled) && i === currentPhase ? "failed"
         : i < currentPhase || isComplete ? "done"
         : i === currentPhase ? "active"
         : "pending";
       return { id: phase.id, label: phase.label, state };
     });
-  }, [job.phases, isFailed, currentPhase, isComplete]);
+  }, [job.phases, isFailed, isCancelled, currentPhase, isComplete]);
 
   const activePhase = timelinePhases.find((p) => p.state === "active");
-  const phaseLabel = activePhase?.label || (isComplete ? "Done" : isFailed ? "Failed" : "Queued");
+  const phaseLabel = activePhase?.label
+    || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed" : "Queued");
 
   const eta = useMemo(() => {
     if (!isRunning || throughput <= 0 || total <= processed) return null;
@@ -269,7 +300,7 @@ export function JobTheaterView({
   const ringCircumference = 2 * Math.PI * 24;
 
   return (
-    <div className={`df2-theater-v3 ${isRunning ? "is-live" : ""} ${isFailed ? "is-failed" : ""} ${isComplete ? "is-done" : ""}`}>
+    <div className={`df2-theater-v3 ${isRunning ? "is-live" : ""} ${isFailed || isCancelled ? "is-failed" : ""} ${isComplete ? "is-done" : ""}`}>
       <div className="df2-theater-v3-scroll">
       <header className="df2-theater-v3-header">
         <div className="df2-theater-v3-route">
@@ -294,12 +325,32 @@ export function JobTheaterView({
         <div className="df2-theater-v3-header-meta">
           <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isQuarantine ? "is-quarantine" : isComplete ? "is-done" : "is-failed"}`}>
             <span className="df2-theater-v3-live-dot" aria-hidden />
-            {isRunning ? "Live" : isQuarantine ? "Quarantine" : isComplete ? "Finalized" : "Attention"}
+            {isRunning ? "Live" : isQuarantine ? "Quarantine" : isComplete ? "Finalized" : isCancelled ? "Cancelled" : "Attention"}
           </span>
           <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
           <span className="df2-theater-v3-job-id" title={jobId}>#{jobId.slice(0, 8)}</span>
+          {isRunning && onCancel && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-ghost"
+              onClick={onCancel}
+              disabled={cancelling}
+            >
+              <DtIcon name="x" size={14} /> {cancelling ? "Cancelling…" : "Cancel"}
+            </button>
+          )}
         </div>
       </header>
+
+      {isCancelled && (
+        <div className="df2-theater-v3-alert error">
+          <DtIcon name="x" size={18} />
+          <div>
+            <strong>Transfer cancelled</strong>
+            <p>{job.message || "The job was stopped before completing. Re-run from Transfer Studio when ready."}</p>
+          </div>
+        </div>
+      )}
 
       {isFailed && (
         <div className="df2-theater-v3-alert error">
@@ -328,7 +379,7 @@ export function JobTheaterView({
             <strong>{progress}%</strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
-            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
+            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isCancelled ? "Transfer cancelled" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
             <p title={job.message || phaseLabel}>
               {job.message || (isRunning ? `${phaseLabel} — streaming rows to destination…` : "Job finished")}
             </p>

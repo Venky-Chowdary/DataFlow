@@ -515,17 +515,98 @@ def capability_label(caps: dict[str, bool]) -> str:
     return "Roadmap"
 
 
+# Engines that resolve to generic_sql but are not yet CI-proven as Certified.
+# Oracle / SQL Server are promoted via ``_generic_sql_brand_certified`` when DBAPI is present.
+_UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
+    "oracle", "sql_server", "sqlserver", "mssql", "db2", "sybase_ase", "sybase",
+    "informix", "teradata", "greenplum", "vertica", "singlestore", "motherduck",
+    "amazon_emr", "cloudera_data_platform", "sap_bw_4hana", "duckdb",
+    "clickhouse", "presto", "trino", "athena", "hive", "impala",
+})
+
+# Brands we certify through generic_sql once the dialect DBAPI is importable.
+_CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
+    "oracle", "sql_server", "sqlserver", "mssql",
+})
+
+
+def _generic_sql_brand_certified(catalog_id: str) -> bool:
+    """True when Oracle/SQL Server DBAPI is installed (Sprint D certified path)."""
+    cid = (catalog_id or "").lower().strip()
+    if cid not in _CERTIFIABLE_GENERIC_SQL_BRANDS and not any(
+        cid.startswith(p) for p in ("oracle", "sql_server", "mssql")
+    ):
+        return False
+    # Map brand → driver key used by driver_available
+    if "oracle" in cid:
+        return driver_available("generic_sql", "oracle")
+    if "sql_server" in cid or "mssql" in cid or cid == "sqlserver":
+        return driver_available("generic_sql", "sqlserver")
+    return False
+
+
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
     """True when the resolved driver is implemented and live (aliases inherit readiness)."""
     if not transfer_ready(caps):
+        return False
+    # Marketing SaaS/API brand IDs that only route to generic rest_api are never
+    # certified transfer-ready — only the first-class driver id itself qualifies.
+    if driver == "rest_api" and catalog_id != "rest_api":
+        return False
+    # generic_sql brand engines stay Planned until CI-certified (Sprint D).
+    # Oracle / SQL Server are certified when their DBAPI packages are installed.
+    if driver == "generic_sql":
+        if catalog_id == "generic_sql":
+            return True
+        if _generic_sql_brand_certified(catalog_id):
+            return True
+        if catalog_id in _UNCERTIFIED_GENERIC_SQL_BRANDS:
+            return False
+        # Substring-matched engines (e.g. "oracle_autonomous") → Planned.
+        if any(b in catalog_id for b in ("oracle", "sql_server", "mssql", "db2", "teradata", "informix", "sybase")):
+            return False
         return False
     if driver in TRANSFER_READY_CATALOG_IDS:
         return True
     if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
         return True
-    if driver == "generic_sql":
+    return False
+
+
+def _is_rest_api_brand_alias(catalog_id: str, driver: str) -> bool:
+    """True when a catalog brand id is only a catch-all rest_api stub."""
+    return driver == "rest_api" and (catalog_id or "") != "rest_api"
+
+
+def _is_uncertified_driver_alias(catalog_id: str, driver: str) -> bool:
+    """True when catalog id should not inherit Certified from its resolved driver."""
+    if _is_rest_api_brand_alias(catalog_id, driver):
+        return True
+    if driver == "generic_sql" and catalog_id != "generic_sql":
+        # Sprint D: Oracle/SQL Server become certified when DBAPI is present.
+        if _generic_sql_brand_certified(catalog_id):
+            return False
         return True
     return False
+
+
+def certification_tier(
+    catalog_id: str,
+    driver: str,
+    caps: dict[str, bool],
+    *,
+    transfer_ready_flag: bool,
+) -> str:
+    """Honest marketplace tier: certified | source_only | connect_only | planned."""
+    if _is_uncertified_driver_alias(catalog_id, driver):
+        return "planned"
+    if transfer_ready_flag and transfer_ready(caps):
+        return "certified"
+    if _source_only_ready(caps) and catalog_id == driver:
+        return "source_only"
+    if connect_only(caps):
+        return "connect_only"
+    return "planned"
 
 
 def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -533,14 +614,24 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     driver = resolve_driver_type(catalog_id)
     caps = get_capabilities(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
-    eff = effective_status(caps, entry.get("status", "planned"))
+    # Brand stubs / uncertified generic_sql engines must not inherit "live".
+    if _is_uncertified_driver_alias(catalog_id, driver):
+        eff = "planned"
+        label = "Planned"
+        is_connect_only = False
+    else:
+        eff = effective_status(caps, entry.get("status", "planned"))
+        label = capability_label(caps)
+        is_connect_only = connect_only(caps) and not ready
+    tier = certification_tier(catalog_id, driver, caps, transfer_ready_flag=ready)
     out = dict(entry)
     out["driver_type"] = driver
     out["capabilities"] = caps
     out["effective_status"] = eff
     out["transfer_ready"] = ready
-    out["connect_only"] = connect_only(caps) and not ready
-    out["capability_label"] = capability_label(caps)
+    out["connect_only"] = is_connect_only
+    out["capability_label"] = label
+    out["certification_tier"] = tier
     return out
 
 

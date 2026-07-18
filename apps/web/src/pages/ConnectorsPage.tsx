@@ -12,6 +12,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
+import { LoadingBlock } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
@@ -20,6 +21,8 @@ import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/
 
 interface ConnectorsPageProps {
   connectors: Connector[];
+  /** True while the first connectors fetch has not settled yet. */
+  connectorsLoading?: boolean;
   jobs?: TransferJob[];
   schedules?: PipelineSchedule[];
   onAdd: (type?: string) => void;
@@ -38,6 +41,7 @@ function catalogType(id: string) {
 
 export function ConnectorsPage({
   connectors,
+  connectorsLoading = false,
   jobs = [],
   schedules = [],
   onAdd,
@@ -165,18 +169,26 @@ export function ConnectorsPage({
   };
 
   const handleCatalogSelect = (item: CatalogConnector) => {
-    if (item.effective_status === "planned" || (!item.transfer_ready && !item.connect_only)) {
+    const tier = item.certification_tier || "";
+    const isPlanned =
+      tier === "planned" ||
+      item.effective_status === "planned" ||
+      (!item.transfer_ready &&
+        !item.connect_only &&
+        tier !== "source_only" &&
+        item.effective_status !== "live");
+    if (isPlanned) {
       toast({
         title: "Connector not available yet",
-        message: `${item.name} is on the roadmap. Choose a transfer-ready or test-only connector.`,
+        message: `${item.name} is on the roadmap. Choose a Certified or Source-only connector.`,
         tone: "info",
       });
       return;
     }
-    if (item.connect_only) {
+    if (item.connect_only || tier === "source_only" || (!item.transfer_ready && item.effective_status === "live")) {
       toast({
-        title: "Connection test only",
-        message: `${item.name} supports credential test — transfer routes coming soon.`,
+        title: "Source only",
+        message: `${item.name} can be saved and tested as a source — full R/W transfer may be limited.`,
         tone: "warning",
       });
     }
@@ -277,7 +289,15 @@ export function ConnectorsPage({
 
         <div className="df2-connectors-workspace">
           {tab === "connections" ? (
-            connectors.length === 0 ? (
+            connectorsLoading && connectors.length === 0 ? (
+              <div className="df2-connectors-empty" aria-busy="true">
+                <LoadingBlock
+                  title="Loading connections"
+                  hint="Fetching saved connectors from your workspace…"
+                  size="md"
+                />
+              </div>
+            ) : connectors.length === 0 ? (
               <div className="df2-connectors-empty">
                 <EmptyState
                   page
@@ -349,7 +369,13 @@ export function ConnectorsPage({
             )
           ) : (
             <div className="df2-connectors-pane df2-connectors-catalog">
-              <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
+              <ConnectorCatalogPanel
+                role={role}
+                onSelect={handleCatalogSelect}
+                initialStatus="live"
+                requireAvailable={false}
+                limit={200}
+              />
             </div>
           )}
         </div>

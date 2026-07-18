@@ -195,7 +195,7 @@ def run_transfer_policy_gates(
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
     requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
-    requires_primary_key = sync in {"upsert", "incremental_deduped", "cdc"}
+    requires_primary_key = sync in {"upsert", "incremental_deduped", "cdc", "scd2", "mirror"}
 
     missing_cursor = [
         c.get("name") or c.get("stream") or "stream"

@@ -389,13 +389,17 @@ async def list_connectors(
 
 
 def _can_access_job(request: Request, job: dict) -> bool:
-    """True if the actor may see or mutate this job."""
-    from services.team_store import require_workspace_isolation
+    """True if the actor may see or mutate this job.
 
-    workspace_id = job.get("workspace_id") or ""
+    Must stay aligned with ``list_jobs``: unscoped/global jobs (empty
+    ``workspace_id``) are returned by the list endpoint for the default
+    workspace filter. Denying them here caused Job Theater 404s in production
+    when ``DATAFLOW_REQUIRE_WORKSPACE`` / production isolation is on.
+    """
+    workspace_id = (job.get("workspace_id") or "").strip()
     if not workspace_id:
-        # Deny cross-tenant reads of unscoped jobs when isolation is on.
-        return not require_workspace_isolation()
+        # Global / legacy jobs — same visibility as list_jobs for "".
+        return True
     return can_read_workspace(workspace_id, _actor_email(request))
 
 
@@ -582,7 +586,7 @@ async def stream_transfer_job(job_id: str, request: Request):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
             yield f"data: {json.dumps(job, default=json_default)}\n\n"
-            if job.get("status") in ("completed", "completed_with_quarantine", "failed"):
+            if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
                 break
             await asyncio.sleep(0.4)
 
@@ -647,6 +651,160 @@ async def export_job_quarantine(job_id: str, request: Request):
         "download_url": f"/api/v1/transfer/download/{filename}",
         "filename": filename,
     }
+
+
+class QuarantineReplayRequest(BaseModel):
+    """Replay quarantined rows through the destination writer with optional edits."""
+
+    rows: list[dict] = Field(default_factory=list, description="Edited rejected_details; empty = all quarantine rows")
+    transform_overrides: dict = Field(default_factory=dict, description="Optional per-column transform overrides keyed by source column")
+
+
+def _quarantine_details_to_records(details: list[dict], transform_overrides: Optional[dict] = None) -> tuple[list[dict], list[str]]:
+    """Group rejected_details by row index into source-shaped records for rewrite."""
+    by_row: dict[int, dict] = {}
+    order: list[int] = []
+    for detail in details:
+        try:
+            row_num = int(detail.get("row") or 0)
+        except (TypeError, ValueError):
+            row_num = 0
+        if row_num not in by_row:
+            by_row[row_num] = {}
+            order.append(row_num)
+        base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
+        if base:
+            for k, v in base.items():
+                by_row[row_num].setdefault(str(k), "" if v is None else str(v))
+        col = str(detail.get("column") or "").strip()
+        if col:
+            by_row[row_num][col] = "" if detail.get("value") is None else str(detail.get("value"))
+    records = [by_row[n] for n in order if by_row[n]]
+    columns: list[str] = []
+    seen: set[str] = set()
+    for rec in records:
+        for k in rec:
+            if k not in seen:
+                seen.add(k)
+                columns.append(k)
+    _ = transform_overrides  # applied to mappings by caller
+    return records, columns
+
+
+@router.post("/jobs/{job_id}/quarantine/replay")
+async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, request: Request):
+    """Rewrite quarantined (optionally edited) rows through the destination with the original mapping.
+
+    Creates a child tracked job, writes synchronously, and returns rows_written / rejected
+    plus the new job_id for audit.
+    """
+    from ..transfer.adapters import write_destination_database
+    from ..transfer.engine import get_transfer_engine
+    from ..transfer.models import transfer_request_from_dict
+
+    mongo = get_mongodb_service()
+    job = mongo.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _can_access_job(request, job):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+
+    payload = job.get("transfer_request")
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail="This job has no saved configuration — cannot replay quarantine.",
+        )
+
+    stored_details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    details = body.rows if body.rows else list(stored_details)
+    if not details:
+        raise HTTPException(status_code=400, detail="No quarantine rows to replay")
+
+    records, columns = _quarantine_details_to_records(details, body.transform_overrides)
+    if not records:
+        raise HTTPException(status_code=400, detail="Could not reconstruct rows from quarantine details")
+
+    transfer_req = transfer_request_from_dict(payload)
+    mappings = list(transfer_req.mappings or [])
+    if body.transform_overrides:
+        for m in mappings:
+            src = m.get("source") or m.get("source_column") or ""
+            if src in body.transform_overrides:
+                m["transform"] = body.transform_overrides[src]
+    if not mappings:
+        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+
+    schema = dict(transfer_req.column_types or {})
+    for c in columns:
+        schema.setdefault(c, "string")
+
+    engine = get_transfer_engine()
+    # Child job: append-only rewrite of remediations (never full-refresh overwrite).
+    child_payload = dict(payload)
+    child_payload["sync_mode"] = "full_refresh_append"
+    child_payload["skip_preflight"] = True
+    child_req = transfer_request_from_dict(child_payload)
+    child_job_id = engine._create_pending_job(child_req)
+    mongo.update_job_status(
+        child_job_id,
+        "running",
+        retry_of=job_id,
+        phase="writing",
+        message=f"Quarantine replay of job {job_id}",
+        operation="quarantine_replay",
+    )
+
+    try:
+        dest = transfer_req.destination
+        if dest.kind == "file_export":
+            raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
+
+        rows_written, ddl_log, dest_summary = write_destination_database(
+            dest,
+            records,
+            columns,
+            schema,
+            mappings,
+            validation_mode=transfer_req.validation_mode or "balanced",
+            backfill_new_fields=bool(transfer_req.backfill_new_fields),
+            write_mode="upsert" if any(m.get("source", "").lower() in {"id", "_id"} for m in mappings) else "insert",
+            conflict_columns=[
+                m.get("target") or m.get("target_column") or m.get("source")
+                for m in mappings
+                if (m.get("source") or "").lower() in {"id", "_id"}
+            ] or None,
+        )
+        rejected = int(dest_summary.get("rejected_rows") or 0)
+        status = "completed_with_quarantine" if rejected > 0 else "completed"
+        mongo.update_job_status(
+            child_job_id,
+            status,
+            phase="completed",
+            message=f"Quarantine replay wrote {rows_written} row(s)",
+            records_processed=rows_written,
+            progress_pct=100,
+            rejected_rows=rejected,
+            rejected_details=dest_summary.get("rejected_details") or [],
+            destination_summary=dest_summary,
+            ddl_log=ddl_log,
+        )
+        return {
+            "success": True,
+            "job_id": child_job_id,
+            "parent_job_id": job_id,
+            "rows_written": rows_written,
+            "rejected": rejected,
+            "rows_attempted": len(records),
+            "status": status,
+            "destination_summary": dest_summary,
+        }
+    except HTTPException:
+        mongo.update_job_status(child_job_id, "failed", phase="failed", message="Quarantine replay failed")
+        raise
+    except Exception as e:
+        mongo.update_job_status(child_job_id, "failed", phase="failed", message=str(e), error=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/{connector_id}")

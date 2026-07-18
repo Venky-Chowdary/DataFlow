@@ -250,6 +250,11 @@ def build_mapped_rows_with_details(
                     "value": str(val) if val is not None else "",
                     "reason": err,
                     "policy": policy,
+                    # Full source row so quarantine replay can rewrite without re-reading.
+                    "values": {
+                        h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
+                        for i, h in enumerate(headers)
+                    },
                 }
                 rejected_details.append(detail)
                 if len(errors) < 10:

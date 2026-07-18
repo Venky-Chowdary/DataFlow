@@ -84,13 +84,14 @@ export function buildColumnSamples(
 }
 
 export async function analyzeSchemaEnhanced(
-  columns: Record<string, string[]>
+  columns: Record<string, string[]>,
+  options?: { timeoutMs?: number },
 ): Promise<EnhancedAnalysis> {
   const res = await apiFetch(`${API_BASE}/ai/analyze/enhanced`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ columns }),
-    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    timeoutMs: options?.timeoutMs ?? LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "AI analysis failed"));
   return res.json();
@@ -384,6 +385,8 @@ export interface CatalogConnector {
   transfer_ready?: boolean;
   connect_only?: boolean;
   capability_label?: string;
+  /** Honest tier: certified | source_only | connect_only | planned */
+  certification_tier?: string;
   capabilities?: {
     test?: boolean;
     read?: boolean;
@@ -543,6 +546,27 @@ export async function resumeJob(jobId: string): Promise<{ job_id: string; status
   throw lastError instanceof Error ? lastError : new Error("Resume failed");
 }
 
+export async function cancelJob(jobId: string): Promise<{ success: boolean; job_id: string; status: string; message?: string }> {
+  const urls = [
+    `${API_BASE}/connectors/jobs/${jobId}/cancel`,
+    `${API_BASE}/jobs/${jobId}/cancel`,
+  ];
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      const res = await apiFetch(url, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(typeof data.detail === "string" ? data.detail : "Cancel failed");
+      }
+      return data as { success: boolean; job_id: string; status: string; message?: string };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Cancel failed");
+}
+
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
 export function streamJobProgress(
   jobId: string,
@@ -611,7 +635,12 @@ export function streamJobProgress(
       try {
         const job = await fetchJob(jobId);
         onUpdate(job);
-        if (job.status === "completed" || job.status === "failed") {
+        if (
+          job.status === "completed"
+          || job.status === "completed_with_quarantine"
+          || job.status === "failed"
+          || job.status === "cancelled"
+        ) {
           if (pollTimer) clearInterval(pollTimer);
         }
       } catch (e) {
@@ -633,7 +662,12 @@ export function streamJobProgress(
       try {
         const job = normalize(JSON.parse(ev.data));
         onUpdate(job);
-        if (job.status === "completed" || job.status === "failed") {
+        if (
+          job.status === "completed"
+          || job.status === "completed_with_quarantine"
+          || job.status === "failed"
+          || job.status === "cancelled"
+        ) {
           es.close();
         }
       } catch {
@@ -1532,7 +1566,15 @@ export async function exportQuery(payload: {
 export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
-  quarantine: { row?: number; column?: string; value?: string; reason?: string }[];
+  quarantine: {
+    row?: number;
+    column?: string;
+    target?: string;
+    value?: string;
+    reason?: string;
+    policy?: string;
+    values?: Record<string, string>;
+  }[];
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -1544,6 +1586,31 @@ export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo>
 export async function exportJobQuarantine(jobId: string): Promise<{ success: boolean; row_count?: number; download_url?: string; filename?: string }> {
   const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/export`, { method: "POST" });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export quarantine"));
+  return res.json();
+}
+
+export interface QuarantineReplayResult {
+  success: boolean;
+  job_id: string;
+  parent_job_id: string;
+  rows_written: number;
+  rejected: number;
+  rows_attempted: number;
+  status: string;
+  destination_summary?: Record<string, unknown>;
+}
+
+export async function replayJobQuarantine(
+  jobId: string,
+  body: { rows?: QuarantineInfo["quarantine"]; transform_overrides?: Record<string, string> } = {},
+): Promise<QuarantineReplayResult> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/replay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Quarantine replay failed"));
   return res.json();
 }
 
@@ -1737,4 +1804,134 @@ export async function downloadBenchmarkReport(rows = 100_000): Promise<Blob> {
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not download benchmark report"));
   return res.blob();
+}
+
+/* ── Data contracts ─────────────────────────────────────────────── */
+
+export interface DataContractSummary {
+  id: string;
+  name: string;
+  version: number;
+  status: string;
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+  columns: Record<string, unknown>[];
+  mappings: Record<string, unknown>[];
+  quality_rules: Record<string, unknown>[];
+  strict: boolean;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+  preflight_gates?: Record<string, unknown>[];
+}
+
+export interface ContractBreaker {
+  contract_id: string;
+  state: string;
+  failure_count: number;
+  success_count: number;
+  failure_threshold: number;
+  recovery_timeout_seconds: number;
+}
+
+export async function fetchContracts(): Promise<DataContractSummary[]> {
+  const res = await apiFetch(`${API_BASE}/contracts`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load contracts"));
+  const data = await res.json();
+  return data.contracts || [];
+}
+
+export async function createContractFromTransfer(body: {
+  name: string;
+  source?: Record<string, unknown>;
+  destination?: Record<string, unknown>;
+  mappings?: Record<string, unknown>[];
+  columns?: Record<string, unknown>[];
+  quality_rules?: Record<string, unknown>[];
+  preflight_gates?: Record<string, unknown>[];
+  column_types?: Record<string, string>;
+  strict?: boolean;
+  metadata?: Record<string, unknown>;
+}): Promise<DataContractSummary> {
+  const res = await apiFetch(`${API_BASE}/contracts/from-transfer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not save contract"));
+  return res.json();
+}
+
+export async function signContract(id: string, strict = true): Promise<DataContractSummary> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/sign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ strict }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not sign contract"));
+  return res.json();
+}
+
+export async function deprecateContract(id: string): Promise<DataContractSummary> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/deprecate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not deprecate contract"));
+  return res.json();
+}
+
+export async function fetchContractBreaker(id: string): Promise<ContractBreaker> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/breaker`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load breaker"));
+  return res.json();
+}
+
+export async function resetContractBreaker(id: string): Promise<ContractBreaker> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/breaker/reset`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not reset breaker"));
+  return res.json();
+}
+
+export async function exportContract(id: string): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/contracts/${encodeURIComponent(id)}/export`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export contract"));
+  return res.blob();
+}
+
+export async function fetchUsageSummary(days = 30): Promise<{
+  days?: number;
+  rows_written?: number;
+  bytes_processed?: number;
+  event_count?: number;
+  totals?: { rows_written?: number; bytes_processed?: number; event_count?: number };
+  daily?: { date: string; rows_written: number; bytes_processed: number; event_count: number }[];
+}> {
+  const res = await apiFetch(`${API_BASE}/usage/summary?days=${days}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load usage"));
+  return res.json();
+}
+
+export interface SchemaDriftReport {
+  severity: string;
+  additive: { kind: string; column?: string; to_type?: string }[];
+  breaking: { kind: string; column?: string; to?: string; to_type?: string }[];
+  summary?: string;
+}
+
+export async function classifySchemaDrift(
+  oldSchema: Record<string, unknown>,
+  newSchema: Record<string, unknown>,
+): Promise<SchemaDriftReport> {
+  const res = await apiFetch(`${API_BASE}/preflight/schema-drift`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_schema: oldSchema, new_schema: newSchema }),
+  });
+  if (!res.ok) {
+    // Fallback: local classify via a thin mirror if endpoint missing
+    throw new Error(await parseApiError(res, "Schema drift classify failed"));
+  }
+  return res.json();
 }

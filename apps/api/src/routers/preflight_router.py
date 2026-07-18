@@ -229,3 +229,19 @@ async def explain_preflight(body: ExplainRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class SchemaDriftRequest(BaseModel):
+    old_schema: dict[str, Any] = Field(default_factory=dict)
+    new_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/schema-drift")
+async def classify_schema_drift(body: SchemaDriftRequest):
+    """Classify schema evolution as additive vs breaking (approve/reject UX)."""
+    from services.schema_drift import classify_schema_change
+
+    try:
+        return classify_schema_change(body.old_schema, body.new_schema)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { fetchCatalogStats } from "../lib/api";
+import { fetchCatalogStats, fetchUsageSummary } from "../lib/api";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   buildStatusDistribution,
@@ -66,11 +66,15 @@ export function DashboardPage({
   onOpenJobs,
 }: DashboardPageProps) {
   const [catalogStats, setCatalogStats] = useState<{ live: number; total: number; transfer_live?: number } | null>(null);
+  const [usageRows, setUsageRows] = useState<number | null>(null);
 
   useEffect(() => {
     fetchCatalogStats()
       .then((s) => setCatalogStats({ live: s.live, total: s.total, transfer_live: s.transfer_live }))
       .catch(() => setCatalogStats(null));
+    fetchUsageSummary(30)
+      .then((u) => setUsageRows(u.totals?.rows_written ?? u.rows_written ?? 0))
+      .catch(() => setUsageRows(null));
   }, []);
 
   const completed = jobs.filter((j) => isJobSuccess(j.status));
@@ -149,6 +153,13 @@ export function DashboardPage({
               icon: "clock",
               tone: "muted",
               title: "Most recent transfer job",
+            },
+            {
+              label: "Usage (30d)",
+              value: usageRows != null ? usageRows.toLocaleString() : "—",
+              icon: "trend",
+              tone: usageRows && usageRows > 0 ? "ok" : "muted",
+              title: "Metered rows written in the last 30 days",
             },
           ]}
           actions={

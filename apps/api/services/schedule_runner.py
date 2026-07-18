@@ -161,6 +161,8 @@ def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     mode = (sync_mode or "full_refresh_overwrite").lower()
     if mode == "incremental":
         return "incremental_deduped" if primary_key else "incremental_append"
+    if mode in ("scd2", "mirror"):
+        return mode
     return mode
 
 

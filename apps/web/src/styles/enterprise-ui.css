@@ -6433,3 +6433,118 @@
   .df2-sched-toggle { margin-left: 0; }
   .df2-sched-panel-head { flex-wrap: wrap; }
 }
+
+/* ── Contracts ───────────────────────────────────────────────────── */
+
+.df2-contracts-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+.df2-contract-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.df2-contract-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--df2-border, #e2e8f0);
+  border-radius: 12px;
+  background: var(--df2-surface, #fff);
+}
+
+.df2-contract-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.df2-contract-name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.df2-contract-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--df2-muted, #64748b);
+}
+
+.df2-contract-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-jobs-v3-live {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+
+.df2-jobs-v3-live-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.df2-quarantine-replay-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #065f46;
+  font-size: 13px;
+}
+
+.df2-quarantine-edit-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.45);
+  padding: 24px;
+}
+
+.df2-quarantine-edit-dialog {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.2);
+}
+
+.df2-quarantine-edit-dialog h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.df2-quarantine-edit-dialog p {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.df2-quarantine-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}

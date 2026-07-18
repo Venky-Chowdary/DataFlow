@@ -876,6 +876,17 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
+                    # Surface CDC lag SLO fields on the job document for status JSON.
+                    if "cdc_lag_seconds" in checkpoint:
+                        update["cdc_lag_seconds"] = checkpoint.get("cdc_lag_seconds")
+                    if "cdc_last_ddl_at" in checkpoint:
+                        update["cdc_last_ddl_at"] = checkpoint.get("cdc_last_ddl_at")
+                    cdc_meta = checkpoint.get("cdc") or {}
+                    if isinstance(cdc_meta, dict):
+                        if "cdc_lag_seconds" in cdc_meta and "cdc_lag_seconds" not in update:
+                            update["cdc_lag_seconds"] = cdc_meta.get("cdc_lag_seconds")
+                        if "cdc_last_ddl_at" in cdc_meta and "cdc_last_ddl_at" not in update:
+                            update["cdc_last_ddl_at"] = cdc_meta.get("cdc_last_ddl_at")
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1333,6 +1344,17 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
+                    # Surface CDC lag SLO fields on the job document for status JSON.
+                    if "cdc_lag_seconds" in checkpoint:
+                        update["cdc_lag_seconds"] = checkpoint.get("cdc_lag_seconds")
+                    if "cdc_last_ddl_at" in checkpoint:
+                        update["cdc_last_ddl_at"] = checkpoint.get("cdc_last_ddl_at")
+                    cdc_meta = checkpoint.get("cdc") or {}
+                    if isinstance(cdc_meta, dict):
+                        if "cdc_lag_seconds" in cdc_meta and "cdc_lag_seconds" not in update:
+                            update["cdc_lag_seconds"] = cdc_meta.get("cdc_lag_seconds")
+                        if "cdc_last_ddl_at" in cdc_meta and "cdc_last_ddl_at" not in update:
+                            update["cdc_last_ddl_at"] = cdc_meta.get("cdc_last_ddl_at")
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1713,6 +1735,17 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
+                    # Surface CDC lag SLO fields on the job document for status JSON.
+                    if "cdc_lag_seconds" in checkpoint:
+                        update["cdc_lag_seconds"] = checkpoint.get("cdc_lag_seconds")
+                    if "cdc_last_ddl_at" in checkpoint:
+                        update["cdc_last_ddl_at"] = checkpoint.get("cdc_last_ddl_at")
+                    cdc_meta = checkpoint.get("cdc") or {}
+                    if isinstance(cdc_meta, dict):
+                        if "cdc_lag_seconds" in cdc_meta and "cdc_lag_seconds" not in update:
+                            update["cdc_lag_seconds"] = cdc_meta.get("cdc_lag_seconds")
+                        if "cdc_last_ddl_at" in cdc_meta and "cdc_last_ddl_at" not in update:
+                            update["cdc_last_ddl_at"] = cdc_meta.get("cdc_last_ddl_at")
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)

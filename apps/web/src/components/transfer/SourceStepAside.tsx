@@ -28,6 +28,7 @@ interface SourceStepAsideProps {
   sourceManualType?: string;
   sourceIntrospecting?: boolean;
   sourceIntrospectError?: string | null;
+  onRetrySourceIntrospect?: () => void;
   sourceObjectLabel?: string;
 }
 
@@ -135,7 +136,7 @@ function SchemaAnalyzingPanel({ target }: { target?: string }) {
   );
 }
 
-function SchemaErrorPanel({ message }: { message: string }) {
+function SchemaErrorPanel({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div className="df2-source-aside df2-source-aside-error">
       <div className="df2-source-aside-head">
@@ -147,7 +148,12 @@ function SchemaErrorPanel({ message }: { message: string }) {
       </div>
       <div className="df2-source-aside-empty">
         <DtIcon name="alert" size={22} />
-        <p>Verify the table or collection name, credentials, and network access, then adjust the selection to retry.</p>
+        <p>Verify the table or collection name, credentials, and network access.</p>
+        {onRetry && (
+          <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" onClick={onRetry}>
+            Retry schema read
+          </button>
+        )}
       </div>
     </div>
   );
@@ -212,6 +218,7 @@ export function SourceStepAside({
   sourceManualType,
   sourceIntrospecting,
   sourceIntrospectError,
+  onRetrySourceIntrospect,
   sourceObjectLabel,
 }: SourceStepAsideProps) {
   if (sourceKind === "file" && parsed) {
@@ -259,7 +266,7 @@ export function SourceStepAside({
   }
 
   if (sourceIntrospectError) {
-    return <SchemaErrorPanel message={sourceIntrospectError} />;
+    return <SchemaErrorPanel message={sourceIntrospectError} onRetry={onRetrySourceIntrospect} />;
   }
 
   if (sourceKind === "database") {

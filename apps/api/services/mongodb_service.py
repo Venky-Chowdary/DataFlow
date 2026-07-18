@@ -368,11 +368,15 @@ class MongoDBService:
             return None
         collection = db["transfer_jobs"]
 
+        result = None
         oid = _as_object_id(job_id)
-        if not oid:
-            return None
-
-        result = collection.find_one({"_id": oid})
+        if oid is not None:
+            result = collection.find_one({"_id": oid})
+        # Fallback: some stores persist string ids / job_id field (memory→mongo, retries).
+        if result is None and job_id:
+            result = collection.find_one({"_id": job_id})
+        if result is None and job_id:
+            result = collection.find_one({"job_id": job_id})
         if result:
             result["_id"] = str(result["_id"])
         return result

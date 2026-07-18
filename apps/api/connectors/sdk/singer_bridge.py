@@ -1,7 +1,5 @@
-"""Singer tap/target bridge entrypoints for the Connector SDK."""
+"""Re-export Singer tap bridge for ``from connectors.sdk.singer_bridge import …``."""
 
-from __future__ import annotations
+from connectors.sdk import SingerTapBridge, test_singer_tap
 
-from connectors.sdk import SingerTapBridge, register_connector, test_singer_tap
-
-__all__ = ["SingerTapBridge", "register_connector", "test_singer_tap"]
+__all__ = ["SingerTapBridge", "test_singer_tap"]

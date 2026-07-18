@@ -22,6 +22,10 @@ class ContractStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_contracts(self, limit: int = 200) -> list[DataContract]:
+        raise NotImplementedError
+
+    @abstractmethod
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         raise NotImplementedError
 
@@ -43,6 +47,14 @@ class InMemoryContractStore(ContractStore):
 
     def get_contract(self, contract_id: str) -> DataContract | None:
         return self._contracts.get(contract_id)
+
+    def list_contracts(self, limit: int = 200) -> list[DataContract]:
+        items = sorted(
+            self._contracts.values(),
+            key=lambda c: c.updated_at or c.created_at or "",
+            reverse=True,
+        )
+        return items[:limit]
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         self._breakers[breaker.contract_id] = breaker
@@ -94,6 +106,17 @@ class MongoContractStore(ContractStore):
             return None
         doc.pop("_id", None)
         return DataContract.from_dict(doc)
+
+    def list_contracts(self, limit: int = 200) -> list[DataContract]:
+        db = self._get_db()
+        if db is None:
+            return self._fallback.list_contracts(limit=limit)
+        docs = list(db["contracts"].find().sort("updated_at", -1).limit(limit))
+        contracts: list[DataContract] = []
+        for doc in docs:
+            doc.pop("_id", None)
+            contracts.append(DataContract.from_dict(doc))
+        return contracts
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         db = self._get_db()

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
-import { exportJobQuarantine, fetchJobQuarantine } from "../../lib/api";
+import { exportJobQuarantine, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
 
 export interface QuarantinePanelProps {
   jobId: string;
@@ -18,6 +18,7 @@ type QuarantineRow = {
   value?: string;
   reason?: string;
   policy?: string;
+  values?: Record<string, string>;
 };
 
 function summarizeReasons(rows: QuarantineRow[]) {
@@ -33,7 +34,15 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen);
   const [loading, setLoading] = useState(false);
+  const [replaying, setReplaying] = useState(false);
   const [rows, setRows] = useState<QuarantineRow[]>([]);
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [replayResult, setReplayResult] = useState<{
+    job_id: string;
+    rows_written: number;
+    rejected: number;
+  } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -61,6 +70,47 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
       }
     } catch (e) {
       toast({ title: "Could not export quarantine", message: (e as Error).message, tone: "error" });
+    }
+  };
+
+  const openEdit = (index: number) => {
+    setEditIndex(index);
+    setEditValue(String(rows[index]?.value ?? ""));
+  };
+
+  const saveEdit = () => {
+    if (editIndex == null) return;
+    setRows((prev) =>
+      prev.map((r, i) => {
+        if (i !== editIndex) return r;
+        const col = r.column || "";
+        const values = { ...(r.values || {}) };
+        if (col) values[col] = editValue;
+        return { ...r, value: editValue, values };
+      }),
+    );
+    setEditIndex(null);
+  };
+
+  const replay = async () => {
+    setReplaying(true);
+    setReplayResult(null);
+    try {
+      const result = await replayJobQuarantine(jobId, { rows });
+      setReplayResult({
+        job_id: result.job_id,
+        rows_written: result.rows_written,
+        rejected: result.rejected,
+      });
+      toast({
+        title: "Quarantine replay finished",
+        message: `Wrote ${result.rows_written.toLocaleString()} row(s)${result.rejected ? `, ${result.rejected} still rejected` : ""}.`,
+        tone: result.rejected ? "warning" : "success",
+      });
+    } catch (e) {
+      toast({ title: "Replay failed", message: (e as Error).message, tone: "error" });
+    } finally {
+      setReplaying(false);
     }
   };
 
@@ -107,6 +157,14 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
               <span className="df2-job-log-count">{rows.length} rows</span>
             </div>
             <div className="df2-job-log-actions">
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm df2-btn-primary"
+                onClick={() => void replay()}
+                disabled={replaying || rows.length === 0}
+              >
+                <DtIcon name="transfer" size={14} /> {replaying ? "Replaying…" : "Replay"}
+              </button>
               <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void download()}>
                 <DtIcon name="download" size={14} /> Export CSV
               </button>
@@ -124,6 +182,17 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
             </div>
           )}
 
+          {replayResult && (
+            <div className="df2-quarantine-replay-result" role="status">
+              <DtIcon name="check" size={14} />
+              <span>
+                Replay job <code>{replayResult.job_id.slice(0, 8)}</code> wrote{" "}
+                {replayResult.rows_written.toLocaleString()} row(s)
+                {replayResult.rejected > 0 ? `, ${replayResult.rejected.toLocaleString()} still rejected` : ""}.
+              </span>
+            </div>
+          )}
+
           <div className="df2-job-log-panel-body" role="log">
             {rows.length === 0 ? (
               <div className="df2-job-log-empty">No quarantined rows recorded for this job.</div>
@@ -137,6 +206,7 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
                     <th>Value</th>
                     <th>Reason</th>
                     <th>Policy</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -148,6 +218,11 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
                       <td className="df2-quarantine-value" title={String(r.value ?? "")}>{String(r.value ?? "")}</td>
                       <td>{r.reason || "—"}</td>
                       <td>{r.policy || "—"}</td>
+                      <td>
+                        <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => openEdit(i)}>
+                          Edit
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -155,6 +230,37 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
             )}
           </div>
         </section>
+      )}
+
+      {editIndex != null && (
+        <div className="df2-quarantine-edit-backdrop" role="presentation" onClick={() => setEditIndex(null)}>
+          <div
+            className="df2-quarantine-edit-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="df2-quarantine-edit-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="df2-quarantine-edit-title">Edit quarantined value</h3>
+            <p>
+              Fix the value for{" "}
+              <strong>{rows[editIndex]?.column || "column"}</strong>
+              {rows[editIndex]?.row != null ? ` (source row ${rows[editIndex].row})` : ""} before replaying.
+            </p>
+            <label className="df2-label" htmlFor="df2-quarantine-edit-input">Value</label>
+            <input
+              id="df2-quarantine-edit-input"
+              className="df2-input"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              autoFocus
+            />
+            <div className="df2-quarantine-edit-actions">
+              <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setEditIndex(null)}>Cancel</button>
+              <button type="button" className="df2-btn df2-btn-primary" onClick={saveEdit}>Save</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

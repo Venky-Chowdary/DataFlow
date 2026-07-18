@@ -2,19 +2,30 @@
 
 Default output plugin is ``test_decoding`` (text parse path). ``pgoutput`` can be
 selected via ``logical_decoding_plugin`` once a binary decoder is available.
-Replication lag is exposed via ``replication_lag_bytes()``.
+Replication lag is exposed via ``replication_lag_bytes()`` and
+``replication_lag_seconds()``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
 from connectors.postgresql_reader import read_table_batch
 from services.cdc_engine import ChangeBatch
+from services.cdc_schema_history import (
+    connection_fingerprint,
+    last_ddl_at,
+    rebuild_schema,
+    record_ddl,
+)
+
+_logger = logging.getLogger(__name__)
 
 # test_decoding value rendering uses type suffixes like [text]:'value' or [int4]:1.
 # The first colon separates column info from value; the value may itself contain colons.
@@ -136,6 +147,15 @@ class PostgreSqlChangeStreamCdc:
         self.database = cfg.get("database") or "postgres"
         self.slot_name = resume_token or _slot_name(self.database, table, cursor_key)
         self.output_plugin = output_plugin or self._select_plugin()
+        self.source_key = connection_fingerprint(
+            {**cfg, "type": "postgresql"},
+            connector_id=str(cfg.get("connector_id") or ""),
+        )
+        self.decode_schema: dict[str, Any] = {}
+        self.last_ddl_at: str | None = None
+        self._last_event_at: datetime | None = None
+        self._last_heartbeat_at: datetime | None = None
+        self._schema_ready = False
 
     def _select_plugin(self) -> str:
         """Select logical decoding plugin.
@@ -226,9 +246,116 @@ class PostgreSqlChangeStreamCdc:
             return None
         return None
 
+    def replication_lag_seconds(self) -> float | None:
+        """Seconds since the last decoded event / heartbeat, when known."""
+        anchor = self._last_event_at or self._last_heartbeat_at
+        if anchor is None:
+            return None
+        return max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
+
+    def heartbeat(self) -> None:
+        """Record a poll heartbeat for lag SLO measurement."""
+        self._last_heartbeat_at = datetime.now(timezone.utc)
+
+    def _qualified_table(self) -> str:
+        return f"{self.schema}.{self.table}"
+
+    def _fetch_live_schema(self) -> dict[str, Any]:
+        """Load column types / nullability / PK from information_schema."""
+        columns: dict[str, str] = {}
+        nullable: dict[str, bool] = {}
+        primary_key: list[str] = []
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT column_name, data_type, is_nullable
+                        FROM information_schema.columns
+                        WHERE table_schema = %s AND table_name = %s
+                        ORDER BY ordinal_position
+                        """,
+                        (self.schema, self.table),
+                    )
+                    for name, data_type, is_nullable in cur.fetchall():
+                        columns[str(name)] = str(data_type or "text")
+                        nullable[str(name)] = str(is_nullable or "").upper() == "YES"
+                    cur.execute(
+                        """
+                        SELECT kcu.column_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.table_schema = kcu.table_schema
+                        WHERE tc.constraint_type = 'PRIMARY KEY'
+                          AND tc.table_schema = %s AND tc.table_name = %s
+                        ORDER BY kcu.ordinal_position
+                        """,
+                        (self.schema, self.table),
+                    )
+                    primary_key = [str(r[0]) for r in cur.fetchall()]
+        except Exception:
+            _logger.debug("PostgreSQL live schema fetch failed", exc_info=True)
+        return {"columns": columns, "nullable": nullable, "primary_key": primary_key}
+
+    def _schema_fingerprint(self, snapshot: dict[str, Any]) -> str:
+        cols = snapshot.get("columns") or {}
+        nulls = snapshot.get("nullable") or {}
+        pk = snapshot.get("primary_key") or []
+        parts = [f"{k}:{cols[k]}:{int(bool(nulls.get(k, True)))}" for k in sorted(cols)]
+        parts.append("pk=" + ",".join(pk))
+        return "|".join(parts)
+
+    def _ensure_decode_schema(self, *, resume_offset: Any = None) -> dict[str, Any]:
+        """Rebuild decode schema from history (or seed from live catalog)."""
+        if self._schema_ready and self.decode_schema:
+            return self.decode_schema
+
+        rebuilt = rebuild_schema(self.source_key, self._qualified_table(), resume_offset)
+        if rebuilt:
+            self.decode_schema = rebuilt
+        else:
+            live = self._fetch_live_schema()
+            if live.get("columns"):
+                record_ddl(
+                    self.source_key,
+                    self._qualified_table(),
+                    ddl="SNAPSHOT",
+                    offset=resume_offset or self.slot_name,
+                    schema_snapshot=live,
+                )
+                self.decode_schema = live
+        self.last_ddl_at = last_ddl_at(self.source_key, self._qualified_table())
+        self._schema_ready = True
+        return self.decode_schema
+
+    def _maybe_record_schema_change(self, *, offset: Any = None) -> None:
+        """Compare live catalog to decode schema; persist DDL history on drift."""
+        live = self._fetch_live_schema()
+        if not live.get("columns"):
+            return
+        if self._schema_fingerprint(live) == self._schema_fingerprint(self.decode_schema):
+            return
+        entry = record_ddl(
+            self.source_key,
+            self._qualified_table(),
+            ddl="ALTER TABLE (detected)",
+            offset=offset or self.slot_name,
+            schema_snapshot=live,
+        )
+        self.decode_schema = live
+        self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
+        _logger.info(
+            "Recorded PostgreSQL CDC schema change for %s v%s",
+            self._qualified_table(),
+            entry.get("version"),
+        )
+
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Yield the full table as INSERT batches and create the logical slot."""
         self._ensure_slot()
+        self._ensure_decode_schema(resume_offset=self.slot_name)
+        self.heartbeat()
         offset = 0
         while True:
             batch = read_table_batch(
@@ -260,6 +387,9 @@ class PostgreSqlChangeStreamCdc:
     def poll(self) -> Iterator[ChangeBatch]:
         """Consume a batch of changes from the logical slot (test_decoding text)."""
         self._ensure_slot()
+        self._ensure_decode_schema(resume_offset=self.slot_name)
+        self._maybe_record_schema_change(offset=self.slot_name)
+        self.heartbeat()
         if self.output_plugin == "pgoutput":
             # Binary pgoutput decoder not yet shipped — do not consume opaque WAL.
             return
@@ -282,10 +412,16 @@ class PostgreSqlChangeStreamCdc:
             text = line or ""
             if text in ("BEGIN", "COMMIT"):
                 continue
+            # test_decoding may surface DDL-ish lines; treat as schema refresh signal.
+            upper = text.upper()
+            if "ALTER TABLE" in upper or ": DDL:" in upper:
+                self._maybe_record_schema_change(offset=self.slot_name)
+                continue
             parsed = _parse_change_line(text, self.schema, self.table)
             if parsed is None:
                 continue
             op, old_key, new_tuple = parsed
+            self._last_event_at = datetime.now(timezone.utc)
             if op == "insert" and new_tuple:
                 inserts.append(new_tuple)
             elif op == "update" and new_tuple:

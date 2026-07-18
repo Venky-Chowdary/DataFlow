@@ -57,6 +57,7 @@ def _enriched_connectors() -> list[dict]:
             row["transfer_ready"] = False
             row["connect_only"] = False
             row["capability_label"] = "Roadmap"
+            row["certification_tier"] = "planned"
         enriched.append(row)
     return enriched
 
@@ -103,9 +104,16 @@ def search_catalog(
 
     if status:
         if status == "live":
-            connectors = [c for c in connectors if c.get("effective_status") == "live"]
+            # "Transfer ready" filter: certified full R/W only — not source-only REST.
+            connectors = [c for c in connectors if c.get("transfer_ready")]
+        elif status == "source_only":
+            connectors = [c for c in connectors if c.get("certification_tier") == "source_only"]
         elif status == "connect_only":
-            connectors = [c for c in connectors if c.get("effective_status") == "connect_only"]
+            connectors = [
+                c for c in connectors
+                if c.get("effective_status") == "connect_only"
+                or c.get("certification_tier") == "connect_only"
+            ]
         elif status == "beta":
             connectors = [c for c in connectors if c.get("status") == "beta" or c.get("effective_status") == "connect_only"]
         else:
@@ -124,6 +132,9 @@ def search_catalog(
 
     categories = sorted({c.get("category", "other") for c in data.get("connectors", [])})
     enriched_all = _enriched_connectors()
+    certified = sum(1 for c in enriched_all if c.get("certification_tier") == "certified" or c.get("transfer_ready"))
+    source_only = sum(1 for c in enriched_all if c.get("certification_tier") == "source_only")
+    planned = sum(1 for c in enriched_all if c.get("certification_tier") == "planned" or c.get("effective_status") == "planned")
 
     return {
         "total": total,
@@ -134,6 +145,9 @@ def search_catalog(
         "transfer_live": sum(1 for c in enriched_all if c.get("transfer_ready")),
         "connect_only": sum(1 for c in enriched_all if c.get("connect_only")),
         "roadmap": sum(1 for c in enriched_all if c.get("effective_status") == "planned"),
+        "certified": certified,
+        "source_only": source_only,
+        "planned_count": planned,
     }
 
 
@@ -147,6 +161,9 @@ def catalog_summary() -> dict:
 
     transfer_live = sum(1 for c in enriched if c.get("transfer_ready"))
     connect_only = sum(1 for c in enriched if c.get("connect_only"))
+    certified = sum(1 for c in enriched if c.get("certification_tier") == "certified" or c.get("transfer_ready"))
+    source_only = sum(1 for c in enriched if c.get("certification_tier") == "source_only")
+    planned_tier = sum(1 for c in enriched if c.get("certification_tier") == "planned")
 
     return {
         "total": data.get("total", len(data.get("connectors", []))),
@@ -157,6 +174,9 @@ def catalog_summary() -> dict:
         "transfer_live": transfer_live,
         "connect_only": connect_only,
         "roadmap": len(enriched) - transfer_live - connect_only,
+        "certified": certified,
+        "source_only": source_only,
+        "planned_count": planned_tier,
     }
 
 

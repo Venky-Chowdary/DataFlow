@@ -3,7 +3,32 @@ export const API_BASE =
   import.meta.env.VITE_API_BASE ||
   "/api/v1";
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs" | "benchmarks";
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
+
+export interface DataContract {
+  id: string;
+  name: string;
+  version: number;
+  status: "draft" | "signed" | "broken" | "deprecated" | string;
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+  columns: {
+    source_name: string;
+    target_name: string;
+    source_type: string;
+    target_type: string;
+    transform?: string | null;
+    nullable?: boolean;
+    primary_key?: boolean;
+  }[];
+  mappings: Record<string, unknown>[];
+  quality_rules: { name: string; expectation: string; threshold?: number | null; severity?: string }[];
+  preflight_gates?: Record<string, unknown>[];
+  strict: boolean;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
 
 export interface Connector {
   id: string;
@@ -366,7 +391,13 @@ export interface TransferPlan {
 }
 
 export type ScheduleInterval = "hourly" | "daily" | "weekly";
-export type ScheduleSyncMode = "full_refresh_overwrite" | "full_refresh_append" | "incremental" | "cdc";
+export type ScheduleSyncMode =
+  | "full_refresh_overwrite"
+  | "full_refresh_append"
+  | "incremental"
+  | "cdc"
+  | "scd2"
+  | "mirror";
 
 /** Editable config shared by create (POST) and partial update (PATCH). */
 export interface ScheduleInput {

@@ -8,7 +8,7 @@ if str(_API_ROOT) in sys.path:
     sys.path.remove(str(_API_ROOT))
 sys.path.insert(0, str(_API_ROOT))
 
-from services.schema_drift import detect_schema_drift
+from services.schema_drift import classify_schema_change, detect_schema_drift
 from services.schema_fingerprint import fingerprint_schema
 
 
@@ -102,3 +102,97 @@ def test_mongo_aliases_treated_as_schemaless_in_drift_engine():
     )
     assert report["type_mismatches"] == []
     assert report["severity"] == "none"
+
+
+def test_classify_no_change():
+    schema = {
+        "columns": {"id": "INTEGER", "name": "VARCHAR"},
+        "nullable": {"id": False, "name": True},
+        "primary_key": ["id"],
+    }
+    report = classify_schema_change(schema, schema)
+    assert report["severity"] == "none"
+    assert report["additive"] == []
+    assert report["breaking"] == []
+
+
+def test_classify_additive_nullable_column_and_widen():
+    old = {
+        "columns": {"id": "INTEGER", "amount": "INTEGER"},
+        "nullable": {"id": False, "amount": True},
+        "primary_key": ["id"],
+    }
+    new = {
+        "columns": {"id": "INTEGER", "amount": "DECIMAL", "note": "VARCHAR"},
+        "nullable": {"id": False, "amount": True, "note": True},
+        "primary_key": ["id"],
+    }
+    report = classify_schema_change(old, new)
+    assert report["severity"] == "additive"
+    kinds = {c["kind"] for c in report["additive"]}
+    assert "add_column" in kinds
+    assert "widen_type" in kinds
+    assert report["breaking"] == []
+
+
+def test_classify_breaking_drop_and_narrow():
+    old = {
+        "columns": {"id": "INTEGER", "amount": "DECIMAL", "legacy": "VARCHAR"},
+        "nullable": {"id": False, "amount": True, "legacy": True},
+        "primary_key": ["id"],
+    }
+    new = {
+        "columns": {"id": "INTEGER", "amount": "INTEGER"},
+        "nullable": {"id": False, "amount": True},
+        "primary_key": ["id"],
+    }
+    report = classify_schema_change(old, new)
+    assert report["severity"] == "breaking"
+    kinds = {c["kind"] for c in report["breaking"]}
+    assert "drop" in kinds
+    assert "narrow_type" in kinds
+
+
+def test_classify_breaking_pk_change():
+    old = {
+        "columns": {"id": "INTEGER", "sku": "VARCHAR"},
+        "nullable": {"id": False, "sku": False},
+        "primary_key": ["id"],
+    }
+    new = {
+        "columns": {"id": "INTEGER", "sku": "VARCHAR"},
+        "nullable": {"id": False, "sku": False},
+        "primary_key": ["sku"],
+    }
+    report = classify_schema_change(old, new)
+    assert report["severity"] == "breaking"
+    assert any(c["kind"] == "primary_key_change" for c in report["breaking"])
+
+
+def test_classify_rename_as_breaking():
+    old = {"columns": {"full_name": "VARCHAR"}, "nullable": {"full_name": True}, "primary_key": []}
+    new = {"columns": {"name": "VARCHAR"}, "nullable": {"name": True}, "primary_key": []}
+    report = classify_schema_change(old, new)
+    assert report["severity"] == "breaking"
+    assert any(c["kind"] == "rename" for c in report["breaking"])
+
+
+def test_classify_add_not_null_is_breaking():
+    old = {"columns": {"id": "INTEGER"}, "nullable": {"id": False}, "primary_key": ["id"]}
+    new = {
+        "columns": {"id": "INTEGER", "code": "VARCHAR"},
+        "nullable": {"id": False, "code": False},
+        "primary_key": ["id"],
+    }
+    report = classify_schema_change(old, new)
+    assert report["severity"] == "breaking"
+    assert any(c["kind"] == "add_not_null" for c in report["breaking"])
+
+
+def test_classify_flat_schema_dicts():
+    report = classify_schema_change(
+        {"id": "INT", "name": "VARCHAR(50)"},
+        {"id": "INT", "name": "VARCHAR(200)"},
+    )
+    assert report["severity"] == "additive"
+    assert any(c["kind"] == "widen_type" for c in report["additive"])

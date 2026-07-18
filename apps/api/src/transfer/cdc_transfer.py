@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from bson import json_util
@@ -49,6 +50,34 @@ except ImportError:  # pragma: no cover - tests with api root on PYTHONPATH
 
 
 CHUNK_SIZE = 1000
+
+
+def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
+    """Collect lag / heartbeat / last-DDL fields from a CDC reader."""
+    lag_bytes = None
+    lag_seconds = None
+    last_ddl = None
+    heartbeat_at = None
+    if hasattr(cdc, "replication_lag_bytes"):
+        try:
+            lag_bytes = cdc.replication_lag_bytes()
+        except Exception:
+            lag_bytes = None
+    if hasattr(cdc, "replication_lag_seconds"):
+        try:
+            lag_seconds = cdc.replication_lag_seconds()
+        except Exception:
+            lag_seconds = None
+    last_ddl = getattr(cdc, "last_ddl_at", None)
+    hb = getattr(cdc, "_last_heartbeat_at", None) or getattr(cdc, "_last_event_at", None)
+    if isinstance(hb, datetime):
+        heartbeat_at = hb.astimezone(timezone.utc).isoformat()
+    return {
+        "replication_lag_bytes": lag_bytes,
+        "cdc_lag_seconds": lag_seconds,
+        "cdc_last_ddl_at": last_ddl,
+        "cdc_heartbeat_at": heartbeat_at,
+    }
 
 
 @dataclass
@@ -508,11 +537,17 @@ def run_cdc_database_transfer(
 
         chunk_idx += 1
         total_chunks = max(total_chunks, chunk_idx)
+        lag_fields = _cdc_lag_fields(cdc)
         if state.running_cursor:
             set_watermark(
                 cursor_key,
                 state.running_cursor,
-                metadata={"job_id": job_id, "sync_mode": sync_mode, "chunk": chunk_idx},
+                metadata={
+                    "job_id": job_id,
+                    "sync_mode": sync_mode,
+                    "chunk": chunk_idx,
+                    **lag_fields,
+                },
             )
         if on_checkpoint:
             on_checkpoint(
@@ -523,24 +558,25 @@ def run_cdc_database_transfer(
                     "chunk_index": chunk_idx,
                     "watermark": state.running_cursor,
                     "rows_written": state.rows_written,
+                    "cdc_lag_seconds": lag_fields.get("cdc_lag_seconds"),
+                    "cdc_last_ddl_at": lag_fields.get("cdc_last_ddl_at"),
                     "cdc": {
                         "inserts": state.inserts,
                         "updates": state.updates,
                         "deletes": state.deletes,
+                        **lag_fields,
                     },
                 },
             )
 
     final_watermark = state.running_cursor or watermark
+    lag_fields = _cdc_lag_fields(cdc)
     if final_watermark:
-        set_watermark(cursor_key, final_watermark, metadata={"job_id": job_id, "sync_mode": sync_mode})
-
-    lag = None
-    if hasattr(cdc, "replication_lag_bytes"):
-        try:
-            lag = cdc.replication_lag_bytes()
-        except Exception:
-            lag = None
+        set_watermark(
+            cursor_key,
+            final_watermark,
+            metadata={"job_id": job_id, "sync_mode": sync_mode, **lag_fields},
+        )
 
     summary = state.last_dest_summary or {}
     summary["cdc"] = {
@@ -548,7 +584,9 @@ def run_cdc_database_transfer(
         "updates": state.updates,
         "deletes": state.deletes,
         "watermark": final_watermark,
-        "replication_lag_bytes": lag,
+        **lag_fields,
     }
+    summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
+    summary["cdc_last_ddl_at"] = lag_fields.get("cdc_last_ddl_at")
     summary["checksum"] = state.last_checksum
     return state.rows_written, ddl_log, summary, headers

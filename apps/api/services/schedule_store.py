@@ -25,7 +25,7 @@ except ImportError:
 STORE_PATH = data_dir() / "schedules.json"
 
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
-SYNC_MODES = {"full_refresh_overwrite", "full_refresh_append", "incremental", "cdc"}
+SYNC_MODES = {"full_refresh_overwrite", "full_refresh_append", "incremental", "cdc", "scd2", "mirror"}
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
 

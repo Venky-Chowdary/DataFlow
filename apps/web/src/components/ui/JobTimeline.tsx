@@ -97,18 +97,26 @@ export function buildJobTimeline(opts: {
     });
   }
 
-  if (opts.status === "completed" || opts.status === "completed_with_quarantine" || opts.status === "failed") {
+  if (
+    opts.status === "completed"
+    || opts.status === "completed_with_quarantine"
+    || opts.status === "failed"
+    || opts.status === "cancelled"
+  ) {
     const isFailed = opts.status === "failed";
+    const isCancelled = opts.status === "cancelled";
     const isQuarantine = opts.status === "completed_with_quarantine";
     entries.push({
       key: "terminal",
-      title: isFailed
-        ? "Transfer failed"
-        : isQuarantine
-          ? "Completed with quarantine"
-          : "Transfer completed",
+      title: isCancelled
+        ? "Transfer cancelled"
+        : isFailed
+          ? "Transfer failed"
+          : isQuarantine
+            ? "Completed with quarantine"
+            : "Transfer completed",
       timestamp: opts.completedAt,
-      status: isFailed ? "failed" : isQuarantine ? "warning" : "done",
+      status: isFailed || isCancelled ? "failed" : isQuarantine ? "warning" : "done",
     });
   } else if (opts.status === "running" || opts.status === "pending") {
     entries.push({ key: "terminal", title: "In progress…", status: "active" });

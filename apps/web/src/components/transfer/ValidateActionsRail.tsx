@@ -9,11 +9,13 @@ interface ValidateActionsRailProps {
   mappingReviewCount: number;
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
+  savingContract?: boolean;
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
   onExecute: () => void;
   onOpenJobTheater: () => void;
+  onSaveAsContract?: () => void;
 }
 
 export function ValidateActionsRail({
@@ -23,11 +25,13 @@ export function ValidateActionsRail({
   mappingReviewCount,
   rowCount,
   transferLaunch,
+  savingContract,
   onBack,
   onRunPreflight,
   onApproveMappings,
   onExecute,
   onOpenJobTheater,
+  onSaveAsContract,
 }: ValidateActionsRailProps) {
   const passed = preflight?.passed;
   const blocked = preflight && !preflight.passed && !preflighting;
@@ -182,6 +186,18 @@ export function ValidateActionsRail({
             {passed
               ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
               : "Execute (blocked)"}
+          </Button>
+        )}
+
+        {preflight && onSaveAsContract && (
+          <Button
+            onClick={onSaveAsContract}
+            loading={savingContract}
+            loadingLabel="Saving…"
+            disabled={savingContract || preflighting}
+            leadingIcon={<DtIcon name="shield" size={16} />}
+          >
+            Save as contract
           </Button>
         )}
 

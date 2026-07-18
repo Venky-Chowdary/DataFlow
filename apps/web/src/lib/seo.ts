@@ -109,6 +109,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
       "DataFlow benchmark, ETL throughput, data transfer performance, Fivetran vs Airbyte, rows per second",
     robots: "noindex",
   },
+  contracts: {
+    title: "Data contracts",
+    description:
+      "Signed schema agreements that gate transfers, enforce quality rules, and detect breaking drift before cutover.",
+    keywords: "DataFlow data contracts, schema agreement, schema drift, preflight gates",
+    robots: "noindex",
+  },
 };
 
 export function resolveSiteUrl(): string {
