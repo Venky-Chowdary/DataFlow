@@ -30,6 +30,8 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+from services.value_serializer import sanitize_json_value
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -432,7 +434,7 @@ def main(rows: int = 1000) -> None:
         "failed": len(failed),
         "results": [asdict(r) for r in report.results],
     }
-    print(json.dumps(summary, indent=2, default=str))
+    print(json.dumps(summary, indent=2, default=sanitize_json_value))
     if failed:
         raise SystemExit(1)
 

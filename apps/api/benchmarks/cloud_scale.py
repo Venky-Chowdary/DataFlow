@@ -16,10 +16,18 @@ from __future__ import annotations
 import csv
 import io
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+from services.value_serializer import sanitize_json_value
 
 
 def _new_job_id() -> str:
@@ -260,7 +268,7 @@ if __name__ == "__main__":
 
     rows = int(os.environ.get("DATAFLOW_BENCHMARK_ROWS", "1000000"))
     results = run_all(rows)
-    print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
+    print(json.dumps([r.__dict__ for r in results], indent=2, default=sanitize_json_value))
     any_ran = any(r.error != "No credentials" for r in results)
     if not any_ran:
         print("No cloud credentials configured; benchmarks skipped.")
