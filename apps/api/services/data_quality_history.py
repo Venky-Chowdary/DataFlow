@@ -18,6 +18,7 @@ from typing import Any
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
+from services.value_serializer import cell_to_string
 
 
 @dataclass
@@ -55,7 +56,7 @@ def _to_sortable(value: Any) -> Any:
         return float(value)
     if isinstance(value, (int, float)):
         return value
-    return str(value)
+    return cell_to_string(value)
 
 
 def _coerce_number(value: Any) -> float | None:
@@ -70,17 +71,24 @@ def _coerce_number(value: Any) -> float | None:
 def _coerce_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
     text = str(value).strip()
+    # Normalize ISO 8601 variants and PostgreSQL-style timestamps to a parseable form.
+    text = text.replace("Z", "+0000")
+    if text.endswith(("+00:00", "+0000")):
+        text = text[:-6].replace("T", " ")
     for fmt in (
-        "%Y-%m-%dT%H:%M:%S.%fZ",
         "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%SZ",
         "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
     ):
         try:
-            return datetime.strptime(text.replace("Z", "+0000"), fmt)
+            return datetime.strptime(text, fmt)
         except ValueError:
             continue
     return None
@@ -89,10 +97,10 @@ def _coerce_datetime(value: Any) -> datetime | None:
 def profile_column(values: list[Any], column: str, dtype: str = "string") -> ColumnProfile:
     """Compute a descriptive statistical profile for a single column."""
     profile = ColumnProfile(column=column, dtype=dtype, count=len(values))
-    non_null = [v for v in values if v is not None and str(v).strip() not in {"", "null", "none"}]
+    non_null = [v for v in values if v is not None and cell_to_string(v).strip().lower() not in {"", "null", "none"}]
     profile.null_count = profile.count - len(non_null)
 
-    as_text = [str(v) for v in non_null]
+    as_text = [cell_to_string(v) for v in non_null]
     lengths = [len(t) for t in as_text]
     if lengths:
         profile.min_length = min(lengths)

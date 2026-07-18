@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime
+from services.value_serializer import cell_to_string
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
@@ -43,10 +44,7 @@ def _iqr_outliers(values: list[float]) -> tuple[float, float, int]:
 def _column_values(rows: list[dict[str, Any]], column: str) -> list[str]:
     values: list[str] = []
     for row in rows:
-        raw = row.get(column, "")
-        if raw is None:
-            raw = ""
-        values.append(str(raw).strip())
+        values.append(cell_to_string(row.get(column, "")))
     return values
 
 
@@ -140,12 +138,7 @@ def analyze_dataset_quality(
     blocking = False
 
     def _hash(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, (dict, list, tuple, set)):
-            import json as _json
-            return _json.dumps(value, sort_keys=True, default=str)
-        return str(value)
+        return cell_to_string(value)
 
     key_signature_counts: dict[tuple[Any, ...], int] = {}
     for row in sample:
