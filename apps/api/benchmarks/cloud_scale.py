@@ -47,8 +47,12 @@ def _snowflake_config() -> dict[str, Any] | None:
     keys = ["ACCOUNT", "USER", "PASSWORD", "DATABASE", "WAREHOUSE", "SCHEMA"]
     if not _has_env("DATAFLOW_BENCHMARK_SNOWFLAKE", keys):
         return None
+    account = os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_ACCOUNT"]
+    if ".snowflakecomputing.com" not in account:
+        account = f"{account}.snowflakecomputing.com"
     return {
-        "account": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_ACCOUNT"],
+        "host": account,
+        "port": 443,
         "username": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_USER"],
         "password": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_PASSWORD"],
         "database": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_DATABASE"],
@@ -110,7 +114,7 @@ def _run_transfer(
     import sys
     from pathlib import Path
 
-    api_root = Path(__file__).resolve().parents[2]
+    api_root = Path(__file__).resolve().parents[1]
     if str(api_root) not in sys.path:
         sys.path.insert(0, str(api_root))
 
