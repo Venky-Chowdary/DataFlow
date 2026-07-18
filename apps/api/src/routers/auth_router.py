@@ -7,7 +7,12 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from ..services.auth_service import authenticate, create_token, public_user
+from ..services.auth_service import (
+    auth_bootstrap_status,
+    authenticate,
+    create_token,
+    public_user,
+)
 
 try:
     from services.sso_state import generate_state, get_and_pop
@@ -166,12 +171,40 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         raise HTTPException(status_code=502, detail=f"SSO callback failed: {exc}") from exc
 
 
+@router.get("/bootstrap")
+async def auth_bootstrap():
+    """Operator-safe auth diagnostics (no secrets) — which emails are configured."""
+    return auth_bootstrap_status()
+
+
 @router.post("/login")
 async def login(body: LoginRequest):
-    user = authenticate(body.email, body.password)
+    status = auth_bootstrap_status()
+    if status["user_count"] == 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No workspace users configured. Set DATAFLOW_ADMIN_EMAIL and "
+                "DATAFLOW_ADMIN_PASSWORD on the API service, then redeploy."
+            ),
+        )
+    try:
+        user = authenticate(body.email, body.password)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    token, expires_at = create_token(user["email"])
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Invalid email or password. If your password contains `$`, re-set "
+                "DATAFLOW_ADMIN_PASSWORD in Railway (escape as `$$` or wrap in quotes) "
+                "and redeploy the API."
+            ),
+        )
+    try:
+        token, expires_at = create_token(user["email"])
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         from services.audit_log import append_audit_event
 

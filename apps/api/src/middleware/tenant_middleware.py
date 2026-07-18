@@ -22,6 +22,7 @@ _PUBLIC_PREFIXES = (
     "/health",
     "/",
     "/api/v1/auth/login",
+    "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
     "/api/v1/mcp",
 )
