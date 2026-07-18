@@ -12,6 +12,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.value_serializer import cell_to_string
 
 # Validation mode → minimum confidence / null tolerance
@@ -68,7 +69,7 @@ def _check_coercion_safety(
         target_types=target_types,
         schema_policy=schema_policy,
     )
-    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
         # Schemaless destinations store values as-is; strict type coercion checks
         # are not transfer blockers.
@@ -112,7 +113,7 @@ def _check_transform_dry_run(
         column_types=source_types,
     )
     missing_col_errors = [e for e in errors if "Source column missing" in e]
-    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless and not missing_col_errors:
         # Schemaless stores values as-is; transform failures (e.g. typed casts
         # inferred from an unknown target schema) should not block preflight.
@@ -199,7 +200,7 @@ def _check_required_nulls(
     In strict/maximum mode we also hold `*_id` columns to the same standard.
     """
     issues: list[str] = []
-    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    schemaless = dest_kind in SCHEMALESS_DESTS
     mode = (validation_mode or "strict").strip().lower()
 
     # Resolve the source column that maps to the primary key target.
@@ -258,7 +259,7 @@ def _check_duplicate_keys(
     primary_key: str | None = None,
 ) -> dict[str, Any]:
     issues: list[str] = []
-    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    schemaless = dest_kind in SCHEMALESS_DESTS
     if not primary_key:
         return {
             "check": "duplicate_keys",
@@ -411,9 +412,7 @@ def run_integrity_audit(
     Returns a structured report used by mapping pipeline and preflight G9.
     """
     cfg = _mode_config(validation_mode)
-    from services.schema_drift import _normalize_dest_kind
-
-    dest_kind = _normalize_dest_kind(destination_db_type)
+    dest_kind = normalize_dest_kind(destination_db_type)
 
     mappings = mappings or []
     source_schemas = source_schemas or []
@@ -435,7 +434,7 @@ def run_integrity_audit(
     # `user_id` or `account_id` in NoSQL/CRM extracts.
     mode = (validation_mode or "strict").strip().lower()
     pk = None
-    preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in {"mongodb", "dynamodb", "redis"} else ("_id",)
+    preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in SCHEMALESS_DESTS else ("_id",)
     for key in preferred:
         for m in mappings:
             if (m.get("target") or "").lower() == key:

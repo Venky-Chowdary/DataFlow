@@ -6,6 +6,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.db_type_utils import SCHEMALESS_DESTS
 from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime
 from services.value_serializer import cell_to_string
 
@@ -56,7 +57,7 @@ def analyze_column_quality(
     dest_kind: str = "",
 ) -> dict[str, Any]:
     """Profile one column for anomalies affecting transfer quality."""
-    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    schemaless = (dest_kind or "").lower() in SCHEMALESS_DESTS
     non_empty = [v for v in values if v]
     null_rate = 1.0 - (len(non_empty) / max(len(values), 1))
     issues: list[str] = []
