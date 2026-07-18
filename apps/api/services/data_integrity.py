@@ -421,10 +421,12 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: prefer the document/SQL primary key (`_id` or `id`)
-    # first, then other *_id columns. Schemaless stores only enforce `_id`.
+    # Primary-key heuristic: only exact canonical key columns (`_id`, `id`, `uuid`,
+    # `pk`, `key`) are treated as required/unique. Foreign-key columns such as
+    # `user_id` or `account_id` can legitimately be null and must not be treated
+    # as the primary key.
     pk = None
-    preferred = ("_id", "id") if dest_kind not in {"mongodb", "dynamodb", "redis"} else ("_id",)
+    preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in {"mongodb", "dynamodb", "redis"} else ("_id",)
     for key in preferred:
         for m in mappings:
             if (m.get("target") or "").lower() == key:
@@ -434,11 +436,6 @@ def run_integrity_audit(
             pk = next((c for c in source_columns if c.lower() == key), None)
         if pk:
             break
-    if not pk:
-        for col in source_columns:
-            if col.lower().endswith("_id"):
-                pk = col
-                break
 
     checks: list[dict[str, Any]] = []
 

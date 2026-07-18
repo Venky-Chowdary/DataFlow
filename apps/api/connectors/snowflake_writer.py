@@ -7,6 +7,7 @@ import os
 import tempfile
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,7 +27,7 @@ from services.value_serializer import cell_to_string
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type
+from services.type_system import ddl_type, normalize_logical_type
 
 COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "2000"))
 MAX_BIND_INSERT_ROWS = int(os.getenv("DATAFLOW_SF_BIND_INSERT_ROWS", "1000"))
@@ -40,6 +41,48 @@ class WriteResult(_WriteResult):
 
 def sf_type(inferred: str) -> str:
     return ddl_type("snowflake", inferred)
+
+
+def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
+    """Return (integer_digits, fractional_scale) for a decimal cell value."""
+    try:
+        text = str(value).strip()
+        if not text:
+            return 0, 0
+        d = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        return 0, 0
+    sign, digits, exponent = d.as_tuple()
+    scale = -exponent if exponent < 0 else 0
+    int_digits = max(0, len(digits) + exponent)
+    return int_digits, scale
+
+
+def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
+    """Pick a NUMBER(p,s) type wide enough for the actual data in this batch.
+
+    The static default of NUMBER(38,10) silently truncates high-precision
+    decimals, which breaks source/target checksum reconciliation.  We size the
+    column from the data we are about to load, keep a small buffer for later
+    rows, and cap at Snowflake's maximum precision of 38.
+    """
+    max_int = 0
+    max_scale = 0
+    for row in mapped_rows:
+        if col_idx >= len(row) or row[col_idx] is None:
+            continue
+        int_digits, scale = _decimal_scale_and_int_digits(row[col_idx])
+        max_int = max(max_int, int_digits)
+        max_scale = max(max_scale, scale)
+
+    # Preserve at least the default 10 fractional digits and add a small buffer
+    # so minor variation in later batches does not overflow the column.
+    scale = min(38, max(10, max_scale + 2))
+    # Leave room for at least a few integer digits beyond what we have seen,
+    # capped by Snowflake's 38 total precision.
+    int_buffer = min(5, 38 - scale)
+    precision = min(38, max(max_int, int_buffer) + scale)
+    return f"NUMBER({precision},{scale})"
 
 
 def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]) -> None:
@@ -232,6 +275,17 @@ def write_mapped_rows(
         dest_types=dest_types,
         error_policy=policy,
     )
+
+    # Size Snowflake NUMBER columns from the actual batch data.  The static
+    # NUMBER(38,10) default truncates high-precision decimals, which makes
+    # source/target checksums diverge.  We still honor the logical type but
+    # choose a scale that preserves the values being loaded.
+    target_types = [
+        _snowflake_decimal_type(i, mapped_rows)
+        if normalize_logical_type(t) == "decimal"
+        else sf_type(t)
+        for i, t in enumerate(logical_types)
+    ]
 
     # Within a single batch, the last occurrence of an upsert key wins.
     if write_mode == "upsert" and conflict_columns:
