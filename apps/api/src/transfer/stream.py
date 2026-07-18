@@ -706,6 +706,7 @@ def stream_database_transfer(
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
+    limit: int = 0,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -806,9 +807,10 @@ def stream_database_transfer(
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
+    sample_limit = 100 if limit == 0 else min(100, limit)
     sample_probe, _ = _unwrap_read(
         _read_batch(
-            src_type, src_cfg, table, None, 0, 100, database=src_db,
+            src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
             cursor_column=cursor_source_col if incremental else "",
             cursor_after=watermark if incremental else None,
             cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
@@ -826,9 +828,14 @@ def stream_database_transfer(
     if dest_type in ("s3", "gcs", "adls") and sample_probe.total_rows:
         chunk_size = max(1, sample_probe.total_rows)
 
+    def _batch_limit(offset: int = 0, *, default: int = chunk_size) -> int:
+        if limit > 0:
+            return max(0, min(default, limit - offset))
+        return default
+
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
-            src_type, src_cfg, table, None, 0, chunk_size, database=src_db,
+            src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
             cursor_column=cursor_source_col if incremental else "",
             cursor_after=watermark if incremental else None,
             cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
@@ -859,6 +866,8 @@ def stream_database_transfer(
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     total_rows = probe.total_rows
+    if total_rows is not None and limit > 0:
+        total_rows = min(total_rows, limit)
 
     checkpoint_service = checkpoint_service or CheckpointService()
     checkpoint = checkpoint or Checkpoint(job_id=job_id or "")
@@ -919,8 +928,11 @@ def stream_database_transfer(
 
     def _fetch_next_batch(last_batch):
         nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after
+        if limit > 0 and fetch_offset >= limit:
+            return None
         if total_rows is not None and fetch_offset >= total_rows:
             return None
+        batch_limit = _batch_limit(fetch_offset)
         if last_batch is not None and len(last_batch.rows) < chunk_size:
             if (
                 src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
@@ -937,7 +949,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     fetch_offset,
-                    chunk_size,
+                    batch_limit,
                     database=src_db,
                     dynamodb_cursor=ddb_cursor,
                     dynamodb_total=ddb_total,
@@ -952,7 +964,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     fetch_offset,
-                    chunk_size,
+                    batch_limit,
                     database=src_db,
                     cursor_column=cursor_source_col,
                     cursor_after=fetch_cursor,
@@ -971,7 +983,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     fetch_offset,
-                    chunk_size,
+                    batch_limit,
                     database=src_db,
                     cursor_column=keyset_col,
                     cursor_after=keyset_after,
@@ -992,7 +1004,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     fetch_offset,
-                    chunk_size,
+                    batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
                     es_search_after=es_search_after,
@@ -1007,7 +1019,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     fetch_offset,
-                    chunk_size,
+                    batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
                     redis_scan_state=redis_scan_state,
@@ -1024,7 +1036,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     fetch_offset,
-                    chunk_size,
+                    batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
                 )
@@ -1244,7 +1256,11 @@ def stream_database_transfer(
                 use_checksum_keyset = True
                 cursor_type_for_read = normalize_inferred(column_types.get(keyset_col, "string")).upper()
         read_offset = 0
+        checksum_rows_read = 0
         while True:
+            read_limit = _batch_limit(read_offset, default=chunk_size)
+            if read_limit <= 0:
+                break
             batch, _ = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -1252,7 +1268,7 @@ def stream_database_transfer(
                     table,
                     columns,
                     read_offset,
-                    chunk_size,
+                    read_limit,
                     database=src_db,
                     cursor_column=checksum_cursor_col,
                     cursor_after=checksum_cursor_after,
@@ -1273,7 +1289,10 @@ def stream_database_transfer(
             )
             if mapped:
                 fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
-            if len(batch.rows) < chunk_size:
+            checksum_rows_read += len(batch.rows)
+            if limit > 0 and checksum_rows_read >= limit:
+                break
+            if len(batch.rows) < read_limit:
                 break
             if use_checksum_keyset:
                 checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
@@ -1343,6 +1362,7 @@ def stream_scd2_mirror_transfer(
     checkpoint_service: Any = None,  # noqa: ARG001
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
+    limit: int = 0,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Stream a mirror or SCD2 database-to-database transfer through a staging table.
 
@@ -1411,6 +1431,7 @@ def stream_scd2_mirror_transfer(
         checkpoint_service=_NoOpCheckpointService(),
         backfill_new_fields=backfill_new_fields,
         validation_mode=validation_mode,
+        limit=limit,
     )
 
     ddl_log = [

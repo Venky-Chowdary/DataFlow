@@ -604,7 +604,6 @@ class UniversalTransferEngine:
         if (
             supports_streaming(request.source, request.destination)
             and not request.priority_column
-            and request.limit == 0
         ):
             try:
                 return self._execute_streaming(
@@ -1131,6 +1130,8 @@ class UniversalTransferEngine:
                 message="Analyzing source table…",
             )
             columns, schema, total_rows, sample_rows = peek_stream_source(request.source)
+            if request.limit > 0:
+                total_rows = min(total_rows, request.limit)
             if total_rows == 0:
                 mongo.update_job_status(job_id, "failed", error="Source table is empty", phase="failed")
                 return TransferResult(
@@ -1329,6 +1330,7 @@ class UniversalTransferEngine:
                     checkpoint_service=checkpoint_service,
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
+                    limit=request.limit,
                 )
             elif effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
@@ -1344,6 +1346,7 @@ class UniversalTransferEngine:
                     checkpoint_service=checkpoint_service,
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
+                    limit=request.limit,
                 )
             else:
                 rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
@@ -1360,6 +1363,7 @@ class UniversalTransferEngine:
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
                     source_filter=request.source_filter,
+                    limit=request.limit,
                 )
 
             mongo.update_job_status(

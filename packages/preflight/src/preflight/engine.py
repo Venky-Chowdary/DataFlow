@@ -21,17 +21,6 @@ class PreflightEngine:
             if result.status == GateStatus.BLOCK:
                 blockers.append(result)
                 if self.fail_fast:
-                    # Mark remaining gates as skipped so the UI still shows a
-                    # complete list instead of "passed then failed" confusion.
-                    for skipped_id, _ in PREFLIGHT_GATES[i + 1:]:
-                        results.append(
-                            GateResult(
-                                gate_id=skipped_id,
-                                status=GateStatus.SKIP,
-                                message="Skipped — earlier gate blocked the transfer",
-                                details={"skipped_after": result.gate_id.value},
-                            )
-                        )
                     break
 
         passed = len(blockers) == 0 and all(

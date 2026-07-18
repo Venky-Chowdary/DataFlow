@@ -308,6 +308,7 @@ def run_cdc_database_transfer(
     checkpoint_service: Any | None = None,
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
+    limit: int = 0,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer from a database source to a database destination."""
     src_type = resolve_driver_type(source.format)
