@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.platform_config import data_dir
+from services.value_serializer import json_default
 
 try:
     from src.services.mongodb_service import get_mongodb_service
@@ -56,7 +57,7 @@ def _load_file() -> dict[str, Any]:
 def _save_file(data: dict[str, Any]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(STATE_PATH)
 
 

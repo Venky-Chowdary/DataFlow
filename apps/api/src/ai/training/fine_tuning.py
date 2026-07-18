@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from services.value_serializer import json_default
 from .data_synthesis import DataTransferDataSynthesizer
 
 
@@ -81,7 +82,7 @@ class DataTransferFineTuningPipeline:
         path = os.path.join(self.output_dir, "embedding_pairs.jsonl")
         with open(path, "w") as f:
             for pair in pairs:
-                f.write(json.dumps(pair) + "\n")
+                f.write(json.dumps(pair, default=json_default) + "\n")
 
         return path
 
@@ -186,7 +187,7 @@ class DataTransferFineTuningPipeline:
                         {"role": "assistant", "content": ex.assistant_message},
                     ]
                 }
-                fo.write(json.dumps(openai_row) + "\n")
+                fo.write(json.dumps(openai_row, default=json_default) + "\n")
                 anthropic_row = {
                     "system": DATA_PILOT_PERSONA,
                     "messages": [
@@ -195,7 +196,7 @@ class DataTransferFineTuningPipeline:
                     ],
                     "metadata": {"intent": ex.intent, **ex.context},
                 }
-                fa.write(json.dumps(anthropic_row) + "\n")
+                fa.write(json.dumps(anthropic_row, default=json_default) + "\n")
                 count += 1
 
         return {

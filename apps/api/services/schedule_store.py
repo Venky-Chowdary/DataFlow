@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.platform_config import data_dir
+from services.value_serializer import json_default
 
 try:
     from src.services.mongodb_service import get_mongodb_service
@@ -133,7 +134,7 @@ def _save_all(schedules: list[PipelineSchedule]) -> None:
         return
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(
-        json.dumps({"schedules": [s.to_dict() for s in schedules]}, indent=2),
+        json.dumps({"schedules": [s.to_dict() for s in schedules]}, indent=2, default=json_default),
         encoding="utf-8",
     )
 

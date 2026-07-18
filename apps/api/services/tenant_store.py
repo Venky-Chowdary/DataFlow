@@ -20,6 +20,7 @@ from typing import Any
 
 from services.byok_key_manager import is_ip_allowed
 from services.platform_config import data_dir
+from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def _load_raw() -> dict[str, Any]:
 def _save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STORE_PATH.with_suffix(STORE_PATH.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(STORE_PATH)
 
 

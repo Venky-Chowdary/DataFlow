@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from connectors.base import ReadBatch
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, json_default
 
 
 @dataclass
@@ -72,9 +72,9 @@ def read_keys_batch(
                 state.keys_seen += 1
                 ktype = _decode(client.type(key))
                 if ktype == "hash":
-                    val = json.dumps({(_decode(f)): _decode(v) for f, v in client.hgetall(key).items()})
+                    val = json.dumps({(_decode(f)): _decode(v) for f, v in client.hgetall(key).items()}, default=json_default)
                 elif ktype == "list":
-                    val = json.dumps([_decode(v) for v in client.lrange(key, 0, 50)])
+                    val = json.dumps([_decode(v) for v in client.lrange(key, 0, 50)], default=json_default)
                 else:
                     val = _decode(client.get(key))
                 rows.append([key, val, ktype])

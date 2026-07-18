@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.sqlite_common import sqlite_file_path
+from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
     _rejected_row_count,
@@ -46,7 +47,7 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         return value
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
         if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
         return value
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         if isinstance(value, bytes):

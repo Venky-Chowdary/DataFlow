@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.value_serializer import json_default
+
 from connectors.elasticsearch_reader import _client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
@@ -35,7 +37,7 @@ def _to_es_value(value: Any, source_type: str) -> Any:
         # JSON as a string keeps the transfer lossless and avoids object/array
         # collisions when the same logical column contains mixed JSON shapes.
         if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
         return value
     return value
 

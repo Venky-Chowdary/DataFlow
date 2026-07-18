@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.value_serializer import json_default
+
 from connectors.writer_common import WriteResult as _WriteResult
 from services.value_serializer import cell_to_string, sanitize_json_value
 from services.vectorization import vectorize_records
@@ -100,7 +102,7 @@ def _ensure_collection(
     }
     resp = session.put(
         f"{base_url}/collections/{collection}",
-        data=json.dumps(create_payload),
+        data=json.dumps(create_payload, default=json_default),
         headers=headers,
         timeout=10,
     )

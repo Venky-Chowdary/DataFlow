@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from connectors import test_database_connection
 from registry import DATABASE_TYPES, FILE_FORMATS, DataOperation, infer_operation
 from services.connector_catalog import list_catalog as list_connector_catalog
+from services.value_serializer import json_default
 from services.connector_factory import generate_connector_from_openapi
 from services.connector_store import (
     create_connector,
@@ -398,10 +399,10 @@ async def stream_job(job_id: str):
         while True:
             job = job_store.get(job_id)
             if not job:
-                yield f"event: error\ndata: {json.dumps({'error': 'Job not found'})}\n\n"
+                yield f"event: error\ndata: {json.dumps({'error': 'Job not found'}, default=json_default)}\n\n"
                 break
             payload = asdict(job)
-            yield f"data: {json.dumps(payload)}\n\n"
+            yield f"data: {json.dumps(payload, default=json_default)}\n\n"
             if job.status in ("completed", "failed"):
                 break
             await asyncio.sleep(0.35)

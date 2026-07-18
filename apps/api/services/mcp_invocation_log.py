@@ -10,6 +10,7 @@ from typing import Any
 
 from services.audit_log import _redact, append_audit_event
 from services.platform_config import data_dir
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "mcp_invocations.jsonl"
 MAX_ROWS = int(__import__("os").getenv("DATAFLOW_MCP_LOG_MAX", "2000"))
@@ -43,7 +44,7 @@ def log_mcp_invocation(
     }
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with STORE_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(row, ensure_ascii=False, default=json_default) + "\n")
     _trim_if_needed()
     append_audit_event(
         action=f"mcp.{tool}",

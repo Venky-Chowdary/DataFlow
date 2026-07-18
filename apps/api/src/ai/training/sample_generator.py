@@ -13,6 +13,8 @@ import random
 import uuid
 from dataclasses import dataclass
 
+from services.value_serializer import json_default
+
 
 @dataclass
 class SampleDataset:
@@ -153,7 +155,7 @@ class DataTransferSampleGenerator:
 
     def to_json_string(self, dataset: SampleDataset) -> str:
         """Convert dataset to JSON string."""
-        return json.dumps(dataset.rows, indent=2)
+        return json.dumps(dataset.rows, indent=2, default=json_default)
 
     def to_schema_dict(self, dataset: SampleDataset) -> dict[str, list[str]]:
         """Convert to schema format for analysis (column → sample values)."""

@@ -500,7 +500,7 @@ class PostgresJobStore:
                         (
                             rows,
                             rows,
-                            json.dumps(reconciliation) if reconciliation else None,
+                            json.dumps(reconciliation, default=json_default) if reconciliation else None,
                             message,
                             table_name,
                             table_name,

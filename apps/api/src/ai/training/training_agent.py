@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..knowledge.copilot_knowledge import get_copilot_documents
 from .conversation_synthesis import ConversationSynthesizer
+from services.value_serializer import json_default
 from .data_synthesis import DataTransferDataSynthesizer
 from .fine_tuning import DataTransferFineTuningPipeline
 from .universal_data_feeder import UniversalDataFeeder
@@ -231,7 +232,7 @@ class DataTransferTrainingAgent:
             "metrics": run.metrics,
         }
         with open(self._checkpoint_path(), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+            json.dump(payload, f, indent=2, default=json_default)
 
     def _save_artifacts(
         self,
@@ -249,19 +250,19 @@ class DataTransferTrainingAgent:
                     "assistant": ex.assistant_message,
                     "intent": ex.intent,
                     "context": ex.context,
-                }) + "\n")
+                }, default=json_default) + "\n")
         paths["conversations"] = conv_path
 
         docs_path = os.path.join(self.OUTPUT_DIR, "vector_documents.jsonl")
         with open(docs_path, "w", encoding="utf-8") as f:
             for doc in conv_docs:
-                f.write(json.dumps(doc) + "\n")
+                f.write(json.dumps(doc, default=json_default) + "\n")
         paths["vector_documents"] = docs_path
 
         feeder_status = self.feeder.get_status()
         status_path = os.path.join(self.OUTPUT_DIR, "feeder_status.json")
         with open(status_path, "w", encoding="utf-8") as f:
-            json.dump(feeder_status, f, indent=2)
+            json.dump(feeder_status, f, indent=2, default=json_default)
         paths["feeder_status"] = status_path
 
         return paths

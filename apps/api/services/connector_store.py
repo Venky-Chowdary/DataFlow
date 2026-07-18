@@ -18,6 +18,7 @@ from typing import Any
 
 from services.platform_config import data_dir
 from services.secret_vault import decrypt_secret, encrypt_secret
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "connectors.json"
 
@@ -211,7 +212,7 @@ def _save_all(connectors: list[SavedConnector]) -> None:
         if d.get("private_key"):
             d["private_key"] = encrypt_secret(d["private_key"])
         payload.append(d)
-    text = json.dumps({"connectors": payload}, indent=2)
+    text = json.dumps({"connectors": payload}, indent=2, default=json_default)
     # Atomic write so a crash mid-write cannot leave a half-written file.
     tmp = store_path.with_suffix(store_path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")

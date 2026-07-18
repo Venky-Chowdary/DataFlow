@@ -11,6 +11,7 @@ from typing import Any
 
 from services.platform_config import data_dir
 from services.secret_vault import decrypt_secret, encrypt_secret
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "integrations.json"
 
@@ -87,7 +88,7 @@ def _load_raw() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
 
 
 def _mask_secret(value: str) -> str:
