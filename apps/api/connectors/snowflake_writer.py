@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,7 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+from services.value_serializer import cell_to_string
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
@@ -41,10 +43,10 @@ def sf_type(inferred: str) -> str:
 
 def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.writer(fh)
+        writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
         writer.writerow(target_cols)
         for row in mapped_rows:
-            writer.writerow(["" if v is None else v for v in row])
+            writer.writerow(["" if v is None else cell_to_string(v) for v in row])
 
 
 def _is_json_type(sf_type: str) -> bool:
@@ -52,50 +54,56 @@ def _is_json_type(sf_type: str) -> bool:
 
 
 def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str], target_types: list[str]) -> int:
-    stage_name = f"{table_name}_STAGE"
-    # Temporary stages must be referenced with a quoted @"name" so Snowflake
-    # resolves them in the session stage namespace instead of current schema.
+    # Use a unique stage per call so parallel threads/processes cannot overwrite
+    # each other's staged files and load each other's data.
+    stage_name = f"{table_name}_STAGE_{uuid.uuid4().hex}"
     stage_ref = f'@"{stage_name}"'
-    cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
-    cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
-    col_list = ", ".join(f'"{c}"' for c in target_cols)
-    # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
-    # all other columns are loaded directly by position.
-    select_items = []
-    for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
-        if _is_json_type(t):
-            select_items.append(f"PARSE_JSON(${i})")
-        else:
-            select_items.append(f"${i}")
-    select_sql = ", ".join(select_items)
-    cur.execute(
-        f"""
-        COPY INTO "{table_name}" ({col_list})
-        FROM (SELECT {select_sql} FROM {stage_ref})
-        FILE_FORMAT = (
-            TYPE = CSV
-            SKIP_HEADER = 1
-            FIELD_OPTIONALLY_ENCLOSED_BY = '"'
-            NULL_IF = ('', 'NULL')
-            ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+    try:
+        cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
+        cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE")
+        col_list = ", ".join(f'"{c}"' for c in target_cols)
+        # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
+        # all other columns are loaded directly by position.
+        select_items = []
+        for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
+            if _is_json_type(t):
+                select_items.append(f"PARSE_JSON(${i})")
+            else:
+                select_items.append(f"${i}")
+        select_sql = ", ".join(select_items)
+        cur.execute(
+            f"""
+            COPY INTO "{table_name}" ({col_list})
+            FROM (SELECT {select_sql} FROM {stage_ref})
+            FILE_FORMAT = (
+                TYPE = CSV
+                SKIP_HEADER = 1
+                FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+                NULL_IF = ('', 'NULL')
+                ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+            )
+            ON_ERROR = 'CONTINUE'
+            """
         )
-        ON_ERROR = 'CONTINUE'
-        """
-    )
-    rows = cur.fetchall()
-    loaded = 0
-    errors_seen = 0
-    first_error = None
-    for row in rows:
-        if len(row) >= 4:
-            loaded += int(row[3] or 0)
-        if len(row) >= 6 and row[5]:
-            errors_seen += int(row[5] or 0)
-            if first_error is None and len(row) >= 7:
-                first_error = row[6]
-    if errors_seen:
-        raise RuntimeError(f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}")
-    return loaded
+        rows = cur.fetchall()
+        loaded = 0
+        errors_seen = 0
+        first_error = None
+        for row in rows:
+            if len(row) >= 4:
+                loaded += int(row[3] or 0)
+            if len(row) >= 6 and row[5]:
+                errors_seen += int(row[5] or 0)
+                if first_error is None and len(row) >= 7:
+                    first_error = row[6]
+        if errors_seen:
+            raise RuntimeError(f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}")
+        return loaded
+    finally:
+        try:
+            cur.execute(f'DROP STAGE IF EXISTS "{stage_name}"')
+        except Exception:
+            pass
 
 
 def write_mapped_rows(
@@ -273,7 +281,9 @@ def write_mapped_rows(
             use_copy = total >= COPY_THRESHOLD and write_mode != "upsert"
             if use_copy:
                 load_method = "copy_into"
-                tmp = Path(tempfile.gettempdir()) / f"df_sf_{table_name.lower()}_{os.getpid()}.csv"
+                fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"df_sf_{table_name.lower()}_")
+                os.close(fd)
+                tmp = Path(tmp_path)
                 try:
                     _write_temp_csv(tmp, target_cols, mapped_rows)
                     written = _copy_into_table(cur, table_name, str(tmp.resolve()), target_cols, target_types)

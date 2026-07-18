@@ -29,6 +29,8 @@ def drop_table(
         return _drop_generic_sql(cfg, table_name, schema)
     if dt == "mongodb":
         return _drop_mongodb(cfg, table_name, schema)
+    if dt == "snowflake":
+        return _drop_snowflake(cfg, table_name, schema)
     return False
 
 
@@ -54,6 +56,33 @@ def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -
             cur.execute(
                 sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE").format(schema_id, table_id)
             )
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
+    from connectors.snowflake_conn import get_connection, normalize_account
+
+    try:
+        conn = get_connection(
+            account=normalize_account(cfg.get("host", "")),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            database=cfg.get("database", ""),
+            schema=schema or cfg.get("schema", "PUBLIC"),
+            warehouse=cfg.get("warehouse", ""),
+            connection_string=cfg.get("connection_string", ""),
+            role=cfg.get("role", ""),
+        )
+        with conn.cursor() as cur:
+            if cfg.get("warehouse"):
+                try:
+                    cur.execute(f'USE WAREHOUSE "{cfg["warehouse"]}"')
+                except Exception:
+                    pass
+            cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
         conn.close()
         return True
     except Exception:
