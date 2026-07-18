@@ -43,6 +43,11 @@ def sf_type(inferred: str) -> str:
     return ddl_type("snowflake", inferred)
 
 
+def _is_fakesnow_connection(conn: Any) -> bool:
+    """Return True for the local fakesnow emulator — it does not support PUT/COPY."""
+    return getattr(conn, "__class__", None) is not None and conn.__class__.__name__ == "FakeSnowflakeConnection"
+
+
 def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
     """Return (integer_digits, fractional_scale) for a decimal cell value."""
     try:
@@ -384,7 +389,9 @@ def write_mapped_rows(
                         cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
 
             total = len(mapped_rows)
-            use_copy = total >= COPY_THRESHOLD and write_mode != "upsert"
+            # The fakesnow emulator does not support PUT/COPY INTO; fall back to
+            # batched INSERT so local tests and benchmarks still work.
+            use_copy = total >= COPY_THRESHOLD and write_mode != "upsert" and not _is_fakesnow_connection(conn)
             if use_copy:
                 load_method = "copy_into"
                 fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"df_sf_{table_name.lower()}_")

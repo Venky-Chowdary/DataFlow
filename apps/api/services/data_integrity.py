@@ -189,15 +189,18 @@ def _check_required_nulls(
     null_rate_max: float,
     dest_kind: str = "",
     primary_key: str | None = None,
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     """Only enforce nullability on the inferred primary key and canonical key columns.
 
     Foreign-key / PII columns (email, phone, ssn, user_id, etc.) can legitimately
     be sparse in source data; blocking transfer because of nulls in those
     columns causes false preflight failures for schemaless/NoSQL sources.
+    In strict/maximum mode we also hold `*_id` columns to the same standard.
     """
     issues: list[str] = []
     schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    mode = (validation_mode or "strict").strip().lower()
 
     # Resolve the source column that maps to the primary key target.
     pk_source = ""
@@ -221,8 +224,12 @@ def _check_required_nulls(
 
         # The inferred primary key is always required.
         is_pk = bool(pk_source and src == pk_source)
-        # In addition, exact canonical key columns are required when present.
-        is_reserved_key = src_lower in {"id", "_id", "uuid", "pk", "key"} or tgt_lower in {"id", "_id", "uuid", "pk", "key"}
+        # Exact canonical key columns are always required; `*_id` columns are
+        # also treated as required in strict/maximum validation mode.
+        reserved_exact = {"id", "_id", "uuid", "pk", "key"}
+        is_reserved_key = src_lower in reserved_exact or tgt_lower in reserved_exact
+        if mode in {"strict", "maximum"} and not is_reserved_key:
+            is_reserved_key = src_lower.endswith("_id") or tgt_lower.endswith("_id")
         if not is_pk and not is_reserved_key:
             continue
 
@@ -421,10 +428,12 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: only exact canonical key columns (`_id`, `id`, `uuid`,
-    # `pk`, `key`) are treated as required/unique. Foreign-key columns such as
-    # `user_id` or `account_id` can legitimately be null and must not be treated
-    # as the primary key.
+    # Primary-key heuristic: exact canonical key columns (`_id`, `id`, `uuid`,
+    # `pk`, `key`) are always treated as required/unique. In strict/maximum mode
+    # we also treat `*_id` columns as keys so high-assurance transfers enforce
+    # completeness, while balanced/review modes allow sparse foreign keys such as
+    # `user_id` or `account_id` in NoSQL/CRM extracts.
+    mode = (validation_mode or "strict").strip().lower()
     pk = None
     preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in {"mongodb", "dynamodb", "redis"} else ("_id",)
     for key in preferred:
@@ -436,6 +445,11 @@ def run_integrity_audit(
             pk = next((c for c in source_columns if c.lower() == key), None)
         if pk:
             break
+    if not pk and mode in {"strict", "maximum"}:
+        for col in source_columns:
+            if col.lower().endswith("_id"):
+                pk = col
+                break
 
     checks: list[dict[str, Any]] = []
 
@@ -443,7 +457,7 @@ def run_integrity_audit(
         checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind, schema_policy=schema_policy))
         checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
         checks.append(_check_financial_precision(mappings, source_types, rows))
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk))
+        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
         checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
