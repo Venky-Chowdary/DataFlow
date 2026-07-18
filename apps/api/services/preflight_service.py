@@ -26,6 +26,7 @@ from services.connector_capability_registry import (
     classify_payload,
     recommended_batch_size,
 )
+from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.value_serializer import cell_to_string
 from services.validation_plan import build_validation_plan
 
@@ -341,10 +342,9 @@ def apply_policy_gates(
                 "warnings": warnings,
             }
 
-    from services.ddl_compatibility import _normalize_dest_kind
     from services.preflight_rules import enrich_blockers
 
-    dest_kind = _normalize_dest_kind(destination_db_type)
+    dest_kind = normalize_dest_kind(destination_db_type)
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -450,14 +450,11 @@ def run_file_preflight(
     dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
     dest_table_exists = destination_table_exists if destination_table_exists is not None else False
 
-    from services.ddl_compatibility import (
-        _normalize_dest_kind,
-        evaluate_ddl_compatibility,
-    )
+    from services.ddl_compatibility import evaluate_ddl_compatibility
     from services.schema_drift import detect_schema_drift
 
-    dest_kind = _normalize_dest_kind(destination_db_type)
-    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    dest_kind = normalize_dest_kind(destination_db_type, default="postgresql")
+    schemaless = dest_kind in SCHEMALESS_DESTS
 
     target_cols = list((destination_column_types or {}).keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(

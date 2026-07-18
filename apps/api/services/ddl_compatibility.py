@@ -5,32 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
 
 _VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.I)
-_SCHEMALESS_DESTS = {"mongodb", "dynamodb", "redis"}
-_DB_TYPE_ALIASES = {
-    "mongo": "mongodb",
-    "mongodb+srv": "mongodb",
-    "mongodb_atlas": "mongodb",
-    "atlas": "mongodb",
-    "cosmos-mongodb": "mongodb",
-    "cosmos_mongodb": "mongodb",
-    "documentdb": "mongodb",
-    "aws_documentdb": "mongodb",
-    "dynamo": "dynamodb",
-    "redis-kv": "redis",
-    "redis_kv": "redis",
-}
-
-
-def _ci_get(schema: dict[str, str], key: str) -> str | None:
-    key_l = key.lower()
-    for existing_key, value in schema.items():
-        if existing_key.lower() == key_l:
-            return value
-    return None
 
 
 def _max_string_len(values: list[str]) -> int:
@@ -54,19 +33,6 @@ def _sample_values(sample_rows: list[dict] | None, column: str) -> list[str]:
     return out
 
 
-def _normalize_dest_kind(dest_db_type: str | None) -> str:
-    raw = (dest_db_type or "postgresql").strip().lower().replace(" ", "_")
-    if raw in _DB_TYPE_ALIASES:
-        return _DB_TYPE_ALIASES[raw]
-    if raw.startswith("mongodb"):
-        return "mongodb"
-    if raw.startswith("dynamodb"):
-        return "dynamodb"
-    if raw.startswith("redis"):
-        return "redis"
-    return raw
-
-
 def _primary_key_target(
     mappings: list[dict],
     dest_kind: str,
@@ -81,7 +47,7 @@ def _primary_key_target(
     srcs = [str(m.get("source") or "") for m in mappings if m.get("source")]
     tgts = [str(m.get("target") or "") for m in mappings if m.get("target")]
 
-    if dest_kind in _SCHEMALESS_DESTS:
+    if dest_kind in SCHEMALESS_DESTS:
         for t in tgts:
             if t.lower() == "_id":
                 return t
@@ -158,8 +124,8 @@ def evaluate_ddl_compatibility(
     source_schema = source_schema or {}
     target_schema = target_schema or {}
     issues: list[str] = []
-    dest_kind = _normalize_dest_kind(dest_db_type)
-    schemaless = dest_kind in _SCHEMALESS_DESTS
+    dest_kind = normalize_dest_kind(dest_db_type, default="postgresql")
+    schemaless = dest_kind in SCHEMALESS_DESTS
 
     if not mappings:
         return False, ["No column mappings defined"]
@@ -176,8 +142,8 @@ def evaluate_ddl_compatibility(
             issues.append(f"Duplicate target column in mapping contract: {tgt}")
         seen_targets.add(tgt_key)
 
-        src_type = _ci_get(source_schema, src) or "VARCHAR"
-        tgt_type = _ci_get(target_schema, tgt)
+        src_type = ci_get(source_schema, src) or "VARCHAR"
+        tgt_type = ci_get(target_schema, tgt)
 
         if not schemaless and table_exists and target_schema and tgt_type is None:
             # If the destination connector supports creating tables, we can evolve

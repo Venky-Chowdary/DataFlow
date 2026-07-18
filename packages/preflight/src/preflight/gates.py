@@ -6,6 +6,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
+from preflight.constants import SCHEMALESS_DESTS
 from preflight.models import (
     GateId,
     GateResult,
@@ -67,7 +68,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     # column-level type contract; every field can hold any BSON/DynamoDB type.
     # Skip lossy-coercion checks for these destinations.
     dest_kind = (ctx.plan.destination.db_type or "").lower()
-    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
         return _pass(GateId.G3_SCHEMA_CONTRACT, "Schemaless destination — no DDL type contract to validate", start)
 
@@ -222,7 +223,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     # Schemaless destinations (MongoDB/DynamoDB/Redis) only have a hard uniqueness
     # contract on `_id`; other `*_id` fields are foreign keys and may repeat.
     dest_kind = (ctx.plan.destination.db_type or "").lower()
-    schemaless = dest_kind in {"mongodb", "dynamodb", "redis"}
+    schemaless = dest_kind in SCHEMALESS_DESTS
     source_cols = [c.name for c in ctx.plan.source.columns]
     tgt_by_src = {m.source: m.target for m in ctx.plan.mappings}
     pk = None

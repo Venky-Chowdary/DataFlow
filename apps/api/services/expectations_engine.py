@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
+from services.db_type_utils import SCHEMALESS_DESTS
+
 ExpectationFn = Callable[..., dict[str, Any]]
 
 
@@ -392,7 +394,7 @@ def infer_expectations_for_schema(
 ) -> list[dict[str, Any]]:
     """Auto-generate standard expectations from schema metadata (dbt-style)."""
     specs: list[dict[str, Any]] = []
-    schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    schemaless = (dest_kind or "").lower() in SCHEMALESS_DESTS
     for col in columns:
         t = (schema.get(col) or "VARCHAR").upper()
         is_id = col.lower().endswith("_id") or col.lower() == "id"
