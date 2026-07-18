@@ -253,7 +253,7 @@ def resolve_connector_config(
             "connection_string": _pick(cfg.get("connection_string"), conn_dict.get("connection_string")),
             "warehouse": _pick(cfg.get("warehouse"), conn_dict.get("warehouse")),
             "ssl": conn_dict.get("ssl") if cfg.get("ssl") is None or cfg.get("ssl") is False else cfg.get("ssl"),
-            "type": endpoint.format or conn_dict.get("type") or "",
+            "type": conn_dict.get("type") or endpoint.format or "",
             "auth_mode": _pick(cfg.get("auth_mode"), conn_dict.get("auth_mode")),
             "auth_role": _pick(cfg.get("auth_role"), conn_dict.get("auth_role")),
             "auth_source": _pick(cfg.get("auth_source"), conn_dict.get("auth_source")),
@@ -294,8 +294,9 @@ def resolve_endpoint(
     merged = endpoint_to_dict(endpoint)
     merged.update(cfg)
     # ``EndpointConfig.from_dict`` expects ``format``; ``resolve_connector_config``
-    # uses ``type`` as the canonical driver key.
-    merged.setdefault("format", merged.get("type", endpoint.format))
+    # uses ``type`` as the canonical driver key.  When a saved connector exists,
+    # its stored driver type is authoritative; otherwise keep the inline format.
+    merged["format"] = merged.get("type") or merged.get("format") or endpoint.format
     return EndpointConfig.from_dict(endpoint.kind, merged)
 
 

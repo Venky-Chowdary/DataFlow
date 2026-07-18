@@ -383,7 +383,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         filename: file?.name,
       };
     }
-    if (!sourceConnector) return { kind: "database", format: "json" };
+    if (!sourceConnector) return { kind: "database", format: "", connector_id: sourceConnectorId };
     const isMongo = sourceConnector.type === "mongodb";
     const isDynamo = sourceConnector.type === "dynamodb";
     const tableOrPath = sourceKind === "cloud"

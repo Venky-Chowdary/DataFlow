@@ -419,10 +419,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
 
 def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, source_info: dict) -> dict:
     """Plan auto-creation and type mappings for a source → destination transfer."""
+    from .adapters import resolve_connector_config
     from .registry import validate_transfer
 
-    src_fmt = source.format or ("csv" if source.kind == "file" else source.format)
-    dst_fmt = destination.format or ("mongodb" if destination.kind == "database" else "json")
+    # When a saved connector is referenced, use its stored driver type as the
+    # canonical format so the UI cannot accidentally pass an unrelated format.
+    def _resolved_fmt(endpoint: EndpointConfig, fallback: str) -> str:
+        if endpoint.connector_id:
+            try:
+                cfg = resolve_connector_config(endpoint)
+                return cfg.get("type") or endpoint.format or fallback
+            except Exception:
+                pass
+        return endpoint.format or fallback
+
+    src_fmt = _resolved_fmt(source, "csv" if source.kind == "file" else source.format or "json")
+    dst_fmt = _resolved_fmt(destination, "mongodb" if destination.kind == "database" else "json")
     ok, msg = validate_transfer(source.kind, src_fmt, destination.kind, dst_fmt)
 
     plan: dict = {
