@@ -85,7 +85,12 @@ def write_mapped_rows(
     client = _client(cfg)
     try:
         if create_table and not client.indices.exists(index=index):
-            client.indices.create(index=index)
+            # Use one shard and zero replicas for predictable test/CI behavior
+            # and to avoid blowing through small cluster shard limits.
+            client.indices.create(
+                index=index,
+                body={"settings": {"number_of_shards": 1, "number_of_replicas": 0}},
+            )
 
         from elasticsearch.helpers import bulk
 
