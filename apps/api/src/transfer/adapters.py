@@ -197,62 +197,82 @@ def resolve_connector_config(
         None if fmt == "generic_sql" else
         "public"
     )
-    cfg = {
-        "host": endpoint.host or "localhost",
-        "port": endpoint.port or default_port,
+    # Start with inline endpoint values only; driver defaults are applied after the
+    # saved connector is merged so saved credentials can fill missing fields.
+    cfg: dict[str, Any] = {
+        "host": endpoint.host or "",
+        "port": endpoint.port or 0,
         "database": endpoint.database or "",
-        "schema": endpoint.schema or default_schema,
+        "schema": endpoint.schema or "",
         "username": endpoint.username,
         "password": endpoint.password,
-        "connection_string": endpoint.connection_string,
-        "warehouse": endpoint.warehouse,
+        "connection_string": endpoint.connection_string or "",
+        "warehouse": endpoint.warehouse or "",
         "ssl": endpoint.ssl,
         "type": endpoint.format,
-        "auth_mode": endpoint.auth_mode,
-        "auth_role": endpoint.auth_role,
-        "auth_source": endpoint.auth_source,
-        "api_key": endpoint.api_key,
-        "service_account": endpoint.service_account,
-        "private_key": endpoint.private_key,
-        "endpoint_url": endpoint.endpoint_url,
+        "auth_mode": endpoint.auth_mode or "",
+        "auth_role": endpoint.auth_role or "",
+        "auth_source": endpoint.auth_source or "",
+        "api_key": endpoint.api_key or "",
+        "service_account": endpoint.service_account or "",
+        "private_key": endpoint.private_key or "",
+        "endpoint_url": endpoint.endpoint_url or "",
         "path_style": endpoint.path_style,
     }
     # Keep "role" as the canonical key used by Snowflake connector functions.
-    cfg["role"] = endpoint.auth_role or cfg.get("role", "")
+    cfg["role"] = endpoint.auth_role or ""
     cfg.update(endpoint.extra)
     if endpoint.connector_id:
         conn_dict = _lookup_saved_connector(endpoint.connector_id, workspace_id=workspace_id)
         if not conn_dict:
             raise ValueError(f"Connector {endpoint.connector_id} not found")
-        # For MongoDB saved connectors that only supply a connection string, the
-        # database name in the URI should take precedence over an inline default
-        # like "test_db" sent by the UI form.
-        saved_database = conn_dict.get("database") or ""
-        if fmt == "mongodb" and not saved_database:
-            from connectors.mongodb_common import mongodb_database_from_uri
+        # Inline values take precedence over a saved connector so users can override
+        # per transfer.  The UI uses "test_db" as an empty placeholder default, so
+        # treat it like an empty database name.
+        inline_database = cfg.get("database") or ""
+        if inline_database and inline_database not in ("test_db", "test"):
+            chosen_database = inline_database
+        else:
+            saved_database = conn_dict.get("database") or ""
+            if fmt == "mongodb" and not saved_database:
+                from connectors.mongodb_common import mongodb_database_from_uri
 
-            saved_database = mongodb_database_from_uri(conn_dict.get("connection_string", "")) or ""
-        cfg.update({
-            "host": conn_dict.get("host") or cfg["host"],
-            "port": conn_dict.get("port") or cfg["port"],
-            "database": saved_database or cfg["database"],
-            "schema": conn_dict.get("schema") or cfg["schema"],
-            "username": conn_dict.get("username") or cfg["username"],
-            "password": conn_dict.get("password") or cfg["password"],
-            "connection_string": conn_dict.get("connection_string") or cfg["connection_string"],
-            "warehouse": conn_dict.get("warehouse") or cfg["warehouse"],
-            "ssl": conn_dict.get("ssl", cfg["ssl"]),
-            "type": conn_dict.get("type") or endpoint.format,
-            "auth_mode": conn_dict.get("auth_mode") or cfg["auth_mode"],
-            "auth_role": conn_dict.get("auth_role") or cfg["auth_role"],
-            "auth_source": conn_dict.get("auth_source") or cfg["auth_source"],
-            "api_key": conn_dict.get("api_key") or cfg["api_key"],
-            "service_account": conn_dict.get("service_account") or cfg["service_account"],
-            "private_key": conn_dict.get("private_key") or cfg["private_key"],
-            "endpoint_url": conn_dict.get("endpoint_url") or cfg["endpoint_url"],
-            "path_style": conn_dict.get("path_style") or cfg["path_style"],
-            "role": conn_dict.get("role") or cfg["role"],
-        })
+                saved_database = mongodb_database_from_uri(conn_dict.get("connection_string", "")) or ""
+            chosen_database = saved_database or inline_database
+
+        def _pick(inline: Any, saved: Any) -> Any:
+            return inline if inline not in (None, "", 0) else (saved if saved is not None else "")
+
+        merged_cfg = {
+            "host": _pick(cfg.get("host"), conn_dict.get("host")),
+            "port": _pick(cfg.get("port"), conn_dict.get("port")),
+            "database": chosen_database,
+            "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
+            "username": _pick(cfg.get("username"), conn_dict.get("username")),
+            "password": _pick(cfg.get("password"), conn_dict.get("password")),
+            "connection_string": _pick(cfg.get("connection_string"), conn_dict.get("connection_string")),
+            "warehouse": _pick(cfg.get("warehouse"), conn_dict.get("warehouse")),
+            "ssl": conn_dict.get("ssl") if cfg.get("ssl") is None or cfg.get("ssl") is False else cfg.get("ssl"),
+            "type": endpoint.format or conn_dict.get("type") or "",
+            "auth_mode": _pick(cfg.get("auth_mode"), conn_dict.get("auth_mode")),
+            "auth_role": _pick(cfg.get("auth_role"), conn_dict.get("auth_role")),
+            "auth_source": _pick(cfg.get("auth_source"), conn_dict.get("auth_source")),
+            "api_key": _pick(cfg.get("api_key"), conn_dict.get("api_key")),
+            "service_account": _pick(cfg.get("service_account"), conn_dict.get("service_account")),
+            "private_key": _pick(cfg.get("private_key"), conn_dict.get("private_key")),
+            "endpoint_url": _pick(cfg.get("endpoint_url"), conn_dict.get("endpoint_url")),
+            "path_style": _pick(cfg.get("path_style"), conn_dict.get("path_style")),
+            "role": _pick(cfg.get("role"), conn_dict.get("role")),
+        }
+        # Preserve any extra keys from the inline endpoint or saved connector.
+        for key, value in {**cfg, **conn_dict}.items():
+            if key not in merged_cfg:
+                merged_cfg[key] = value
+        cfg = merged_cfg
+    # Apply driver defaults for fields that are still missing.
+    cfg["host"] = cfg["host"] or "localhost"
+    cfg["port"] = cfg["port"] or default_port
+    cfg["schema"] = cfg["schema"] or default_schema
     if fmt == "mongodb" and not cfg.get("database"):
         from connectors.mongodb_common import mongodb_database_from_uri
 
