@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from connectors.writer_common import WriteResult as _WriteResult
+from services.value_serializer import cell_to_string, sanitize_json_value
 from services.vectorization import vectorize_records
 
 
@@ -201,20 +202,21 @@ def write_mapped_rows(
             batch = vector_rows[i : i + batch_size]
             points = []
             for row in batch:
+                raw_id = row.get("id")
                 point = {
-                    "id": row["id"] if row["id"] else str(uuid.uuid4()),
-                    "vector": row["embedding"] if row.get("embedding") else [0.0] * dimension,
-                    "payload": row.get("metadata") or {},
+                    "id": cell_to_string(raw_id) if raw_id else str(uuid.uuid4()),
+                    "vector": sanitize_json_value(row.get("embedding") or [0.0] * dimension),
+                    "payload": sanitize_json_value(row.get("metadata") or {}),
                 }
                 # Qdrant payload must be JSON serializable.
                 point["payload"]["content"] = row.get("content", "")
-                point["payload"]["source_id"] = row.get("source_id", "")
+                point["payload"]["source_id"] = cell_to_string(row.get("source_id", ""))
                 point["payload"]["chunk_index"] = row.get("chunk_index", 0)
                 points.append(point)
 
             resp = session.put(
                 f"{base_url}/collections/{collection}/points?wait=true",
-                data=json.dumps({"points": points}),
+                data=json.dumps({"points": points}, default=sanitize_json_value),
                 headers=hdrs,
                 timeout=30,
             )
