@@ -95,10 +95,12 @@ class MongodbChangeStreamCdc:
                 break
 
     def _pk_value(self, doc: dict[str, Any]) -> str:
+        from services.value_serializer import cell_to_string
+
         value = doc.get(self.primary_key)
         if value is None and "documentKey" in doc:
             value = doc["documentKey"].get(self.primary_key)
-        return str(value) if value is not None else ""
+        return cell_to_string(value) if value is not None else ""
 
     def _full_doc(self, change: dict[str, Any]) -> dict[str, Any] | None:
         return change.get("fullDocument") or change.get("documentKey")

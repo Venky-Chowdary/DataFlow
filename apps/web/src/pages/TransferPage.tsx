@@ -265,7 +265,12 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setTransferPlan(null);
     setPreflight(null);
     setPersistedPlanId(null);
-  }, [sourceConnectorId, sourceTable, sourceCollection, cloudPath, sourceKind]);
+    setParsed(null);
+    // Only reset when the connector or source kind changes, not while the user
+    // is still typing a table/collection name.  That prevents the preview from
+    // flickering blank between keystrokes and keeps the last valid schema
+    // visible until the new introspection completes.
+  }, [sourceConnectorId, sourceKind]);
 
   const buildDestinationEndpoint = () => {
     const isMongo = destDriverType === "mongodb";
@@ -330,10 +335,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const isConnectorSource = sourceKind === "database" || sourceKind === "cloud";
   const currentSourceColumns = sourceKind === "file"
     ? parsed?.columns ?? []
-    : transferPlan?.source_columns ?? [];
+    : (transferPlan?.source_columns ?? parsed?.columns ?? []);
   const currentSourceSchema = sourceKind === "file"
     ? parsed?.schema ?? {}
-    : transferPlan?.source_schema ?? {};
+    : (transferPlan?.source_schema ?? parsed?.schema ?? {});
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
   const cursorCandidate = findColumn(currentSourceColumns, [
@@ -382,7 +387,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         filename: file?.name,
       };
     }
-    if (!sourceConnector) return { kind: "database", format: "json" };
+    if (!sourceConnector) return { kind: "database", format: "", connector_id: sourceConnectorId };
     const isMongo = sourceConnector.type === "mongodb";
     const isDynamo = sourceConnector.type === "dynamodb";
     const tableOrPath = sourceKind === "cloud"
@@ -977,8 +982,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     return false;
   };
 
-  const introspectConnectorSource = async (): Promise<boolean> => {
-    if (!sourceConnector) return false;
+  const introspectConnectorSource = useCallback(async () => {
+    if (!sourceConnector) return null;
     const isMongo = sourceConnector.type === "mongodb";
     const tableOrPath = sourceKind === "cloud"
       ? cloudPath.trim()
@@ -1004,13 +1009,17 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         message: intro.message || "Verify table, collection, or object path and credentials.",
         tone: "error",
       });
-      return false;
+      return null;
     }
     if (intro.row_estimate != null && intro.row_estimate > 0) {
       setSourceRowEstimate(intro.row_estimate);
     }
+    const sampleRows = intro.data ?? intro.sample_data ?? [];
     const columnSamples = Object.fromEntries(
-      intro.columns.map((col) => [col, intro.schema?.[col] ? [String(intro.schema[col])] : []]),
+      intro.columns.map((col) => [
+        col,
+        sampleRows.slice(0, 8).map((row) => String(row[col] ?? "")).filter((v) => v.length > 0),
+      ]),
     );
     const dbAnalysis = await analyzeSchemaEnhanced(columnSamples);
     setAnalysis(dbAnalysis);
@@ -1030,8 +1039,37 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       samples: columnSamples,
       schema: intro.schema ?? {},
     });
-    return true;
-  };
+    // Populate parsed so the SourceStepAside preview table (samplePreviewRows)
+    // renders live connector samples the same way it does for file uploads.
+    setParsed({
+      columns: intro.columns,
+      schema: intro.schema ?? {},
+      row_count: intro.row_estimate ?? 0,
+      data: intro.data ?? intro.sample_data ?? [],
+      file_type: sourceConnector.type,
+    });
+    return intro;
+  }, [sourceConnector, sourceKind, sourceCollection, sourceTable, cloudPath, sourceConnectorId, toast, setActiveData]);
+
+  // Auto-introspect connector sources as soon as the user enters a table or
+  // collection, so the preview panel renders before they click Continue.
+  useEffect(() => {
+    if (sourceKind !== "database" && sourceKind !== "cloud") return;
+    if (!sourceConnectorId || sourceIntrospecting || analyzing) return;
+    const tableOrPath = sourceKind === "cloud"
+      ? cloudPath.trim()
+      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    if (!tableOrPath) return;
+    const t = window.setTimeout(() => {
+      setSourceIntrospecting(true);
+      setAnalyzing(true);
+      introspectConnectorSource().finally(() => {
+        setSourceIntrospecting(false);
+        setAnalyzing(false);
+      });
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceCollection, sourceTable, cloudPath, introspectConnectorSource]);
 
   const proceedToDestination = async () => {
     if (explainSourceGap()) return;
@@ -1039,8 +1077,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       setSourceIntrospecting(true);
       setAnalyzing(true);
       try {
-        const ok = await introspectConnectorSource();
-        if (!ok) return;
+        const intro = await introspectConnectorSource();
+        if (!intro?.columns?.length) return;
       } catch (e) {
         const message = e instanceof Error ? e.message : "Source introspection failed.";
         toast({ title: "Schema read failed", message, tone: "error" });
@@ -1959,6 +1997,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 dbConnectors={dbSourceConnectors}
                 cloudConnectors={cloudSourceConnectors}
                 uploading={uploading}
+                sourceIntrospecting={sourceIntrospecting}
               />
             </div>
           </div>
@@ -1985,7 +2024,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <button
               type="button"
               className="df2-btn df2-btn-primary"
-              disabled={!sourceInputsReady || sourceIntrospecting}
+              disabled={!canConfigureDest || sourceIntrospecting}
               onClick={() => void proceedToDestination()}
             >
               {sourceIntrospecting ? <ButtonLoader label="Reading schema…" /> : "Continue to Destination →"}

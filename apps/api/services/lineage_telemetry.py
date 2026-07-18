@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from services.value_serializer import json_default
+
 LINEAGE_EVENTS: list[dict[str, Any]] = []
 
 
@@ -197,4 +199,4 @@ def clear_events() -> None:
 
 
 def to_ndjson() -> str:
-    return "\n".join(json.dumps(e, default=str) for e in LINEAGE_EVENTS)
+    return "\n".join(json.dumps(e, default=json_default) for e in LINEAGE_EVENTS)

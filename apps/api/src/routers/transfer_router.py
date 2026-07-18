@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.team_store import can_write_workspace
+from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
@@ -168,13 +169,14 @@ async def transfer_readiness():
 async def analyze_route(body: AnalyzeRequest):
     """Score a source → destination route with conversion and driver hints."""
     from services.universal_router import analyze_route as score_route
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
 
-    return score_route(
-        body.source.kind,
-        body.source.format or ("csv" if body.source.kind == "file" else body.source.format),
-        body.destination.kind,
-        body.destination.format or ("json" if body.destination.kind == "file_export" else body.destination.format),
-    )
+    src = resolve_endpoint(EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True)))
+    dst = resolve_endpoint(EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True)))
+    src_fmt = src.format or ("csv" if src.kind == "file" else src.format or "")
+    dst_fmt = dst.format or ("json" if dst.kind == "file_export" else dst.format or "")
+    return score_route(src.kind, src_fmt, dst.kind, dst_fmt)
 
 
 @router.post("/analyze")
@@ -229,7 +231,7 @@ async def map_columns_route(body: MapColumnsRequest):
         {
             "name": c,
             "inferred_type": body.source_schema.get(c, "VARCHAR"),
-            "samples": [str(x) for x in samples_by_col.get(c, [])[:8]],
+            "samples": [cell_to_string(x) for x in samples_by_col.get(c, [])[:8]],
         }
         for c in body.source_columns
     ]
@@ -637,7 +639,12 @@ async def run_universal_transfer(
     _residency_check(request, destination, region)
 
     engine = get_transfer_engine()
-    job_id = engine._create_pending_job(request_obj)
+    try:
+        job_id = engine._create_pending_job(request_obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
 
     try:
         from services.audit_log import actor_from_request, append_audit_event

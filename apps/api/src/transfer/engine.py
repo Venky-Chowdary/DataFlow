@@ -29,6 +29,7 @@ try:
     from services.mirror_engine import apply_inferred_soft_deletes
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
+    from services.value_serializer import cell_to_string
     from services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -55,6 +56,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services.mirror_engine import apply_inferred_soft_deletes
     from src.services.mongodb_service import get_mongodb_service
     from src.services.pipeline_explanation import build_pipeline_explanation
+    from src.services.value_serializer import cell_to_string
     from src.services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -72,6 +74,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 from .adapters import (
     parse_file_content,
     read_source_database,
+    resolve_connector_config,
     write_destination_database,
     write_destination_file,
 )
@@ -361,7 +364,7 @@ def _auto_map(
                         {
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
-                            "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                            "samples": [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]],
                         }
                         for c in columns
                     ]
@@ -371,7 +374,7 @@ def _auto_map(
                         for c in target_columns
                     ]
                     source_samples = {
-                        c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        c: [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]]
                         for c in columns
                     }
                     result = run_mapping_pipeline(
@@ -601,7 +604,6 @@ class UniversalTransferEngine:
         if (
             supports_streaming(request.source, request.destination)
             and not request.priority_column
-            and request.limit == 0
         ):
             try:
                 return self._execute_streaming(
@@ -1030,7 +1032,7 @@ class UniversalTransferEngine:
             )
             if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
                 try:
-                    samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
+                    samples = {c: [cell_to_string(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
                     schedule_training_on_transfer(
                         request.source_filename or dest_summary.get("table", "transfer"),
                         columns, len(records), samples,
@@ -1128,6 +1130,8 @@ class UniversalTransferEngine:
                 message="Analyzing source table…",
             )
             columns, schema, total_rows, sample_rows = peek_stream_source(request.source)
+            if request.limit > 0:
+                total_rows = min(total_rows, request.limit)
             if total_rows == 0:
                 mongo.update_job_status(job_id, "failed", error="Source table is empty", phase="failed")
                 return TransferResult(
@@ -1326,6 +1330,7 @@ class UniversalTransferEngine:
                     checkpoint_service=checkpoint_service,
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
+                    limit=request.limit,
                 )
             elif effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
@@ -1341,6 +1346,7 @@ class UniversalTransferEngine:
                     checkpoint_service=checkpoint_service,
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
+                    limit=request.limit,
                 )
             else:
                 rows_written, ddl_log, dest_summary, _ = stream_database_transfer(
@@ -1357,6 +1363,7 @@ class UniversalTransferEngine:
                     backfill_new_fields=request.backfill_new_fields,
                     validation_mode=request.validation_mode,
                     source_filter=request.source_filter,
+                    limit=request.limit,
                 )
 
             mongo.update_job_status(
@@ -1871,10 +1878,24 @@ class UniversalTransferEngine:
         if source_info.get("columns"):
             plan["source_columns"] = source_info["columns"]
             plan["source_schema"] = source_info["schema"]
-        src_fmt = source.format or ("csv" if source.kind == "file" else source.format or "")
-        dst_fmt = destination.format or ("mongodb" if destination.kind == "database" else "json")
+        src_fmt = self._resolved_format(source)
+        dst_fmt = self._resolved_format(destination)
         plan["route_analysis"] = analyze_route(source.kind, src_fmt, destination.kind, dst_fmt)
         return plan
+
+    def _resolved_format(self, endpoint: EndpointConfig) -> str:
+        """Return the canonical driver format, preferring saved connector type."""
+        if endpoint.connector_id:
+            try:
+                cfg = resolve_connector_config(endpoint)
+                return (cfg.get("type") or endpoint.format or "").lower()
+            except Exception:
+                pass
+        if endpoint.kind == "file":
+            return (endpoint.format or "csv").lower()
+        if endpoint.kind == "file_export":
+            return (endpoint.format or "json").lower()
+        return (endpoint.format or "").lower()
 
 
 _engine: Optional[UniversalTransferEngine] = None

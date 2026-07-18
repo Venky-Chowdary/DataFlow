@@ -6,6 +6,11 @@ import json
 import uuid
 from pathlib import Path
 
+try:
+    from services.value_serializer import json_default
+except ImportError:
+    json_default = str
+
 OUTPUT = Path(__file__).resolve().parents[1] / "data" / "connector_catalog.json"
 
 # Core live connectors
@@ -174,7 +179,7 @@ def generate() -> list[dict]:
 def main() -> None:
     catalog = generate()
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(json.dumps({"version": 1, "total": len(catalog), "connectors": catalog}, indent=2), encoding="utf-8")
+    OUTPUT.write_text(json.dumps({"version": 1, "total": len(catalog), "connectors": catalog}, indent=2, default=json_default), encoding="utf-8")
     print(f"Generated {len(catalog)} connectors -> {OUTPUT}")
 
 

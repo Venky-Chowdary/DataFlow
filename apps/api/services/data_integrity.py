@@ -12,6 +12,8 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.value_serializer import cell_to_string
+
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
     "maximum": {"confidence": 0.95, "null_rate_max": 0.0, "parse_fail_max": 0.0},
@@ -19,10 +21,7 @@ _MODE_THRESHOLDS = {
     "balanced": {"confidence": 0.75, "null_rate_max": 0.15, "parse_fail_max": 0.05},
 }
 
-_REQUIRED_NAME_PATTERNS = re.compile(
-    r"(^id$|_id$|^uuid$|_uuid$|_key$|^key$|_code$|account_no|acct_no|ssn|mrn)",
-    re.IGNORECASE,
-)
+
 _FINANCIAL_NAME_PATTERNS = re.compile(
     r"(amount|amt|price|cost|total|balance|payment|revenue|salary|premium|fee)",
     re.IGNORECASE,
@@ -103,7 +102,7 @@ def _check_transform_dry_run(
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
     headers = source_columns or list(rows[0].keys())
-    sample_rows = [[str(row.get(h, "")) for h in headers] for row in rows[:200]]
+    sample_rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in rows[:200]]
     from services.transform_engine import dry_run_sample
 
     ok, errors = dry_run_sample(
@@ -151,7 +150,7 @@ def _check_financial_precision(
         )
         if transform not in {"decimal", "integer", "currency", "percentage"}:
             continue
-        values = [str(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
+        values = [cell_to_string(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
                 continue
@@ -189,21 +188,55 @@ def _check_required_nulls(
     *,
     null_rate_max: float,
     dest_kind: str = "",
+    primary_key: str | None = None,
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
+    """Only enforce nullability on the inferred primary key and canonical key columns.
+
+    Foreign-key / PII columns (email, phone, ssn, user_id, etc.) can legitimately
+    be sparse in source data; blocking transfer because of nulls in those
+    columns causes false preflight failures for schemaless/NoSQL sources.
+    In strict/maximum mode we also hold `*_id` columns to the same standard.
+    """
     issues: list[str] = []
     schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+    mode = (validation_mode or "strict").strip().lower()
+
+    # Resolve the source column that maps to the primary key target.
+    pk_source = ""
+    if primary_key:
+        for m in mappings:
+            if (m.get("target") or "").lower() == primary_key.lower():
+                pk_source = m.get("source", "")
+                break
+        if not pk_source:
+            pk_source = primary_key
+
     for m in mappings:
         src = m.get("source", "")
         tgt = m.get("target", "")
-        if schemaless and tgt.lower() != "_id" and src.lower() != "_id":
+        src_lower = src.lower()
+        tgt_lower = tgt.lower()
+
+        if schemaless and src_lower != "_id":
             # Schemaless documents generate `_id` and do not require every FK.
             continue
-        if not (_REQUIRED_NAME_PATTERNS.search(src) or _REQUIRED_NAME_PATTERNS.search(tgt)):
+
+        # The inferred primary key is always required.
+        is_pk = bool(pk_source and src == pk_source)
+        # Exact canonical key columns are always required; `*_id` columns are
+        # also treated as required in strict/maximum validation mode.
+        reserved_exact = {"id", "_id", "uuid", "pk", "key"}
+        is_reserved_key = src_lower in reserved_exact or tgt_lower in reserved_exact
+        if mode in {"strict", "maximum"} and not is_reserved_key:
+            is_reserved_key = src_lower.endswith("_id") or tgt_lower.endswith("_id")
+        if not is_pk and not is_reserved_key:
             continue
+
         values = [row.get(src) for row in rows]
         if not values:
             continue
-        empty = sum(1 for v in values if v is None or str(v).strip() == "")
+        empty = sum(1 for v in values if cell_to_string(v) == "")
         rate = empty / len(values)
         if rate > null_rate_max:
             issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
@@ -248,7 +281,7 @@ def _check_duplicate_keys(
             continue
         seen: dict[str, int] = {}
         for row in rows:
-            val = str(row.get(src, "")).strip()
+            val = cell_to_string(row.get(src, "")).strip()
             if not val:
                 continue
             seen[val] = seen.get(val, 0) + 1
@@ -341,7 +374,7 @@ def _check_encoding_anomalies(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for val in row.values():
             if val is None:
                 continue
-            text = str(val)
+            text = cell_to_string(val)
             if "\ufffd" in text:
                 issues.append("replacement character () detected — encoding mismatch")
                 break
@@ -395,31 +428,28 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: prefer exact id/_id target (e.g. id -> _id for MongoDB),
-    # then exact id/_id source, then first *_id source. Schemaless stores only enforce _id.
+    # Primary-key heuristic: exact canonical key columns (`_id`, `id`, `uuid`,
+    # `pk`, `key`) are always treated as required/unique. In strict/maximum mode
+    # we also treat `*_id` columns as keys so high-assurance transfers enforce
+    # completeness, while balanced/review modes allow sparse foreign keys such as
+    # `user_id` or `account_id` in NoSQL/CRM extracts.
+    mode = (validation_mode or "strict").strip().lower()
     pk = None
-    if dest_kind in {"mongodb", "dynamodb", "redis"}:
+    preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in {"mongodb", "dynamodb", "redis"} else ("_id",)
+    for key in preferred:
         for m in mappings:
-            if (m.get("target") or "").lower() == "_id":
+            if (m.get("target") or "").lower() == key:
                 pk = m.get("source")
                 break
         if not pk:
-            pk = next((c for c in source_columns if c.lower() == "_id"), None)
-    else:
-        for m in mappings:
-            if (m.get("target") or "").lower() in {"id", "_id"}:
-                pk = m.get("source")
+            pk = next((c for c in source_columns if c.lower() == key), None)
+        if pk:
+            break
+    if not pk and mode in {"strict", "maximum"}:
+        for col in source_columns:
+            if col.lower().endswith("_id"):
+                pk = col
                 break
-        if not pk:
-            for col in source_columns:
-                if col.lower() in {"id", "_id"}:
-                    pk = col
-                    break
-        if not pk:
-            for col in source_columns:
-                if col.lower().endswith("_id"):
-                    pk = col
-                    break
 
     checks: list[dict[str, Any]] = []
 
@@ -427,7 +457,7 @@ def run_integrity_audit(
         checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind, schema_policy=schema_policy))
         checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
         checks.append(_check_financial_precision(mappings, source_types, rows))
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind))
+        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
         checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
@@ -449,6 +479,7 @@ def run_integrity_audit(
             source_types,
             primary_key=pk,
             dest_kind=dest_kind,
+            validation_mode=validation_mode,
         )
         checks.append({
             "check": "expectations_suite",

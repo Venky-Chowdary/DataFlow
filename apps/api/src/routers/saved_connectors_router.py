@@ -223,7 +223,11 @@ def test_saved_connector(
         "private_key": conn.private_key or "",
         "auth_source": conn.auth_source or "",
     }
-    ok, message = run_probe(conn.type or "", cfg)
+    try:
+        ok, message = run_probe(conn.type or "", cfg)
+    except Exception as exc:
+        mark_tested(connector_id, False)
+        return {"success": False, "message": f"Test failed: {exc}", "auth_source": cfg.get("auth_source", "")}
 
     # Persist any auto-resolved auth fields (e.g., MongoDB authSource) so the
     # saved connector works end-to-end without re-entering the connection string.

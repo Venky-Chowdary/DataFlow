@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+from services.value_serializer import json_default
+
 
 def fingerprint_schema(
     columns: list[str],
@@ -17,7 +19,7 @@ def fingerprint_schema(
         {"name": c, "type": (column_types.get(c) or "VARCHAR").upper()}
         for c in sorted(columns)
     ]
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=json_default)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
@@ -32,7 +34,7 @@ def fingerprint_mappings(mappings: list[dict[str, Any]]) -> str:
         }
         for m in sorted(mappings, key=lambda x: str(x.get("source", "")))
     ]
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=json_default)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 

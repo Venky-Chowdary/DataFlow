@@ -11,6 +11,7 @@ import random
 import uuid
 from dataclasses import dataclass, field
 
+from services.value_serializer import json_default
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.synonyms import SYNONYM_DICTIONARY
 
@@ -40,7 +41,7 @@ class TrainingDataset:
                 "input": ex.input,
                 "output": ex.output,
                 "category": ex.category,
-            }))
+            }, default=json_default))
         return "\n".join(lines)
 
     def save(self, path: str):

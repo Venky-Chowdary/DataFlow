@@ -12,6 +12,11 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+try:
+    from services.value_serializer import json_default
+except ImportError:
+    json_default = str  # fallback when running outside api root
+
 
 def _is_valid_api_key(value: str) -> bool:
     """Reject masked or sentinel keys that may leak through the store."""
@@ -291,7 +296,7 @@ class DataTransferLocalProvider(DataTransferLLMProvider):
             "analysis": answer_parts,
             "reasoning": reasoning_steps,
             "method": "local_knowledge",
-        }, indent=2)
+        }, indent=2, default=json_default)
 
         return LLMResponse(
             content=content,

@@ -20,6 +20,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from services.value_serializer import json_default
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
@@ -69,7 +70,7 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
             id_input = json.dumps(
                 {k: v for k, v in doc.items() if k != "_id"},
                 sort_keys=True,
-                default=str,
+                default=json_default,
             )
             doc["_id"] = hashlib.sha256(id_input.encode("utf-8")).hexdigest()
 
@@ -192,11 +193,20 @@ def write_mapped_rows(
         from bson.binary import Binary
         from bson.decimal128 import Decimal128
 
-        def _to_bson(value: Any, stype: str) -> Any:
+        transform_by_col = {
+            sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (m.get("transform") or "")
+            for m in mappings
+        }
+
+        def _to_bson(value: Any, stype: str, transform: str = "") -> Any:
             if value is None:
                 return None
             upper = stype.upper()
-            if upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
+            # An explicit mapping transform overrides the inferred source type so
+            # values like decimal strings are stored as the correct BSON type.
+            if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC"}:
+                return Decimal128(str(value))
+            if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 try:
                     iv = int(value)
                 except (ValueError, TypeError):
@@ -209,15 +219,13 @@ def write_mapped_rows(
                     except Exception:
                         return str(iv)
                 return iv
-            if upper in {"BOOLEAN", "BOOL"}:
+            if transform == "boolean" or upper in {"BOOLEAN", "BOOL"}:
                 text = str(value).strip().lower()
                 if text in {"true", "t", "yes", "y", "1"}:
                     return True
                 if text in {"false", "f", "no", "n", "0"}:
                     return False
                 return value
-            if upper in {"DECIMAL", "NUMERIC"}:
-                return Decimal128(str(value))
             if upper == "DATE":
                 if isinstance(value, _datetime):
                     return value
@@ -282,7 +290,12 @@ def write_mapped_rows(
 
         typed_rows: list[tuple] = []
         for row in mapped_rows:
-            typed_rows.append(tuple(_to_bson(v, t) for v, t in zip(row, logical_types)))
+            typed_rows.append(
+                tuple(
+                    _to_bson(v, t, transform_by_col.get(target_cols[i], ""))
+                    for i, (v, t) in enumerate(zip(row, logical_types))
+                )
+            )
 
         total = len(typed_rows)
         # MongoDB writes are split into smaller server-friendly batches.

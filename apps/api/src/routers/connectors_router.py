@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import PyMongoError
 
 from services.team_store import can_read_workspace, can_write_workspace
+from services.value_serializer import json_default
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -572,12 +573,12 @@ async def stream_transfer_job(job_id: str, request: Request):
         while True:
             job = mongo.get_job(job_id)
             if not job:
-                yield f"event: error\ndata: {json.dumps({'error': 'Job not found'})}\n\n"
+                yield f"event: error\ndata: {json.dumps({'error': 'Job not found'}, default=json_default)}\n\n"
                 break
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
-            yield f"data: {json.dumps(job)}\n\n"
+            yield f"data: {json.dumps(job, default=json_default)}\n\n"
             if job.get("status") in ("completed", "failed"):
                 break
             await asyncio.sleep(0.4)

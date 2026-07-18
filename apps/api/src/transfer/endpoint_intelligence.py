@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from connectors.mongodb_common import _mongo_client
+
 from .adapters import (
     _introspect_table_schema,
     mongodb_connection_string,
@@ -11,6 +13,7 @@ from .adapters import (
 from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
+from services.value_serializer import cell_to_string
 
 
 def introspect_endpoint(
@@ -58,6 +61,11 @@ def introspect_endpoint(
         return out
 
     cfg = resolve_connector_config(endpoint)
+    # When a saved connector is used, its stored driver type is authoritative;
+    # ignore an inline format string that may have been sent as a placeholder.
+    resolved_fmt = cfg.get("type") or endpoint.format
+    fmt = (resolved_fmt or "").lower()
+    out["format"] = resolved_fmt
 
     if fmt == "postgresql":
         from connectors.postgresql import test_postgresql
@@ -81,8 +89,6 @@ def introspect_endpoint(
 
     if fmt == "mongodb":
         try:
-            from pymongo import MongoClient
-
             from .connector_registry import humanize_connection_error, run_probe
 
             ok, msg = run_probe(fmt, cfg)
@@ -92,16 +98,29 @@ def introspect_endpoint(
             # Carry the resolved auth_source into the endpoint so subsequent
             # sample reads use the same authentication database.
             endpoint.auth_source = cfg.get("auth_source", "") or endpoint.auth_source
-            client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
+            client = _mongo_client(mongodb_connection_string(cfg))
             db_name = endpoint.database or cfg["database"] or "test"
             db = client[db_name]
-            colls = db.list_collection_names()
-            out["connected"] = True
-            out["objects"] = [{"name": c, "type": "collection"} for c in colls[:50]]
-            out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
-            if endpoint.collection:
+            # When the caller already supplied a collection/table, target it
+            # directly instead of listing every collection. This avoids slow
+            # namespace scans on large MongoDB deployments and makes the source
+            # preview load in one round-trip.
+            requested_coll = endpoint.collection
+            if requested_coll:
+                try:
+                    db[requested_coll].find_one({})
+                except Exception as coll_err:
+                    out["message"] = f"Collection `{requested_coll}` not found or unreadable: {coll_err}"
+                    return out
+                out["connected"] = True
+                out["objects"] = [{"name": requested_coll, "type": "collection"}]
+                out["message"] = f"MongoDB connected — reading `{requested_coll}` in `{db_name}`"
                 _attach_db_sample(out, endpoint)
-            client.close()
+            else:
+                colls = db.list_collection_names()
+                out["connected"] = True
+                out["objects"] = [{"name": c, "type": "collection"} for c in colls[:50]]
+                out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
         except Exception as e:
             out["message"] = humanize_connection_error("mongodb", e)
         return out
@@ -280,31 +299,60 @@ def introspect_endpoint(
     return out
 
 
-def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 200) -> None:
+def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 100) -> None:
     """Bounded schema discovery — safe for million-row tables."""
     try:
         cfg = resolve_connector_config(endpoint)
-        fmt = (endpoint.format or "").lower()
+        # Use the resolved saved-connector driver type if available, otherwise
+        # fall back to the inline format string.
+        fmt = (cfg.get("type") or endpoint.format or "").lower()
 
         if fmt == "mongodb":
+            import json
+
             from pymongo import MongoClient
+
+            from services.schema_inference import infer_type
 
             coll_name = endpoint.collection
             if not coll_name:
                 return
-            client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
-            db = client[endpoint.database or cfg["database"] or "test"]
-            coll = db[coll_name]
-            records = list(coll.find().limit(sample_limit))
+            try:
+                # Reuse the cached MongoClient to avoid repeated connection handshakes
+                # when the UI polls/retries introspection for the same connector.
+                client = _mongo_client(mongodb_connection_string(cfg))
+                db = client[endpoint.database or cfg["database"] or "test"]
+                coll = db[coll_name]
+                cursor = coll.find().max_time_ms(5000).limit(sample_limit)
+                records = list(cursor)
+            except Exception as exc:
+                out["message"] = f"Collection sample failed: {exc}"
+                return
+            # Serialize MongoDB-native types to JSON-safe scalars so the
+            # introspection response can be returned without FastAPI serialization errors.
+            from services.value_serializer import json_default
+
+            safe_records = []
             for r in records:
-                if "_id" in r:
-                    r["_id"] = str(r["_id"])
-            columns = list(records[0].keys()) if records else []
+                safe_records.append(json.loads(json.dumps(r, default=json_default)))
+            columns = list(safe_records[0].keys()) if safe_records else []
+            # Infer logical types from the raw sampled values (not just "string").
+            # cell_to_string normalizes ObjectId, datetime, Decimal128, and nested
+            # documents into canonical strings so the statistical inferrer can detect
+            # INTEGER, DECIMAL, BOOLEAN, TIMESTAMP, JSON, etc.
+            schema = {}
+            for col in columns:
+                samples = [cell_to_string(r.get(col)) for r in records[:100] if r.get(col) is not None]
+                schema[col] = infer_type(samples, field_name=col) if samples else "VARCHAR"
             out["columns"] = columns
-            out["schema"] = {c: "string" for c in columns}
-            out["row_estimate"] = coll.estimated_document_count() if columns else 0
+            out["schema"] = schema
+            out["sample_data"] = safe_records[:10]
+            out["data"] = safe_records[:10]
+            try:
+                out["row_estimate"] = coll.estimated_document_count(maxTimeMS=5000) if columns else 0
+            except Exception:
+                out["row_estimate"] = len(records)
             out["table_exists"] = bool(columns)
-            client.close()
             return
 
         if fmt == "redis":
@@ -394,10 +442,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
 
 def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, source_info: dict) -> dict:
     """Plan auto-creation and type mappings for a source → destination transfer."""
+    from .adapters import resolve_connector_config
     from .registry import validate_transfer
 
-    src_fmt = source.format or ("csv" if source.kind == "file" else source.format)
-    dst_fmt = destination.format or ("mongodb" if destination.kind == "database" else "json")
+    # When a saved connector is referenced, use its stored driver type as the
+    # canonical format so the UI cannot accidentally pass an unrelated format.
+    def _resolved_fmt(endpoint: EndpointConfig, fallback: str) -> str:
+        if endpoint.connector_id:
+            try:
+                cfg = resolve_connector_config(endpoint)
+                return cfg.get("type") or endpoint.format or fallback
+            except Exception:
+                pass
+        return endpoint.format or fallback
+
+    src_fmt = _resolved_fmt(source, "csv" if source.kind == "file" else source.format or "json")
+    dst_fmt = _resolved_fmt(destination, "mongodb" if destination.kind == "database" else "json")
     ok, msg = validate_transfer(source.kind, src_fmt, destination.kind, dst_fmt)
 
     plan: dict = {

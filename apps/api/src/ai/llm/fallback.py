@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from services.value_serializer import json_default
+
 from .provider import (
     DataTransferAnthropicProvider,
     DataTransferLLMProvider,
@@ -86,7 +88,7 @@ class DataTransferFallbackChain:
         answer = result.answer if isinstance(result.answer, dict) else {}
 
         return FallbackResult(
-            content=json.dumps(answer, indent=2),
+            content=json.dumps(answer, indent=2, default=json_default),
             success=True,
             method=result.method,
             reasoning="\n".join(f"Step {s.step}: {s.description} → {s.result}" for s in result.reasoning),
@@ -103,7 +105,7 @@ class DataTransferFallbackChain:
         """Map columns with full fallback chain."""
         result = self.reasoning_chain.map_columns(source_columns, target_columns, source_samples)
         return FallbackResult(
-            content=json.dumps(result.answer, indent=2),
+            content=json.dumps(result.answer, indent=2, default=json_default),
             success=True,
             method=result.method,
             reasoning="\n".join(f"Step {s.step}: {s.description} → {s.result}" for s in result.reasoning),

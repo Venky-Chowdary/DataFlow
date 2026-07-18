@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
@@ -202,7 +203,7 @@ class DataPilotAgent:
                 tool_results_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
-                    "content": json.dumps(tr.output if tr.success else {"error": tr.error}, default=str),
+                    "content": json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default),
                 })
 
             messages.append({"role": "assistant", "content": assistant_content})

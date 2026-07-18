@@ -143,7 +143,7 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     """
     from urllib.parse import parse_qs, urlparse
 
-    from pymongo import MongoClient
+    from connectors.mongodb_common import _mongo_client
 
     connection_string = (cfg.get("connection_string") or "").strip()
     qs = parse_qs(urlparse(connection_string).query, keep_blank_values=True)
@@ -163,9 +163,8 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     for auth_source in candidates:
         try:
             conn_str = mongodb_connection_string({**cfg, "auth_source": auth_source})
-            client = MongoClient(conn_str, serverSelectionTimeoutMS=2500)
+            client = _mongo_client(conn_str)
             client.admin.command("ping")
-            client.close()
             cfg["auth_source"] = auth_source
             return True, f"MongoDB reachable (authSource={auth_source})"
         except Exception as exc:
@@ -253,7 +252,7 @@ def resolve_connector_config(
             "connection_string": _pick(cfg.get("connection_string"), conn_dict.get("connection_string")),
             "warehouse": _pick(cfg.get("warehouse"), conn_dict.get("warehouse")),
             "ssl": conn_dict.get("ssl") if cfg.get("ssl") is None or cfg.get("ssl") is False else cfg.get("ssl"),
-            "type": endpoint.format or conn_dict.get("type") or "",
+            "type": conn_dict.get("type") or endpoint.format or "",
             "auth_mode": _pick(cfg.get("auth_mode"), conn_dict.get("auth_mode")),
             "auth_role": _pick(cfg.get("auth_role"), conn_dict.get("auth_role")),
             "auth_source": _pick(cfg.get("auth_source"), conn_dict.get("auth_source")),
@@ -294,8 +293,9 @@ def resolve_endpoint(
     merged = endpoint_to_dict(endpoint)
     merged.update(cfg)
     # ``EndpointConfig.from_dict`` expects ``format``; ``resolve_connector_config``
-    # uses ``type`` as the canonical driver key.
-    merged.setdefault("format", merged.get("type", endpoint.format))
+    # uses ``type`` as the canonical driver key.  When a saved connector exists,
+    # its stored driver type is authoritative; otherwise keep the inline format.
+    merged["format"] = merged.get("type") or merged.get("format") or endpoint.format
     return EndpointConfig.from_dict(endpoint.kind, merged)
 
 
@@ -338,8 +338,14 @@ def _lookup_saved_connector(
         return None
 
 
-def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, headers: list[str]) -> dict[str, str]:
-    """Load column types from INFORMATION_SCHEMA when the driver is available."""
+def _introspect_table_schema(
+    db_type: str,
+    cfg: dict[str, Any],
+    table: str,
+    headers: list[str],
+    records: list[dict] | None = None,
+) -> dict[str, str]:
+    """Load column types from INFORMATION_SCHEMA or infer from sample records."""
     if db_type == "generic_sql":
         try:
             from connectors.generic_sql import introspect_table_schema
@@ -369,6 +375,19 @@ def _introspect_table_schema(db_type: str, cfg: dict[str, Any], table: str, head
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
+
+    # Fallback: infer logical types from the sample records we already have in hand.
+    # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
+    # stored values may be strings but whose content is numeric, boolean, JSON, etc.
+    if records:
+        try:
+            from services.file_parser import FileParser
+
+            inferred = FileParser.infer_schema(records)
+            if inferred:
+                return {h: inferred.get(h, "TEXT") for h in headers}
+        except Exception:
+            pass
     return {h: "TEXT" for h in headers}
 
 
@@ -394,7 +413,8 @@ def read_source_database(
 ) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
     cfg = resolve_connector_config(endpoint)
-    db_type = resolve_driver_type(endpoint.format)
+    # Prefer the saved connector's driver type over any inline format string.
+    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
@@ -418,7 +438,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema("postgresql", cfg, table, batch.headers)
+        schema = _introspect_table_schema("postgresql", cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "mongodb":
@@ -444,7 +464,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, "mongodb", coll_name)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema("mongodb", cfg, coll_name, batch.headers)
+        schema = _introspect_table_schema("mongodb", cfg, coll_name, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "mysql":
@@ -468,7 +488,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "bigquery":
@@ -494,7 +514,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "snowflake":
@@ -519,7 +539,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "gcs":
@@ -624,7 +644,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "generic_sql":
@@ -649,7 +669,7 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = _introspect_table_schema(db_type, cfg, table, batch.headers)
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
     if db_type == "sftp":
@@ -702,8 +722,9 @@ def write_destination_database(
     conflict_columns: list[str] | None = None,
 ) -> tuple[int, list[str], dict]:
     from .connector_capabilities import resolve_driver_type
-    db_type = resolve_driver_type(endpoint.format)
     cfg = resolve_connector_config(endpoint)
+    # Prefer the saved connector's driver type over any inline format string.
+    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
     ddl_log: list[str] = []
 
     from connectors.writer_common import transform_error_policy_for_validation_mode
@@ -1146,3 +1167,18 @@ def write_destination_file(
         "transform_errors": transform_errors[:10],
         "mapped": bool(mappings),
     }
+
+
+def resolve_endpoint_dict(endpoint_dict: dict[str, Any], workspace_id: str | None = None) -> dict[str, Any]:
+    """Resolve a saved connector into a plain endpoint dict (format, credentials, etc.)."""
+    from .models import EndpointConfig, endpoint_to_dict
+
+    kind = endpoint_dict.get("kind") or "database"
+    ep = EndpointConfig.from_dict(kind, endpoint_dict)
+    resolved = resolve_endpoint(ep, workspace_id=workspace_id)
+    out = endpoint_to_dict(resolved)
+    # Preserve keys the UI may rely on that are not in endpoint_to_dict.
+    for key, value in endpoint_dict.items():
+        if key not in out and value is not None:
+            out[key] = value
+    return out

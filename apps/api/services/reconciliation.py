@@ -18,6 +18,8 @@ from datetime import timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from services.value_serializer import json_default
+
 SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
@@ -725,9 +727,7 @@ def verify_mongodb_collection(
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
-        from pymongo import MongoClient
-
-        from connectors.mongodb_common import normalize_mongodb_connection_string
+        from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
 
         conn_str = normalize_mongodb_connection_string(
             connection_string or "",
@@ -739,7 +739,7 @@ def verify_mongodb_collection(
             ssl=ssl,
             auth_source=auth_source,
         )
-        client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
+        client = _mongo_client(conn_str)
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
@@ -756,7 +756,6 @@ def verify_mongodb_collection(
             set(k for doc in coll.find({}).limit(100) for k in doc.keys())
         )
         checksum = canonical_checksum_from_iter(_doc_iter(), columns, limit=limit)
-        client.close()
         return int(count), checksum
     except Exception:
         return -1, ""
@@ -974,8 +973,8 @@ def normalize_cell(value: Any) -> str:
         except Exception:
             pass
         return base64.b64encode(value).decode("ascii")
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, sort_keys=True, default=str)
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        return json.dumps(value, sort_keys=True, default=json_default)
     text = str(value).strip()
     # Boolean and empty fast paths.
     if not text:
@@ -997,7 +996,7 @@ def normalize_cell(value: Any) -> str:
         try:
             parsed = json.loads(text)
             if isinstance(parsed, (dict, list)):
-                return json.dumps(parsed, sort_keys=True, default=str)
+                return json.dumps(parsed, sort_keys=True, default=json_default)
         except (json.JSONDecodeError, TypeError):
             pass
     # Date/time normalization: cheap heuristic first to avoid running the date

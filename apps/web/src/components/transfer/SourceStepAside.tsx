@@ -26,6 +26,7 @@ interface SourceStepAsideProps {
   uploading?: boolean;
   sourceManual?: boolean;
   sourceManualType?: string;
+  sourceIntrospecting?: boolean;
 }
 
 function ProfilingSteps({ active }: { active: boolean }) {
@@ -136,6 +137,7 @@ export function SourceStepAside({
   uploading,
   sourceManual,
   sourceManualType,
+  sourceIntrospecting,
 }: SourceStepAsideProps) {
   if (sourceKind === "file" && parsed) {
     return (
@@ -152,11 +154,12 @@ export function SourceStepAside({
     );
   }
 
-  if (sourceColumns.length > 0) {
+  if (sourceColumns.length > 0 && !sourceIntrospecting) {
     return (
       <StructurePreview
         columns={sourceColumns}
         schema={sourceSchema}
+        rows={samplePreviewRows}
         title="Source schema"
         subtitle={
           sourceConnector
@@ -169,6 +172,21 @@ export function SourceStepAside({
 
   if (sourceKind === "file") {
     return <FileAwaitingPanel uploading={uploading} />;
+  }
+
+  if (sourceIntrospecting) {
+    return (
+      <div className="df2-source-aside">
+        <div className="df2-source-aside-head">
+          <div>
+            <h4>Reading source schema</h4>
+            <p>Detecting columns and sample rows from the connector…</p>
+          </div>
+          <span className="df2-badge df2-badge-xs df2-badge-live">Profiling</span>
+        </div>
+        <SchemaSkeleton />
+      </div>
+    );
   }
 
   if (sourceKind === "database") {

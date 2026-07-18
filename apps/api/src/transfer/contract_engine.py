@@ -80,6 +80,6 @@ def finalize_contract(contract_id: str, success: bool) -> None:
     store.save_breaker(breaker)
 
     contract = store.get_contract(contract_id)
-    if contract and not success and breaker.state == "open":
+    if contract and not success and breaker.state.value == "open":
         contract.status = ContractStatus.BROKEN
         store.save_contract(contract)

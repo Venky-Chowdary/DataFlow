@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.postgresql_conn import get_connection
+from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
     build_mapped_rows,
@@ -40,7 +41,7 @@ def _copy_text_value(value: Any) -> str:
     if isinstance(value, bool):
         return "t" if value else "f"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
     if isinstance(value, bytes):
         return "\\x" + value.hex()
     if isinstance(value, Decimal):

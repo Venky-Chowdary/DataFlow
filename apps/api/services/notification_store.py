@@ -12,6 +12,7 @@ from typing import Any
 
 from services.platform_config import data_dir
 from services.secret_vault import decrypt_secret, encrypt_secret
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "notifications.json"
 
@@ -75,7 +76,7 @@ def _save(data: dict[str, Any]) -> None:
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
     tmp.replace(path)
 
 

@@ -11,8 +11,23 @@ from typing import Any
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "transfer_plans.json"
+
+
+def _resolve_endpoint_in_plan(endpoint: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Canonicalize a saved connector endpoint so its format is authoritative."""
+    if not endpoint:
+        return endpoint
+    connector_id = endpoint.get("connector_id")
+    if not connector_id:
+        return endpoint
+    try:
+        from src.transfer.adapters import resolve_endpoint_dict
+        return resolve_endpoint_dict(endpoint)
+    except Exception:
+        return endpoint
 
 
 def _now() -> str:
@@ -130,7 +145,7 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
         STORE_PATH,
         {"plans": [p.to_dict() for p in plans]},
         indent=2,
-        default=None,
+        default=json_default,
     )
 
 
@@ -148,12 +163,14 @@ def get_plan(plan_id: str) -> TransferPlanRecord | None:
 
 def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
     plans = _load_all()
+    source = _resolve_endpoint_in_plan(data.get("source")) or {}
+    destination = _resolve_endpoint_in_plan(data.get("destination")) or {}
     plan = TransferPlanRecord(
         id=str(uuid.uuid4()),
         name=data.get("name") or "Transfer plan",
         status="draft",
-        source=dict(data.get("source") or {}),
-        destination=dict(data.get("destination") or {}),
+        source=source,
+        destination=destination,
         source_columns=list(data.get("source_columns") or []),
         source_schema={k: str(v) for k, v in (data.get("source_schema") or {}).items()},
         target_columns=list(data.get("target_columns") or []),
@@ -248,9 +265,9 @@ def update_plan(plan_id: str, data: dict[str, Any]) -> TransferPlanRecord | None
         if "name" in data and data["name"]:
             plan.name = str(data["name"])
         if "source" in data:
-            plan.source = dict(data["source"] or {})
+            plan.source = _resolve_endpoint_in_plan(data["source"]) or {}
         if "destination" in data:
-            plan.destination = dict(data["destination"] or {})
+            plan.destination = _resolve_endpoint_in_plan(data["destination"]) or {}
         if "source_columns" in data:
             plan.source_columns = list(data["source_columns"] or [])
         if "source_schema" in data:

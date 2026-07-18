@@ -101,8 +101,8 @@ def _role_from_name(name: str) -> tuple[str | None, float]:
     return best_role, best_score
 
 
-def _role_from_samples(samples: list[str], inferred_type: str) -> tuple[str | None, float]:
-    non_empty = [s.strip() for s in samples if s and str(s).strip()]
+def _role_from_samples(samples: list[Any], inferred_type: str) -> tuple[str | None, float]:
+    non_empty = [str(s).strip() for s in samples if s is not None and str(s).strip()]
     if not non_empty:
         return None, 0.0
 
@@ -123,7 +123,7 @@ def _role_from_samples(samples: list[str], inferred_type: str) -> tuple[str | No
             id_like += 1
 
     n = len(non_empty)
-    avg_len = sum(len(str(s)) for s in non_empty) / n
+    avg_len = sum(len(s) for s in non_empty) / n
     if avg_len > 256 or inferred_type.upper() in {"TEXT", "CLOB", "LONGTEXT"}:
         return "long_text", 0.85
     if inferred_type.upper() in {"BINARY", "BLOB", "BYTEA"}:

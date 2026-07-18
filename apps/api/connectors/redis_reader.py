@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from connectors.base import ReadBatch
+from services.value_serializer import cell_to_string, json_default
 
 
 @dataclass
@@ -33,13 +34,15 @@ def _redis_client(cfg: dict[str, Any]):
 
 
 def _decode(value: Any) -> str:
+    from services.value_serializer import json_default
+
     if value is None:
         return ""
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
     if isinstance(value, str):
         return value
-    return json.dumps(value, default=str)
+    return json.dumps(value, default=json_default)
 
 
 def read_keys_batch(
@@ -69,9 +72,9 @@ def read_keys_batch(
                 state.keys_seen += 1
                 ktype = _decode(client.type(key))
                 if ktype == "hash":
-                    val = json.dumps({(_decode(f)): _decode(v) for f, v in client.hgetall(key).items()})
+                    val = json.dumps({(_decode(f)): _decode(v) for f, v in client.hgetall(key).items()}, default=json_default)
                 elif ktype == "list":
-                    val = json.dumps([_decode(v) for v in client.lrange(key, 0, 50)])
+                    val = json.dumps([_decode(v) for v in client.lrange(key, 0, 50)], default=json_default)
                 else:
                     val = _decode(client.get(key))
                 rows.append([key, val, ktype])
@@ -103,7 +106,7 @@ def read_keys_batch(
                         seen.add(key)
                         fieldnames.append(key)
             headers = fieldnames
-            rows = [[str(obj.get(field, "")) for field in fieldnames] for obj in object_values]
+            rows = [[cell_to_string(obj.get(field, "")) for field in fieldnames] for obj in object_values]
 
         total = known_total_rows if known_total_rows is not None else state.keys_seen
         return ReadBatch(headers=headers, rows=rows, offset=state.keys_seen, total_rows=total), state

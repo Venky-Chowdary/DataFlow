@@ -16,10 +16,18 @@ from __future__ import annotations
 import csv
 import io
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
+from services.value_serializer import sanitize_json_value
 
 
 def _new_job_id() -> str:
@@ -47,8 +55,12 @@ def _snowflake_config() -> dict[str, Any] | None:
     keys = ["ACCOUNT", "USER", "PASSWORD", "DATABASE", "WAREHOUSE", "SCHEMA"]
     if not _has_env("DATAFLOW_BENCHMARK_SNOWFLAKE", keys):
         return None
+    account = os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_ACCOUNT"]
+    if ".snowflakecomputing.com" not in account:
+        account = f"{account}.snowflakecomputing.com"
     return {
-        "account": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_ACCOUNT"],
+        "host": account,
+        "port": 443,
         "username": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_USER"],
         "password": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_PASSWORD"],
         "database": os.environ["DATAFLOW_BENCHMARK_SNOWFLAKE_DATABASE"],
@@ -110,7 +122,7 @@ def _run_transfer(
     import sys
     from pathlib import Path
 
-    api_root = Path(__file__).resolve().parents[2]
+    api_root = Path(__file__).resolve().parents[1]
     if str(api_root) not in sys.path:
         sys.path.insert(0, str(api_root))
 
@@ -256,7 +268,7 @@ if __name__ == "__main__":
 
     rows = int(os.environ.get("DATAFLOW_BENCHMARK_ROWS", "1000000"))
     results = run_all(rows)
-    print(json.dumps([r.__dict__ for r in results], indent=2, default=str))
+    print(json.dumps([r.__dict__ for r in results], indent=2, default=sanitize_json_value))
     any_ran = any(r.error != "No credentials" for r in results)
     if not any_ran:
         print("No cloud credentials configured; benchmarks skipped.")

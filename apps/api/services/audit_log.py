@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "audit_events.jsonl"
 MAX_EVENTS = int(__import__("os").getenv("DATAFLOW_AUDIT_MAX_EVENTS", "5000"))
@@ -89,7 +90,7 @@ def append_audit_event(
     # Remove MongoDB-specific _id before writing to file
     file_event = {k: v for k, v in event.items() if k != "_id"}
     with STORE_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(file_event, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(file_event, ensure_ascii=False, default=json_default) + "\n")
     _trim_if_needed()
     return event
 

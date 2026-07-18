@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.value_serializer import json_default
+
 from connectors.elasticsearch_reader import _client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
@@ -35,7 +37,7 @@ def _to_es_value(value: Any, source_type: str) -> Any:
         # JSON as a string keeps the transfer lossless and avoids object/array
         # collisions when the same logical column contains mixed JSON shapes.
         if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
         return value
     return value
 
@@ -83,7 +85,12 @@ def write_mapped_rows(
     client = _client(cfg)
     try:
         if create_table and not client.indices.exists(index=index):
-            client.indices.create(index=index)
+            # Use one shard and zero replicas for predictable test/CI behavior
+            # and to avoid blowing through small cluster shard limits.
+            client.indices.create(
+                index=index,
+                body={"settings": {"number_of_shards": 1, "number_of_replicas": 0}},
+            )
 
         from elasticsearch.helpers import bulk
 

@@ -6,11 +6,14 @@ import json
 import re
 from typing import Any
 
+from services.value_serializer import sanitize_json_value
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from connectors.mongodb_common import (
+    _mongo_client,
     mongodb_database_from_uri,
     normalize_mongodb_connection_string,
 )
@@ -182,7 +185,12 @@ async def query_export(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    rows, columns, schema, _ = _run_query(connector, body)
+    try:
+        rows, columns, schema, _ = _run_query(connector, body)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return QueryExportResult(success=False, error=f"Query execution failed: {exc}", format=body.format)
     if not rows:
         return QueryExportResult(success=True, row_count=0, format=body.format)
 
@@ -317,7 +325,7 @@ def _run_mongodb_query(connector, body):
         raise HTTPException(status_code=500, detail=f"MongoDB driver unavailable: {exc}") from exc
 
     conn_str = connector.connection_string or _build_mongodb_connection_string(connector)
-    client = pymongo.MongoClient(conn_str)
+    client = _mongo_client(conn_str)
     db_name = body.database or connector.database or mongodb_database_from_uri(conn_str) or "test"
     db = client[db_name]
     coll_name = body.collection or "data"
@@ -354,13 +362,8 @@ def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, 
 
 
 def _jsonify_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (dict, list, tuple)):
-        return json.loads(json.dumps(value, default=str))
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
+    """Return a JSON-safe Python value (no Python repr() artifacts)."""
+    return sanitize_json_value(value)
 
 
 def _build_mongodb_connection_string(connector) -> str:
@@ -457,6 +460,7 @@ def _run_snowflake_query(connector, body):
     warehouse = connector.warehouse or ""
     role = getattr(connector, "auth_role", "")
 
+    conn = None
     try:
         conn = snowflake.connector.connect(
             account=account,
@@ -494,4 +498,8 @@ def _run_snowflake_query(connector, body):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass

@@ -830,6 +830,8 @@ export interface EndpointIntrospection {
   objects?: { name: string; type: string }[];
   row_estimate?: number;
   table_exists?: boolean;
+  data?: Record<string, unknown>[];
+  sample_data?: Record<string, unknown>[];
   message: string;
 }
 

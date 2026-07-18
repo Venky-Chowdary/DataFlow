@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.value_serializer import json_default
+
 from .data_analyst import get_data_analyst
 
 
@@ -644,7 +646,7 @@ def format_tool_results_for_llm(results: list[ToolResult]) -> str:
     parts = []
     for r in results:
         if r.success:
-            parts.append(f"Tool `{r.name}` result:\n{json.dumps(r.output, indent=2, default=str)[:4000]}")
+            parts.append(f"Tool `{r.name}` result:\n{json.dumps(r.output, indent=2, default=json_default)[:4000]}")
         else:
             parts.append(f"Tool `{r.name}` failed: {r.error}")
     return "\n\n".join(parts)

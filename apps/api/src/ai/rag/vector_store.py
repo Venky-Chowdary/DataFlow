@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .embedding_service import get_embedding_service
+from services.value_serializer import json_default
 
 _vector_store: Optional["DataTransferVectorStore"] = None
 
@@ -94,7 +95,7 @@ class DataTransferVectorStore:
                 if isinstance(v, (str, int, float, bool)):
                     clean[k] = v
                 elif isinstance(v, list):
-                    clean[k] = json.dumps(v)
+                    clean[k] = json.dumps(v, default=json_default)
                 else:
                     clean[k] = str(v)
             clean_metas.append(clean)

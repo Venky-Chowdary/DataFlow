@@ -5,6 +5,8 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Iterator
 
+from services.value_serializer import cell_to_string
+
 
 def _load_workbook(content: bytes):
     try:
@@ -29,14 +31,17 @@ def parse_excel_preview(content: bytes, preview_rows: int = 100) -> tuple[list[s
         wb.close()
         return [], [], 0
 
-    headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+    headers = []
+    for i, c in enumerate(first):
+        h = cell_to_string(c).strip() if c is not None else ""
+        headers.append(h if h else f"col_{i}")
     preview: list[list[str]] = []
     total = 0
 
     for row in row_iter:
         total += 1
         if len(preview) < preview_rows:
-            preview.append([str(c).strip() if c is not None else "" for c in row])
+            preview.append([cell_to_string(c) for c in row])
 
     wb.close()
     return headers, preview, total
@@ -56,12 +61,15 @@ def iter_excel_batches(content: bytes, chunk_size: int) -> Iterator[list[dict]]:
         wb.close()
         return
 
-    headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+    headers = []
+    for i, c in enumerate(first):
+        h = cell_to_string(c).strip() if c is not None else ""
+        headers.append(h if h else f"col_{i}")
     batch: list[dict] = []
     try:
         for row in row_iter:
             record = {
-                headers[i]: ("" if c is None else str(c).strip())
+                headers[i]: cell_to_string(c)
                 for i, c in enumerate(row[: len(headers)])
             }
             batch.append(record)

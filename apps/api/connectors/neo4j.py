@@ -12,6 +12,7 @@ from typing import Any
 import requests
 
 from connectors.saas_common import ReadBatch, humanize_http_error
+from services.value_serializer import cell_to_string, json_default
 
 
 def _url(host: str, port: int, ssl: bool, database: str) -> str:
@@ -55,15 +56,10 @@ def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
         # Each row entry may be a node dict (when RETURN n) or scalar/dict.
         flat_row = []
         for value in row:
-            if isinstance(value, dict):
-                if "properties" in value:
-                    flat_row.append(json.dumps(value["properties"], default=str))
-                else:
-                    flat_row.append(json.dumps(value, default=str))
-            elif isinstance(value, list):
-                flat_row.append(json.dumps(value, default=str))
+            if isinstance(value, dict) and "properties" in value:
+                flat_row.append(json.dumps(value["properties"], default=json_default))
             else:
-                flat_row.append(str(value))
+                flat_row.append(cell_to_string(value))
         rows.append(flat_row)
     return columns, rows
 

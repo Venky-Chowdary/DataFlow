@@ -388,6 +388,7 @@ def infer_expectations_for_schema(
     *,
     primary_key: str | None = None,
     dest_kind: str = "",
+    validation_mode: str = "strict",
 ) -> list[dict[str, Any]]:
     """Auto-generate standard expectations from schema metadata (dbt-style)."""
     specs: list[dict[str, Any]] = []
@@ -422,10 +423,12 @@ def infer_expectations_for_schema(
                 "severity": "warn",
             })
         if re.search(r"status|state|type|category", col, re.I):
-            # Categorical columns in schemaless documents are often sparse; do not
-            # treat a 5% null rate as a transfer blocker.
+            # Categorical columns in schemaless documents are often sparse.
+            # Only treat a 5% null rate as a hard blocker in maximum validation mode;
+            # otherwise surface it as a warning so the transfer is not held up.
             if not schemaless:
-                specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.05})
+                cat_severity = "block" if (validation_mode or "").lower() == "maximum" else "warn"
+                specs.append({"fn": "expect_column_not_null", "column": col, "max_null_rate": 0.05, "severity": cat_severity})
     return specs
 
 
@@ -488,9 +491,16 @@ def run_auto_expectations(
     primary_key: str | None = None,
     baseline_rows: list[dict[str, Any]] | None = None,
     dest_kind: str = "",
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     """Infer + run standard expectations for a dataset."""
-    specs = infer_expectations_for_schema(columns, schema, primary_key=primary_key, dest_kind=dest_kind)
+    specs = infer_expectations_for_schema(
+        columns,
+        schema,
+        primary_key=primary_key,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
     if baseline_rows:
         for col in columns:
             if (schema.get(col) or "").upper() in {"DECIMAL", "INTEGER", "VARCHAR"}:

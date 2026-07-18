@@ -26,6 +26,7 @@ from services.connector_capability_registry import (
     classify_payload,
     recommended_batch_size,
 )
+from services.value_serializer import cell_to_string
 from services.validation_plan import build_validation_plan
 
 
@@ -41,7 +42,9 @@ class FilePreflightContext(PreflightContext):
             return False, ["No sample rows available for dry-run validation"]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
-        rows = [[str(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
+        # Use cell_to_string so nested lists/dicts from schemaless sources become
+        # valid JSON strings instead of Python repr() artifacts.
+        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
         dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
         mapping_dicts = [
@@ -85,7 +88,7 @@ class FilePreflightContext(PreflightContext):
         seen: dict[str, int] = {}
         dupes: list[dict[str, Any]] = []
         for row in self.sample_rows:
-            val = str(row.get(source_col, ""))
+            val = cell_to_string(row.get(source_col, ""))
             seen[val] = seen.get(val, 0) + 1
         for val, count in seen.items():
             if count > 1 and val:
@@ -387,6 +390,27 @@ def run_file_preflight(
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
+    # Preflight is a sample-based safety check, not a full table scan.  Cap the
+    # sample size so very large file previews or database samples cannot make the
+    # validate step hang.
+    if sample_rows and len(sample_rows) > 500:
+        sample_rows = sample_rows[:500]
+
+    # If the caller did not supply rich source types, infer them from the sample
+    # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
+    # being treated as all-VARCHAR against a typed warehouse target.
+    if sample_rows and columns:
+        generic_types = {"", "varchar", "text", "string"}
+        if not column_types or all((column_types.get(c) or "").lower() in generic_types for c in columns):
+            try:
+                from services.file_parser import FileParser
+
+                inferred = FileParser.infer_schema(sample_rows)
+                if inferred:
+                    column_types = {**column_types, **{c: inferred.get(c, column_types.get(c, "VARCHAR")) for c in columns}}
+            except Exception:
+                pass
+
     source_cols = [
         ColumnSchema(name=c, inferred_type=column_types.get(c, "VARCHAR").upper())
         for c in columns
@@ -467,13 +491,10 @@ def run_file_preflight(
         from services.sample_quality import analyze_dataset_quality
 
         sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types, dest_kind=dest_kind)
-        # For schemaless destinations (MongoDB, DynamoDB, Redis) missing/optional fields
-        # are normal; high null rates should not be treated as DDL blockers.
-        if sample_quality.get("blocks_transfer") and not schemaless:
-            ddl_compatible = False
-            for issue in sample_quality.get("issues", [])[:10]:
-                if issue not in ddl_issues:
-                    ddl_issues.append(issue)
+        # Sample-quality findings (high null rates, outliers, etc.) describe the data,
+        # not the target schema.  They are surfaced by the data-integrity gate (G9);
+        # conflating them with DDL compatibility causes false "Target DDL incompatible"
+        # blockers for real-world sparse collections.
         if schemaless:
             sample_quality["blocks_transfer"] = False
 
@@ -508,7 +529,10 @@ def run_file_preflight(
     )
 
     ctx = FilePreflightContext(plan, sample_rows)
-    engine = PreflightEngine(fail_fast=False)
+    # Fail fast only once both source and destination are known to be connected.
+    # When either side is not yet connected we want every reachable gate to run
+    # (and be reported) so source-only or destination-only problems are visible.
+    engine = PreflightEngine(fail_fast=source_connected and destination_connected)
     result = engine.run(ctx)
 
     from services.preflight_proof_bundle import build_preflight_proof_bundle
@@ -521,7 +545,7 @@ def run_file_preflight(
             {
                 "name": c,
                 "inferred_type": column_types.get(c, "VARCHAR").upper(),
-                "samples": [str(row.get(c, "")) for row in (sample_rows or [])[:20] if row.get(c) is not None],
+                "samples": [cell_to_string(row.get(c, "")) for row in (sample_rows or [])[:20] if row.get(c) is not None],
             }
             for c in columns
         ],
@@ -601,8 +625,9 @@ def probe_destination(endpoint) -> tuple[bool, str]:
     if endpoint.kind != "database":
         return True, "Non-database destination"
 
-    db_type = (endpoint.format or "").lower()
     cfg = resolve_connector_config(endpoint)
+    # Prefer the saved connector's driver type over any inline format string.
+    db_type = (cfg.get("type") or endpoint.format or "").lower()
     # DynamoDB uses the table name as the database identifier; ensure the
     # connectivity probe sees the intended destination table.
     if db_type == "dynamodb":
@@ -672,28 +697,30 @@ def inspect_destination_for_preflight(
         if not conn:
             out["message"] = f"Connector '{connector_id}' not found"
             return out
-        db_type = (conn.get("type") or "mongodb").lower()
+        # Saved connector type is authoritative; inline form values only fill
+        # fields the user may have overridden in the current step.
+        db_type = (conn.get("type") or dest_type or "mongodb").lower()
         out["db_type"] = db_type
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
             connector_id=connector_id,
-            host=conn.get("host", ""),
-            port=int(conn.get("port") or 0),
-            database=conn.get("database", ""),
-            schema=conn.get("schema", "public"),
+            host=dest_host or "",
+            port=int(dest_port or 0),
+            database=dest_database or "",
+            schema=dest_schema or "",
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
-            username=conn.get("username", ""),
-            password=conn.get("password", ""),
-            connection_string=conn.get("connection_string", ""),
-            warehouse=conn.get("warehouse", ""),
-            ssl=conn.get("ssl", False),
-            auth_source=conn.get("auth_source", ""),
-            auth_mode=conn.get("auth_mode", ""),
-            auth_role=conn.get("auth_role", ""),
-            api_key=conn.get("api_key", ""),
-            service_account=conn.get("service_account", ""),
+            username=dest_username or "",
+            password=dest_password or "",
+            connection_string=dest_connection_string or "",
+            warehouse=dest_warehouse or "",
+            ssl=False,
+            auth_source=dest_auth_source or "",
+            auth_mode=dest_auth_mode or "",
+            auth_role=dest_auth_role or "",
+            api_key=dest_api_key or "",
+            service_account=dest_service_account or "",
         )
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()

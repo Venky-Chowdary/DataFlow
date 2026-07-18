@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from connectors.saas_common import ReadBatch, humanize_http_error
+from services.value_serializer import cell_to_string
 
 
 def _url(host: str, port: int, ssl: bool) -> str:
@@ -62,7 +63,7 @@ def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
             record = raw if isinstance(raw, dict) else {"value": raw}
         if not headers and record:
             headers = sorted(record.keys())
-        rows.append([str(record.get(h, "")) for h in headers])
+        rows.append([cell_to_string(record.get(h, "")) for h in headers])
     return headers, rows
 
 

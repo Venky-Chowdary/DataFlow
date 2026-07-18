@@ -35,6 +35,7 @@ from services.cdc_engine import (
     max_watermark,
 )
 from services.error_handling import RetryBudget, with_retry
+from services.value_serializer import cell_to_string
 from services.sync_cursor import (
     build_cursor_key,
     get_watermark,
@@ -71,7 +72,7 @@ class CdcState:
 
 
 def _records_to_matrix(records: list[dict[str, Any]], headers: list[str]) -> list[list[str]]:
-    return [[str(r.get(h, "")) for h in headers] for r in records]
+    return [[cell_to_string(r.get(h, "")) for h in headers] for r in records]
 
 
 def _source_headers(headers: list[str], mappings: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
@@ -307,6 +308,7 @@ def run_cdc_database_transfer(
     checkpoint_service: Any | None = None,
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
+    limit: int = 0,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer from a database source to a database destination."""
     src_type = resolve_driver_type(source.format)

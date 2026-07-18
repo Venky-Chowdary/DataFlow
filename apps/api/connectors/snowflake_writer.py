@@ -5,7 +5,9 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,12 +23,14 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+from services.value_serializer import cell_to_string
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.type_system import ddl_type
+from services.type_system import ddl_type, normalize_logical_type
 
 COPY_THRESHOLD = int(os.getenv("DATAFLOW_SNOWFLAKE_COPY_THRESHOLD", "2000"))
+MAX_BIND_INSERT_ROWS = int(os.getenv("DATAFLOW_SF_BIND_INSERT_ROWS", "1000"))
 
 
 @dataclass
@@ -39,63 +43,166 @@ def sf_type(inferred: str) -> str:
     return ddl_type("snowflake", inferred)
 
 
+def _is_fakesnow_connection(conn: Any) -> bool:
+    """Return True for the local fakesnow emulator — it does not support PUT/COPY."""
+    return getattr(conn, "__class__", None) is not None and conn.__class__.__name__ == "FakeSnowflakeConnection"
+
+
+def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
+    """Return (integer_digits, fractional_scale) for a decimal cell value."""
+    try:
+        text = str(value).strip()
+        if not text:
+            return 0, 0
+        d = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        return 0, 0
+    sign, digits, exponent = d.as_tuple()
+    scale = -exponent if exponent < 0 else 0
+    int_digits = max(0, len(digits) + exponent)
+    return int_digits, scale
+
+
+def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
+    """Pick a NUMBER(p,s) type wide enough for the actual data in this batch.
+
+    The static default of NUMBER(38,10) silently truncates high-precision
+    decimals, which breaks source/target checksum reconciliation.  We size the
+    column from the data we are about to load, keep a small buffer for later
+    rows, and cap at Snowflake's maximum precision of 38.
+    """
+    max_int = 0
+    max_scale = 0
+    for row in mapped_rows:
+        if col_idx >= len(row) or row[col_idx] is None:
+            continue
+        int_digits, scale = _decimal_scale_and_int_digits(row[col_idx])
+        max_int = max(max_int, int_digits)
+        max_scale = max(max_scale, scale)
+
+    # Preserve at least the default 10 fractional digits and add a small buffer
+    # so minor variation in later batches does not overflow the column.
+    scale = min(38, max(10, max_scale + 2))
+    # Leave room for at least a few integer digits beyond what we have seen,
+    # capped by Snowflake's 38 total precision.
+    int_buffer = min(5, 38 - scale)
+    precision = min(38, max(max_int, int_buffer) + scale)
+    return f"NUMBER({precision},{scale})"
+
+
 def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.writer(fh)
+        writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
         writer.writerow(target_cols)
         for row in mapped_rows:
-            writer.writerow(["" if v is None else v for v in row])
+            writer.writerow(["" if v is None else cell_to_string(v) for v in row])
 
 
 def _is_json_type(sf_type: str) -> bool:
     return sf_type and sf_type.split("(")[0].upper() in {"VARIANT", "JSON", "OBJECT", "ARRAY"}
 
 
-def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str], target_types: list[str]) -> int:
-    stage_name = f"{table_name}_STAGE"
-    # Temporary stages must be referenced with a quoted @"name" so Snowflake
-    # resolves them in the session stage namespace instead of current schema.
-    stage_ref = f'@"{stage_name}"'
-    cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
-    cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
+def _batch_insert_rows(
+    cur: Any,
+    table_name: str,
+    target_cols: list[str],
+    target_types: list[str],
+    batch: list[tuple],
+) -> int:
+    """Batch INSERT for rows below the COPY threshold, including VARIANT/JSON.
+
+    Snowflake's Python connector does not support array binds inside a
+    ``SELECT ... FROM VALUES`` subquery (SNOW-940628) and ``VALUES`` clauses do
+    not allow function calls such as ``PARSE_JSON``.  We build one
+    ``INSERT INTO ... SELECT ... FROM VALUES (%s,...), (%s,...)`` statement per
+    sub-batch, stringify JSON-typed values so ``PARSE_JSON(columnN)`` can parse
+    them, and bind all values as positional parameters.
+    """
     col_list = ", ".join(f'"{c}"' for c in target_cols)
-    # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
-    # all other columns are loaded directly by position.
     select_items = []
-    for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
+    for i, t in enumerate(target_types, start=1):
         if _is_json_type(t):
-            select_items.append(f"PARSE_JSON(${i})")
+            select_items.append(f"PARSE_JSON(column{i})")
         else:
-            select_items.append(f"${i}")
+            select_items.append(f"column{i}")
     select_sql = ", ".join(select_items)
-    cur.execute(
-        f"""
-        COPY INTO "{table_name}" ({col_list})
-        FROM (SELECT {select_sql} FROM {stage_ref})
-        FILE_FORMAT = (
-            TYPE = CSV
-            SKIP_HEADER = 1
-            FIELD_OPTIONALLY_ENCLOSED_BY = '"'
-            NULL_IF = ('', 'NULL')
-            ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+
+    written = 0
+    for offset in range(0, len(batch), MAX_BIND_INSERT_ROWS):
+        sub = batch[offset : offset + MAX_BIND_INSERT_ROWS]
+        row_placeholders: list[str] = []
+        params: list[Any] = []
+        for row in sub:
+            converted: list[Any] = []
+            for v, t in zip(row, target_types):
+                if _is_json_type(t):
+                    # JSON-typed cells must be valid JSON strings (or SQL NULL).
+                    # cell_to_string(None) would produce '', which PARSE_JSON('')
+                    # treats as NULL in real Snowflake but errors in DuckDB/fakesnow.
+                    s = cell_to_string(v)
+                    converted.append(None if s == "" else s)
+                else:
+                    converted.append(v)
+            params.extend(converted)
+            row_placeholders.append(f"({', '.join(['%s'] * len(target_cols))})")
+        values_sql = ", ".join(row_placeholders)
+        sql = f'INSERT INTO "{table_name}" ({col_list}) SELECT {select_sql} FROM VALUES {values_sql}'
+        cur.execute(sql, params)
+        written += len(sub)
+    return written
+
+
+def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str], target_types: list[str]) -> int:
+    # Use a unique stage per call so parallel threads/processes cannot overwrite
+    # each other's staged files and load each other's data.
+    stage_name = f"{table_name}_STAGE_{uuid.uuid4().hex}"
+    stage_ref = f'@"{stage_name}"'
+    try:
+        cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
+        cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE")
+        col_list = ", ".join(f'"{c}"' for c in target_cols)
+        # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
+        # all other columns are loaded directly by position.
+        select_items = []
+        for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
+            if _is_json_type(t):
+                select_items.append(f"PARSE_JSON(${i})")
+            else:
+                select_items.append(f"${i}")
+        select_sql = ", ".join(select_items)
+        cur.execute(
+            f"""
+            COPY INTO "{table_name}" ({col_list})
+            FROM (SELECT {select_sql} FROM {stage_ref})
+            FILE_FORMAT = (
+                TYPE = CSV
+                SKIP_HEADER = 1
+                FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+                NULL_IF = ('', 'NULL')
+                ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+            )
+            ON_ERROR = 'CONTINUE'
+            """
         )
-        ON_ERROR = 'CONTINUE'
-        """
-    )
-    rows = cur.fetchall()
-    loaded = 0
-    errors_seen = 0
-    first_error = None
-    for row in rows:
-        if len(row) >= 4:
-            loaded += int(row[3] or 0)
-        if len(row) >= 6 and row[5]:
-            errors_seen += int(row[5] or 0)
-            if first_error is None and len(row) >= 7:
-                first_error = row[6]
-    if errors_seen:
-        raise RuntimeError(f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}")
-    return loaded
+        rows = cur.fetchall()
+        loaded = 0
+        errors_seen = 0
+        first_error = None
+        for row in rows:
+            if len(row) >= 4:
+                loaded += int(row[3] or 0)
+            if len(row) >= 6 and row[5]:
+                errors_seen += int(row[5] or 0)
+                if first_error is None and len(row) >= 7:
+                    first_error = row[6]
+        if errors_seen:
+            raise RuntimeError(f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}")
+        return loaded
+    finally:
+        try:
+            cur.execute(f'DROP STAGE IF EXISTS "{stage_name}"')
+        except Exception:
+            pass
 
 
 def write_mapped_rows(
@@ -174,6 +281,17 @@ def write_mapped_rows(
         error_policy=policy,
     )
 
+    # Size Snowflake NUMBER columns from the actual batch data.  The static
+    # NUMBER(38,10) default truncates high-precision decimals, which makes
+    # source/target checksums diverge.  We still honor the logical type but
+    # choose a scale that preserves the values being loaded.
+    target_types = [
+        _snowflake_decimal_type(i, mapped_rows)
+        if normalize_logical_type(t) == "decimal"
+        else sf_type(t)
+        for i, t in enumerate(logical_types)
+    ]
+
     # Within a single batch, the last occurrence of an upsert key wins.
     if write_mode == "upsert" and conflict_columns:
         mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
@@ -219,6 +337,7 @@ def write_mapped_rows(
             rejected_details=rejected_details,
         )
 
+    conn = None
     try:
         conn = get_connection(
             account=account,
@@ -270,10 +389,14 @@ def write_mapped_rows(
                         cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
 
             total = len(mapped_rows)
-            use_copy = total >= COPY_THRESHOLD and write_mode != "upsert"
+            # The fakesnow emulator does not support PUT/COPY INTO; fall back to
+            # batched INSERT so local tests and benchmarks still work.
+            use_copy = total >= COPY_THRESHOLD and write_mode != "upsert" and not _is_fakesnow_connection(conn)
             if use_copy:
                 load_method = "copy_into"
-                tmp = Path(tempfile.gettempdir()) / f"df_sf_{table_name.lower()}_{os.getpid()}.csv"
+                fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix=f"df_sf_{table_name.lower()}_")
+                os.close(fd)
+                tmp = Path(tmp_path)
                 try:
                     _write_temp_csv(tmp, target_cols, mapped_rows)
                     written = _copy_into_table(cur, table_name, str(tmp.resolve()), target_cols, target_types)
@@ -322,17 +445,9 @@ def write_mapped_rows(
                     else:
                         has_json = any(_is_json_type(t) for t in target_types)
                         if has_json:
-                            # VALUES clause does not allow PARSE_JSON, and
-                            # executemany cannot rewrite SELECT statements, so we
-                            # execute one SELECT row at a time for VARIANT/JSON.
-                            select_items = ", ".join(
-                                f'PARSE_JSON(%s)' if _is_json_type(t) else '%s'
-                                for c, t in zip(target_cols, target_types)
+                            written += _batch_insert_rows(
+                                cur, table_name, target_cols, target_types, batch
                             )
-                            insert_sql = f'INSERT INTO "{table_name}" ({col_list}) SELECT {select_items}'
-                            for row in batch:
-                                cur.execute(insert_sql, row)
-                                written += 1
                         else:
                             value_placeholders = ", ".join(["%s"] * len(target_cols))
                             insert_sql = f'INSERT INTO "{table_name}" ({col_list}) VALUES ({value_placeholders})'
@@ -341,7 +456,6 @@ def write_mapped_rows(
                     if on_checkpoint:
                         on_checkpoint(chunk_idx + 1, chunks, written)
 
-        conn.close()
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -365,3 +479,9 @@ def write_mapped_rows(
             error=str(exc),
             rejected_details=rejected_details,
         )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass

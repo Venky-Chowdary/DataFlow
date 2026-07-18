@@ -89,20 +89,12 @@ def _parse_iso_date(value: Any) -> datetime | None:
 
 
 def _is_required_target(target: str) -> bool:
-    lowered = target.lower()
-    return lowered in {
-        "_id",
-        "id",
-        "pk",
-        "key",
-        "uuid",
-        "email",
-        "phone",
-        "ssn",
-        "customer_id",
-        "account_id",
-        "order_id",
-    } or lowered.endswith("_id") or lowered.endswith("key")
+    """Return True for canonical primary-key columns.
+
+    Foreign-key columns such as user_id/account_id are not required because
+    real-world sources frequently contain sparse optional references.
+    """
+    return target.lower() in {"_id", "id", "pk", "key", "uuid"}
 
 
 def _is_amount_column(name: str) -> bool:

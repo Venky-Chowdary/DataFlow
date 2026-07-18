@@ -9,6 +9,7 @@ import requests
 
 from connectors.base import ReadBatch
 from services.error_handling import RetryBudget, with_retry
+from services.value_serializer import cell_to_string
 
 
 def base_url(host: str, default: str) -> str:
@@ -92,7 +93,7 @@ def extract_records(records: list[dict[str, Any]]) -> ReadBatch:
     if not records:
         return ReadBatch(headers=[], rows=[], offset=0, total_rows=0)
     headers = list(records[0].keys())
-    rows = [[str(r.get(h, "")) for h in headers] for r in records]
+    rows = [[cell_to_string(r.get(h, "")) for h in headers] for r in records]
     return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
 
 

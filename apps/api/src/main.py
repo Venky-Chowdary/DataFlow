@@ -196,7 +196,24 @@ async def add_timing_header(request: Request, call_next):
     start_time = time.time()
     correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
     request.state.correlation_id = correlation_id
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except (Exception, BaseException) as exc:
+        # Catch unhandled endpoint and TaskGroup exceptions here so the outer
+        # Starlette/anyio task group does not surface an ExceptionGroup and
+        # crash the worker. Re-raise process-control exceptions.
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
+        # Unwrap a single ExceptionGroup so a clear message reaches the client.
+        if isinstance(exc, BaseExceptionGroup) and len(getattr(exc, "exceptions", [])) == 1:
+            exc = exc.exceptions[0]
+        logger.exception("Unhandled error on %s", request.url.path)
+        detail = str(exc) if not is_production() else "An unexpected error occurred"
+        response = JSONResponse(
+            status_code=500,
+            content={"error": "Internal Server Error", "detail": detail},
+            headers={"X-Correlation-ID": correlation_id},
+        )
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
     response.headers["X-Correlation-ID"] = correlation_id

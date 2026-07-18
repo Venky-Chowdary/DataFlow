@@ -6,6 +6,8 @@ import datetime
 import json
 from typing import Any
 
+from services.value_serializer import json_default
+
 
 def _bson_decimal_type():
     try:
@@ -804,7 +806,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                         if value is None:
                             continue
                         if isinstance(value, (dict, list)):
-                            samples_by_name[name].append(json.dumps(value, default=str))
+                            samples_by_name[name].append(json.dumps(value, default=json_default))
                         elif isinstance(value, (bytes, bytearray)):
                             import base64
 

@@ -14,7 +14,7 @@ class PreflightEngine:
         results: list[GateResult] = []
         blockers: list[GateResult] = []
 
-        for _gate_id, gate_fn in PREFLIGHT_GATES:
+        for i, (gate_id, gate_fn) in enumerate(PREFLIGHT_GATES):
             result = gate_fn(ctx)
             results.append(result)
 

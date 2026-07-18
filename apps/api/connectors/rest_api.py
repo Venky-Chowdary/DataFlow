@@ -14,6 +14,7 @@ from typing import Any
 import requests
 
 from connectors.saas_common import ReadBatch, base_url, token
+from services.value_serializer import cell_to_string
 
 COMMON_DATA_PATHS = ["data", "results", "items", "records", "values", "contacts", "accounts", "list", "objects"]
 COMMON_TOTAL_PATHS = ["total", "count", "total_count", "meta.total_count", "meta.count", "page.total_elements"]
@@ -56,7 +57,8 @@ def _flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
             if isinstance(v, dict):
                 out.update(_flatten(v, key))
             elif isinstance(v, list):
-                out[key] = json.dumps(v, default=str)
+                from services.value_serializer import json_default
+                out[key] = json.dumps(v, default=json_default)
             else:
                 out[key] = v
     else:
@@ -338,7 +340,7 @@ def read_object(
             if k not in seen:
                 seen.add(k)
                 keys.append(k)
-        flattened.append({k: str(v) for k, v in flat.items()})
+        flattened.append({k: cell_to_string(v) for k, v in flat.items()})
 
     rows = [[r.get(k, "") for k in keys] for r in flattened]
     return ReadBatch(headers=keys, rows=rows, offset=0, total_rows=len(rows))

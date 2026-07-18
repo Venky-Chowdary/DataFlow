@@ -14,7 +14,7 @@ from typing import Any
 from services.csv_profiler import count_csv_rows, detect_delimiter, parse_csv_preview
 from services.platform_config import data_dir, upload_dir
 from services.schema_inference import infer_columns_from_rows, infer_type
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, json_default
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"
@@ -52,7 +52,7 @@ def _save_registry() -> None:
         "files": [_registry_record_for_disk(r) for r in _file_registry.values()],
         "count": len(_file_registry),
     }
-    REGISTRY_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    REGISTRY_PATH.write_text(json.dumps(payload, indent=2, default=json_default), encoding="utf-8")
 
 
 _load_registry()
@@ -96,10 +96,7 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
     if not objects:
         raise ValueError("JSONL must contain at least one JSON object per line")
     headers = list(objects[0].keys())
-    rows = [
-        [json.dumps(item[h]) if isinstance(item.get(h), (dict, list)) else str(item.get(h, "")) for h in headers]
-        for item in objects
-    ]
+    rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in objects]
     return headers, rows, len(objects)
 
 
@@ -108,7 +105,7 @@ def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
     if isinstance(data, list) and data:
         if isinstance(data[0], dict):
             headers = list(data[0].keys())
-            rows = [[str(item.get(h, "")) for h in headers] for item in data]
+            rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in data]
             return headers, rows[:100], len(data)
     raise ValueError("JSON must be an array of objects")
 
@@ -127,7 +124,7 @@ def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[lis
         row = []
         for col in slice_table.column_names:
             val = slice_table.column(col)[i].as_py()
-            row.append("" if val is None else str(val))
+            row.append("" if val is None else cell_to_string(val))
         rows.append(row)
     return headers, rows, row_count
 
@@ -238,7 +235,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             headers = list(data[0].keys())
             for i in range(0, len(data), chunk_size):
                 batch = data[i:i+chunk_size]
-                rows = [[str(item.get(h, "")) for h in headers] for item in batch]
+                rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
                 yield headers, rows
     elif fmt == "jsonl":
         import json
@@ -252,7 +249,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 obj = json.loads(line)
                 if headers is None:
                     headers = list(obj.keys())
-                row = [json.dumps(obj[h]) if isinstance(obj.get(h), (dict, list)) else str(obj.get(h, "")) for h in headers]
+                row = [cell_to_string(obj.get(h, "")) for h in headers]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
                     yield headers, chunk
@@ -757,7 +754,7 @@ class FileParser:
                 for sub_k, sub_v in v.items():
                     out[f"{k}.{sub_k}"] = sub_v
             elif isinstance(v, list):
-                out[k] = json.dumps(v, default=str)
+                out[k] = json.dumps(v, default=json_default)
             else:
                 out[k] = v
         return out

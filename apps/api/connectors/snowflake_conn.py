@@ -3,7 +3,29 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
+import unittest.mock
 from typing import Any
+
+
+# fakesnow patches snowflake.connector.connect globally; keep a process-wide
+# refcount so multiple nested get_connection() calls (e.g. count + read) can
+# share one patch and the last close tears it down.  This prevents the "already
+# patched" leaks that break downstream tests.
+_fakesnow_lock = threading.Lock()
+_fakesnow_refcount = 0
+_fakesnow_patch_cm: Any | None = None
+
+
+def _fakesnow_exit_patch() -> None:
+    global _fakesnow_refcount, _fakesnow_patch_cm
+    with _fakesnow_lock:
+        _fakesnow_refcount -= 1
+        if _fakesnow_refcount <= 0 and _fakesnow_patch_cm is not None:
+            _fakesnow_patch_cm.__exit__(None, None, None)
+            _fakesnow_patch_cm = None
+            _fakesnow_refcount = 0
 
 
 def normalize_account(host: str) -> str:
@@ -63,30 +85,52 @@ def get_connection(
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
     if _is_local_account(kwargs["account"]):
-        import unittest.mock
-
         import fakesnow
 
-        # fakesnow cannot be nested, so reuse an active patch in this thread.
-        already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
-        if not already_patched:
-            patch_cm = fakesnow.patch(
-                db_path=_fakesnow_db_path(),
-                nop_regexes=[r"^USE WAREHOUSE"],
-            )
-            patch_cm.__enter__()
-        else:
-            patch_cm = None
+        global _fakesnow_refcount, _fakesnow_patch_cm
 
-        conn = snowflake.connector.connect(**kwargs)
+        product_managed = False
+        with _fakesnow_lock:
+            already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
+            if _fakesnow_refcount > 0:
+                # Product already owns the active patch; just share it.
+                _fakesnow_refcount += 1
+                product_managed = True
+            elif not already_patched:
+                # No existing patch — install one and own it.
+                _fakesnow_patch_cm = fakesnow.patch(
+                    db_path=_fakesnow_db_path(),
+                    nop_regexes=[r"^USE WAREHOUSE"],
+                )
+                _fakesnow_patch_cm.__enter__()
+                _fakesnow_refcount = 1
+                product_managed = True
+            else:
+                # A test/framework already patched the connector; use it but do
+                # not manage its lifecycle.
+                product_managed = False
+
+        try:
+            conn = snowflake.connector.connect(**kwargs)
+        except Exception:
+            # If we installed a patch for this connect attempt, roll it back so a
+            # failed local connection cannot leak the patch into later tests.
+            if product_managed:
+                with _fakesnow_lock:
+                    _fakesnow_refcount -= 1
+                    if _fakesnow_refcount <= 0 and _fakesnow_patch_cm is not None:
+                        _fakesnow_patch_cm.__exit__(*sys.exc_info())
+                        _fakesnow_patch_cm = None
+                        _fakesnow_refcount = 0
+            raise
         orig_close = conn.close
 
         def _close() -> None:
             try:
                 orig_close()
             finally:
-                if patch_cm is not None:
-                    patch_cm.__exit__(None, None, None)
+                if product_managed:
+                    _fakesnow_exit_patch()
 
         conn.close = _close  # type: ignore[assignment]
         return conn
