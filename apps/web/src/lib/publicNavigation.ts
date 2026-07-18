@@ -13,6 +13,9 @@ export type PublicRoute =
   | "product-transfer"
   | "product-pilot"
   | "product-mcp"
+  | "product-jobs"
+  | "product-pipelines"
+  | "product-query"
   | "integrations"
   | "solution-migrations"
   | "solution-warehouse"
@@ -38,6 +41,9 @@ const HASH_TO_ROUTE: Record<string, PublicRoute> = {
   "product/transfer": "product-transfer",
   "product/pilot": "product-pilot",
   "product/mcp": "product-mcp",
+  "product/jobs": "product-jobs",
+  "product/pipelines": "product-pipelines",
+  "product/query": "product-query",
   "solutions/migrations": "solution-migrations",
   "solutions/warehouse": "solution-warehouse",
   "solutions/sync": "solution-sync",
@@ -56,6 +62,9 @@ const ROUTE_TO_HASH: Record<PublicRoute, string> = {
   "product-transfer": "#/product/transfer",
   "product-pilot": "#/product/pilot",
   "product-mcp": "#/product/mcp",
+  "product-jobs": "#/product/jobs",
+  "product-pipelines": "#/product/pipelines",
+  "product-query": "#/product/query",
   integrations: "#/integrations",
   "solution-migrations": "#/solutions/migrations",
   "solution-warehouse": "#/solutions/warehouse",
@@ -110,6 +119,18 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, { title: string; description:
   "product-mcp": {
     title: "MCP Server",
     description: "Governed transfers from Cursor, Claude, and VS Code.",
+  },
+  "product-jobs": {
+    title: "Job Theater",
+    description: "Live batch progress, phases, quarantine, and proof reports for every transfer.",
+  },
+  "product-pipelines": {
+    title: "Pipelines",
+    description: "Scheduled sync with watermarks, upsert modes, and governed preflight.",
+  },
+  "product-query": {
+    title: "Query Playground",
+    description: "Ad-hoc SQL and document queries against live connectors with export paths.",
   },
   integrations: {
     title: "Connectors",

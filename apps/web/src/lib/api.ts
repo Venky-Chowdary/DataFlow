@@ -570,6 +570,7 @@ export function streamJobProgress(
     chunk_current: raw.chunk_current != null ? Number(raw.chunk_current) : undefined,
     chunk_total: raw.chunk_total != null ? Number(raw.chunk_total) : undefined,
     rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
+    coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
     rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
     destination_summary: raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
@@ -675,42 +676,57 @@ export async function fetchSchedules(): Promise<PipelineSchedule[]> {
   return res.json();
 }
 
-export async function createSchedule(payload: {
-  name: string;
-  source_connector_id: string;
-  source_table: string;
-  dest_connector_id: string;
-  dest_table: string;
-  interval: "hourly" | "daily" | "weekly";
-  enabled?: boolean;
-}): Promise<PipelineSchedule> {
-  const res = await apiFetch(`${API_BASE}/schedules/`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error("Failed to create schedule");
+/** Preset cadences and available sync modes for the schedule editor dropdowns. */
+export async function fetchScheduleIntervals(): Promise<import("./types").ScheduleIntervals> {
+  const res = await apiFetch(`${API_BASE}/schedules/intervals`);
+  if (!res.ok) throw new Error("Failed to fetch schedule intervals");
   return res.json();
 }
 
-export async function updateSchedule(
+export async function fetchSchedule(id: string): Promise<PipelineSchedule> {
+  const res = await apiFetch(`${API_BASE}/schedules/${id}`);
+  if (!res.ok) throw new Error("Failed to fetch schedule");
+  return res.json();
+}
+
+/** Run history for a schedule, most-recent-first. */
+export async function fetchScheduleHistory(
   id: string,
-  payload: Partial<{
+  limit = 25,
+): Promise<import("./types").ScheduleHistory> {
+  const res = await apiFetch(`${API_BASE}/schedules/${id}/history?limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to fetch schedule history");
+  return res.json();
+}
+
+export async function createSchedule(
+  payload: Partial<import("./types").ScheduleInput> & {
     name: string;
     source_connector_id: string;
     source_table: string;
     dest_connector_id: string;
     dest_table: string;
-    interval: "hourly" | "daily" | "weekly";
-    enabled: boolean;
-  }>,
+  },
+): Promise<PipelineSchedule> {
+  const res = await apiFetch(`${API_BASE}/schedules/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create schedule"));
+  return res.json();
+}
+
+export async function updateSchedule(
+  id: string,
+  payload: Partial<import("./types").ScheduleInput>,
 ): Promise<PipelineSchedule> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error("Failed to update schedule");
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to update schedule"));
   return res.json();
 }
 
@@ -721,7 +737,7 @@ export async function deleteSchedule(id: string): Promise<void> {
 
 export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}/run`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to run schedule");
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to run schedule"));
   return res.json();
 }
 

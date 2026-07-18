@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorCatalogPanel } from "../components/ConnectorCatalogPanel";
-import { ConnectionWorkbench, CONNECTION_TABS } from "../components/ConnectionWorkbench";
+import { CONNECTION_TABS } from "../components/ConnectionWorkbench";
+import { ConnectorDetailDrawer } from "../components/ConnectorDetailDrawer";
 import { EmptyState } from "../components/ui/EmptyState";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
@@ -26,6 +27,7 @@ interface ConnectorsPageProps {
   onDelete: (id: string) => void;
   onRefresh?: () => void | Promise<void>;
   onOpenTransfer?: () => void;
+  onOpenJob?: (jobId: string) => void;
   showConnectionsTab?: number;
   highlightConnectorId?: string;
 }
@@ -43,6 +45,7 @@ export function ConnectorsPage({
   onDelete,
   onRefresh,
   onOpenTransfer,
+  onOpenJob,
   showConnectionsTab,
   highlightConnectorId,
 }: ConnectorsPageProps) {
@@ -54,13 +57,21 @@ export function ConnectorsPage({
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [connectionTab, setConnectionTab] = useState<(typeof CONNECTION_TABS)[number]>("Status");
+
+  const openDrawer = (id: string) => {
+    setSelectedConnectionId(id);
+    setConnectionTab("Status");
+    setDrawerOpen(true);
+  };
 
   useEffect(() => {
     if (!highlightConnectorId) return;
     if (!connectors.some((c) => c.id === highlightConnectorId)) return;
     setTab("connections");
     setSelectedConnectionId(highlightConnectorId);
+    setDrawerOpen(true);
     window.requestAnimationFrame(() => {
       document.getElementById(`connector-card-${highlightConnectorId}`)?.scrollIntoView({
         behavior: "smooth",
@@ -76,10 +87,9 @@ export function ConnectorsPage({
   }, [showConnectionsTab]);
 
   useEffect(() => {
-    if (!selectedConnectionId && connectors.length > 0) {
-      setSelectedConnectionId(connectors[0].id);
-    } else if (selectedConnectionId && !connectors.some((c) => c.id === selectedConnectionId)) {
-      setSelectedConnectionId(connectors[0]?.id ?? "");
+    if (selectedConnectionId && !connectors.some((c) => c.id === selectedConnectionId)) {
+      setSelectedConnectionId("");
+      setDrawerOpen(false);
     }
   }, [connectors, selectedConnectionId]);
 
@@ -109,7 +119,7 @@ export function ConnectorsPage({
     () => new Set(connectors.map((c) => c.type)).size,
     [connectors],
   );
-  const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? connectors[0];
+  const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? null;
   const workbench = useMemo(
     () => (selectedConnection ? buildConnectionWorkbenchContext(selectedConnection, jobs, schedules) : null),
     [selectedConnection, jobs, schedules],
@@ -302,45 +312,39 @@ export function ConnectorsPage({
                 </div>
               </div>
             ) : (
-            <div className="df2-connectors-layout">
-              <aside className="df2-connectors-list">
-                  <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
-                    {filteredConnectors.map((c) => (
-                      <ConnectorCard
-                        key={c.id}
-                        connector={c}
-                        index={connectors.findIndex((x) => x.id === c.id)}
-                        selected={selectedConnectionId === c.id}
-                        highlighted={highlightConnectorId === c.id}
-                        testing={testingId === c.id}
-                        lastUsedAt={lastUsedAtForConnector(c, jobs)}
-                        onSelect={() => setSelectedConnectionId(c.id)}
-                        onTest={() => void handleTest(c.id)}
-                        onEdit={() => onEdit(c)}
-                        onDelete={() => onDelete(c.id)}
-                      />
-                    ))}
-                    {filteredConnectors.length === 0 && (
-                      <EmptyState
-                        compact
-                        icon="search"
-                        title="No matches"
-                        description="No saved connections match the current search or filters."
-                      />
-                    )}
-                  </div>
-              </aside>
-              <section className="df2-connectors-detail">
-                <ConnectionWorkbench
-                  selectedConnection={selectedConnection}
-                  workbench={workbench}
-                  connectionTab={connectionTab}
-                  setConnectionTab={setConnectionTab}
-                  connectors={connectors}
-                  onSelectConnection={setSelectedConnectionId}
-                  onOpenTransfer={onOpenTransfer}
+            <div className="df2-connectors-list-full">
+              {filteredConnectors.length === 0 ? (
+                <EmptyState
+                  compact
+                  icon="search"
+                  title="No matches"
+                  description="No saved connections match the current search or filters."
                 />
-              </section>
+              ) : (
+                <div className="df2-connector-rows" role="list" aria-label="Saved connections">
+                  <div className="df2-connector-rows-head" aria-hidden>
+                    <span className="df2-connector-rows-head-name">Connection</span>
+                    <span className="df2-connector-rows-head-role">Role</span>
+                    <span className="df2-connector-rows-head-test">Last test</span>
+                    <span className="df2-connector-rows-head-used">Last used</span>
+                    <span className="df2-connector-rows-head-actions" />
+                  </div>
+                  {filteredConnectors.map((c) => (
+                    <ConnectorCard
+                      key={c.id}
+                      compact
+                      connector={c}
+                      index={connectors.findIndex((x) => x.id === c.id)}
+                      selected={selectedConnectionId === c.id && drawerOpen}
+                      highlighted={highlightConnectorId === c.id}
+                      testing={testingId === c.id}
+                      lastUsedAt={lastUsedAtForConnector(c, jobs)}
+                      onSelect={() => openDrawer(c.id)}
+                      onTest={() => void handleTest(c.id)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
             )
           ) : (
@@ -349,6 +353,31 @@ export function ConnectorsPage({
             </div>
           )}
         </div>
+
+        <ConnectorDetailDrawer
+          open={drawerOpen && !!selectedConnection}
+          connector={selectedConnection}
+          workbench={workbench}
+          connectors={connectors}
+          connectionTab={connectionTab}
+          setConnectionTab={setConnectionTab}
+          testing={testingId === selectedConnection?.id}
+          onClose={() => setDrawerOpen(false)}
+          onTest={() => selectedConnection && void handleTest(selectedConnection.id)}
+          onEdit={() => {
+            if (!selectedConnection) return;
+            setDrawerOpen(false);
+            onEdit(selectedConnection);
+          }}
+          onDelete={() => {
+            if (!selectedConnection) return;
+            setDrawerOpen(false);
+            onDelete(selectedConnection.id);
+          }}
+          onOpenTransfer={onOpenTransfer}
+          onSelectConnection={setSelectedConnectionId}
+          onOpenJob={onOpenJob}
+        />
       </PageFrame>
     </PageShell>
   );

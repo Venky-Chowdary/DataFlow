@@ -16,7 +16,9 @@
   --dt-flow-particle: var(--df-brand);
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
+  --df-brand-strong: #115e59;
   --df-brand-muted: #f0fdfa;
+  --df-brand-soft: #ccfbf1;
   --df-brand-ring: rgba(13, 148, 136, 0.28);
   --df-accent: #0d9488;
   --df-accent-muted: #f0fdfa;
@@ -26,27 +28,47 @@
   --df-navy-700: #334155;
   --df-steel-500: #334155;
   --df-steel-400: #475569;
+  --df-teal-400: #2dd4bf;
   --df-teal-500: #0d9488;
+  --df-teal-600: #0f766e;
   --df-success: #059669;
   --df-success-bg: #ecfdf5;
+  --df-success-border: rgba(5, 150, 105, 0.22);
   --df-warning: #d97706;
   --df-warning-bg: #fffbeb;
+  --df-warning-border: rgba(217, 119, 6, 0.22);
   --df-danger: #dc2626;
   --df-danger-bg: #fef2f2;
+  --df-danger-border: rgba(220, 38, 38, 0.22);
+  --df-info: #0284c7;
+  --df-info-bg: #f0f9ff;
+  --df-info-border: rgba(2, 132, 199, 0.2);
 
   /* Surfaces — cool slate canvas, crisp white panels */
-  --df-bg-canvas: #f4f6f8;
+  --df-bg-canvas: #f3f5f7;
   --df-bg-subtle: #eef1f4;
   --df-surface: #ffffff;
   --df-surface-raised: #ffffff;
-  --df-border: #e6e9ee;
-  --df-border-strong: #d4d9e0;
+  --df-surface-muted: #f8fafc;
+  --df-surface-tint: #f0fdfa;
+  --df-border: #e4e8ee;
+  --df-border-strong: #d0d6de;
+  --df-border-brand: color-mix(in srgb, var(--df-brand) 28%, var(--df-border));
 
   --df-text-primary: #0f172a;
   --df-text-secondary: #475569;
   --df-text-tertiary: #94a3b8;
   --df-text-muted: #64748b;
   --df-focus-ring: var(--df-brand-ring);
+
+  /* Motion — shared easings / durations for landing + workspace */
+  --df-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --df-ease-soft: cubic-bezier(0.33, 1, 0.68, 1);
+  --df-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --df-dur-fast: 140ms;
+  --df-dur: 240ms;
+  --df-dur-slow: 420ms;
+  --df-dur-reveal: 560ms;
 
   /* Platform aliases used by enterprise-platform.css */
   --df-surface-canvas: var(--df-bg-canvas);
@@ -186,8 +208,8 @@
   --dt-radius-full: 9999px;
   --dt-sidebar-width: var(--df-sidebar-width);
   --dt-header-height: var(--df-header-height);
-  --dt-transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
-  --dt-transition-slow: 240ms cubic-bezier(0.4, 0, 0.2, 1);
+  --dt-transition: var(--df-dur-fast) var(--df-ease);
+  --dt-transition-slow: var(--df-dur) var(--df-ease);
 
   /* Stacking — single scale (do not use raw 9999/10000 elsewhere) */
   --df-z-base: 1;

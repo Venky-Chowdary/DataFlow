@@ -14,6 +14,7 @@ from connectors.sqlite_common import sqlite_file_path
 from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
+    _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
     quote_sql_identifier,
@@ -173,6 +174,7 @@ def write_mapped_rows(
         ]
 
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
                 ok=False,
@@ -241,6 +243,7 @@ def write_mapped_rows(
                 chunks_completed=chunks,
                 rejected_rows=max(rejected_rows, len(data_rows) - written),
                 rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
                 warnings=transform_errors,
             )
         finally:

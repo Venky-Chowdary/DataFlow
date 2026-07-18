@@ -8,7 +8,7 @@ import {
   buildThroughputSeries,
   sparklineFromThroughput,
 } from "../lib/overviewAnalytics";
-import { jobStatusBadgeClass } from "../lib/uiUtils";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { DtIcon } from "../components/DtIcon";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
 import {
@@ -73,7 +73,7 @@ export function DashboardPage({
       .catch(() => setCatalogStats(null));
   }, []);
 
-  const completed = jobs.filter((j) => j.status === "completed");
+  const completed = jobs.filter((j) => isJobSuccess(j.status));
   const failed = jobs.filter((j) => j.status === "failed");
   const running = jobs.filter((j) => j.status === "running" || j.status === "pending");
   const totalRecords = completed.reduce((sum, j) => sum + (j.records_processed || 0), 0);
@@ -301,14 +301,14 @@ export function DashboardPage({
                       </thead>
                       <tbody>
                         {jobs.slice(0, JOB_LIMIT).map((job) => (
-                          <tr key={job._id} className={job.status === "failed" ? "df2-row-error" : ""}>
+                          <tr key={job._id} className={job.status === "failed" ? "df2-row-error" : job.status === "completed_with_quarantine" ? "df2-row-warn" : ""}>
                             <td>
                               <div className="df2-cell-title" title={job.source_name}>{job.source_name}</div>
                               <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>
                                 {job.source_type} → {job.destination_type}
                               </div>
                             </td>
-                            <td><span className={jobStatusBadgeClass(job.status)}>{job.status}</span></td>
+                            <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                             <td className="df2-col-progress"><JobProgressCell job={job} /></td>
                             <td className="df2-overview-rows">{job.records_processed?.toLocaleString() ?? "—"}</td>
                           </tr>
@@ -424,6 +424,13 @@ export function DashboardPage({
 function JobProgressCell({ job }: { job: TransferJob }) {
   if (job.status === "completed") {
     return <ProgressCell value={100} done />;
+  }
+  if (job.status === "completed_with_quarantine") {
+    return (
+      <span className="df2-cell-meta df2-progress-warn" title="Completed, but rows were rejected or values coerced to NULL">
+        <DtIcon name="alert" size={12} /> Landed, not full fidelity
+      </span>
+    );
   }
   if ((job.status === "running" || job.status === "pending") && job.progress_pct != null) {
     return <ProgressCell value={job.progress_pct} />;

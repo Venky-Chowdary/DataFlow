@@ -43,6 +43,7 @@ from connectors.writer_common import (  # noqa: E402
     build_mapped_rows,
     resolve_target_columns,
     row_fingerprints,
+    transform_error_policy_for_validation_mode,
 )
 from services.reconciliation import FingerprintAccumulator  # noqa: E402
 
@@ -629,6 +630,9 @@ def stream_file_to_database(
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
+    coerced_null_total = 0
+    # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
+    stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
     warning_samples: list[str] = []
     rejected_details: list[dict] = []
 
@@ -668,6 +672,7 @@ def stream_file_to_database(
                 "dest_summary": {},
                 "fingerprints": [],
                 "rejected": 0,
+                "coerced_null": 0,
                 "warnings": [],
                 "rejected_details": [],
                 "batch_rows": 0,
@@ -706,7 +711,7 @@ def stream_file_to_database(
             mappings=mappings,
             target_cols=target_cols,
             column_types=column_types,
-            error_policy="quarantine",
+            error_policy=stream_error_policy,
             preserve_case=True,
         )
         fingerprints = row_fingerprints(mapped_rows, target_cols) if mapped_rows else []
@@ -729,6 +734,7 @@ def stream_file_to_database(
             write_mode=write_mode,
             conflict_columns=pk_target_cols,
             backfill_new_fields=backfill_new_fields,
+            error_policy=stream_error_policy,
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
@@ -746,6 +752,7 @@ def stream_file_to_database(
             "dest_summary": dest_summary,
             "fingerprints": fingerprints,
             "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
+            "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "rejected_details": (dest_summary.get("rejected_details") or [])[:200],
             "batch_rows": len(data_rows),
@@ -755,11 +762,12 @@ def stream_file_to_database(
     batch_enum = enumerate(batch_iter, start=first_index)
 
     def _apply_file_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, last_checksum
+        nonlocal written, rejected_total, coerced_null_total, last_checksum
         if result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
         written += result["batch_written"]
         rejected_total += result["rejected"]
+        coerced_null_total += result.get("coerced_null", 0)
         warning_samples.extend(result["warnings"])
         rejected_details.extend(result["rejected_details"])
         last_checksum = result["last_checksum"] or last_checksum
@@ -808,7 +816,7 @@ def stream_file_to_database(
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
-                error_policy="quarantine",
+                error_policy=stream_error_policy,
                 preserve_case=True,
             )
             if mapped_rows:
@@ -819,7 +827,8 @@ def stream_file_to_database(
 
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
+    dest_summary["coerced_null_rows"] = coerced_null_total
     dest_summary["rejected_details"] = rejected_details[:200]
     dest_summary["warnings"] = warning_samples[:10]
-    dest_summary["error_policy"] = "quarantine" if rejected_total else "none"
+    dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     return written, ddl_log, dest_summary, columns

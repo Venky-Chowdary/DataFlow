@@ -11,12 +11,14 @@ interface ConnectorCardProps {
   selected?: boolean;
   highlighted?: boolean;
   testing?: boolean;
+  /** Dense single-line row for scannable lists; opens a detail drawer on click. */
+  compact?: boolean;
   /** ISO timestamp of the most recent transfer that touched this connection, if any. */
   lastUsedAt?: string | null;
   onSelect?: () => void;
   onTest: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
 }
 
 /**
@@ -30,6 +32,7 @@ export function ConnectorCard({
   selected,
   highlighted,
   testing,
+  compact,
   lastUsedAt,
   onSelect,
   onTest,
@@ -40,6 +43,66 @@ export function ConnectorCard({
   const healthy = c.status !== "error" && c.last_test_ok !== false;
   const neverTested = c.last_test_ok == null && c.status !== "error";
   const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "";
+
+  if (compact) {
+    return (
+      <div
+        id={`connector-card-${c.id}`}
+        className={`df2-connector-row df2-card-interactive ${selected ? "selected" : ""} ${highlighted ? "highlighted" : ""} ${healthy ? "" : "error"}`}
+        onClick={onSelect}
+        onKeyDown={(e) => {
+          if (onSelect && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            onSelect();
+          }
+        }}
+        role={onSelect ? "button" : undefined}
+        tabIndex={onSelect ? 0 : undefined}
+        aria-current={selected || undefined}
+      >
+        <span
+          className={`df2-health-dot ${healthy ? "ok" : "err"}`}
+          aria-hidden
+          title={healthy ? "Healthy" : "Connection error"}
+        />
+        <span className="df2-connector-row-icon" aria-hidden>
+          <ConnectorIcon id={c.type} size={20} />
+        </span>
+        <div className="df2-connector-row-identity">
+          <span className="df2-connector-row-name" title={c.name}>{c.name}</span>
+          <span
+            className="df2-connector-row-meta"
+            title={[c.type.replace(/_/g, " "), c.database, endpoint].filter(Boolean).join(" · ")}
+          >
+            {c.type.replace(/_/g, " ")}{c.database ? ` · ${c.database}` : ""}
+          </span>
+        </div>
+        <span className="df2-badge df2-badge-muted df2-connector-row-role">{role}</span>
+        <span className={`df2-connector-row-signal ${healthy ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
+          <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
+          <span className="df2-connector-row-signal-text">{neverTested ? "Never tested" : healthy ? "Test passed" : "Test failed"}</span>
+        </span>
+        <span className="df2-connector-row-used" title="Last transfer that used this connection">
+          {lastUsedAt ? formatRelativeTime(lastUsedAt) : "Not used"}
+        </span>
+        <div className="df2-connector-row-quick" onClick={(e) => e.stopPropagation()}>
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={testing}
+            loadingLabel="Testing…"
+            onClick={onTest}
+            leadingIcon={<DtIcon name="activity" size={14} />}
+          >
+            Test
+          </Button>
+          <button type="button" className="df2-connector-row-open" onClick={onSelect} aria-label={`Open ${c.name} details`}>
+            <DtIcon name="chevron-right" size={16} />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <article

@@ -52,6 +52,7 @@ except Exception:  # pragma: no cover
 
 from connectors.writer_common import (
     CHUNK_SIZE,
+    _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
     quote_sql_identifier,
@@ -1509,6 +1510,7 @@ def write_mapped_rows(
             chunks_completed=chunks,
             rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
             rejected_details=rejected_details,
+            coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             warnings=transform_errors,
         )
     except Exception as exc:

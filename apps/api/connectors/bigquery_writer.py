@@ -9,7 +9,9 @@ from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
-    build_mapped_rows,
+    _coerced_null_row_count,
+    _rejected_row_count,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -130,7 +132,7 @@ def write_mapped_rows(
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
 
-        mapped_rows, transform_errors = build_mapped_rows(
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
@@ -139,13 +141,15 @@ def write_mapped_rows(
             dest_types=dest_types,
             error_policy=policy,
         )
-        rejected_rows = len(data_rows) - len(mapped_rows)
+        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
                 ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
                 checksum="", chunks_completed=0,
                 error=f"Transform errors: {'; '.join(transform_errors[:3])}",
                 rejected_rows=rejected_rows,
+                rejected_details=rejected_details,
                 warnings=transform_errors,
             )
 
@@ -173,7 +177,9 @@ def write_mapped_rows(
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,
             checksum=row_checksum(mapped_rows, target_cols), chunks_completed=chunks,
-            rejected_rows=len(data_rows) - written,
+            rejected_rows=max(rejected_rows, len(data_rows) - written),
+            rejected_details=rejected_details,
+            coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,
         )
     except Exception as exc:

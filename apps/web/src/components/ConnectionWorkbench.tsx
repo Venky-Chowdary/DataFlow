@@ -5,7 +5,7 @@ import { FilterBar } from "./ui/FilterBar";
 import { Button } from "./ui/Button";
 import { Connector } from "../lib/types";
 import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
-import { connectorHealthLabel, jobStatusBadgeClass } from "../lib/uiUtils";
+import { connectorHealthLabel, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { introspectTransferEndpoints, type EndpointIntrospection } from "../lib/api";
 
 export const CONNECTION_TABS = ["Status", "Streams", "Schema", "Mappings", "Sync History", "Settings"] as const;
@@ -18,6 +18,8 @@ interface ConnectionWorkbenchProps {
   connectors: Connector[];
   onSelectConnection: (id: string) => void;
   onOpenTransfer?: () => void;
+  /** Hide the identity header + connection picker (e.g. when embedded in a drawer already scoped to one connection). */
+  hideHeader?: boolean;
 }
 
 type SchemaObject = { name: string; columns?: { name: string; type?: string }[] };
@@ -30,6 +32,7 @@ export function ConnectionWorkbench({
   connectors,
   onSelectConnection,
   onOpenTransfer,
+  hideHeader,
 }: ConnectionWorkbenchProps) {
   const [schemaObjects, setSchemaObjects] = useState<SchemaObject[]>([]);
   const [schemaError, setSchemaError] = useState("");
@@ -88,33 +91,35 @@ export function ConnectionWorkbench({
 
   return (
     <section className="df2-connection-workbench" aria-label="Connection operations workbench">
-      <div className="df2-connection-workbench-head">
-        <div>
-          <span className="df2-rail-kicker">Connection workbench</span>
-          <h2>{selectedConnection?.name ?? "Select a connection"}</h2>
-          <p>
-            {selectedConnection
-              ? `${selectedConnection.type} · ${selectedConnection.host || "managed endpoint"}${selectedConnection.port ? `:${selectedConnection.port}` : ""}`
-              : "Pick a saved connection to inspect health, live schema, streams, and sync history."}
-          </p>
+      {!hideHeader && (
+        <div className="df2-connection-workbench-head">
+          <div>
+            <span className="df2-rail-kicker">Connection workbench</span>
+            <h2>{selectedConnection?.name ?? "Select a connection"}</h2>
+            <p>
+              {selectedConnection
+                ? `${selectedConnection.type} · ${selectedConnection.host || "managed endpoint"}${selectedConnection.port ? `:${selectedConnection.port}` : ""}`
+                : "Pick a saved connection to inspect health, live schema, streams, and sync history."}
+            </p>
+          </div>
+          <div className="df2-connection-picker">
+            <label className="df2-label" htmlFor="connection-workbench-picker">Connection</label>
+            <select
+              id="connection-workbench-picker"
+              className="df2-input df2-select"
+              value={selectedConnection?.id ?? ""}
+              onChange={(e) => onSelectConnection(e.target.value)}
+              disabled={connectors.length === 0}
+            >
+              {connectors.length === 0 ? (
+                <option value="">No saved connections</option>
+              ) : connectors.map((c) => (
+                <option key={c.id} value={c.id}>{c.name} · {c.type}</option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div className="df2-connection-picker">
-          <label className="df2-label" htmlFor="connection-workbench-picker">Connection</label>
-          <select
-            id="connection-workbench-picker"
-            className="df2-input df2-select"
-            value={selectedConnection?.id ?? ""}
-            onChange={(e) => onSelectConnection(e.target.value)}
-            disabled={connectors.length === 0}
-          >
-            {connectors.length === 0 ? (
-              <option value="">No saved connections</option>
-            ) : connectors.map((c) => (
-              <option key={c.id} value={c.id}>{c.name} · {c.type}</option>
-            ))}
-          </select>
-        </div>
-      </div>
+      )}
 
       <FilterBar ariaLabel="Connection sections">
         <FilterTabs
@@ -140,7 +145,7 @@ export function ConnectionWorkbench({
               <span>Last sync</span>
               <strong>
                 {workbench?.lastJob
-                  ? `${workbench.lastJob.status} · ${formatRelativeTime(workbench.lastJob.created_at)}`
+                  ? `${jobStatusLabel(workbench.lastJob.status)} · ${formatRelativeTime(workbench.lastJob.created_at)}`
                   : "No runs yet"}
               </strong>
             </div>
@@ -281,7 +286,7 @@ export function ConnectionWorkbench({
                           <div className="df2-cell-title">{job.source_name}</div>
                           <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
                         </td>
-                        <td><span className={jobStatusBadgeClass(job.status)}>{job.status}</span></td>
+                        <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                         <td>{job.records_processed?.toLocaleString() ?? "—"}</td>
                         <td className="df2-cell-meta">{formatRelativeTime(job.created_at)}</td>
                       </tr>

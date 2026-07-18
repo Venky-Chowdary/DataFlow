@@ -533,6 +533,7 @@ function AppShell({
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
                     onOpenTransfer={() => setScreen("transfer")}
+                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     showConnectionsTab={connectorsViewToken}
                     highlightConnectorId={
                       searchFocus?.screen === "connectors" ? searchFocus.connectorId : undefined
@@ -547,6 +548,7 @@ function AppShell({
                   <SchedulesPage
                     connectors={connectors}
                     onViewJobs={() => setScreen("jobs")}
+                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     onSchedulesChange={loadSchedules}
                     highlightScheduleId={
                       searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined

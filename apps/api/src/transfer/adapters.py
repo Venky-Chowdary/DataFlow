@@ -57,13 +57,15 @@ def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_nam
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
+    coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
     rejected_details = list(getattr(result, "rejected_details", []) or [])
     return {
         "rejected_rows": rejected,
+        "coerced_null_rows": coerced,
         "rejected_details": rejected_details[:200],
         "warnings": warnings[:10],
-        "error_policy": "quarantine" if rejected else "none",
+        "error_policy": "quarantine" if (rejected or coerced) else "none",
     }
 
 

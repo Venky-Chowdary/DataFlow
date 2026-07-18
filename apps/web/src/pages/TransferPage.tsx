@@ -42,6 +42,7 @@ import {
   uploadFile,
 } from "../lib/api";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, resolveDriverType } from "../lib/connectorTypes";
+import { isJobSuccess } from "../lib/uiUtils";
 import {
   buildPreflightMappings,
   confidenceThresholdForMode,
@@ -1674,16 +1675,25 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
 
   const handleJobComplete = (job: JobProgress) => {
     setActiveJobId(null);
+    const success = isJobSuccess(job.status);
+    const ds = (job.destination_summary ?? {}) as NonNullable<TransferResult["destination_summary"]>;
     setResult({
-      success: job.status === "completed",
+      success,
       records_transferred: job.records_processed,
       error: job.error,
+      job_id: job._id,
       destination: {
         database: job.destination_database,
         collection: job.destination_collection,
       },
+      destination_summary: {
+        ...ds,
+        rejected_rows: job.rejected_rows ?? ds.rejected_rows,
+        coerced_null_rows: job.coerced_null_rows ?? ds.coerced_null_rows,
+        rejected_details: job.rejected_details ?? ds.rejected_details,
+      },
     });
-    if (job.status === "completed") onTransferComplete();
+    if (success) onTransferComplete();
   };
 
   const handleScheduleRoute = async () => {

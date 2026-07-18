@@ -84,6 +84,18 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   <strong>Transfer Studio</strong>
                   <span>Map, preflight, and prove any→any loads</span>
                 </a>
+                <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>
+                  <strong>Job Theater</strong>
+                  <span>Live phases, quarantine, and proof reports</span>
+                </a>
+                <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>
+                  <strong>Pipelines</strong>
+                  <span>Scheduled sync with watermarks &amp; gates</span>
+                </a>
+                <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>
+                  <strong>Query Playground</strong>
+                  <span>Ad-hoc SQL &amp; document queries</span>
+                </a>
                 <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
                   <strong>Data Pilot</strong>
                   <span>Natural-language triage for transfers</span>
@@ -223,47 +235,87 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
       {children}
 
       <footer className="lp-footer">
-        <div className="lp-footer-grid">
-          <div className="lp-footer-brand">
-            <strong>DataFlow</strong>
-            <p>Universal data freedom — move any data, anywhere, with proof.</p>
+        <div className="lp-footer-inner">
+          <div className="lp-footer-cta">
+            <div className="lp-footer-cta-copy">
+              <p className="lp-footer-cta-kicker">Ready when you are</p>
+              <h2>Run your next transfer with proof</h2>
+              <p>Semantic mapping, eight preflight gates, and checksum reconciliation — one governed engine.</p>
+            </div>
+            <div className="lp-footer-cta-actions">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Get started
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-footer-btn-ghost" onClick={() => go("contact")}>
+                Contact sales
+              </button>
+            </div>
           </div>
-          <div>
-            <h4>Product</h4>
-            <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>Transfer Studio</a>
-            <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>Data Pilot</a>
-            <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>MCP Server</a>
-            <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>Connectors</a>
+
+          <div className="lp-footer-grid">
+            <div className="lp-footer-brand">
+              <a
+                className="lp-footer-brand-link"
+                href={link("home")}
+                onClick={(e) => {
+                  e.preventDefault();
+                  go("home");
+                }}
+              >
+                <DtLogo size={26} />
+                <strong>DataFlow</strong>
+              </a>
+              <p>Universal data movement with semantic mapping, preflight gates, and end-to-end proof.</p>
+              <ul className="lp-footer-trust" aria-label="Platform guarantees">
+                <li><span className="lp-footer-trust-icon" aria-hidden><DtIcon name="shield" size={16} /></span> SOC 2 posture</li>
+                <li><span className="lp-footer-trust-icon" aria-hidden><DtIcon name="lock" size={16} /></span> Tenant isolation</li>
+                <li><span className="lp-footer-trust-icon" aria-hidden><DtIcon name="check" size={16} /></span> Zero silent loss</li>
+              </ul>
+            </div>
+            <div>
+              <h4>Product</h4>
+              <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>Transfer Studio</a>
+              <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>Job Theater</a>
+              <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>Pipelines</a>
+              <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>Query Playground</a>
+              <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>Data Pilot</a>
+              <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>MCP Server</a>
+              <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>Connectors</a>
+              <a href={link("pricing")} onClick={(e) => { e.preventDefault(); go("pricing"); }}>Pricing</a>
+            </div>
+            <div>
+              <h4>Solutions</h4>
+              <a href={link("solution-migrations")} onClick={(e) => { e.preventDefault(); go("solution-migrations"); }}>Migrations</a>
+              <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>Recurring sync</a>
+              <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>Warehouse loading</a>
+              <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
+            </div>
+            <div>
+              <h4>Resources</h4>
+              <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>Docs &amp; help</a>
+              <a href={link("customers")} onClick={(e) => { e.preventDefault(); go("customers"); }}>Customers</a>
+              <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
+              <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact sales</a>
+            </div>
+            <div>
+              <h4>Account</h4>
+              <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
+              <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
+              <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
+              <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
+            </div>
           </div>
-          <div>
-            <h4>Solutions</h4>
-            <a href={link("solution-migrations")} onClick={(e) => { e.preventDefault(); go("solution-migrations"); }}>Migrations</a>
-            <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>Recurring sync</a>
-            <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>Warehouse loading</a>
+
+          <div className="lp-footer-bottom">
+            <span>© {new Date().getFullYear()} DataFlow. All rights reserved.</span>
+            <span className="lp-footer-legal">
+              <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
+              <span aria-hidden>·</span>
+              <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
+              <span aria-hidden>·</span>
+              <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
+            </span>
           </div>
-          <div>
-            <h4>Resources</h4>
-            <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>Docs &amp; help</a>
-            <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
-            <a href={link("customers")} onClick={(e) => { e.preventDefault(); go("customers"); }}>Customers</a>
-            <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
-            <a href={link("pricing")} onClick={(e) => { e.preventDefault(); go("pricing"); }}>Pricing</a>
-          </div>
-          <div>
-            <h4>Company</h4>
-            <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact sales</a>
-            <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
-            <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
-            <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
-          </div>
-        </div>
-        <div className="lp-footer-bottom">
-          <span>© {new Date().getFullYear()} DataFlow</span>
-          <span className="lp-footer-legal">
-            <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
-            <span aria-hidden>·</span>
-            <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
-          </span>
         </div>
       </footer>
     </div>

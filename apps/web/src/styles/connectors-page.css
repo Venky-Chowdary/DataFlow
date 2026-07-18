@@ -1,4 +1,4 @@
-/* Connectors page — list + detail split layout with compact cards */
+/* Connectors page — dense, scannable connection list + detail drawer */
 
 .df2-connectors-workspace,
 .df2-connectors-pane {
@@ -6,63 +6,6 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-
-.df2-connectors-layout {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
-  gap: 0;
-  min-height: min-content;
-  overflow: visible;
-}
-
-.df2-connectors-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  border-right: 1px solid #e2e8f0;
-  background: #fff;
-  min-height: min-content;
-  overflow: visible;
-}
-
-.df2-connectors-list-controls {
-  display: none; /* controls moved to shared .df2-page-controls */
-}
-
-.df2-connectors-list-controls .df2-filter-tabs {
-  flex-wrap: wrap;
-  flex: 0 0 auto;
-}
-
-.df2-connectors-list-controls .df2-page-toolbar {
-  flex: 0 0 auto;
-  min-width: 0;
-}
-
-.df2-connectors-list .df2-connector-card-grid {
-  flex: 0 0 auto;
-  overflow: visible;
-  padding: 12px;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-  align-content: start;
-}
-
-.df2-connectors-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 16px;
-  /* Document scroll via .df2-content — no nested scrollport */
-  overflow: visible;
-  min-height: min-content;
-}
-
-.df2-connectors-detail .df2-topology-card {
-  flex-shrink: 0;
 }
 
 .df2-connectors-catalog {
@@ -74,163 +17,338 @@
   flex-shrink: 0;
 }
 
-.df2-page-connectors .df2-connection-workbench {
-  flex: 0 0 auto;
-  min-height: min-content;
+/* ── Dense connection list ── */
+.df2-connectors-list-full {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-connector-rows {
   display: flex;
   flex-direction: column;
-  overflow: visible;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 12px;
+  background: var(--df-surface, #fff);
+  overflow: hidden;
 }
 
-.df2-page-connectors .df2-connection-panel {
-  flex: 0 0 auto;
-  min-height: min-content;
-  overflow: visible;
-}
-
-/* Section filter inside an opened connection — give it real breathing room so
-   it matches the enterprise control-height standard instead of collapsing to a
-   thin, cramped strip (the filter cluster inherits --df-toolbar-h globally). */
-.df2-page-connectors .df2-connection-workbench > .df2-filter-bar {
-  margin: 14px 0 4px;
-  max-width: 100%;
-  width: 100%;
-  justify-content: flex-start;
-}
-
-.df2-page-connectors .df2-connection-workbench > .df2-filter-bar .df2-tab {
-  padding: 0 16px !important;
-  font-size: 13px !important;
-}
-
-/* Compact connection cards */
-.df2-connectors-list .df2-connector-card {
-  padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #fff;
-  transition: border-color 0.12s;
-  cursor: pointer;
-}
-
-.df2-connectors-list .df2-connector-card:hover {
-  border-color: #0f766e;
-  box-shadow: none;
-}
-
-.df2-connectors-list .df2-connector-card.selected {
-  border-color: #0f766e;
-  background: #f0fdfa;
-}
-
-/* Status-first row: health dot -> icon -> identity -> role badge */
-.df2-connectors-list .df2-connector-row-top {
-  display: flex;
+.df2-connector-rows-head,
+.df2-connector-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 130px 120px 150px;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 12px;
 }
 
-.df2-connectors-list .df2-health-dot {
+.df2-connector-rows-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  background: var(--df-surface-subtle, #f8fafc);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+}
+
+.df2-connector-rows-head-actions { justify-self: end; }
+
+/* Compact status-first row */
+.df2-connector-row {
+  grid-template-columns: auto auto minmax(0, 1fr) 120px 130px 120px 150px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--df-border, #eef1f5);
+  cursor: pointer;
+  transition: background var(--df-dur-fast, 140ms) ease;
+}
+
+.df2-connector-row:last-child { border-bottom: none; }
+
+.df2-connector-row:hover {
+  background: var(--df-surface-subtle, #f8fafc);
+}
+
+.df2-connector-row.selected,
+.df2-connector-row[aria-current="true"] {
+  background: var(--df-brand-muted, #f0fdfa);
+  box-shadow: inset 2px 0 0 var(--df-brand, #0d9488);
+}
+
+.df2-connector-row.highlighted {
+  background: var(--df-brand-muted, #f0fdfa);
+}
+
+.df2-connector-row .df2-health-dot {
   flex-shrink: 0;
   width: 8px;
   height: 8px;
   border-radius: 999px;
 }
 
-.df2-connectors-list .df2-health-dot.ok { background: #059669; }
-.df2-connectors-list .df2-health-dot.err { background: #dc2626; }
+.df2-connector-row .df2-health-dot.ok { background: #059669; }
+.df2-connector-row .df2-health-dot.err { background: #dc2626; }
 
-.df2-connectors-list .df2-connector-card-icon svg {
-  width: 22px;
-  height: 22px;
+.df2-connector-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.df2-connectors-list .df2-connector-row-identity {
-  flex: 1;
+.df2-connector-row-icon svg { width: 20px; height: 20px; }
+
+.df2-connector-row-identity {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 
-.df2-connectors-list .df2-connector-card-title {
-  font-size: 14px;
+.df2-connector-row-name {
+  font-size: 13.5px;
   font-weight: 600;
-  margin: 0 0 1px;
+  color: #0f172a;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.df2-connectors-list .df2-connector-card-meta {
-  font-size: 11px;
+.df2-connector-row-meta {
+  font-size: 11.5px;
   color: #64748b;
-  margin: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-transform: capitalize;
 }
 
-.df2-connectors-list .df2-connector-row-role {
-  flex-shrink: 0;
+.df2-connector-row-role {
+  justify-self: start;
   font-size: 10px;
+  text-transform: capitalize;
 }
 
-/* Status signals — the "last test" / "last used" facts an Airbyte-style
-   health-first list surfaces before you open the detail drilldown. */
-.df2-connectors-list .df2-connector-row-signals {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 0 0 8px;
-  padding-left: 30px;
+.df2-connector-row-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: #64748b;
 }
 
-.df2-connectors-list .df2-connector-signal {
+.df2-connector-row-signal.ok { color: #059669; }
+.df2-connector-row-signal.err { color: #dc2626; }
+
+.df2-connector-row-used {
+  font-size: 11.5px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.df2-connector-row-quick {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  justify-self: end;
+}
+
+.df2-connector-row-quick .df2-btn {
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.df2-connector-row-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+
+.df2-connector-row:hover .df2-connector-row-open,
+.df2-connector-row.selected .df2-connector-row-open {
+  color: #0f766e;
+  background: #fff;
+}
+
+/* Tablet: drop the "last used" and role columns into the identity block */
+@media (max-width: 1024px) {
+  .df2-connector-rows-head { display: none; }
+  .df2-connector-row {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+  }
+  .df2-connector-row-role,
+  .df2-connector-row-signal,
+  .df2-connector-row-used { display: none; }
+}
+
+@media (max-width: 560px) {
+  .df2-connector-row-quick .df2-btn { display: none; }
+}
+
+/* ── Detail drawer content ── */
+.df2-drawer-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.df2-drawer-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--df-border, #e6e9ee);
+  border-radius: 10px;
+  background: var(--df-surface-subtle, #f8fafc);
+  min-width: 0;
+}
+
+.df2-drawer-fact span {
   font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+}
+
+.df2-drawer-fact strong {
+  font-size: 13px;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+
+.df2-drawer-fact .df2-fact-ok { color: #059669; }
+.df2-drawer-fact .df2-fact-err { color: #dc2626; }
+
+.df2-drawer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-drawer-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.df2-drawer-section-head h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.df2-drawer-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--df-brand-muted, #f0fdfa);
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.df2-drawer-empty-line {
+  margin: 0;
+  font-size: 12.5px;
+  color: #94a3b8;
+}
+
+.df2-drawer-related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-drawer-related-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--df-border, #e6e9ee);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.df2-drawer-related-row.is-clickable {
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+
+.df2-drawer-related-row.is-clickable:hover {
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 40%, var(--df-border, #e6e9ee));
+  background: var(--df-surface-subtle, #f8fafc);
+}
+
+.df2-drawer-related-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.df2-drawer-related-main strong {
+  font-size: 13px;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-drawer-related-main small {
+  font-size: 11.5px;
   color: #64748b;
 }
 
-.df2-connectors-list .df2-connector-signal.ok { color: #059669; }
-.df2-connectors-list .df2-connector-signal.err { color: #dc2626; }
+.df2-drawer-workbench {
+  padding-top: 4px;
+  border-top: 1px dashed var(--df-border, #e6e9ee);
+}
 
-.df2-connectors-list .df2-connector-card-actions {
+.df2-drawer-actions {
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
-  padding-left: 30px;
+  gap: 8px;
+  align-items: center;
 }
 
-.df2-connectors-list .df2-connector-card-actions .df2-btn {
-  padding: 4px 8px;
-  font-size: 11px;
+.df2-drawer-actions .df2-drawer-action-delete { margin-left: auto; }
+
+/* Workbench embedded in the drawer — remove page-split assumptions */
+.df2-drawer .df2-connection-workbench {
+  display: flex;
+  flex-direction: column;
 }
 
-@media (max-width: 1024px) {
-  .df2-connectors-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) auto;
-  }
-
-  .df2-connectors-list {
-    border-right: none;
-    border-bottom: 1px solid #e2e8f0;
-  }
-
-  .df2-connectors-list .df2-connector-card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  }
-
-  .df2-connectors-detail {
-    overflow: visible;
-  }
+.df2-drawer .df2-connection-workbench > .df2-filter-bar {
+  margin: 4px 0;
+  width: 100%;
+  justify-content: flex-start;
 }
 
-@media (max-width: 600px) {
-  .df2-connectors-list .df2-connector-card-grid {
-    grid-template-columns: 1fr;
-  }
+@media (max-width: 560px) {
+  .df2-drawer-facts { grid-template-columns: 1fr; }
+  .df2-drawer-actions .df2-drawer-action-delete { margin-left: 0; }
 }
 
 /* ─── Zero connections — centered enterprise empty state ─── */
@@ -293,4 +411,41 @@
   .df2-connectors-empty-features {
     grid-template-columns: 1fr;
   }
+}
+
+/* Connectors polish — tokenized surfaces + clearer selected row */
+.df2-connectors-list {
+  border-right-color: var(--df-border, #e6e9ee);
+  background: var(--df-surface, #fff);
+}
+
+.df2-connectors-list .df2-connector-card {
+  border: 1px solid var(--df-border, #e6e9ee);
+  border-radius: 12px;
+  transition:
+    border-color var(--df-dur-fast, 140ms) ease,
+    background var(--df-dur-fast, 140ms) ease,
+    box-shadow var(--df-dur-fast, 140ms) ease;
+}
+
+.df2-connectors-list .df2-connector-card:hover,
+.df2-connectors-list .df2-connector-card.is-selected,
+.df2-connectors-list .df2-connector-card[aria-current="true"] {
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 40%, var(--df-border, #e6e9ee));
+  background: var(--df-brand-muted, #f0fdfa);
+}
+
+.df2-connectors-detail {
+  background:
+    radial-gradient(90% 60% at 100% 0%, rgba(13, 148, 136, 0.05), transparent 50%),
+    var(--df-surface, #fff);
+}
+
+.df2-connectors-feature-card {
+  border-color: var(--df-border, #e6e9ee);
+  background: var(--df-surface, #fff);
+}
+
+.df2-connectors-feature-card:hover {
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, var(--df-border, #e6e9ee));
 }

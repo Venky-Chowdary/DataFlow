@@ -4,7 +4,7 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
 import { streamJobProgress } from "../lib/api";
-import { jobStatusBadgeClass } from "../lib/uiUtils";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 
 interface JobTheaterProps {
@@ -36,7 +36,7 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 function phaseIndex(phase?: string, status?: string): number {
-  if (status === "completed") return 5;
+  if (isJobSuccess(status)) return 5;
   if (status === "failed") return -1;
   const idx = PHASES.findIndex((p) => p.id === (phase || "queued"));
   return idx >= 0 ? idx : 0;
@@ -116,9 +116,14 @@ export function JobTheater({
         if (elapsed > 0.5 && processed > 0) {
           setThroughput(Math.round(processed / elapsed));
         }
-        if (!doneRef.current && update.status === "completed") {
+        if (!doneRef.current && isJobSuccess(update.status)) {
           doneRef.current = true;
-          append(`Job completed — ${processed.toLocaleString()} rows transferred`);
+          const quarantine = update.status === "completed_with_quarantine";
+          append(
+            quarantine
+              ? `Job completed with quarantine — ${processed.toLocaleString()} rows landed, some rows rejected or coerced to NULL`
+              : `Job completed — ${processed.toLocaleString()} rows transferred`,
+          );
           onComplete?.(update);
         }
         if (!doneRef.current && update.status === "failed") {
@@ -195,7 +200,8 @@ export function JobTheaterView({
   const processed = job.records_processed ?? 0;
   const currentPhase = phaseIndex(job.phase, job.status);
   const isFailed = job.status === "failed";
-  const isComplete = job.status === "completed";
+  const isComplete = isJobSuccess(job.status);
+  const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete;
 
   // Reconcile reported progress with row-derived progress so the bar never
@@ -228,9 +234,10 @@ export function JobTheaterView({
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
   const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
+  const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
+  const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
-  const rejectionRate = processed > 0 && rejectedRows > 0 ? (rejectedRows / processed) * 100 : 0;
 
   const timelinePhases = useMemo(() => {
     if (job.phases?.length) {
@@ -285,11 +292,11 @@ export function JobTheaterView({
           </div>
         </div>
         <div className="df2-theater-v3-header-meta">
-          <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isComplete ? "is-done" : "is-failed"}`}>
+          <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isQuarantine ? "is-quarantine" : isComplete ? "is-done" : "is-failed"}`}>
             <span className="df2-theater-v3-live-dot" aria-hidden />
-            {isRunning ? "Live" : isComplete ? "Finalized" : "Attention"}
+            {isRunning ? "Live" : isQuarantine ? "Quarantine" : isComplete ? "Finalized" : "Attention"}
           </span>
-          <span className={jobStatusBadgeClass(job.status)}>{job.status}</span>
+          <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
           <span className="df2-theater-v3-job-id" title={jobId}>#{jobId.slice(0, 8)}</span>
         </div>
       </header>
@@ -321,7 +328,7 @@ export function JobTheaterView({
             <strong>{progress}%</strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
-            <h3>{isComplete ? "Transfer complete" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
+            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
             <p title={job.message || phaseLabel}>
               {job.message || (isRunning ? `${phaseLabel} — streaming rows to destination…` : "Job finished")}
             </p>
@@ -420,9 +427,14 @@ export function JobTheaterView({
 
       <div className="df2-theater-v3-sla" aria-label="Execution quality and evidence">
         <article className="df2-theater-v3-sla-card">
-          <span>Rejected rows</span>
-          <strong>{rejectedRows.toLocaleString()}</strong>
-          <small>{rejectionRate > 0 ? `${rejectionRate.toFixed(2)}% of processed` : "No rejections reported"}</small>
+          <span>Dropped / rejected</span>
+          <strong>{droppedRows.toLocaleString()}</strong>
+          <small>{droppedRows > 0 ? "Isolated in quarantine — not written" : "No rows dropped"}</small>
+        </article>
+        <article className="df2-theater-v3-sla-card">
+          <span>Coerced to NULL</span>
+          <strong>{coercedNullRows.toLocaleString()}</strong>
+          <small>{coercedNullRows > 0 ? "Value altered to NULL — not full fidelity" : "No values coerced"}</small>
         </article>
         <article className="df2-theater-v3-sla-card">
           <span>Writer warnings</span>
@@ -436,7 +448,7 @@ export function JobTheaterView({
         </article>
       </div>
 
-      {isComplete && (
+      {isComplete && !isQuarantine && (
         <div className="df2-theater-v3-alert success">
           <DtIcon name="check" size={18} />
           <div>
@@ -446,14 +458,28 @@ export function JobTheaterView({
         </div>
       )}
 
+      {isQuarantine && (
+        <div className="df2-theater-v3-alert warn">
+          <DtIcon name="alert" size={18} />
+          <div>
+            <strong>Completed with quarantine — not full fidelity</strong>
+            <p>
+              {processed.toLocaleString()} rows landed
+              {droppedRows > 0 ? `, ${droppedRows.toLocaleString()} dropped/rejected` : ""}
+              {coercedNullRows > 0 ? `, ${coercedNullRows.toLocaleString()} value(s) coerced to NULL` : ""}. Review the details below.
+            </p>
+          </div>
+        </div>
+      )}
+
       {rejectedRows > 0 && (
         <div className="df2-theater-v3-alert warn">
           <DtIcon name="alert" size={18} />
           <div>
-            <strong>{rejectedRows.toLocaleString()} rows rejected</strong>
-            <p>Review rejected details below and export them for remediation.</p>
+            <strong>{droppedRows > 0 ? `${droppedRows.toLocaleString()} rows rejected` : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}</strong>
+            <p>Review the quarantine details below and export them for remediation.</p>
           </div>
-          <QuarantinePanel jobId={jobId} rejectedRows={rejectedRows} />
+          <QuarantinePanel jobId={jobId} rejectedRows={rejectedRows} coercedNullRows={coercedNullRows} />
         </div>
       )}
 

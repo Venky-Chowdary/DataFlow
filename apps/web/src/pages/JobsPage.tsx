@@ -13,7 +13,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { fetchJob, retryJob, resumeJob } from "../lib/api";
-import { jobStatusBadgeClass } from "../lib/uiUtils";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
@@ -50,6 +50,7 @@ type JobFilter = "all" | "running" | "completed" | "failed";
 
 function statusIcon(status: string) {
   if (status === "completed") return "check";
+  if (status === "completed_with_quarantine") return "alert";
   if (status === "failed") return "x";
   if (status === "running" || status === "pending") return "activity";
   return "jobs";
@@ -68,7 +69,8 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const counts = useMemo(() => ({
     all: jobs.length,
     running: jobs.filter((j) => j.status === "running" || j.status === "pending").length,
-    completed: jobs.filter((j) => j.status === "completed").length,
+    completed: jobs.filter((j) => isJobSuccess(j.status)).length,
+    quarantine: jobs.filter((j) => j.status === "completed_with_quarantine").length,
     failed: jobs.filter((j) => j.status === "failed").length,
   }), [jobs]);
 
@@ -83,6 +85,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const filtered = useMemo(() => {
     let list = jobs;
     if (filter === "running") list = jobs.filter((j) => j.status === "running" || j.status === "pending");
+    else if (filter === "completed") list = jobs.filter((j) => isJobSuccess(j.status));
     else if (filter !== "all") list = jobs.filter((j) => j.status === filter);
 
     const q = jobSearch.trim().toLowerCase();
@@ -200,6 +203,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
             phases: liveJob.phases,
             notifications: liveJob.notifications,
             rejectedRows: liveJob.rejected_rows,
+            coercedNullRows: liveJob.coerced_null_rows,
           })
         : [],
     [liveJob, selected],
@@ -324,7 +328,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                               {job.source_name} → {destLabel}
                             </span>
                             <span className={`${jobStatusBadgeClass(job.status)} df2-job-row-badge`}>
-                              {job.status}
+                              {jobStatusLabel(job.status)}
                             </span>
                           </div>
                           <div className="df2-job-row-meta">
@@ -379,7 +383,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                           <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
                         </div>
                       </div>
-                      <span className={jobStatusBadgeClass(liveJob.status)}>{liveJob.status}</span>
+                      <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
                     </header>
 
                     <div className="df2-jobs-v3-summary-metrics">
@@ -491,9 +495,33 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       </div>
                     )}
 
+                    {isJobSuccess(selected.status) && (((liveJob.rejected_rows ?? 0) - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
+                      <div className="df2-data-integrity" role="note">
+                        <header className="df2-data-integrity-head">
+                          <DtIcon name="alert" size={16} />
+                          <div>
+                            <strong>Completed with quarantine — not full fidelity</strong>
+                            <span>The transfer finished and data landed, but some rows were affected. These are two different kinds of data change.</span>
+                          </div>
+                        </header>
+                        <div className="df2-data-integrity-metrics">
+                          <article className="df2-data-integrity-metric is-dropped">
+                            <strong>{Math.max((liveJob.rejected_rows ?? 0) - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
+                            <span>Rows dropped / rejected</span>
+                            <small>Isolated in quarantine — not written to the destination.</small>
+                          </article>
+                          <article className="df2-data-integrity-metric is-coerced">
+                            <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                            <span>Values coerced to NULL</span>
+                            <small>Row kept, but a value was altered to NULL — the original value was not preserved.</small>
+                          </article>
+                        </div>
+                      </div>
+                    )}
+
                     {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0) && (
                       <div className="df2-jobs-v3-actions">
-                        <QuarantinePanel jobId={selected._id} rejectedRows={liveJob.rejected_rows} />
+                        <QuarantinePanel jobId={selected._id} rejectedRows={liveJob.rejected_rows} coercedNullRows={liveJob.coerced_null_rows} />
                       </div>
                     )}
 

@@ -16,7 +16,9 @@ from connectors.snowflake_conn import get_connection, normalize_account
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
-    build_mapped_rows,
+    _coerced_null_row_count,
+    _rejected_row_count,
+    build_mapped_rows_with_details,
     dedupe_rows,
     resolve_target_columns,
     row_checksum,
@@ -271,7 +273,7 @@ def write_mapped_rows(
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
 
-    mapped_rows, transform_errors = build_mapped_rows(
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
@@ -296,11 +298,8 @@ def write_mapped_rows(
     if write_mode == "upsert" and conflict_columns:
         mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
-    rejected_rows = len(data_rows) - len(mapped_rows)
-    rejected_details = [
-        {"message": msg, "policy": policy}
-        for msg in transform_errors[:100]
-    ]
+    rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+    coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -335,6 +334,7 @@ def write_mapped_rows(
             rejected_rows=rejected_rows,
             warnings=transform_errors,
             rejected_details=rejected_details,
+            coerced_null_rows=coerced_null_rows,
         )
 
     conn = None
@@ -466,6 +466,7 @@ def write_mapped_rows(
             rejected_rows=rejected_rows,
             warnings=transform_errors,
             rejected_details=rejected_details,
+            coerced_null_rows=coerced_null_rows,
             load_method=load_method,
         )
     except Exception as exc:

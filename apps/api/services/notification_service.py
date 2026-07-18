@@ -314,7 +314,7 @@ def build_job_payload(
     base_url: str = "",
     web_url: str = "",
 ) -> dict[str, Any]:
-    color = "28a745" if status in ("completed", "success") else "ffc107" if status in ("partial", "failed_with_quarantine") else "dc3545"
+    color = "28a745" if status in ("completed", "success") else "ffc107" if status in ("partial", "failed_with_quarantine", "completed_with_quarantine") else "dc3545"
     title = f"DataFlow transfer {status}: {source} → {destination}"
     api_base = (base_url or "").rstrip("/")
     web_base = (web_url or "").rstrip("/")

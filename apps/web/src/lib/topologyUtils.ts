@@ -176,7 +176,7 @@ export function buildDataPlaneTopology(
           jobDestLabel(job) || job.destination_type || "Destination",
           job.destination_type || "database",
           "destination",
-          job.status === "completed" || running,
+          job.status === "completed" || job.status === "completed_with_quarantine" || running,
         );
 
     const key = `${srcId}→${dstId}`;

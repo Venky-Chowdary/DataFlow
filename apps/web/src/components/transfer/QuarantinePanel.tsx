@@ -6,6 +6,8 @@ import { exportJobQuarantine, fetchJobQuarantine } from "../../lib/api";
 export interface QuarantinePanelProps {
   jobId: string;
   rejectedRows?: number;
+  /** Distinct rows where a value was coerced to NULL (kept, but fidelity lost). */
+  coercedNullRows?: number;
   initiallyOpen?: boolean;
 }
 
@@ -27,7 +29,7 @@ function summarizeReasons(rows: QuarantineRow[]) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
 }
 
-export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: QuarantinePanelProps) {
+export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiallyOpen = false }: QuarantinePanelProps) {
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen);
   const [loading, setLoading] = useState(false);
@@ -77,6 +79,9 @@ export function QuarantinePanel({ jobId, rejectedRows, initiallyOpen = false }: 
           {rejectedRows != null && rejectedRows > 0 && (
             <span className="df2-quarantine-explainer-count">
               {rejectedRows.toLocaleString()} row{rejectedRows === 1 ? "" : "s"} quarantined for this job
+              {coercedNullRows != null && coercedNullRows > 0 && (
+                <> · {coercedNullRows.toLocaleString()} had a value coerced to NULL (not full fidelity)</>
+              )}
             </span>
           )}
         </div>

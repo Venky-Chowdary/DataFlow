@@ -81,6 +81,12 @@ class WriteResult:
     rejected_details: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     load_method: str | None = None
+    # Distinct source rows kept but with >=1 cell forced to NULL because a
+    # coercion failed (quarantine/coerce_null). This is a data-ALTERATION count,
+    # separate from dropped rows, so reconciliation cannot claim 100% fidelity
+    # when values were silently changed. Genuine empty->NULL sentinels are NOT
+    # counted here (they produce no transform error).
+    coerced_null_rows: int = 0
 
 
 def row_checksum(rows: list[Any], columns: list[str] | None = None) -> str:
@@ -151,6 +157,19 @@ def _rejected_row_count(
     if policy in {"quarantine", "coerce_null"}:
         return len({d["row"] for d in rejected_details})
     return len(data_rows) - len(mapped_rows)
+
+
+def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str) -> int:
+    """Distinct source rows that were KEPT but had a cell coerced to NULL.
+
+    Only meaningful under ``quarantine``/``coerce_null`` — under ``fail`` the
+    offending rows are dropped, not coerced, so this is 0. ``rejected_details``
+    only contains cells whose ``apply_transform`` returned an error, so genuine
+    empty->NULL sentinels (no error) are correctly excluded.
+    """
+    if policy in {"quarantine", "coerce_null"}:
+        return len({d["row"] for d in rejected_details})
+    return 0
 
 
 def build_mapped_rows(

@@ -308,7 +308,7 @@ class MongoDBService:
 
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
-        elif status in ("completed", "failed", "cancelled"):
+        elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             updates["completed_at"] = datetime.now(timezone.utc)
 
         phase_label = kwargs.get("phase")
@@ -325,7 +325,7 @@ class MongoDBService:
                 existing = collection.find_one({"_id": oid}, {"phases": 1})
                 phases = (existing or {}).get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
-                if status in ("completed",):
+                if status in ("completed", "completed_with_quarantine"):
                     phases = complete_phases(phases, success=True, message=message or "")
                 elif status in ("failed", "cancelled"):
                     phases = complete_phases(phases, success=False, message=kwargs.get("error") or message or "")
@@ -537,7 +537,7 @@ class MemoryMongoDBService:
         rec["updated_at"] = datetime.now(timezone.utc)
         if status == "running":
             rec.setdefault("started_at", datetime.now(timezone.utc))
-        elif status in ("completed", "failed", "cancelled"):
+        elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             rec["completed_at"] = datetime.now(timezone.utc)
         phase_label = kwargs.get("phase")
         if phase_label:
@@ -551,7 +551,7 @@ class MemoryMongoDBService:
 
                 phases = rec.get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
-                if status in ("completed",):
+                if status in ("completed", "completed_with_quarantine"):
                     phases = complete_phases(phases, success=True, message=kwargs.get("message", ""))
                 elif status in ("failed", "cancelled"):
                     phases = complete_phases(

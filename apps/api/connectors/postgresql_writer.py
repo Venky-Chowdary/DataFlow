@@ -13,7 +13,9 @@ from connectors.postgresql_conn import get_connection
 from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
-    build_mapped_rows,
+    _coerced_null_row_count,
+    _rejected_row_count,
+    build_mapped_rows_with_details,
     dedupe_rows,
     resolve_target_columns,
     row_checksum,
@@ -196,7 +198,7 @@ def write_mapped_rows(
                         )
                     )
 
-            mapped_rows, transform_errors = build_mapped_rows(
+            mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
                 headers=headers,
                 data_rows=data_rows,
                 mappings=mappings,
@@ -234,7 +236,8 @@ def write_mapped_rows(
                     converted.append(tuple(row_list))
                 mapped_rows = converted
 
-            rejected_rows = len(data_rows) - len(mapped_rows)
+            rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
             if transform_errors and policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -245,6 +248,7 @@ def write_mapped_rows(
                     chunks_completed=0,
                     error=f"Transform errors: {'; '.join(transform_errors[:3])}",
                     rejected_rows=rejected_rows,
+                    rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
             total = len(mapped_rows)
@@ -323,7 +327,9 @@ def write_mapped_rows(
             target_schema=schema,
             checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
-            rejected_rows=len(data_rows) - written,
+            rejected_rows=max(rejected_rows, len(data_rows) - written),
+            rejected_details=rejected_details,
+            coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,
         )
     except Exception as exc:

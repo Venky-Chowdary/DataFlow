@@ -531,7 +531,8 @@ class UniversalTransferEngine:
     def _notify_job_status(self, request: TransferRequest, result: TransferResult) -> None:
         """Fire workspace notifications for failed or partially-quarantined jobs."""
         rejected = result.destination_summary.get("rejected_rows", 0) or 0
-        if result.success and not rejected:
+        coerced = result.destination_summary.get("coerced_null_rows", 0) or 0
+        if result.success and not rejected and not coerced:
             return
         try:
             from services.notification_service import (
@@ -542,8 +543,10 @@ class UniversalTransferEngine:
             from services.platform_config import public_url, web_url
 
             status = "failed"
-            if result.success and rejected:
-                status = "failed_with_quarantine"
+            if result.success and (rejected or coerced):
+                # Successful terminal run that altered/dropped data — consistent
+                # with the persisted job status.
+                status = "completed_with_quarantine"
             elif result.success:
                 status = "completed"
             payload = build_job_payload(
@@ -1029,8 +1032,13 @@ class UniversalTransferEngine:
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
+            from services.job_status import terminal_status_for
+
+            terminal_status = terminal_status_for(
+                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
             mongo.update_job_status(
-                job_id, "completed",
+                job_id, terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
@@ -1038,6 +1046,7 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
@@ -1426,8 +1435,13 @@ class UniversalTransferEngine:
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
+            from services.job_status import terminal_status_for
+
+            terminal_status = terminal_status_for(
+                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
             mongo.update_job_status(
-                job_id, "completed",
+                job_id, terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
@@ -1435,6 +1449,7 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
@@ -1765,8 +1780,13 @@ class UniversalTransferEngine:
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
+            from services.job_status import terminal_status_for
+
+            terminal_status = terminal_status_for(
+                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
             mongo.update_job_status(
-                job_id, "completed",
+                job_id, terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
@@ -1774,6 +1794,7 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,

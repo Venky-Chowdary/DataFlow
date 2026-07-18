@@ -46,6 +46,10 @@ class ReconciliationReport:
     target_checksum: str
     message: str
     rejected_rows: int = 0
+    # Rows kept but with >=1 cell coerced to NULL because a value could not be
+    # cast. Data was ALTERED, so this is surfaced even when row counts/checksums
+    # match — reconciliation must not claim "100% fidelity" in that case.
+    coerced_null_rows: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -286,8 +290,15 @@ def reconcile(
     strict_checksum: bool = True,
     allow_extra_rows: bool = False,
     sample_compare: dict[str, Any] | None = None,
+    coerced_null_rows: int = 0,
 ) -> ReconciliationReport:
-    expected_rows = max(source_rows - max(rejected_rows, 0), 0)
+    coerced_null_rows = max(int(coerced_null_rows or 0), 0)
+    # Coerced rows are KEPT in the destination (a cell became NULL), so they do
+    # not lower the expected row count — only genuinely DROPPED rows do. Under a
+    # quarantine policy rejected_rows == coerced_null_rows (kept), so dropped==0;
+    # under a fail policy coerced_null_rows==0, so dropped==rejected_rows.
+    dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
+    expected_rows = max(source_rows - dropped_rows, 0)
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )
@@ -304,6 +315,7 @@ def reconcile(
                 f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
         )
 
     if sample_compare and not sample_compare.get("passed", True):
@@ -317,6 +329,7 @@ def reconcile(
             target_checksum=target_checksum,
             message=f"Read-back sample verification failed: {detail}",
             rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
         )
 
     if source_checksum != target_checksum:
@@ -363,10 +376,23 @@ def reconcile(
                 "cross-engine type rendering — not a data loss signal"
             ),
             rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
         )
-    message = f"100% row fidelity verified ({target_rows} rows)"
-    if rejected_rows:
-        message = f"Transfer verified ({target_rows} rows written, {rejected_rows} rejected)"
+    if coerced_null_rows:
+        # Row counts and checksums can still match here because the SAME failed
+        # coercion is applied when re-reading the source for its checksum. That
+        # does NOT mean the destination holds the original values — it holds
+        # NULLs. Be explicit rather than claiming full fidelity.
+        message = (
+            f"Transfer completed but NOT full fidelity: {coerced_null_rows} row(s) had a value "
+            f"coerced to NULL because it could not be cast to the target type"
+        )
+        if rejected_rows and rejected_rows != coerced_null_rows:
+            message += f"; {rejected_rows} row(s) rejected"
+    else:
+        message = f"100% row fidelity verified ({target_rows} rows)"
+        if rejected_rows:
+            message = f"Transfer verified ({target_rows} rows written, {rejected_rows} rejected)"
     return ReconciliationReport(
         passed=True,
         source_rows=source_rows,
@@ -375,6 +401,7 @@ def reconcile(
         target_checksum=target_checksum,
         message=message,
         rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
     )
 
 

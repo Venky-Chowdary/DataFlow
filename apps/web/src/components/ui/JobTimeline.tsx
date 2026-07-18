@@ -5,7 +5,7 @@ export interface JobTimelineEntry {
   key: string;
   title: string;
   timestamp?: string | null;
-  status: "done" | "active" | "failed" | "skipped" | "pending";
+  status: "done" | "active" | "failed" | "skipped" | "pending" | "warning";
   detail?: string;
 }
 
@@ -25,6 +25,7 @@ function fmt(ts?: string | null): string | undefined {
 function iconFor(status: JobTimelineEntry["status"]) {
   if (status === "done") return "check";
   if (status === "failed") return "x";
+  if (status === "warning") return "alert";
   if (status === "skipped") return "activity";
   if (status === "active") return "activity";
   return "jobs";
@@ -44,6 +45,7 @@ export function buildJobTimeline(opts: {
   phases?: JobPhase[];
   notifications?: JobNotificationResult[];
   rejectedRows?: number;
+  coercedNullRows?: number;
 }): JobTimelineEntry[] {
   const entries: JobTimelineEntry[] = [];
 
@@ -67,12 +69,22 @@ export function buildJobTimeline(opts: {
     });
   }
 
-  if (opts.rejectedRows && opts.rejectedRows > 0) {
+  const coercedNull = opts.coercedNullRows ?? 0;
+  const droppedRows = Math.max((opts.rejectedRows ?? 0) - coercedNull, 0);
+  if (droppedRows > 0) {
     entries.push({
       key: "quarantine",
       title: "Rows quarantined",
-      status: "skipped",
-      detail: `${opts.rejectedRows.toLocaleString()} rows isolated for review, not silently dropped`,
+      status: "warning",
+      detail: `${droppedRows.toLocaleString()} row(s) isolated for review — failed validation, not silently dropped`,
+    });
+  }
+  if (coercedNull > 0) {
+    entries.push({
+      key: "coerced-null",
+      title: "Values coerced to NULL",
+      status: "warning",
+      detail: `${coercedNull.toLocaleString()} row(s) kept but a value was changed to NULL — not full fidelity`,
     });
   }
 
@@ -85,12 +97,18 @@ export function buildJobTimeline(opts: {
     });
   }
 
-  if (opts.status === "completed" || opts.status === "failed") {
+  if (opts.status === "completed" || opts.status === "completed_with_quarantine" || opts.status === "failed") {
+    const isFailed = opts.status === "failed";
+    const isQuarantine = opts.status === "completed_with_quarantine";
     entries.push({
       key: "terminal",
-      title: opts.status === "completed" ? "Transfer completed" : "Transfer failed",
+      title: isFailed
+        ? "Transfer failed"
+        : isQuarantine
+          ? "Completed with quarantine"
+          : "Transfer completed",
       timestamp: opts.completedAt,
-      status: opts.status === "completed" ? "done" : "failed",
+      status: isFailed ? "failed" : isQuarantine ? "warning" : "done",
     });
   } else if (opts.status === "running" || opts.status === "pending") {
     entries.push({ key: "terminal", title: "In progress…", status: "active" });

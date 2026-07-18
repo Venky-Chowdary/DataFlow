@@ -91,7 +91,7 @@ function DocsHero({
             <span>Catalog connectors</span>
           </div>
           <div className="df2-docs-hero-stat">
-            <strong>6</strong>
+            <strong>8</strong>
             <span>Preflight gates</span>
           </div>
           <div className="df2-docs-hero-stat">
@@ -123,54 +123,82 @@ function DocsHero({
 
 function ArchitectureDiagram() {
   const width = 1200;
-  const height = 320;
-  const y = 160;
+  const height = 380;
+  const y = 168;
   const nodes = [
-    { x: 80, w: 150, label: "Sources", sub: "Files · Databases · Warehouses · SaaS" },
-    { x: 280, w: 120, label: "Ingestion", sub: "Parse · Profile · Normalize" },
-    { x: 440, w: 120, label: "Canonical", sub: "Schema · Types · Keys" },
-    { x: 600, w: 120, label: "Mapper", sub: "AI · Semantic · Rules" },
-    { x: 760, w: 120, label: "Preflight", sub: "Gates · Evidence · Decision" },
-    { x: 920, w: 120, label: "Execution", sub: "Chunk · Transform · Write" },
-    { x: 1080, w: 150, label: "Targets", sub: "Any database · File · Warehouse" },
+    { x: 48, w: 142, label: "Sources", sub: "Files · DBs · Warehouses · SaaS", tone: "edge" },
+    { x: 230, w: 118, label: "Ingestion", sub: "Parse · Profile · Normalize", tone: "core" },
+    { x: 384, w: 118, label: "Canonical", sub: "Schema · Types · Keys", tone: "core" },
+    { x: 538, w: 118, label: "Mapper", sub: "AI · Semantic · Rules", tone: "core" },
+    { x: 692, w: 118, label: "Preflight", sub: "8 gates · Evidence", tone: "gate" },
+    { x: 846, w: 118, label: "Execution", sub: "Chunk · Transform · Write", tone: "core" },
+    { x: 1004, w: 148, label: "Targets", sub: "DB · File · Warehouse", tone: "edge" },
   ];
 
   const path = nodes
     .map((n, i) => {
-      const x1 = n.x + (i === 0 ? n.w / 2 : 0);
-      const x2 = n.x + (i === 0 ? n.w / 2 : n.w / 2);
-      return i === 0 ? `M ${x1} ${y}` : `L ${x2} ${y}`;
+      const x = n.x + n.w / 2;
+      return i === 0 ? `M ${x} ${y}` : `L ${x} ${y}`;
     })
     .join(" ");
 
+  const surfaces = [
+    { label: "Transfer Studio", x: 180 },
+    { label: "Data Pilot", x: 420 },
+    { label: "MCP Agents", x: 640 },
+    { label: "Pipelines API", x: 880 },
+  ];
+
   return (
     <div className="df2-docs-architecture" aria-label="DataFlow architecture diagram">
+      <div className="df2-docs-arch-planes">
+        <span className="df2-docs-arch-plane-tag">Control surfaces</span>
+        <span className="df2-docs-arch-plane-tag is-data">Canonical data plane</span>
+      </div>
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="df2-docs-architecture-svg"
         preserveAspectRatio="xMidYMid meet"
         role="img"
-        aria-label="Data pipeline flow"
+        aria-label="Data pipeline flow from sources through preflight to targets"
       >
         <defs>
+          <linearGradient id="df2-docs-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#14b8a6" />
+            <stop offset="55%" stopColor="#0d9488" />
+            <stop offset="100%" stopColor="#0f766e" />
+          </linearGradient>
           <marker id="df2-docs-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--df-brand, #2563eb)" />
+            <path d="M0,0 L0,6 L9,3 z" fill="#0d9488" />
           </marker>
+          <filter id="df2-docs-soft" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="4" stdDeviation="6" floodColor="#0f172a" floodOpacity="0.08" />
+          </filter>
         </defs>
 
-        {nodes.map((n, i) => (
-          <g key={n.label}>
+        <rect x="36" y="36" width="1128" height="64" rx="14" className="df2-docs-arch-surface-band" />
+        {surfaces.map((s) => (
+          <g key={s.label}>
+            <rect x={s.x} y="48" width="140" height="40" rx="10" className="df2-docs-arch-surface" />
+            <text x={s.x + 70} y="72" textAnchor="middle" className="df2-docs-arch-surface-label">{s.label}</text>
+          </g>
+        ))}
+
+        <path d={path} className="df2-docs-arch-flow" markerEnd="url(#df2-docs-arrow)" />
+
+        {nodes.map((n) => (
+          <g key={n.label} filter="url(#df2-docs-soft)">
             <rect
               x={n.x}
-              y={y - 50}
+              y={y - 52}
               width={n.w}
-              height={100}
-              rx={12}
-              className="df2-docs-arch-node"
+              height={104}
+              rx={14}
+              className={`df2-docs-arch-node df2-docs-arch-node--${n.tone}`}
             />
             <text
               x={n.x + n.w / 2}
-              y={y - 24}
+              y={y - 22}
               className="df2-docs-arch-title"
               textAnchor="middle"
               dominantBaseline="middle"
@@ -179,31 +207,24 @@ function ArchitectureDiagram() {
             </text>
             <text
               x={n.x + n.w / 2}
-              y={y - 4}
+              y={y + 2}
               className="df2-docs-arch-sub"
               textAnchor="middle"
               dominantBaseline="middle"
             >
               {n.sub.split(" · ").map((line, idx) => (
-                <tspan key={line} x={n.x + n.w / 2} dy={idx === 0 ? 0 : "1.2em"}>
+                <tspan key={line} x={n.x + n.w / 2} dy={idx === 0 ? 0 : "1.25em"}>
                   {line}
                 </tspan>
               ))}
             </text>
-            {n.label === "Preflight" && (
-              <circle
-                cx={n.x + n.w / 2}
-                cy={y - 50}
-                r={6}
-                className="df2-docs-pulse-ring"
-              />
+            {n.tone === "gate" && (
+              <circle cx={n.x + n.w / 2} cy={y - 52} r={6} className="df2-docs-pulse-ring" />
             )}
           </g>
         ))}
 
-        <path d={path} className="df2-docs-arch-flow" markerEnd="url(#df2-docs-arrow)" />
-
-        <circle r="7" fill="var(--df-brand, #2563eb)" className="df2-docs-flow-particle">
+        <circle r="7" fill="url(#df2-docs-flow-grad)" className="df2-docs-flow-particle">
           <animateMotion dur="3.5s" repeatCount="indefinite" path={path} />
         </circle>
         <circle r="5" fill="#06b6d4" className="df2-docs-flow-particle df2-docs-flow-particle--lag">
@@ -212,6 +233,10 @@ function ArchitectureDiagram() {
         <circle r="5" fill="#f59e0b" className="df2-docs-flow-particle df2-docs-flow-particle--lag2">
           <animateMotion dur="3.5s" begin="1.4s" repeatCount="indefinite" path={path} />
         </circle>
+
+        <text x="600" y="320" textAnchor="middle" className="df2-docs-arch-footnote">
+          One engine under every surface — profile → map → validate → execute → reconcile
+        </text>
       </svg>
 
       <div className="df2-docs-arch-legend">
@@ -226,6 +251,10 @@ function ArchitectureDiagram() {
         <div className="df2-docs-legend-item">
           <span className="df2-docs-legend-dot df2-docs-legend-dot--amber" />
           <span>Streaming / CDC</span>
+        </div>
+        <div className="df2-docs-legend-item">
+          <span className="df2-docs-legend-dot df2-docs-legend-dot--teal" />
+          <span>Preflight gate</span>
         </div>
       </div>
     </div>
@@ -288,12 +317,24 @@ const PREFLIGHT_RULES = [
   },
   {
     id: "G5",
-    title: "Dry-Run Integrity",
-    icon: "check",
-    desc: "A sample is run through the real pipeline. Duplicates, missing keys, and invalid transforms are surfaced.",
+    title: "Nullability & Keys",
+    icon: "key",
+    desc: "Required fields, primary keys, and uniqueness constraints are checked against sampled values before write.",
   },
   {
     id: "G6",
+    title: "Destination Probe",
+    icon: "server",
+    desc: "Connectivity, privileges, and target object presence are verified with a live probe — not assumed.",
+  },
+  {
+    id: "G7",
+    title: "Capacity & Dry-Run",
+    icon: "check",
+    desc: "A sample runs through the real pipeline. Volume estimates, duplicates, and invalid transforms are surfaced.",
+  },
+  {
+    id: "G8",
     title: "Target DDL Compatibility",
     icon: "shield",
     desc: "Will the target table or collection accept the data? Existing schemas, PKs, and required fields are checked.",

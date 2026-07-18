@@ -2619,7 +2619,10 @@ body {
 .df2-inline-bar span { font-size: 11px; color: #64748b; }
 
 .df2-row-error { background: #fef2f2; }
+.df2-row-warn { background: #fffbeb; }
 .df2-text-error { color: #dc2626; }
+.df2-progress-warn { display: inline-flex; align-items: center; gap: 5px; color: #b45309; font-weight: 600; }
+.df2-progress-warn .dt-nav-icon { display: inline-flex; }
 
 .df2-card-elevated {
   box-shadow: 0 4px 24px rgba(15, 23, 42, 0.06);

@@ -168,11 +168,16 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
               <p className="lp-login-sub">Work email and password for your workspace.</p>
             </div>
 
-            {credentialError && credentialError.includes("API") && (
-              <div className="lp-login-alert" role="alert">
+            {credentialError && (
+              <div
+                className={`lp-login-alert ${credentialError.includes("API") ? "" : "lp-login-alert--warn"}`}
+                role="alert"
+              >
                 <DtIcon name="alert" size={18} />
                 <div>
-                  <strong>Control plane unreachable</strong>
+                  <strong>
+                    {credentialError.includes("API") ? "Control plane unreachable" : "Sign-in failed"}
+                  </strong>
                   <p>{credentialError}</p>
                 </div>
               </div>
@@ -189,11 +194,13 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                   onChange={(e) => { setEmail(e.target.value); setCredentialError(""); }}
                   autoComplete="email"
                   placeholder="you@company.com"
+                  aria-invalid={Boolean(emailError)}
+                  aria-describedby={emailError ? "login-email-error" : undefined}
                 />
-                {emailError && <small className="lp-field-error">{emailError}</small>}
+                {emailError && <small id="login-email-error" className="lp-field-error">{emailError}</small>}
               </div>
 
-              <div className={`lp-field ${passwordError || credentialError ? "is-error" : ""}`}>
+              <div className={`lp-field ${passwordError ? "is-error" : ""}`}>
                 <label className="lp-label" htmlFor="login-password">Password</label>
                 <input
                   id="login-password"
@@ -203,11 +210,10 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                   onChange={(e) => { setPassword(e.target.value); setCredentialError(""); }}
                   autoComplete="current-password"
                   placeholder="At least 8 characters"
+                  aria-invalid={Boolean(passwordError || (credentialError && !credentialError.includes("API")))}
+                  aria-describedby={passwordError ? "login-password-error" : undefined}
                 />
-                {passwordError && <small className="lp-field-error">{passwordError}</small>}
-                {!passwordError && credentialError && !credentialError.includes("API") && (
-                  <small className="lp-field-error">{credentialError}</small>
-                )}
+                {passwordError && <small id="login-password-error" className="lp-field-error">{passwordError}</small>}
               </div>
 
               <label className="lp-login-remember">

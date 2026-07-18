@@ -541,7 +541,7 @@ async def cancel_transfer_job(job_id: str, request: Request):
         job = mongo.get_job(job_id)
         if not job or not _can_access_job(request, job):
             raise HTTPException(status_code=404, detail="Job not found")
-        if job.get("status") in ("completed", "failed", "cancelled"):
+        if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
         mongo.update_job_status(
             job_id, "cancelled",
@@ -582,7 +582,7 @@ async def stream_transfer_job(job_id: str, request: Request):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
             yield f"data: {json.dumps(job, default=json_default)}\n\n"
-            if job.get("status") in ("completed", "failed"):
+            if job.get("status") in ("completed", "completed_with_quarantine", "failed"):
                 break
             await asyncio.sleep(0.4)
 

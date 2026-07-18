@@ -21,6 +21,7 @@ from connectors.writer_common import (  # noqa: E402
     build_mapped_rows,
     resolve_target_columns,
     row_fingerprints,
+    transform_error_policy_for_validation_mode,
 )
 
 # Keep resilient batch/quarantine path importable for streaming callers.
@@ -53,11 +54,13 @@ except ImportError:  # pragma: no cover - tests with api root on path
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
+    coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     return {
         "rejected_rows": rejected,
+        "coerced_null_rows": coerced,
         "rejected_details": list(getattr(result, "rejected_details", []) or [])[:50],
         "warnings": list(getattr(result, "warnings", []) or [])[:10],
-        "error_policy": "quarantine" if rejected else "none",
+        "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
     }
 
@@ -402,6 +405,7 @@ def _write_batch(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    error_policy: str | None = None,
 ) -> tuple[int, str, dict]:
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
@@ -426,6 +430,7 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -462,6 +467,7 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -497,6 +503,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -533,6 +540,7 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -571,6 +579,7 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -600,6 +609,7 @@ def _write_batch(
             column_types=column_types,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -642,6 +652,7 @@ def _write_batch(
             "mappings": mappings,
             "column_types": column_types,
             "create_table": create_table,
+            "error_policy": error_policy,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         }
         if dest_type in ("pgvector", "qdrant"):
@@ -682,6 +693,7 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -920,6 +932,10 @@ def stream_database_transfer(
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
+    coerced_null_total = 0
+    # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
+    # Threaded to every writer so the streaming path matches the buffered path.
+    stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
     warning_samples: list[str] = []
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
@@ -1088,6 +1104,7 @@ def stream_database_transfer(
                 "last_checksum": "",
                 "dest_summary": {},
                 "rejected": 0,
+                "coerced_null": 0,
                 "warnings": [],
                 "batch_max": None,
                 "batch_rows": 0,
@@ -1133,6 +1150,7 @@ def stream_database_transfer(
             write_mode=write_mode,
             conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
+            error_policy=stream_error_policy,
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1149,15 +1167,17 @@ def stream_database_transfer(
             "last_checksum": last_checksum,
             "dest_summary": dest_summary,
             "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
+            "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
             "batch_rows": len(batch.rows),
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, last_checksum, running_cursor, committed_offset, dest_summary
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary
         written += result["batch_written"]
         rejected_total += result["rejected"]
+        coerced_null_total += result.get("coerced_null", 0)
         last_checksum = result["last_checksum"] or last_checksum
         warning_samples.extend(result["warnings"])
         if result["batch_max"] is not None:
@@ -1297,7 +1317,9 @@ def stream_database_transfer(
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
-                error_policy="quarantine",
+                # Use the SAME policy as the write path so strict/maximum cannot
+                # silently coerce a bad cell to NULL here and mask a mismatch.
+                error_policy=stream_error_policy,
                 preserve_case=True,
             )
             if mapped:
@@ -1317,8 +1339,9 @@ def stream_database_transfer(
 
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
+    dest_summary["coerced_null_rows"] = coerced_null_total
     dest_summary["warnings"] = warning_samples[:10]
-    dest_summary["error_policy"] = "quarantine" if rejected_total else "none"
+    dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
     dest_summary["watermark"] = running_cursor
     ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")

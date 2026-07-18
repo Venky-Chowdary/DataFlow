@@ -42,6 +42,29 @@ export interface TransferCheckpoint {
   status?: string;
 }
 
+/**
+ * Canonical transfer-job lifecycle vocabulary (mirrors `services/job_status.py`).
+ * `completed_with_quarantine` is a SUCCESS-with-warnings terminal state — the
+ * data landed, but rows were rejected and/or values were coerced to NULL.
+ */
+export type JobStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "completed_with_quarantine"
+  | "failed"
+  | "cancelled";
+
+/** A single quarantined/rejected cell, emitted by every writer. */
+export interface RejectedDetail {
+  row?: number;
+  column?: string;
+  target?: string;
+  value?: string;
+  reason?: string;
+  policy?: string;
+}
+
 export interface TransferJob {
   _id: string;
   source_type: string;
@@ -49,7 +72,7 @@ export interface TransferJob {
   destination_type: string;
   destination_database: string;
   destination_collection: string;
-  status: string;
+  status: JobStatus | string;
   records_processed: number;
   created_at: string;
   total_rows?: number;
@@ -88,7 +111,9 @@ export interface JobProgress extends TransferJob {
   message?: string;
   error?: string;
   rejected_rows?: number;
-  rejected_details?: { row?: number; column?: string; reason?: string; value?: string }[];
+  /** Distinct rows where a value was coerced to NULL (kept, but fidelity lost). */
+  coerced_null_rows?: number;
+  rejected_details?: RejectedDetail[];
   destination_summary?: Record<string, unknown>;
   preflight?: PreflightResult;
   phases?: JobPhase[];
@@ -305,7 +330,8 @@ export interface TransferResult {
     checksum?: string;
     driver?: string;
     rejected_rows?: number;
-    rejected_details?: { row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[];
+    coerced_null_rows?: number;
+    rejected_details?: RejectedDetail[];
     warnings?: string[];
     error_policy?: string;
     filename?: string;
@@ -320,6 +346,7 @@ export interface TransferResult {
     source_rows?: number;
     target_rows?: number;
     rejected_rows?: number;
+    coerced_null_rows?: number;
     source_checksum?: string;
     target_checksum?: string;
   };
@@ -338,6 +365,36 @@ export interface TransferPlan {
   source_schema?: Record<string, string>;
 }
 
+export type ScheduleInterval = "hourly" | "daily" | "weekly";
+export type ScheduleSyncMode = "full_refresh_overwrite" | "full_refresh_append" | "incremental" | "cdc";
+
+/** Editable config shared by create (POST) and partial update (PATCH). */
+export interface ScheduleInput {
+  name: string;
+  source_connector_id: string;
+  source_table: string;
+  dest_connector_id: string;
+  dest_table: string;
+  interval: ScheduleInterval | string;
+  cron: string;
+  timezone: string;
+  sync_mode: ScheduleSyncMode | string;
+  validation_mode: string;
+  schema_policy: string;
+  backfill_new_fields: boolean;
+  cursor_column: string;
+  primary_key: string;
+  mappings: Record<string, unknown>[];
+  stream_contracts: Record<string, unknown>[];
+  workspace_id: string;
+  max_retries: number;
+  retry_backoff_seconds: number;
+  notify_on_failure: boolean;
+  notify_on_success: boolean;
+  enabled: boolean;
+}
+
+/** Full schedule record (list/detail) — config plus read-only run state. */
 export interface PipelineSchedule {
   id: string;
   name: string;
@@ -345,13 +402,59 @@ export interface PipelineSchedule {
   source_table: string;
   dest_connector_id: string;
   dest_table: string;
-  interval: "hourly" | "daily" | "weekly";
+  interval: ScheduleInterval | string;
+  cron: string;
+  timezone: string;
+  sync_mode: ScheduleSyncMode | string;
+  validation_mode: string;
+  schema_policy: string;
+  backfill_new_fields: boolean;
+  cursor_column: string;
+  primary_key: string;
+  cursor_value: string;
+  workspace_id: string;
+  max_retries: number;
+  retry_backoff_seconds: number;
+  notify_on_failure: boolean;
+  notify_on_success: boolean;
   enabled: boolean;
   last_run_at: string | null;
   next_run_at: string | null;
   last_job_id: string | null;
+  last_status: string | null;
   run_count: number;
+  running: boolean;
   created_at: string;
+}
+
+/** A single persisted run attempt from GET /schedules/{id}/history. */
+export interface ScheduleRun {
+  job_id: string;
+  status: string;
+  attempt: number;
+  started_at: string;
+  finished_at: string;
+  duration_seconds: number;
+  records_transferred: number;
+  rejected_rows: number;
+  coerced_null_rows: number;
+  error: string;
+  retry_scheduled?: boolean;
+}
+
+export interface ScheduleHistory {
+  schedule_id: string;
+  runs: ScheduleRun[];
+}
+
+export interface ScheduleIntervalOption {
+  id: string;
+  label: string;
+}
+
+export interface ScheduleIntervals {
+  intervals: ScheduleIntervalOption[];
+  sync_modes: string[];
 }
 
 export const CONNECTOR_CATALOG = [
