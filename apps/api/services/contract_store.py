@@ -66,13 +66,17 @@ class MongoContractStore(ContractStore):
                 from services.mongodb_service import get_mongodb_service
 
                 self.mongo = get_mongodb_service()
+            # The in-memory fallback returns an empty dict, not a real MongoDB
+            # database, so fall back to the in-memory contract store instead.
+            if type(self.mongo).__name__ == "MemoryMongoDBService":
+                return None
             return self.mongo.get_database()
         except Exception:
             return None
 
     def save_contract(self, contract: DataContract) -> DataContract:
         db = self._get_db()
-        if not db:
+        if db is None:
             return self._fallback.save_contract(contract)
         db["contracts"].update_one(
             {"id": contract.id},
@@ -83,7 +87,7 @@ class MongoContractStore(ContractStore):
 
     def get_contract(self, contract_id: str) -> DataContract | None:
         db = self._get_db()
-        if not db:
+        if db is None:
             return self._fallback.get_contract(contract_id)
         doc = db["contracts"].find_one({"id": contract_id})
         if not doc:
@@ -93,7 +97,7 @@ class MongoContractStore(ContractStore):
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         db = self._get_db()
-        if not db:
+        if db is None:
             self._fallback.save_breaker(breaker)
             return
         db["contract_breakers"].update_one(
@@ -104,7 +108,7 @@ class MongoContractStore(ContractStore):
 
     def get_breaker(self, contract_id: str) -> CircuitBreaker:
         db = self._get_db()
-        if not db:
+        if db is None:
             return self._fallback.get_breaker(contract_id)
         doc = db["contract_breakers"].find_one({"contract_id": contract_id})
         if doc:

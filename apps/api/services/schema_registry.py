@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 
 _SCHEMAS_PATH = data_dir() / "schema_registry_schemas.json"
@@ -34,10 +35,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _save(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(path, data, indent=2, default=str)
 
 
 @dataclass

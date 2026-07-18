@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from connectors.mongodb_common import (
+    _mongo_client,
+    mongodb_database_from_uri,
+    normalize_mongodb_connection_string,
+)
+
 
 def drop_table(
     db_type: str,
@@ -103,19 +109,19 @@ def _drop_generic_sql(cfg: dict[str, Any], table_name: str, schema: str | None) 
 
 def _drop_mongodb(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
     try:
-        from pymongo import MongoClient
-
-        host = cfg.get("host") or "127.0.0.1"
-        port = int(cfg.get("port") or 27017)
-        database = cfg.get("database") or "test"
-        username = cfg.get("username", "")
-        password = cfg.get("password", "")
-        if username and password:
-            client = MongoClient(f"mongodb://{username}:{password}@{host}:{port}/")
-        else:
-            client = MongoClient(host, port)
-        client[database].drop_collection(table_name)
-        client.close()
+        conn_str = normalize_mongodb_connection_string(
+            connection_string=cfg.get("connection_string", ""),
+            host=cfg.get("host") or "127.0.0.1",
+            port=int(cfg.get("port") or 27017),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            database=cfg.get("database") or "test",
+            auth_source=cfg.get("auth_source", ""),
+            ssl=bool(cfg.get("ssl")),
+        )
+        client = _mongo_client(conn_str)
+        db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
+        client[db_name].drop_collection(table_name)
         return True
     except Exception:
         return False
@@ -237,20 +243,19 @@ def _delete_generic_sql(cfg: dict[str, Any], table_name: str, pk_col: str, keys:
 
 def _delete_mongodb(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[str]) -> int:
     try:
-        from pymongo import MongoClient
-
-        host = cfg.get("host") or "127.0.0.1"
-        port = int(cfg.get("port") or 27017)
-        database = cfg.get("database") or "test"
-        username = cfg.get("username", "")
-        password = cfg.get("password", "")
-        if username and password:
-            client = MongoClient(f"mongodb://{username}:{password}@{host}:{port}/")
-        else:
-            client = MongoClient(host, port)
-        col = client[database][table_name]
-        result = col.delete_many({pk_col: {"$in": keys}})
-        client.close()
+        conn_str = normalize_mongodb_connection_string(
+            connection_string=cfg.get("connection_string", ""),
+            host=cfg.get("host") or "127.0.0.1",
+            port=int(cfg.get("port") or 27017),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            database=cfg.get("database") or "test",
+            auth_source=cfg.get("auth_source", ""),
+            ssl=bool(cfg.get("ssl")),
+        )
+        client = _mongo_client(conn_str)
+        db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
+        result = client[db_name][table_name].delete_many({pk_col: {"$in": keys}})
         return result.deleted_count
     except Exception:
         return 0

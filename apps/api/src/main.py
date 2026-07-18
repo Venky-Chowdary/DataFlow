@@ -44,6 +44,7 @@ from .routers.schedules_router import router as schedules_router
 from .routers.training_agent_router import router as training_agent_router
 from .routers.transfer_router import router as transfer_router
 from .routers.workspace_router import router as workspace_router
+from .services.rbac import RBACMiddleware
 
 logger = logging.getLogger("dataflow.api")
 
@@ -120,16 +121,20 @@ async def lifespan(app: FastAPI):
         start_transfer_scheduler()
 
         from .services.mongodb_service import get_mongodb_service
+        from .services.worker_leases import get_worker_lease_store
         from .transfer.background import run_transfer_async
         from .transfer.models import transfer_request_from_dict
 
         mongo = get_mongodb_service()
+        lease_store = get_worker_lease_store()
         resumed = 0
         for job in mongo.list_jobs(limit=200):
             if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
                 payload = job["transfer_request"]
                 if payload.get("requires_file_reupload"):
                     mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
+                    continue
+                if lease_store.is_held(job["_id"]):
                     continue
                 request = transfer_request_from_dict(payload)
                 run_transfer_async(job["_id"], request, resume=True)
@@ -172,6 +177,7 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
 

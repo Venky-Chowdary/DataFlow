@@ -639,6 +639,25 @@ async def run_universal_transfer(
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request_obj)
 
+    try:
+        from services.audit_log import actor_from_request, append_audit_event
+
+        append_audit_event(
+            action="transfer.run",
+            resource=f"/transfer/{job_id}",
+            actor=actor_from_request(request),
+            level="info",
+            details={
+                "source_format": source_format,
+                "dest_format": dest_format,
+                "sync_mode": sync_mode,
+                "workspace_id": workspace_id,
+                "async": async_mode.lower() in ("true", "1", "yes"),
+            },
+        )
+    except Exception:
+        pass
+
     if plan_id and plan_id.strip():
         from services.transfer_plan_store import attach_job
         attach_job(plan_id.strip(), job_id, status="running")

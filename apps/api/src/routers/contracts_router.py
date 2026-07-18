@@ -7,9 +7,10 @@ contract lifecycle management and circuit-breaker status.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+import yaml
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..services.contract_store import get_contract_store
@@ -166,3 +167,33 @@ def test_contract(body: _ContractTestRequest):
     except ContractViolation as cv:
         return _ContractTestResponse(valid=False, violations=cv.violations)
     return _ContractTestResponse(valid=True, violations=[])
+
+
+@router.get("/{contract_id}/export")
+def export_contract(contract_id: str, format: Literal["yaml", "json"] = "yaml"):
+    """Export a contract as a versionable YAML or JSON artifact for GitOps."""
+    store = get_contract_store()
+    contract = store.get_contract(contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    payload = contract.to_dict()
+    if format == "yaml":
+        return Response(
+            content=yaml.safe_dump(payload, sort_keys=False, default_flow_style=False),
+            media_type="application/x-yaml",
+            headers={"Content-Disposition": f"attachment; filename=contract-{contract_id}.yaml"},
+        )
+    return payload
+
+
+@router.post("/import", response_model=_ContractResponse)
+def import_contract(payload: dict[str, Any]):
+    """Import a contract from a YAML/JSON artifact. Replaces an existing contract with the same id."""
+    store = get_contract_store()
+    try:
+        contract = DataContract.from_dict(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid contract payload: {exc}") from exc
+    contract.status = ContractStatus.DRAFT
+    store.save_contract(contract)
+    return _contract_to_response(contract)

@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import requests
 
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int = 0
+from connectors.base import ReadBatch
+from services.error_handling import RetryBudget, with_retry
 
 
 def base_url(host: str, default: str) -> str:
@@ -51,20 +45,28 @@ def request(
     params: dict[str, Any] | None = None,
     data: dict[str, Any] | None = None,
     timeout: float = 30.0,
+    retry_budget: RetryBudget | None = None,
 ) -> requests.Response:
+    """Make an HTTP request with retriable transient handling (429 / 5xx / timeouts)."""
     h = dict(headers or {})
     if token:
         h.setdefault("Authorization", f"Bearer {token}")
     h.setdefault("Accept", "application/json")
     h.setdefault("User-Agent", "DataFlow/1.0")
-    return requests.request(
-        method=method,
-        url=url,
-        headers=h,
-        params=params,
-        json=data,
-        timeout=timeout,
-    )
+
+    def _call() -> requests.Response:
+        resp = requests.request(
+            method=method,
+            url=url,
+            headers=h,
+            params=params,
+            json=data,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp
+
+    return with_retry(_call, budget=retry_budget or RetryBudget())
 
 
 def humanize_http_error(exc: Exception, driver: str) -> str:

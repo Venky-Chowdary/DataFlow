@@ -114,6 +114,47 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
     return False, f"Combination {source_kind}/{source_format} → {dest_kind}/{dest_format} not yet live"
 
 
+# Production SKU: the source × destination combinations we explicitly commit to
+# supporting and verifying in CI. Every pair listed here is exercised by the
+# live transfer matrix when the required local emulators are running.
+PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
+    # File sources
+    ("file", "csv", "database", "sqlite"),
+    ("file", "csv", "database", "postgresql"),
+    ("file", "csv", "database", "mongodb"),
+    ("file", "csv", "file_export", "csv"),
+    ("file", "csv", "file_export", "json"),
+    ("file", "json", "database", "sqlite"),
+    ("file", "json", "database", "postgresql"),
+    ("file", "json", "database", "mongodb"),
+    ("file", "json", "file_export", "csv"),
+    ("file", "json", "file_export", "json"),
+    # Database sources
+    ("database", "sqlite", "database", "sqlite"),
+    ("database", "sqlite", "database", "postgresql"),
+    ("database", "sqlite", "database", "mongodb"),
+    ("database", "sqlite", "file_export", "csv"),
+    ("database", "sqlite", "file_export", "json"),
+    ("database", "postgresql", "database", "sqlite"),
+    ("database", "postgresql", "database", "postgresql"),
+    ("database", "postgresql", "database", "mongodb"),
+    ("database", "postgresql", "file_export", "csv"),
+    ("database", "postgresql", "file_export", "json"),
+    ("database", "mongodb", "database", "sqlite"),
+    ("database", "mongodb", "database", "postgresql"),
+    ("database", "mongodb", "database", "mongodb"),
+    ("database", "mongodb", "file_export", "csv"),
+    ("database", "mongodb", "file_export", "json"),
+]
+
+
+def validate_sku(source_kind: str, source_format: str, dest_kind: str, dest_format: str) -> tuple[bool, str]:
+    """Return whether a route is in the committed production SKU."""
+    if (source_kind, source_format, dest_kind, dest_format) in PRODUCTION_SKU:
+        return validate_transfer(source_kind, source_format, dest_kind, dest_format)
+    return False, "Route is not in the committed production SKU"
+
+
 def _live_catalog_ids() -> list[str]:
     """Return catalog IDs that are actually live so the UI can select them."""
     try:

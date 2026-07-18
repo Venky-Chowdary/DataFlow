@@ -605,7 +605,7 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis"):
+    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "pgvector", "qdrant"):
         writers = {
             "s3": "connectors.s3_writer",
             "gcs": "connectors.gcs_writer",
@@ -613,32 +613,43 @@ def _write_batch(
             "dynamodb": "connectors.dynamodb_writer",
             "elasticsearch": "connectors.elasticsearch_writer",
             "redis": "connectors.redis_writer",
+            "pgvector": "connectors.pgvector_writer",
+            "qdrant": "connectors.qdrant_writer",
         }
         import importlib
         mod = importlib.import_module(writers[dest_type])
-        result = mod.write_mapped_rows(
-            host=cfg["host"],
-            port=int(cfg.get("port") or 0),
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", ""),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", False),
-            warehouse=cfg.get("warehouse", ""),
-            role=cfg.get("role", ""),
-            auth_mode=cfg.get("auth_mode", ""),
-            api_key=cfg.get("api_key", ""),
-            service_account=cfg.get("service_account", ""),
-            auth_source=cfg.get("auth_source", ""),
-            table_name=table_name,
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            column_types=column_types,
-            create_table=create_table,
-            on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
-        )
+        kwargs = {
+            "host": cfg["host"],
+            "port": int(cfg.get("port") or 0),
+            "database": cfg["database"],
+            "username": cfg.get("username", ""),
+            "password": cfg.get("password", ""),
+            "schema": cfg.get("schema", ""),
+            "connection_string": cfg.get("connection_string", ""),
+            "ssl": cfg.get("ssl", False),
+            "warehouse": cfg.get("warehouse", ""),
+            "role": cfg.get("role", ""),
+            "auth_mode": cfg.get("auth_mode", ""),
+            "api_key": cfg.get("api_key", ""),
+            "service_account": cfg.get("service_account", ""),
+            "auth_source": cfg.get("auth_source", ""),
+            "table_name": table_name,
+            "headers": headers,
+            "data_rows": data_rows,
+            "mappings": mappings,
+            "column_types": column_types,
+            "create_table": create_table,
+            "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+        }
+        if dest_type in ("pgvector", "qdrant"):
+            extra = getattr(dest, "extra", {}) or {}
+            kwargs["content_column"] = extra.get("content_column")
+            kwargs["embedding_column"] = extra.get("embedding_column")
+            kwargs["metadata_columns"] = extra.get("metadata_columns")
+            kwargs["embedding_model"] = extra.get("embedding_model")
+            kwargs["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
+            kwargs["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
+        result = mod.write_mapped_rows(**kwargs)
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
         summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}

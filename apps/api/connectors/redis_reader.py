@@ -6,13 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int = 0
+from connectors.base import ReadBatch
 
 
 @dataclass

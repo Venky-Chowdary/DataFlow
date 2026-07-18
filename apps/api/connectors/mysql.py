@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from connectors.base import ConnectResult
-from connectors.driver_guard import platform_driver_unavailable
 
 
 def test_mysql(
@@ -19,19 +18,16 @@ def test_mysql(
 ) -> ConnectResult:
     del schema
     try:
-        import pymysql
-    except ImportError:
-        return _stub_fallback(host, database, username)
+        from connectors.mysql_conn import get_connection
 
-    try:
-        conn = pymysql.connect(
+        conn = get_connection(
             host=host or "localhost",
             port=port or 3306,
-            user=username,
-            password=password,
             database=database,
-            connect_timeout=8,
-            charset="utf8mb4",
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
         )
         with conn.cursor() as cur:
             cur.execute(
@@ -52,13 +48,3 @@ def test_mysql(
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="pymysql")
-
-
-def _stub_fallback(host: str, database: str, username: str) -> ConnectResult:
-    del host, database, username
-    return ConnectResult(
-        ok=False,
-        tables=[],
-        error=platform_driver_unavailable("MySQL"),
-        driver="none",
-    )

@@ -357,9 +357,10 @@ _NON_STREAMING_ROW_LIMIT = 100_000
 
 def _guard_truncated_read(batch, db_type: str, name: str) -> None:
     """Fail closed when a non-streaming read would silently drop rows."""
-    if batch.total_rows > len(batch.rows):
+    total_rows = batch.total_rows or 0
+    if total_rows > len(batch.rows):
         raise ValueError(
-            f"Source {db_type}.{name} has {batch.total_rows:,} rows but non-streaming reads "
+            f"Source {db_type}.{name} has {total_rows:,} rows but non-streaming reads "
             f"are capped at {len(batch.rows):,}. Use database-to-database transfer (async) "
             "for large tables."
         )
@@ -950,6 +951,43 @@ def write_destination_database(
         ddl_log.insert(0, f"EMAIL {result.table_name} via {cfg.get('host', '')}")
         return result.rows_written, ddl_log, {
             "type": "email", "host": cfg.get("host", ""), "subject": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "pgvector":
+        from connectors.pgvector_writer import write_mapped_rows
+        # Pass through vectorization options from the endpoint configuration.
+        common["content_column"] = endpoint.extra.get("content_column")
+        common["embedding_column"] = endpoint.extra.get("embedding_column")
+        common["metadata_columns"] = endpoint.extra.get("metadata_columns")
+        common["embedding_model"] = endpoint.extra.get("embedding_model")
+        common["chunk_size"] = int(endpoint.extra.get("chunk_size", 512)) if endpoint.extra.get("chunk_size") else 512
+        common["chunk_overlap"] = int(endpoint.extra.get("chunk_overlap", 50)) if endpoint.extra.get("chunk_overlap") else 50
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "pgvector write failed")
+        ddl_log.insert(0, f"UPSERT pgvector {result.target_schema}.{result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "pgvector", "schema": result.target_schema, "table": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "qdrant":
+        from connectors.qdrant_writer import write_mapped_rows
+        common["content_column"] = endpoint.extra.get("content_column")
+        common["embedding_column"] = endpoint.extra.get("embedding_column")
+        common["metadata_columns"] = endpoint.extra.get("metadata_columns")
+        common["embedding_model"] = endpoint.extra.get("embedding_model")
+        common["chunk_size"] = int(endpoint.extra.get("chunk_size", 512)) if endpoint.extra.get("chunk_size") else 512
+        common["chunk_overlap"] = int(endpoint.extra.get("chunk_overlap", 50)) if endpoint.extra.get("chunk_overlap") else 50
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Qdrant write failed")
+        ddl_log.insert(0, f"UPSERT qdrant collection {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "qdrant", "collection": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
             **_writer_diagnostics(result),
         }

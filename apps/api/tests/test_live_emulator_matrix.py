@@ -326,6 +326,20 @@ CASES = [
         ),
         id="mysql",
     ),
+    pytest.param(
+        EndpointConfig(
+            kind="database",
+            format="pgvector",
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            table="payments_pgvector",
+        ),
+        id="pgvector",
+    ),
 ]
 
 

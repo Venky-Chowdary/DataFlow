@@ -19,6 +19,7 @@ if str(_api_root) not in sys.path:
 
 try:
     from services import lineage_telemetry as lineage
+    from services.data_quality_history import validate_batch_against_history
     from services.error_handling import (
         RetryBudget,
         TransferCancelled,
@@ -44,6 +45,7 @@ try:
     )
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import lineage_telemetry as lineage
+    from src.services.data_quality_history import validate_batch_against_history
     from src.services.error_handling import (
         RetryBudget,
         TransferCancelled,
@@ -806,6 +808,33 @@ class UniversalTransferEngine:
                     job_id=job_id,
                 )
 
+            # History-aware data quality gate: compare this batch's statistical
+            # profile to the stored baseline for the same source/destination route.
+            try:
+                route = transfer_request_to_dict(request)
+                quality_passed, quality_anomalies, _ = validate_batch_against_history(
+                    records,
+                    route["source"],
+                    route["destination"],
+                    schema=schema,
+                    save_baseline=False,
+                )
+                if quality_anomalies:
+                    mongo.update_job_status(
+                        job_id, "running", phase="quality_check", progress_pct=20,
+                        message="; ".join(quality_anomalies),
+                    )
+                    if request.validation_mode == "strict":
+                        return TransferResult(
+                            success=False,
+                            error="Data quality anomaly: " + "; ".join(quality_anomalies),
+                            operation=request.operation,
+                            job_id=job_id,
+                        )
+            except Exception:
+                # Never block a transfer because the quality history store is down.
+                pass
+
             ddl_log: list[str] = []
             dest_summary: dict = {}
             rows_written = 0
@@ -1026,6 +1055,14 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
                 destination_summary=dest_summary,
             )
+            # Persist this successful batch as the new data-quality baseline.
+            try:
+                from services.data_quality_history import profile_batch, save_profile
+
+                route = transfer_request_to_dict(request)
+                save_profile(route["source"], route["destination"], profile_batch(records, schema))
+            except Exception:
+                pass
             finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 
 STORE_PATH = data_dir() / "sync_cursors.json"
@@ -83,10 +84,7 @@ def _load() -> dict[str, Any]:
 
 
 def _save(data: dict[str, Any]) -> None:
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(STORE_PATH)
+    write_json_atomic(STORE_PATH, data, indent=2, default=None)
 
 
 def get_watermark(cursor_key: str) -> str | None:

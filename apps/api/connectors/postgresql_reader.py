@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from connectors.base import ReadBatch
 from connectors.driver_guard import require_driver
 from connectors.postgresql_conn import get_connection
 
@@ -27,13 +27,6 @@ def _ensure_psycopg2() -> None:
 def _cell(value: Any) -> str:
     return cell_to_string(value)
 
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int
-    total_rows: int
 
 
 def count_table_rows(

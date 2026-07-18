@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
+from connectors.base import ReadBatch
 from connectors.snowflake_conn import get_connection, normalize_account
 
 _api_root = Path(__file__).resolve().parents[1]
@@ -13,14 +13,6 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.value_serializer import cell_to_string
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int = 0
 
 
 def count_table_rows(
@@ -51,7 +43,7 @@ def count_table_rows(
     try:
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                cur.execute(f'USE WAREHOUSE "{warehouse}"')
             sch = schema or "PUBLIC"
             cur.execute(f'SELECT COUNT(*) FROM "{sch}"."{table}"')
             return int(cur.fetchone()[0])
@@ -90,7 +82,7 @@ def read_table_batch(
     try:
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                cur.execute(f'USE WAREHOUSE "{warehouse}"')
             sch = schema or "PUBLIC"
             if known_total_rows is not None:
                 total = known_total_rows
@@ -144,7 +136,7 @@ def read_table_cursor_batch(
     try:
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                cur.execute(f'USE WAREHOUSE "{warehouse}"')
             sch = schema or "PUBLIC"
             col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
             if cursor_after:

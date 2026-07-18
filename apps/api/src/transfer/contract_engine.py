@@ -37,6 +37,8 @@ def enforce_or_create_contract(
 
     If the request supplies a contract_id and enforce_contract is True, the
     stored contract is loaded and enforced against the current schema/mappings.
+    The associated circuit breaker is also consulted: an OPEN breaker halts
+    the transfer until the contract is re-signed or the recovery timeout elapses.
     Otherwise a new contract is generated from the preflight result and saved.
     """
     store = get_contract_store()
@@ -46,6 +48,12 @@ def enforce_or_create_contract(
             raise ContractViolation(
                 f"Contract {request.contract_id} not found",
                 violations=[{"rule": "contract_not_found", "contract_id": request.contract_id}],
+            )
+        breaker = store.get_breaker(contract.id)
+        if not breaker.allow():
+            raise ContractViolation(
+                f"Circuit breaker for contract {contract.id} is OPEN; transfer blocked until recovery",
+                violations=[{"rule": "circuit_breaker_open", "contract_id": contract.id, "state": breaker.state.value}],
             )
         enforcer = ContractEnforcer(contract)
         enforcer.enforce(request, sample_schema=schema or request.column_types or {})

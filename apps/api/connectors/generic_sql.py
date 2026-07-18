@@ -18,6 +18,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from connectors.base import ReadBatch
 from connectors.schema_drift import add_missing_columns
 from services.value_serializer import cell_to_string
 
@@ -60,14 +61,6 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int | None = None
 
 
 @dataclass
@@ -707,11 +700,6 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
     return value
 
 
-def _cell_to_string(value: Any) -> str:
-    """Render a SQLAlchemy result cell value to the string matrix used by DataFlow."""
-    return cell_to_string(value)
-
-
 def _cfg_from_params(
     host: str,
     port: int,
@@ -879,7 +867,7 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
             "VARCHAR": "string",
             "TEXT": "string",
         }
-        samples = [_cell_to_string(v) if v is not None else "" for v in values]
+        samples = [cell_to_string(v) if v is not None else "" for v in values]
         return mapped.get(infer_type(samples, field_name=field_name))
     except Exception:
         return None
@@ -1073,7 +1061,7 @@ def _read_table_raw(
         sql += f" LIMIT {limit}"
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
-    rows = [[_cell_to_string(value) for value in row] for row in result.fetchall()]
+    rows = [[cell_to_string(value) for value in row] for row in result.fetchall()]
     return headers, rows
 
 
@@ -1142,7 +1130,7 @@ def read_table_batch(
 
                 fetched = conn.execute(stmt).fetchall()
                 headers = [c.name for c in selected_cols]
-                rows = [[_cell_to_string(value) for value in row] for row in fetched]
+                rows = [[cell_to_string(value) for value in row] for row in fetched]
 
                 if known_total_rows is not None:
                     total = known_total_rows
@@ -1220,7 +1208,7 @@ def read_table_cursor_batch(
 
             fetched = conn.execute(stmt).fetchall()
             headers = [c.name for c in selected_cols]
-            rows = [[_cell_to_string(value) for value in row] for row in fetched]
+            rows = [[cell_to_string(value) for value in row] for row in fetched]
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:

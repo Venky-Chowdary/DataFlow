@@ -1,25 +1,31 @@
 """Change-data-capture transfer runner for database sources.
 
-Implemented: **query-based CDC**. Polls the source table using a monotonic
-source cursor column (typically ``updated_at`` / ``created_at`` / an incrementing
-version / auto-increment id). Optional soft-delete / tombstone columns are
-honoured so rows flagged as deleted propagate as ``DELETE`` events.
+Implemented:
+  - **Query-based CDC**: polls the source table using a monotonic cursor column
+    (``updated_at`` / ``created_at`` / incrementing id). Optional soft-delete / tombstone
+    columns are honoured so rows flagged as deleted propagate as ``DELETE`` events.
+  - **MongoDB log-based CDC**: uses native Change Streams via
+    ``connectors.mongodb_change_stream`` when the deployment supports it and falls
+    back to query-based CDC otherwise.
 
-Not yet implemented: **log-based CDC** (PostgreSQL ``pgoutput`` logical decoding,
-MySQL binlog, SQL Server CDC, Oracle LogMiner, MongoDB Change Streams, etc.).
-Those require replication-slot/binlog/change-stream readers that are not present
-in this codebase, so any UI copy or capability registry that claims WAL/binlog
-CDC is aspirational and must be corrected.
+Not yet implemented: PostgreSQL ``pgoutput`` logical decoding, MySQL binlog,
+SQL Server CDC, Oracle LogMiner.
 
 The runner returns the same ``(rows_written, ddl_log, dest_summary, columns)``
 shape as ``stream_database_transfer`` so the engine can use it interchangeably.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from bson import json_util
+
+from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+from connectors.mysql_change_stream import MySqlChangeStreamCdc
+from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 from connectors.table_manager import delete_by_primary_keys
 from services.cdc_engine import (
     ChangeBatch,
@@ -313,8 +319,12 @@ def run_cdc_database_transfer(
     contract = resolve_sync_contract(stream_contracts)
     primary_key = contract.primary_key if contract else ""
     cursor_field = contract.cursor_field if contract else ""
-    if not primary_key or not cursor_field:
-        raise ValueError("CDC sync requires both primary_key and cursor_field in the stream contract")
+    if not primary_key:
+        raise ValueError("CDC sync requires primary_key in the stream contract")
+    if src_type in {"mongodb", "mysql", "postgresql"}:
+        cursor_field = cursor_field or primary_key or ("_id" if src_type == "mongodb" else "id")
+    elif not cursor_field:
+        raise ValueError("CDC sync requires cursor_field in the stream contract")
 
     pk_target_col = map_source_to_target(primary_key, mappings)
     cursor_key = build_cursor_key(
@@ -330,28 +340,124 @@ def run_cdc_database_transfer(
 
     headers = list(schema.keys())
     column_types = {c: schema.get(c, "string") for c in headers}
-    cdc = CdcEngine(
-        src_cfg,
-        src_type,
-        table_name,
-        cursor_field,
-        primary_key,
-        watermark,
-        columns=headers,
-        schema=schema,
-    )
 
-    ddl_log = [
-        f"CDC {src_type}.{table_name} → {dest_type}.{dest_table} "
-        f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
-    ]
+    if src_type == "mongodb":
+        try:
+            cdc: CdcEngine | MongodbChangeStreamCdc | MySqlChangeStreamCdc | PostgreSqlChangeStreamCdc = MongodbChangeStreamCdc(
+                src_cfg,
+                collection=table_name,
+                primary_key=primary_key,
+                columns=headers,
+                resume_token=watermark,
+                batch_size=CHUNK_SIZE,
+            )
+            if not cdc.is_available():
+                raise RuntimeError("MongoDB change streams not available; falling back to query CDC")
+            ddl_log = [
+                f"CDC(change_stream) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(pk={primary_key}, resume_token={'set' if watermark else 'initial'})"
+            ]
+        except Exception:
+            cdc = CdcEngine(
+                src_cfg,
+                src_type,
+                table_name,
+                cursor_field,
+                primary_key,
+                watermark,
+                columns=headers,
+                schema=schema,
+            )
+            ddl_log = [
+                f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+            ]
+    elif src_type == "mysql":
+        try:
+            cdc = MySqlChangeStreamCdc(
+                src_cfg,
+                table=table_name,
+                primary_key=primary_key,
+                columns=headers,
+                resume_token=watermark,
+                batch_size=CHUNK_SIZE,
+            )
+            if not cdc.is_available():
+                raise RuntimeError("MySQL binlog not available; falling back to query CDC")
+            ddl_log = [
+                f"CDC(binlog) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(pk={primary_key}, resume={'set' if watermark else 'initial'})"
+            ]
+        except Exception:
+            cdc = CdcEngine(
+                src_cfg,
+                src_type,
+                table_name,
+                cursor_field,
+                primary_key,
+                watermark,
+                columns=headers,
+                schema=schema,
+            )
+            ddl_log = [
+                f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+            ]
+    elif src_type == "postgresql":
+        try:
+            cdc = PostgreSqlChangeStreamCdc(
+                src_cfg,
+                table=table_name,
+                primary_key=primary_key,
+                cursor_key=cursor_key,
+                schema=src_cfg.get("schema") or "public",
+                columns=headers,
+                resume_token=watermark,
+                batch_size=CHUNK_SIZE,
+            )
+            if not cdc.is_available():
+                raise RuntimeError("PostgreSQL logical decoding not available; falling back to query CDC")
+            ddl_log = [
+                f"CDC(logical_decoding) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(pk={primary_key}, slot={'set' if watermark else 'initial'})"
+            ]
+        except Exception:
+            cdc = CdcEngine(
+                src_cfg,
+                src_type,
+                table_name,
+                cursor_field,
+                primary_key,
+                watermark,
+                columns=headers,
+                schema=schema,
+            )
+            ddl_log = [
+                f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+            ]
+    else:
+        cdc = CdcEngine(
+            src_cfg,
+            src_type,
+            table_name,
+            cursor_field,
+            primary_key,
+            watermark,
+            columns=headers,
+            schema=schema,
+        )
+        ddl_log = [
+            f"CDC {src_type}.{table_name} → {dest_type}.{dest_table} "
+            f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+        ]
 
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
     total_chunks = 1
     chunk_idx = 0
 
     for change in cdc.snapshot() if watermark is None else cdc.poll():
-        if not change.total_changes and not change.deletes:
+        if not change.total_changes and not change.deletes and change.resume_token is None:
             continue
 
         rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
@@ -375,8 +481,13 @@ def run_cdc_database_transfer(
         if dest_summary:
             state.last_dest_summary = dest_summary
 
-        # Advance watermark from the rows we just applied.
-        if change.inserts or change.updates:
+        # Advance watermark / resume token from the rows we just applied.
+        if change.resume_token is not None:
+            try:
+                state.running_cursor = json.dumps(change.resume_token, default=json_util.default)
+            except TypeError:
+                state.running_cursor = str(change.resume_token)
+        elif change.inserts or change.updates:
             values = [r.get(cursor_field) for r in (change.inserts + change.updates) if r.get(cursor_field) is not None]
             if values:
                 wm_type = infer_watermark_type([str(v) for v in values])

@@ -159,6 +159,7 @@ class ChangeBatch:
     updates: list[dict[str, Any]] = field(default_factory=list)
     deletes: list[str] = field(default_factory=list)  # primary key values
     unchanged: int = 0
+    resume_token: Any = None  # log-based CDC checkpoint (e.g. MongoDB change stream)
 
     @property
     def total_changes(self) -> int:

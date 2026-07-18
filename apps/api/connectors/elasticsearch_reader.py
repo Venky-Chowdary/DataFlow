@@ -3,23 +3,16 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from connectors.base import ReadBatch
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.value_serializer import cell_to_string
-
-
-@dataclass
-class ReadBatch:
-    headers: list[str]
-    rows: list[list[str]]
-    offset: int = 0
-    total_rows: int = 0
 
 
 def _client(cfg: dict[str, Any]):
