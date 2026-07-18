@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { StructurePreview } from "../ui/StructurePreview";
@@ -27,6 +27,8 @@ interface SourceStepAsideProps {
   sourceManual?: boolean;
   sourceManualType?: string;
   sourceIntrospecting?: boolean;
+  sourceIntrospectError?: string | null;
+  sourceObjectLabel?: string;
 }
 
 function ProfilingSteps({ active }: { active: boolean }) {
@@ -80,6 +82,77 @@ function SchemaSkeleton() {
   );
 }
 
+const ANALYZE_PHASES = [
+  "Connecting to source…",
+  "Reading table & column metadata…",
+  "Sampling representative rows…",
+  "Inferring types & building preview…",
+];
+
+/**
+ * Polished, honest loader shown while live schema introspection runs. The bar
+ * is intentionally indeterminate (the backend returns one result, not a stream
+ * of progress) but the cycling caption reflects the real phases of the analysis.
+ */
+function SchemaAnalyzingPanel({ target }: { target?: string }) {
+  const [phaseIdx, setPhaseIdx] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(
+      () => setPhaseIdx((i) => (i + 1) % ANALYZE_PHASES.length),
+      1100,
+    );
+    return () => window.clearInterval(t);
+  }, []);
+
+  return (
+    <div className="df2-source-aside df2-source-analyze">
+      <div className="df2-source-aside-head">
+        <div>
+          <h4>Analyzing source{target ? ` · ${target}` : ""}</h4>
+          <p>Introspecting schema and sampling live rows from the connector…</p>
+        </div>
+        <span className="df2-badge df2-badge-xs df2-badge-live">Analyzing</span>
+      </div>
+
+      <div
+        className="df2-source-analyze-progress"
+        role="progressbar"
+        aria-label="Schema analysis in progress"
+        aria-busy="true"
+      >
+        <div className="df2-source-analyze-track">
+          <span className="df2-source-analyze-indeterminate" />
+        </div>
+        <p className="df2-source-analyze-phase" aria-live="polite">
+          <DtIcon name="sparkle" size={13} />
+          {ANALYZE_PHASES[phaseIdx]}
+        </p>
+      </div>
+
+      <ProfilingSteps active />
+      <SchemaSkeleton />
+    </div>
+  );
+}
+
+function SchemaErrorPanel({ message }: { message: string }) {
+  return (
+    <div className="df2-source-aside df2-source-aside-error">
+      <div className="df2-source-aside-head">
+        <div>
+          <h4>Couldn’t read the source</h4>
+          <p>{message}</p>
+        </div>
+        <span className="df2-badge df2-badge-xs df2-badge-run">Error</span>
+      </div>
+      <div className="df2-source-aside-empty">
+        <DtIcon name="alert" size={22} />
+        <p>Verify the table or collection name, credentials, and network access, then adjust the selection to retry.</p>
+      </div>
+    </div>
+  );
+}
+
 function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
   return (
     <div className="df2-source-aside">
@@ -107,7 +180,7 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           <div className="df2-source-aside-format-chips">
             {FILE_FORMATS.map((fmt) => (
               <span key={fmt} className="df2-source-aside-format-chip">{fmt}</span>
-            )).reduce((acc: React.ReactNode[], chip, i) => {
+            )).reduce((acc: ReactNode[], chip, i) => {
               acc.push(chip);
               if (i < FILE_FORMATS.length - 1) acc.push(" ");
               return acc;
@@ -138,6 +211,8 @@ export function SourceStepAside({
   sourceManual,
   sourceManualType,
   sourceIntrospecting,
+  sourceIntrospectError,
+  sourceObjectLabel,
 }: SourceStepAsideProps) {
   if (sourceKind === "file" && parsed) {
     return (
@@ -150,6 +225,7 @@ export function SourceStepAside({
         subtitle={`${parsed.columns.length} fields · ${parsed.row_count.toLocaleString()} rows`}
         fill
         showBadge
+        allowJson
       />
     );
   }
@@ -160,12 +236,16 @@ export function SourceStepAside({
         columns={sourceColumns}
         schema={sourceSchema}
         rows={samplePreviewRows}
+        rowCount={parsed?.row_count}
         title="Source schema"
         subtitle={
           sourceConnector
-            ? `${sourceColumns.length} fields from ${sourceConnector.name}`
+            ? `${sourceColumns.length} fields${samplePreviewRows.length ? ` · ${samplePreviewRows.length} sample rows` : ""} from ${sourceConnector.name}`
             : "Fields discovered from the selected connector"
         }
+        fill
+        showBadge
+        allowJson
       />
     );
   }
@@ -175,18 +255,11 @@ export function SourceStepAside({
   }
 
   if (sourceIntrospecting) {
-    return (
-      <div className="df2-source-aside">
-        <div className="df2-source-aside-head">
-          <div>
-            <h4>Reading source schema</h4>
-            <p>Detecting columns and sample rows from the connector…</p>
-          </div>
-          <span className="df2-badge df2-badge-xs df2-badge-live">Profiling</span>
-        </div>
-        <SchemaSkeleton />
-      </div>
-    );
+    return <SchemaAnalyzingPanel target={sourceObjectLabel} />;
+  }
+
+  if (sourceIntrospectError) {
+    return <SchemaErrorPanel message={sourceIntrospectError} />;
   }
 
   if (sourceKind === "database") {

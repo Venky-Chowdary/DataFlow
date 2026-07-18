@@ -3,6 +3,7 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../../components/DtIcon";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
+import { MarketingFigure } from "../../components/marketing/MarketingFigure";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -762,6 +763,40 @@ function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" |
     { step: "4", title: "Write with proof", body: "Load data, reconcile checksums, and inspect quarantined rows in Job Theater." },
   ];
 
+  const walkthrough = [
+    {
+      step: 1,
+      title: "Connect your systems",
+      body: "Add a source and destination from 600+ drivers, or upload CSV, JSONL, and Parquet. Every connector shows an honest transfer-ready label.",
+      label: "Transfer Studio · Connectors",
+      caption: "The connector catalog groups native drivers, warehouse paths, and file formats with transfer-ready status.",
+      kind: "integrations" as const,
+    },
+    {
+      step: 2,
+      title: "Review the semantic map",
+      body: "DataFlow proposes column mappings with confidence scores. Accept high-confidence matches and review ambiguous fields before write.",
+      label: "Transfer Studio · Mapping",
+      caption: "Source columns are matched to destination fields with a confidence score — you approve anything ambiguous.",
+      kind: "mapping" as const,
+    },
+    {
+      step: 3,
+      title: "Run preflight & prove the load",
+      body: "Eight fail-fast gates validate schema, types, capacity, and destination readiness. After write, checksums reconcile every row.",
+      label: "Job Theater · Proof report",
+      caption: "Preflight gates, quarantine, and post-load reconciliation run inside one governed engine.",
+      kind: "security" as const,
+    },
+  ];
+
+  const docNav = [
+    { id: "quick-start", label: "Quick start" },
+    { id: "walkthrough", label: "Guided walkthrough" },
+    { id: "guides", label: "Product guides" },
+    { id: "faq", label: "Common questions" },
+  ];
+
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
@@ -781,71 +816,114 @@ function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" |
         visual={<MarketingIllustration kind="help" />}
       />
 
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <h2>Quick start</h2>
-          <p className="lp-mkt-lead">Four steps from first connector to checksum-proven load.</p>
-          <div className="lp-mkt-workflow lp-mkt-workflow--help">
-            {quickStart.map((item) => (
-              <article key={item.step} className="lp-mkt-workflow-step">
-                <span className="lp-mkt-workflow-num">{item.step}</span>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
-              </article>
+      <section className="lp-mkt-body lp-mkt-docs-layout">
+        <nav className="lp-mkt-docs-nav" aria-label="On this page">
+          <h2>On this page</h2>
+          <ul>
+            {docNav.map((item) => (
+              <li key={item.id}>
+                <a href={`#${item.id}`}>{item.label}</a>
+              </li>
             ))}
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <h2>Guides</h2>
-          <div className="lp-mkt-feature-grid">
-            {guides.map((g) => (
-              <button key={g.t} type="button" className="lp-mkt-feature-card lp-mkt-card--button" onClick={() => onNavigate(g.r)}>
-                <span className="lp-mkt-feature-icon" aria-hidden>
-                  <DtIcon name={g.icon} size={18} />
-                </span>
-                <div>
-                  <h3>{g.t}</h3>
-                  <p>{g.d}</p>
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <div className="lp-mkt-faq">
-            <h2>Common questions</h2>
-            <dl>
-              <div>
-                <dt>What is quarantine?</dt>
-                <dd>Rows that fail validation during load are isolated with the column, value, and reason — never silently dropped.</dd>
-              </div>
-              <div>
-                <dt>Do I need the API online?</dt>
-                <dd>File-to-file demo transfers work locally. Connectors and Job Theater need the API for live runs.</dd>
-              </div>
-              <div>
-                <dt>How is DataFlow different from ETL scripts?</dt>
-                <dd>Preflight gates and post-load reconciliation prove every transfer before and after write.</dd>
-              </div>
-            </dl>
-          </div>
-
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-              Contact sales
+          </ul>
+          <div className="lp-mkt-docs-nav-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--block" onClick={onGetStarted}>
+              Open the app
             </button>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
-              Start a transfer
-            </button>
-          </MarketingSectionFooter>
-        </section>
-      </MarketingReveal>
+          </div>
+        </nav>
+
+        <div className="lp-mkt-docs-content">
+          <MarketingReveal>
+            <section id="quick-start" className="lp-mkt-doc-section">
+              <h2>Quick start</h2>
+              <p className="lp-mkt-lead">Four steps from first connector to checksum-proven load.</p>
+              <div className="lp-mkt-workflow lp-mkt-workflow--help">
+                {quickStart.map((item) => (
+                  <article key={item.step} className="lp-mkt-workflow-step">
+                    <span className="lp-mkt-workflow-num">{item.step}</span>
+                    <h3>{item.title}</h3>
+                    <p>{item.body}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </MarketingReveal>
+
+          <MarketingReveal>
+            <section id="walkthrough" className="lp-mkt-doc-section">
+              <h2>Guided walkthrough</h2>
+              <p className="lp-mkt-lead">
+                A visual tour of the governed path — the same surfaces you&rsquo;ll see once you sign in.
+              </p>
+              <div className="lp-mkt-walkthrough">
+                {walkthrough.map((w) => (
+                  <article key={w.step} className="lp-mkt-walkthrough-row">
+                    <div className="lp-mkt-walkthrough-copy">
+                      <span className="lp-mkt-workflow-num">{w.step}</span>
+                      <h3>{w.title}</h3>
+                      <p>{w.body}</p>
+                    </div>
+                    <MarketingFigure step={w.step} label={w.label} caption={w.caption}>
+                      <MarketingIllustration kind={w.kind} />
+                    </MarketingFigure>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </MarketingReveal>
+
+          <MarketingReveal>
+            <section id="guides" className="lp-mkt-doc-section">
+              <h2>Product guides</h2>
+              <div className="lp-mkt-feature-grid">
+                {guides.map((g) => (
+                  <button key={g.t} type="button" className="lp-mkt-feature-card lp-mkt-card--button" onClick={() => onNavigate(g.r)}>
+                    <span className="lp-mkt-feature-icon" aria-hidden>
+                      <DtIcon name={g.icon} size={18} />
+                    </span>
+                    <div>
+                      <h3>{g.t}</h3>
+                      <p>{g.d}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </MarketingReveal>
+
+          <MarketingReveal>
+            <section id="faq" className="lp-mkt-doc-section">
+              <div className="lp-mkt-faq">
+                <h2>Common questions</h2>
+                <dl>
+                  <div>
+                    <dt>What is quarantine?</dt>
+                    <dd>Rows that fail validation during load are isolated with the column, value, and reason — never silently dropped.</dd>
+                  </div>
+                  <div>
+                    <dt>Do I need the API online?</dt>
+                    <dd>File-to-file demo transfers work locally. Connectors and Job Theater need the API for live runs.</dd>
+                  </div>
+                  <div>
+                    <dt>How is DataFlow different from ETL scripts?</dt>
+                    <dd>Preflight gates and post-load reconciliation prove every transfer before and after write.</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <MarketingSectionFooter>
+                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
+                  Contact sales
+                </button>
+                <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+                  Start a transfer
+                </button>
+              </MarketingSectionFooter>
+            </section>
+          </MarketingReveal>
+        </div>
+      </section>
     </div>
   );
 }

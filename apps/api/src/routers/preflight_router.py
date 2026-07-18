@@ -198,3 +198,34 @@ async def run_preflight(body: PreflightRequest):
         ),
         validation_mode=body.validation_mode,
     )
+
+
+class ExplainRequest(BaseModel):
+    """A preflight result to explain (as returned by POST /preflight/run)."""
+
+    preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
+    dest_type: Optional[str] = None
+    validation_mode: str = "strict"
+    use_llm: bool = Field(True, description="Reuse Data Pilot LLM for a natural-language narrative when available")
+
+
+@router.post("/explain")
+async def explain_preflight(body: ExplainRequest):
+    """AI-assisted 'explain & suggest fix' for a preflight/validation result.
+
+    Returns a structured, actionable explanation — what failed, which
+    column/row/value/type, why, and concrete fixes plus machine-readable
+    ``suggested_actions``. Works deterministically offline; reuses the Data
+    Pilot LLM only to add a friendlier narrative when a provider is configured.
+    """
+    from services.validation_assistant import explain_validation
+
+    try:
+        return explain_validation(
+            body.preflight,
+            dest_kind=(body.dest_type or "").lower(),
+            validation_mode=body.validation_mode,
+            use_llm=body.use_llm,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

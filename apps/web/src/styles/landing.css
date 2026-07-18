@@ -3131,3 +3131,783 @@
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   ENTERPRISE ELEVATION LAYER
+   One shared design language for the landing page AND every marketing subpage.
+   Motion, elevation, radii, and gradient primitives are defined once here and
+   reused everywhere. Later source order intentionally refines earlier rules.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.lp {
+  /* Motion — one easing + duration scale for the whole marketing site */
+  --lp-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --lp-ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --lp-dur-fast: 180ms;
+  --lp-dur: 460ms;
+  --lp-dur-slow: 760ms;
+
+  /* Brand aliases (fixes stray var(--lp-brand) references) */
+  --lp-brand: var(--lp-accent);
+  --lp-brand-ink: var(--lp-accent-ink);
+
+  /* Elevation scale */
+  --lp-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.04);
+  --lp-shadow-md: 0 10px 30px rgba(15, 23, 42, 0.08);
+  --lp-shadow-lg: 0 28px 80px rgba(15, 23, 42, 0.12);
+  --lp-shadow-glow: 0 16px 40px rgba(13, 148, 136, 0.16);
+
+  /* Radii */
+  --lp-radius-md: 12px;
+  --lp-radius-lg: 16px;
+  --lp-radius-xl: 22px;
+
+  /* Signature gradients */
+  --lp-grad-brand: linear-gradient(135deg, #0f766e 0%, #0d9488 46%, #14b8a6 100%);
+  --lp-grad-ink: linear-gradient(155deg, #0c3b37 0%, #0f172a 58%, #0b1220 100%);
+  --lp-grad-surface: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  --lp-hairline: color-mix(in srgb, var(--lp-accent) 22%, var(--lp-line));
+
+  scroll-behavior: smooth;
+}
+
+/* ─── Hero — refined eyebrow, aurora backdrop, stronger type ─── */
+.lp-hero {
+  isolation: isolate;
+}
+
+.lp-hero::before {
+  content: "";
+  position: absolute;
+  inset: -12% -20% auto -20%;
+  height: 620px;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(680px 320px at 30% 12%, rgba(13, 148, 136, 0.16), transparent 60%),
+    radial-gradient(560px 300px at 78% 4%, rgba(20, 184, 166, 0.12), transparent 62%);
+  filter: blur(6px);
+  opacity: 0.9;
+  animation: lp-aurora 16s var(--lp-ease-soft) infinite alternate;
+}
+
+@keyframes lp-aurora {
+  0% { transform: translate3d(-1.5%, 0, 0) scale(1); opacity: 0.75; }
+  100% { transform: translate3d(1.5%, -1.5%, 0) scale(1.05); opacity: 1; }
+}
+
+.lp-hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 20px;
+  padding: 6px 14px 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--lp-hairline);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--lp-shadow-sm);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+  color: var(--lp-accent-ink);
+}
+
+.lp-hero-eyebrow-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--lp-accent);
+  box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.16);
+  animation: lp-pulse-dot 2.4s var(--lp-ease-soft) infinite;
+}
+
+@keyframes lp-pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.16); }
+  50% { box-shadow: 0 0 0 6px rgba(13, 148, 136, 0.05); }
+}
+
+.lp-hero h1 {
+  background: linear-gradient(180deg, #0f172a 0%, #1a2b3d 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.lp-hero-mock {
+  position: relative;
+}
+
+.lp-hero-mock::after {
+  content: "";
+  position: absolute;
+  inset: auto 8% -34px 8%;
+  height: 80px;
+  z-index: -1;
+  background: radial-gradient(60% 100% at 50% 0%, rgba(13, 148, 136, 0.22), transparent 70%);
+  filter: blur(22px);
+  pointer-events: none;
+}
+
+/* ─── Reveal system — subtle fade + rise + de-blur, shared everywhere ─── */
+.lp-reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  filter: blur(3px);
+  transition:
+    opacity var(--lp-dur) var(--lp-ease),
+    transform var(--lp-dur) var(--lp-ease),
+    filter var(--lp-dur) var(--lp-ease);
+  will-change: opacity, transform;
+}
+
+.lp-reveal--in {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+.lp-reveal--in .lp-usecase,
+.lp-reveal--in .lp-together-card,
+.lp-reveal--in .lp-tool,
+.lp-reveal--in .lp-platform-step,
+.lp-reveal--in .lp-product-card,
+.lp-reveal--in .lp-trust-card,
+.lp-reveal--in .lp-testimonial-card,
+.lp-reveal--in .lp-compare-row,
+.lp-reveal--in .lp-mkt-feature-card,
+.lp-reveal--in .lp-mkt-price-card,
+.lp-reveal--in .lp-mkt-workflow-step,
+.lp-reveal--in .lp-mkt-quote,
+.lp-reveal--in .lp-mkt-stats-item,
+.lp-reveal--in .lp-mkt-icon-cell {
+  animation: lp-stagger-in 520ms var(--lp-ease) both;
+  animation-delay: calc(var(--reveal-i, 0) * 55ms);
+}
+
+/* ─── Unified card interaction — one hover language across the home page ─── */
+.lp-usecase,
+.lp-tool,
+.lp-together-card {
+  transition:
+    transform var(--lp-dur-fast) var(--lp-ease),
+    box-shadow var(--lp-dur-fast) var(--lp-ease),
+    border-color var(--lp-dur-fast) var(--lp-ease);
+}
+
+.lp-usecase:hover,
+.lp-tool:hover,
+.lp-together-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--lp-hairline);
+  box-shadow: var(--lp-shadow-glow);
+}
+
+.lp-tools-featured article {
+  transition: transform var(--lp-dur-fast) var(--lp-ease), box-shadow var(--lp-dur-fast) var(--lp-ease);
+}
+
+.lp-tools-featured article:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--lp-shadow-md);
+}
+
+/* Section headings — a touch more presence, brand-tinted kickers */
+.lp-section-kicker,
+.lp-mkt-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lp-section-kicker::before {
+  content: "";
+  width: 18px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--lp-grad-brand);
+}
+
+/* Platform icon color fix (was referencing an undefined var) */
+.lp-platform-step-icon {
+  color: var(--lp-accent-ink);
+  background: var(--lp-accent-soft);
+}
+
+/* ─── Nav — crisper scrolled state ─── */
+.lp-nav.is-scrolled .lp-nav-pill {
+  background: rgba(255, 255, 255, 0.97);
+}
+
+.lp-nav-dropdown {
+  animation: lp-dropdown-in 160ms var(--lp-ease) both;
+}
+
+@keyframes lp-dropdown-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Logo strip — gentle hover reveal of color ─── */
+.lp-logos-row {
+  transition: opacity var(--lp-dur) var(--lp-ease), filter var(--lp-dur) var(--lp-ease);
+}
+
+.lp-logos-row:hover {
+  opacity: 1;
+  filter: grayscale(0);
+}
+
+/* ─── Enterprise band — premium ink gradient, not flat black ─── */
+.lp-enterprise {
+  position: relative;
+  overflow: hidden;
+  background: var(--lp-grad-ink);
+  box-shadow: var(--lp-shadow-lg);
+}
+
+.lp-enterprise::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(520px 260px at 88% -10%, rgba(20, 184, 166, 0.28), transparent 60%),
+    radial-gradient(420px 220px at 6% 120%, rgba(13, 148, 136, 0.2), transparent 62%);
+}
+
+.lp-enterprise > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ─── CTA band — turn the closing section into a real branded panel
+   (fixes the previously invisible white sub-text on a light background) ─── */
+.lp-cta-band {
+  position: relative;
+  overflow: hidden;
+  width: min(1120px, calc(100% - clamp(32px, 8vw, 80px)));
+  margin: 8px auto 0;
+  border-radius: var(--lp-radius-xl);
+  background: var(--lp-grad-ink);
+  color: #fff;
+  box-shadow: var(--lp-shadow-lg);
+}
+
+.lp-cta-band::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(600px 260px at 50% -20%, rgba(20, 184, 166, 0.3), transparent 62%),
+    radial-gradient(380px 200px at 12% 120%, rgba(13, 148, 136, 0.22), transparent 60%);
+}
+
+.lp-cta-band > * {
+  position: relative;
+  z-index: 1;
+}
+
+.lp-cta-band h3 {
+  color: #fff;
+}
+
+.lp-cta-band .lp-btn--outline {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.lp-cta-band .lp-btn--outline:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.lp-cta-band .lp-btn--ghost {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.lp-cta-band .lp-btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+/* ─── Marquee — richer tiles with hover lift ─── */
+.lp-marquee-item {
+  box-shadow: var(--lp-shadow-sm);
+  transition: transform var(--lp-dur-fast) var(--lp-ease), box-shadow var(--lp-dur-fast) var(--lp-ease);
+}
+
+.lp-marquee-item:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--lp-shadow-md);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SUBPAGE COHESION — restore restrained enterprise depth so subpages share
+   the landing page's premium feel (they were previously flattened).
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Refined hero backdrop on subpages — subtle brand wash, not plain white */
+.lp.lp-subpage .lp-mkt-hero-band {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(760px 320px at 18% -10%, rgba(13, 148, 136, 0.12), transparent 58%),
+    radial-gradient(560px 280px at 92% 0%, rgba(20, 184, 166, 0.08), transparent 60%),
+    linear-gradient(180deg, #f6fefc 0%, #ffffff 62%);
+  border-bottom: 1px solid var(--lp-line);
+}
+
+/* Restrained elevation for subpage cards + a shared hover language */
+.lp.lp-subpage .lp-mkt-feature-card,
+.lp.lp-subpage .lp-mkt-price-card,
+.lp.lp-subpage .lp-mkt-workflow-step,
+.lp.lp-subpage .lp-mkt-quote,
+.lp.lp-subpage .lp-mkt-stats-item,
+.lp.lp-subpage .lp-mkt-card,
+.lp.lp-subpage .lp-trust-card,
+.lp.lp-subpage .lp-testimonial-card,
+.lp.lp-subpage .lp-mkt-icon-cell {
+  box-shadow: var(--lp-shadow-sm) !important;
+  transition:
+    transform var(--lp-dur-fast) var(--lp-ease),
+    box-shadow var(--lp-dur-fast) var(--lp-ease),
+    border-color var(--lp-dur-fast) var(--lp-ease);
+}
+
+.lp.lp-subpage .lp-mkt-feature-card.lp-mkt-card--button:hover,
+.lp.lp-subpage .lp-mkt-workflow-step:hover,
+.lp.lp-subpage .lp-mkt-card--button:hover,
+.lp.lp-subpage .lp-mkt-icon-cell:hover {
+  box-shadow: var(--lp-shadow-glow) !important;
+  transform: translateY(-3px) !important;
+  border-color: var(--lp-hairline) !important;
+}
+
+.lp.lp-subpage .lp-mkt-price-card.is-featured {
+  box-shadow: var(--lp-shadow-glow) !important;
+  border-width: 2px;
+}
+
+/* Featured pricing card — quiet brand tint for hierarchy */
+.lp-mkt-price-card.is-featured {
+  background: linear-gradient(180deg, var(--lp-accent-soft) 0%, #ffffff 42%);
+}
+
+.lp-mkt-price-card.is-featured::before {
+  content: "Most popular";
+  display: inline-flex;
+  align-self: flex-start;
+  margin-bottom: 2px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--lp-grad-brand);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Stats — brand top accent for a high-signal strip */
+.lp-mkt-stats-item {
+  position: relative;
+  overflow: hidden;
+}
+
+.lp-mkt-stats-item::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--lp-grad-brand);
+  opacity: 0.85;
+}
+
+/* Illustrations — unified framing so every subpage visual matches */
+.lp-mkt-illustration {
+  border: 1px solid var(--lp-line);
+  box-shadow: var(--lp-shadow-md);
+  background: #fff;
+}
+
+/* Feature icons — subtle brand ring for depth */
+.lp-mkt-feature-icon,
+.lp-hero-value-icon {
+  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.14);
+}
+
+/* ─── Outcomes band — high-signal, count-up metric strip ─── */
+.lp-outcomes {
+  padding-top: clamp(40px, 6vh, 72px);
+  padding-bottom: clamp(40px, 6vh, 72px);
+}
+
+.lp-outcomes-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.lp-outcome {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 26px 22px;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--lp-radius-lg);
+  background: var(--lp-grad-surface);
+  overflow: hidden;
+  transition: transform var(--lp-dur-fast) var(--lp-ease), box-shadow var(--lp-dur-fast) var(--lp-ease), border-color var(--lp-dur-fast) var(--lp-ease);
+}
+
+.lp-outcome::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--lp-grad-brand);
+}
+
+.lp-outcome:hover {
+  transform: translateY(-4px);
+  border-color: var(--lp-hairline);
+  box-shadow: var(--lp-shadow-glow);
+}
+
+.lp-outcome-value {
+  font-size: clamp(34px, 4.4vw, 48px);
+  font-weight: 780;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  background: var(--lp-grad-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+
+.lp-outcome-label {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--lp-ink);
+}
+
+.lp-outcome-detail {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--lp-muted-soft);
+}
+
+/* ─── CTA band trust line ─── */
+.lp-cta-band-trust {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 22px;
+  margin: 22px 0 0;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lp-cta-band-trust span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.lp-cta-band-trust .dt-nav-icon {
+  color: #5eead4;
+}
+
+@media (max-width: 960px) {
+  .lp-outcomes-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .lp-outcomes-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   DOCS / HELP — article-grade layout: sticky page nav, framed figures,
+   step-by-step walkthrough. Adapts polished help-portal patterns (left rail,
+   heading rhythm, captioned screenshot frames) under our own branding.
+   ══════════════════════════════════════════════════════════════════════════ */
+.lp-mkt-docs-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: clamp(24px, 4vw, 56px);
+  align-items: start;
+  padding-top: 40px;
+  padding-bottom: 8px;
+}
+
+.lp-mkt-docs-nav {
+  position: sticky;
+  top: 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px;
+  border: 1px solid var(--lp-line);
+  border-radius: var(--lp-radius-md);
+  background: var(--lp-grad-surface);
+  box-shadow: var(--lp-shadow-sm);
+}
+
+.lp-mkt-docs-nav h2 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lp-muted-soft);
+}
+
+.lp-mkt-docs-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.lp-mkt-docs-nav a {
+  display: block;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--lp-muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: background var(--lp-dur-fast) var(--lp-ease), color var(--lp-dur-fast) var(--lp-ease);
+}
+
+.lp-mkt-docs-nav a:hover {
+  background: var(--lp-accent-soft);
+  color: var(--lp-accent-ink);
+  border-left-color: var(--lp-accent);
+}
+
+.lp-mkt-docs-nav-cta {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--lp-line);
+}
+
+.lp-mkt-docs-content {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(40px, 6vw, 64px);
+  min-width: 0;
+}
+
+.lp-mkt-doc-section {
+  scroll-margin-top: 96px;
+}
+
+.lp-mkt-doc-section > h2 {
+  margin: 0 0 10px;
+  font-size: clamp(22px, 3vw, 28px);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--lp-ink);
+}
+
+/* Step-by-step walkthrough — copy paired with a captioned figure */
+.lp-mkt-walkthrough {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  margin-top: 20px;
+}
+
+.lp-mkt-walkthrough-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: clamp(20px, 3vw, 40px);
+  align-items: center;
+}
+
+.lp-mkt-walkthrough-row:nth-child(even) .lp-mkt-walkthrough-copy {
+  order: 2;
+}
+
+.lp-mkt-walkthrough-copy h3 {
+  margin: 10px 0 8px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--lp-ink);
+}
+
+.lp-mkt-walkthrough-copy p {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--lp-muted);
+}
+
+/* Figure frame — browser-style chrome + caption for embedded visuals */
+.lp-mkt-figure {
+  margin: 0;
+}
+
+.lp-mkt-figure-frame {
+  border: 1px solid var(--lp-line);
+  border-radius: var(--lp-radius-md);
+  background: #fff;
+  box-shadow: var(--lp-shadow-md);
+  overflow: hidden;
+}
+
+.lp-mkt-figure-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--lp-line);
+  background: #fafbfc;
+}
+
+.lp-mkt-figure-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.lp-mkt-figure-dot:nth-child(1) { background: #fca5a5; }
+.lp-mkt-figure-dot:nth-child(2) { background: #fcd34d; }
+.lp-mkt-figure-dot:nth-child(3) { background: #86efac; }
+
+.lp-mkt-figure-bar-label {
+  margin-left: 8px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--lp-muted-soft);
+}
+
+.lp-mkt-figure-body {
+  padding: 16px;
+  background:
+    radial-gradient(600px 200px at 50% -30%, rgba(13, 148, 136, 0.06), transparent 60%),
+    #ffffff;
+}
+
+.lp-mkt-figure-body .lp-mkt-illustration {
+  box-shadow: none;
+  border-color: var(--lp-line);
+  animation: none;
+}
+
+.lp-mkt-figure-caption {
+  margin: 10px 2px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--lp-muted-soft);
+}
+
+.lp-mkt-figure-step {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--lp-accent-soft);
+  color: var(--lp-accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.lp.lp-subpage .lp-mkt-docs-nav,
+.lp.lp-subpage .lp-mkt-figure-frame {
+  box-shadow: var(--lp-shadow-sm) !important;
+}
+
+@media (max-width: 960px) {
+  .lp-mkt-docs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-mkt-docs-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .lp-mkt-docs-nav ul {
+    grid-auto-flow: column;
+    grid-template-columns: none;
+    flex-wrap: wrap;
+  }
+
+  .lp-mkt-docs-nav h2 {
+    width: 100%;
+  }
+
+  .lp-mkt-docs-nav-cta {
+    margin: 0 0 0 auto;
+    padding: 0;
+    border: 0;
+  }
+
+  .lp-mkt-walkthrough-row {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-mkt-walkthrough-row:nth-child(even) .lp-mkt-walkthrough-copy {
+    order: 0;
+  }
+}
+
+/* ─── Consolidated reduced-motion — disable every marketing animation ─── */
+@media (prefers-reduced-motion: reduce) {
+  .lp * {
+    scroll-behavior: auto;
+  }
+
+  .lp-reveal,
+  .lp-reveal--in .lp-usecase,
+  .lp-reveal--in .lp-together-card,
+  .lp-reveal--in .lp-tool,
+  .lp-reveal--in .lp-platform-step,
+  .lp-reveal--in .lp-product-card,
+  .lp-reveal--in .lp-trust-card,
+  .lp-reveal--in .lp-testimonial-card,
+  .lp-reveal--in .lp-compare-row,
+  .lp-reveal--in .lp-mkt-feature-card,
+  .lp-reveal--in .lp-mkt-price-card,
+  .lp-reveal--in .lp-mkt-workflow-step,
+  .lp-reveal--in .lp-mkt-quote,
+  .lp-reveal--in .lp-mkt-stats-item,
+  .lp-reveal--in .lp-mkt-icon-cell {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .lp-hero::before,
+  .lp-hero-eyebrow-dot,
+  .lp-marquee-track,
+  .lp-mkt-illustration,
+  .lp-nav-dropdown {
+    animation: none !important;
+  }
+}
+

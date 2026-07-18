@@ -16,6 +16,8 @@ interface StructurePreviewProps {
   className?: string;
   /** When true, show more sample rows so the fill-height card stays useful on large screens */
   fill?: boolean;
+  /** Offer a Table / JSON toggle — ideal for document sources (e.g. MongoDB) */
+  allowJson?: boolean;
 }
 
 export function StructurePreview({
@@ -31,10 +33,12 @@ export function StructurePreview({
   showBadge = false,
   className = "",
   fill = false,
+  allowJson = false,
 }: StructurePreviewProps) {
   const rowsPerPage = maxRows ?? (fill ? 40 : 10);
   const [page, setPage] = useState(0);
   const [showAllFields, setShowAllFields] = useState(false);
+  const [view, setView] = useState<"table" | "json">("table");
   const previewCols = columns.slice(0, maxCols ?? columns.length);
   const STRIP_CAP = 24;
   const stripCols = showAllFields ? previewCols : previewCols.slice(0, STRIP_CAP);
@@ -62,11 +66,35 @@ export function StructurePreview({
               ?? `${columns.length} fields${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""} · sample below`}
           </p>
         </div>
-        {showBadge && (
-          <span className="df2-badge df2-badge-live">
-            <DtIcon name="check" size={12} /> Detected
-          </span>
-        )}
+        <div className="df2-structure-preview-head-actions">
+          {allowJson && rows.length > 0 && (
+            <div className="df2-structure-view-toggle" role="tablist" aria-label="Preview format">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "table"}
+                className={view === "table" ? "active" : ""}
+                onClick={() => setView("table")}
+              >
+                <DtIcon name="layers" size={13} /> Table
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "json"}
+                className={view === "json" ? "active" : ""}
+                onClick={() => setView("json")}
+              >
+                <DtIcon name="code" size={13} /> JSON
+              </button>
+            </div>
+          )}
+          {showBadge && (
+            <span className="df2-badge df2-badge-live">
+              <DtIcon name="check" size={12} /> Detected
+            </span>
+          )}
+        </div>
       </div>
 
       {showFieldStrip && (
@@ -100,7 +128,15 @@ export function StructurePreview({
         </div>
       )}
 
-      {previewRows.length > 0 ? (
+      {previewRows.length > 0 && allowJson && view === "json" ? (
+        <div className="df2-structure-json" aria-label="Sample documents">
+          {previewRows.map((row, i) => (
+            <pre key={i} className="df2-structure-json-doc">
+              <code>{JSON.stringify(row, null, 2)}</code>
+            </pre>
+          ))}
+        </div>
+      ) : previewRows.length > 0 ? (
         <div className="df2-structure-table-wrap">
           <table className="df2-structure-table" style={{ "--cols": previewCols.length } as React.CSSProperties}>
             <thead>

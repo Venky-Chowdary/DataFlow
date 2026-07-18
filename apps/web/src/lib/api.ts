@@ -142,6 +142,27 @@ export async function runPreflight(payload: {
   return res.json();
 }
 
+/**
+ * AI-assisted "explain & suggest fix" for a preflight result. Works
+ * deterministically offline; the backend reuses an LLM only to add a friendlier
+ * narrative when a provider is configured (see `assistant_provider`).
+ */
+export async function explainPreflight(payload: {
+  preflight: import("./types").PreflightResult;
+  dest_type?: string;
+  validation_mode?: string;
+  use_llm?: boolean;
+}): Promise<import("./types").ValidationExplanation> {
+  const res = await apiFetch(`${API_BASE}/preflight/explain`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ use_llm: true, ...payload }),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Explain failed"));
+  return res.json();
+}
+
 export async function analyzeDbTransfer(payload: {
   sourceConnectorId: string;
   sourceFormat: string;

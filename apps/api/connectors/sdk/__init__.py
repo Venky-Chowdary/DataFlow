@@ -155,6 +155,19 @@ class SingerTapBridge(BaseConnector):
 register_connector(SingerTapBridge)
 
 
+def test_singer_tap(**cfg: Any) -> tuple[bool, str]:
+    """Connectivity probe for the Singer tap bridge.
+
+    A Singer tap has no network endpoint of its own — "reachability" means a
+    tap command was configured. Returns the (ok, message) tuple the connector
+    registry probe contract expects.
+    """
+    tap_command = cfg.get("tap_command") or cfg.get("connection_string")
+    if not tap_command:
+        return False, "Singer tap requires a 'tap_command' (argv list or shell string)."
+    return True, "Singer tap command configured."
+
+
 def load_entrypoint(module_path: str, attr: str = "Connector") -> type[BaseConnector]:
     """Import ``module_path:attr`` and register it as an SDK connector."""
     mod = importlib.import_module(module_path)

@@ -605,7 +605,9 @@ def _sf_to_logical(dtype: str) -> str:
 
 def _sample_logical_type(value: Any, key: str = "") -> str:
     if value is None:
-        return "TEXT"
+        # Null/absent is unknown, not TEXT. Returning "" keeps a null observation
+        # from demoting a field that is typed (e.g. OBJECT) in other documents.
+        return ""
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
@@ -634,16 +636,36 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     return "TEXT"
 
 
+_STRUCTURAL_TYPES = {"OBJECT", "ARRAY", "JSON"}
+
+
 def _widen_mongodb_type(current: str, observed: str) -> str:
     """Widen inferred type across sampled documents; prefer more specific type.
 
     TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE,
     UUID/BINARY/OBJECT are retained when observed.
 
-    Any observed or current TEXT/VARCHAR value demotes a column to TEXT so that
-    mixed fields (e.g. a referral code that is sometimes a date string and
-    sometimes a hex token) do not force a strict date/number type on all rows.
+    Nested documents / arrays (OBJECT / ARRAY / JSON) are semi-structured and
+    "sticky": a later scalar, text, or null observation does NOT flatten them to
+    TEXT. This keeps schemaless nested fields queryable at columnar destinations
+    (Snowflake VARIANT, BigQuery JSON, Redshift SUPER) instead of landing as
+    JSON-in-VARCHAR. The write path losslessly wraps any bare scalar as JSON so
+    those mixed values still load without data loss.
+
+    Any other observed/current TEXT/VARCHAR value still demotes a column to TEXT
+    so that mixed scalar fields (e.g. a referral code that is sometimes a date
+    string and sometimes a hex token) do not force a strict date/number type.
     """
+    # Null/unknown observations are neutral — never demote a known type.
+    if not observed:
+        return current
+    if not current:
+        return observed
+    # Semi-structured wins over scalars/text so nested docs/arrays stay queryable.
+    if current in _STRUCTURAL_TYPES or observed in _STRUCTURAL_TYPES:
+        if current in _STRUCTURAL_TYPES and observed in _STRUCTURAL_TYPES:
+            return current if current == observed else "JSON"
+        return current if current in _STRUCTURAL_TYPES else observed
     if current in {"TEXT", "VARCHAR"} or observed in {"TEXT", "VARCHAR"}:
         return "TEXT"
     order = {
@@ -699,6 +721,11 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                             columns[key]["inferred_type"], inferred
                         )
         client.close()
+        # A field that was null in every sampled document has no observed type;
+        # fall back to TEXT so the column is still created.
+        for col in columns.values():
+            if not col.get("inferred_type"):
+                col["inferred_type"] = "TEXT"
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}

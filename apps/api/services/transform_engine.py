@@ -428,10 +428,19 @@ def _parse_boolean(value: str) -> bool | None:
 
 
 def _parse_json(value: str) -> str | None:
+    """Normalize a cell into JSON-valid text for a semi-structured target.
+
+    Valid JSON (objects, arrays, numbers, booleans, quoted strings) is preserved
+    and re-serialized compactly. A bare scalar that is not valid JSON on its own
+    — e.g. a plain word from a mixed MongoDB field that is an array in one
+    document and ``"single"`` in another — is losslessly wrapped as a JSON string
+    so it still loads into a VARIANT / JSON / SUPER column and stays queryable.
+    No value is ever dropped: the raw text is always representable as JSON.
+    """
     try:
         parsed = json.loads(value, parse_constant=lambda v: None)
-    except json.JSONDecodeError:
-        return None
+    except (json.JSONDecodeError, ValueError):
+        parsed = value  # wrap the raw scalar as a JSON string literal
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default, allow_nan=False)
 
 

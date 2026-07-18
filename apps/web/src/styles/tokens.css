@@ -78,6 +78,16 @@
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
 
+  /* Single control-height standard — every text input, select, search box,
+     and filter pill resolves to one of these so no control ever renders thin
+     or short. Referenced by inputs (app-styles/dataflow-ui), the toolbar/filter
+     cluster (enterprise-ui), and the connection workbench. Defined globally so
+     controls outside a `.df2-toolbar` (e.g. the connection workbench filter)
+     still get a real height instead of collapsing to text. */
+  --df-control-height: 38px;
+  --df-control-height-sm: 34px;
+  --df-toolbar-h: 38px;
+
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
   --df-nav-item-height: 36px;

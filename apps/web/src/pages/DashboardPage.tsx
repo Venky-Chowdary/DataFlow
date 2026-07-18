@@ -348,7 +348,14 @@ export function DashboardPage({
 
             <article className="df2-overview-v3-card">
               <header className="df2-overview-v3-card-head">
-                <h2 className="df2-overview-v3-card-title">Connections</h2>
+                <div>
+                  <h2 className="df2-overview-v3-card-title">Connections</h2>
+                  <p className="df2-overview-v3-card-sub">
+                    {connectors.length
+                      ? `${healthyConnectors} healthy · ${connectors.length - healthyConnectors} need attention`
+                      : "No connections yet"}
+                  </p>
+                </div>
                 {onOpenConnectors && (
                   <button type="button" className="df2-overview-v3-link" onClick={onOpenConnectors}>
                     Manage →
@@ -360,13 +367,21 @@ export function DashboardPage({
                   <p className="df2-overview-v3-inline-empty">No saved connections.</p>
                 ) : (
                   <ul className="df2-overview-conn-list">
-                    {connectors.slice(0, 6).map((c) => (
+                    {connectors.slice(0, 8).map((c) => (
                       <li key={c.id}>
                         <span className={`df2-health-dot ${c.status === "error" || c.last_test_ok === false ? "err" : "ok"}`} />
                         <ConnectorIcon id={c.type} size={18} />
-                        <span className="df2-overview-conn-name" title={c.name}>{c.name}</span>
+                        <span className="df2-overview-conn-body">
+                          <span className="df2-overview-conn-name" title={c.name}>{c.name}</span>
+                          <span className="df2-overview-conn-meta" title={`${c.type}${c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}`}>
+                            {c.type}{c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
+                          </span>
+                        </span>
                       </li>
                     ))}
+                    {connectors.length > 8 && (
+                      <li className="df2-overview-conn-more">+{connectors.length - 8} more connections</li>
+                    )}
                   </ul>
                 )}
               </div>
@@ -382,7 +397,7 @@ export function DashboardPage({
                 ) : (
                   <>
                     <ul className="df2-overview-pipeline-list">
-                      {schedules.slice(0, 5).map((s) => (
+                      {schedules.slice(0, 6).map((s) => (
                         <li key={s.id}>
                           <strong title={s.name}>{s.name}</strong>
                           <span className="df2-cell-meta">

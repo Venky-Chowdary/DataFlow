@@ -77,6 +77,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     except ImportError:
         is_lossy_coercion = None
 
+    # Value-aware report (host-injected). When sample rows exist we can predict
+    # the *real* write outcome per value instead of guessing from declared types.
+    report = {}
+    try:
+        report = ctx.coercion_report() or {}
+    except Exception:
+        report = {}
+    by_source: dict[str, dict] = report.get("by_source", {}) if isinstance(report, dict) else {}
+    value_aware = bool(report.get("sampled_rows")) if isinstance(report, dict) else False
+
+    warnings: list[str] = []
+    issues_detail: list[dict] = []
+
     for m in ctx.plan.mappings:
         target = dest_by_name.get(m.target.lower())
         if not target:
@@ -88,11 +101,48 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         lossy = pair in LOSSY_COERCIONS
         if not lossy and is_lossy_coercion:
             lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
-        if lossy:
-            issues.append(
-                f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
-                f"{m.target} ({target.inferred_type})"
-            )
+        if not lossy:
+            continue
+
+        label = (
+            f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
+            f"{m.target} ({target.inferred_type})"
+        )
+
+        # With sampled values we only hard-block when a real value cannot be
+        # coerced. A declared-type mismatch whose values all coerce cleanly (or
+        # are placeholder text that becomes NULL) is downgraded to a warning —
+        # this is what stops schemaless sources (MongoDB widened to TEXT) from
+        # producing a wall of false coercion blocks.
+        probe = by_source.get(m.source) if value_aware else None
+        if probe is not None:
+            severity = probe.get("severity", "ok")
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": severity,
+                "sampled": probe.get("sampled", 0),
+                "failed": probe.get("failed", 0),
+                "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                "sample_failures": probe.get("sample_failures", []),
+                "suggested_fix": probe.get("suggested_fix", ""),
+                "suggested_target_type": probe.get("suggested_target_type"),
+                "suggested_transform": probe.get("suggested_transform"),
+            }
+            issues_detail.append(detail)
+            if severity == "block":
+                issues.append(label)
+            else:
+                warnings.append(label)
+        elif value_aware:
+            # Report exists and covers this pair as clean (no entry ⇒ all values
+            # coerce): downgrade the declared-type mismatch to a warning.
+            warnings.append(label)
+        else:
+            # No samples to inspect — keep the conservative declared-type check.
+            issues.append(label)
 
     if issues:
         if (ctx.plan.validation_mode or "strict").lower() in {"strict", "maximum"}:
@@ -100,13 +150,20 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 GateId.G3_SCHEMA_CONTRACT,
                 f"{len(issues)} type coercion issue(s)",
                 start,
-                {"issues": issues},
+                {"issues": issues, "issues_detail": issues_detail, "warnings": warnings},
             )
         return _pass(
             GateId.G3_SCHEMA_CONTRACT,
             f"{len(issues)} type coercion warning(s) — will be verified by dry-run",
             start,
-            {"issues": issues, "warnings": issues},
+            {"issues": issues, "issues_detail": issues_detail, "warnings": issues + warnings},
+        )
+    if warnings:
+        return _pass(
+            GateId.G3_SCHEMA_CONTRACT,
+            f"Schema contract valid — {len(warnings)} coercion(s) verified against sampled values",
+            start,
+            {"warnings": warnings, "issues_detail": issues_detail},
         )
     return _pass(GateId.G3_SCHEMA_CONTRACT, "Schema contract valid", start)
 

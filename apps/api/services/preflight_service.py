@@ -77,6 +77,42 @@ class FilePreflightContext(PreflightContext):
                             return False, errors
             return len(errors) == 0, errors
 
+    def coercion_report(self) -> dict[str, Any]:
+        """Predict per-value write coercion for the plan against sample rows.
+
+        Reuses the exact transform-resolution and coercion the write path uses so
+        the preflight verdict matches the real write outcome. Cached so G3 and the
+        API response layer share one computation.
+        """
+        cached = getattr(self, "_coercion_report_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            from services.coercion_probe import analyze_coercion
+
+            source_types = {c.name: c.inferred_type for c in self.plan.source.columns}
+            dest_types = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
+            mapping_dicts = [
+                {
+                    "source": m.source,
+                    "target": m.target,
+                    "transform": getattr(m, "transform", None),
+                    "target_type": dest_types.get(m.target),
+                }
+                for m in self.plan.mappings
+            ]
+            report = analyze_coercion(
+                sample_rows=self.sample_rows,
+                mappings=mapping_dicts,
+                source_types=source_types,
+                dest_types=dest_types,
+                dest_db_type=self.plan.destination.db_type,
+            )
+        except Exception:
+            report = {}
+        self._coercion_report_cache = report
+        return report
+
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         if not columns or not self.sample_rows:
             return []
@@ -606,6 +642,7 @@ def run_file_preflight(
         "proof_bundle": proof_bundle,
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
+        "coercion_report": ctx.coercion_report(),
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),

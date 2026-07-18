@@ -88,6 +88,21 @@
   overflow: visible;
 }
 
+/* Section filter inside an opened connection — give it real breathing room so
+   it matches the enterprise control-height standard instead of collapsing to a
+   thin, cramped strip (the filter cluster inherits --df-toolbar-h globally). */
+.df2-page-connectors .df2-connection-workbench > .df2-filter-bar {
+  margin: 14px 0 4px;
+  max-width: 100%;
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.df2-page-connectors .df2-connection-workbench > .df2-filter-bar .df2-tab {
+  padding: 0 16px !important;
+  font-size: 13px !important;
+}
+
 /* Compact connection cards */
 .df2-connectors-list .df2-connector-card {
   padding: 12px;

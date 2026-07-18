@@ -2856,6 +2856,77 @@ textarea.df2-pilot-composer textarea {
   color: #64748b;
 }
 
+.df2-structure-preview-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Table / JSON segmented toggle — matches the enterprise pill-filter language */
+.df2-structure-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #eef2f6;
+}
+
+.df2-structure-view-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.df2-structure-view-toggle button:hover {
+  color: #0f172a;
+}
+
+.df2-structure-view-toggle button.active {
+  color: #0f172a;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1);
+}
+
+/* JSON document view — clean, scrollable sample documents (great for MongoDB) */
+.df2-structure-json {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 2px;
+}
+
+.df2-structure-json-doc {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #fff;
+  overflow-x: auto;
+}
+
+.df2-structure-json-doc code {
+  font-family: var(--df-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  color: #0f172a;
+  white-space: pre;
+}
+
 .df2-structure-field-strip {
   display: flex;
   flex-wrap: nowrap;
@@ -3849,6 +3920,32 @@ textarea.df2-pilot-composer textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Two-line connection row — name + type/database meta for real signal density */
+.df2-overview-conn-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.df2-overview-conn-meta {
+  font-size: 11px;
+  color: var(--df-text-muted, #64748b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-overview-conn-more {
+  display: block !important;
+  border: 0 !important;
+  background: transparent !important;
+  padding: 2px 2px 0 !important;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--df-text-muted, #64748b);
 }
 
 .df2-overview-conn-type {

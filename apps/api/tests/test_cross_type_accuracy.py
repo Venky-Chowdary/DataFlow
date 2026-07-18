@@ -77,6 +77,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "influxdb": ("connectors.influxdb", "test_connection"),
         "neo4j": ("connectors.neo4j", "test_connection"),
         "couchbase": ("connectors.couchbase", "test_connection"),
+        "singer_tap": ("connectors.sdk.singer_bridge", "test_singer_tap"),
     }
     if driver == "mongodb":
         import pymongo  # noqa: F401
@@ -108,6 +109,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "influxdb": "connectors.influxdb",
         "neo4j": "connectors.neo4j",
         "couchbase": "connectors.couchbase",
+        "singer_tap": "connectors.sdk",
     }
     writers = {
         "postgresql": "connectors.postgresql_writer",
@@ -134,6 +136,7 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         "influxdb": "connectors.saas_common",
         "neo4j": "connectors.saas_common",
         "couchbase": "connectors.saas_common",
+        "singer_tap": "connectors.saas_common",
     }
     if readers.get(driver):
         assert importlib.import_module(readers[driver])
@@ -408,7 +411,9 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         # json and arrays
         ('{"a": [1, 2]}', "json", '{"a":[1,2]}', False),
         ("[1, 2, 3]", "json", "[1,2,3]", False),
-        ("not-json", "json", None, True),
+        # A bare scalar is losslessly wrapped as a JSON string (semi-structured
+        # targets like VARIANT/JSON/SUPER stay loadable — no data dropped).
+        ("not-json", "json", '"not-json"', False),
         # uuids
         ("550e8400-e29b-41d4-a716-446655440000", "uuid", "550e8400-e29b-41d4-a716-446655440000", False),
         # null sentinels collapse to None for typed transforms

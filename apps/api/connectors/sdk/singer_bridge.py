@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from connectors.sdk import SingerTapBridge, register_connector
+from connectors.sdk import SingerTapBridge, register_connector, test_singer_tap
 
-__all__ = ["SingerTapBridge", "register_connector"]
+__all__ = ["SingerTapBridge", "register_connector", "test_singer_tap"]

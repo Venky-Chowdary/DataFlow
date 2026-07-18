@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { DtLogo } from "../components/DtLogo";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
@@ -100,6 +100,103 @@ function ConnectorMarqueeBand() {
   );
 }
 
+/**
+ * Count-up metric that animates once when scrolled into view. Honors
+ * prefers-reduced-motion by rendering the final value immediately.
+ */
+function CountUpStat({
+  target,
+  prefix = "",
+  suffix = "",
+  label,
+  detail,
+  index,
+}: {
+  target: number;
+  prefix?: string;
+  suffix?: string;
+  label: string;
+  detail: string;
+  index: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [value, setValue] = useState(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced || target === 0) {
+      setValue(target);
+      return;
+    }
+
+    let raf = 0;
+    let started = false;
+    const run = () => {
+      if (started) return;
+      started = true;
+      const duration = 1100;
+      const start = performance.now();
+      const tick = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        setValue(Math.round(eased * target));
+        if (t < 1) raf = window.requestAnimationFrame(tick);
+      };
+      raf = window.requestAnimationFrame(tick);
+    };
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          run();
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.4 },
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(raf);
+    };
+  }, [target]);
+
+  return (
+    <div ref={ref} className="lp-outcome" style={{ "--reveal-i": index } as CSSProperties}>
+      <strong className="lp-outcome-value">
+        {prefix}
+        {value.toLocaleString()}
+        {suffix}
+      </strong>
+      <span className="lp-outcome-label">{label}</span>
+      <span className="lp-outcome-detail">{detail}</span>
+    </div>
+  );
+}
+
+function OutcomesBand() {
+  return (
+    <section className="lp-section lp-outcomes" id="outcomes" aria-label="Outcomes">
+      <Reveal>
+        <div className="lp-section-head">
+          <p className="lp-section-kicker">Outcomes</p>
+          <h2>Built to prove every transfer</h2>
+          <p>Governance isn&rsquo;t a dashboard afterthought — it&rsquo;s enforced on every run, before and after write.</p>
+        </div>
+      </Reveal>
+      <Reveal className="lp-outcomes-grid">
+        <CountUpStat index={0} target={8} label="Preflight gates" detail="Block bad writes before production" />
+        <CountUpStat index={1} target={600} suffix="+" label="Transfer drivers" detail="Any source to any destination" />
+        <CountUpStat index={2} target={100} suffix="%" label="Row & checksum proof" detail="Reconciled end-to-end after write" />
+        <CountUpStat index={3} target={0} label="Silently dropped rows" detail="Bad rows are quarantined, never lost" />
+      </Reveal>
+    </section>
+  );
+}
+
 /** Home marketing body — chrome (nav/footer) lives in MarketingChrome. */
 export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
@@ -113,7 +210,10 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
   return (
     <>
       <section className="lp-hero">
-        <p className="lp-hero-brand">DataFlow</p>
+        <span className="lp-hero-eyebrow">
+          <span className="lp-hero-eyebrow-dot" aria-hidden />
+          Universal data movement, proven end-to-end
+        </span>
         <h1>Move any schema anywhere</h1>
         <p className="lp-hero-sub">
           Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
@@ -256,6 +356,8 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
           ))}
         </div>
       </section>
+
+      <OutcomesBand />
 
       <section className="lp-section lp-section-platform" id="platform">
         <Reveal>
@@ -548,6 +650,11 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
             Log in
           </button>
         </div>
+        <p className="lp-cta-band-trust">
+          <span><DtIcon name="shield" size={14} /> SOC 2 Type II posture</span>
+          <span><DtIcon name="lock" size={14} /> Your data stays in your tenant</span>
+          <span><DtIcon name="check" size={14} /> No credit card to start</span>
+        </p>
       </section>
     </>
   );

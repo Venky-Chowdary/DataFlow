@@ -1,7 +1,15 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
-import type { PreflightGate, PreflightResult } from "../../lib/types";
+import { Button } from "../ui/Button";
+import { explainPreflight } from "../../lib/api";
+import type {
+  CoercionColumn,
+  PreflightGate,
+  PreflightResult,
+  ValidationExplanation,
+  ValidationSuggestedAction,
+} from "../../lib/types";
 
 interface GateMeta {
   key: string;
@@ -49,6 +57,139 @@ interface ValidateDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
   confidenceThreshold?: number;
+  destType?: string;
+  validationMode?: string;
+  /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
+  onApplyAction?: (action: ValidationSuggestedAction) => void;
+}
+
+const SEVERITY_LABEL: Record<string, string> = {
+  block: "Block",
+  warn: "Warn",
+  ok: "OK",
+};
+
+const ACTION_ICON: Record<string, string> = {
+  change_target_type: "layers",
+  add_transform: "code",
+  review_mappings: "sparkle",
+  rerun_mapping: "transfer",
+  check_connection: "server",
+};
+
+/** Per-column value-aware coercion table with expandable offending-value rows. */
+function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  return (
+    <div className="df2-vd-coerce">
+      <div className="df2-vd-coerce-head">
+        <DtIcon name="scan" size={15} />
+        <strong>Type coercion preview</strong>
+        <span>{columns.length} column{columns.length === 1 ? "" : "s"} coerced against sampled values — expand a row to see the offending values.</span>
+      </div>
+      <div className="df2-vd-coerce-table-wrap">
+        <table className="df2-vd-coerce-table">
+          <thead>
+            <tr>
+              <th aria-label="Expand" />
+              <th>Column</th>
+              <th>Source → Target</th>
+              <th className="df2-vd-num">Sampled</th>
+              <th className="df2-vd-num">OK</th>
+              <th className="df2-vd-num">NULLed</th>
+              <th className="df2-vd-num">Failed</th>
+              <th>Severity</th>
+            </tr>
+          </thead>
+          <tbody>
+            {columns.map((col) => {
+              const key = `${col.source}→${col.target}`;
+              const nulled = (col.nulls ?? 0) + (col.sentinel_nulls ?? 0);
+              const isOpen = expanded.has(key);
+              const hasDetail = col.sample_failures.length > 0 || Boolean(col.suggested_fix);
+              return (
+                <Fragment key={key}>
+                  <tr
+                    className={`df2-vd-coerce-row sev-${col.severity}${hasDetail ? " has-detail" : ""}${isOpen ? " is-open" : ""}`}
+                    onClick={hasDetail ? () => toggle(key) : undefined}
+                    aria-expanded={hasDetail ? isOpen : undefined}
+                  >
+                    <td className="df2-vd-coerce-caret">
+                      {hasDetail && <DtIcon name={isOpen ? "chevron-down" : "chevron-right"} size={14} />}
+                    </td>
+                    <td className="df2-vd-coerce-col">
+                      <strong>{col.source}</strong>
+                      {col.target !== col.source && <span>→ {col.target}</span>}
+                    </td>
+                    <td className="df2-vd-coerce-types">
+                      <code>{col.source_type}</code>
+                      <DtIcon name="arrow-right" size={11} />
+                      <code>{col.target_type}</code>
+                    </td>
+                    <td className="df2-vd-num">{col.sampled.toLocaleString()}</td>
+                    <td className="df2-vd-num df2-vd-ok">{col.ok.toLocaleString()}</td>
+                    <td className="df2-vd-num df2-vd-nulled">{nulled.toLocaleString()}</td>
+                    <td className="df2-vd-num df2-vd-failed">{col.failed.toLocaleString()}</td>
+                    <td>
+                      <span className={`df2-vd-sev sev-${col.severity}`}>
+                        <DtIcon
+                          name={col.severity === "block" ? "x" : col.severity === "warn" ? "alert" : "check"}
+                          size={11}
+                        />
+                        {SEVERITY_LABEL[col.severity] ?? col.severity}
+                      </span>
+                    </td>
+                  </tr>
+                  {isOpen && hasDetail && (
+                    <tr className={`df2-vd-coerce-detail sev-${col.severity}`}>
+                      <td colSpan={8}>
+                        {col.suggested_fix && (
+                          <p className="df2-vd-coerce-fix">
+                            <DtIcon name="sparkle" size={13} /> {col.suggested_fix}
+                          </p>
+                        )}
+                        {col.sample_failures.length > 0 && (
+                          <div className="df2-vd-coerce-samples">
+                            <span className="df2-vd-coerce-samples-title">Offending values</span>
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th className="df2-vd-num">Row</th>
+                                  <th>Value</th>
+                                  <th>Reason</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {col.sample_failures.map((f, i) => (
+                                  <tr key={`${f.row}-${i}`}>
+                                    <td className="df2-vd-num">{f.row}</td>
+                                    <td><code>{f.value === "" ? "∅ empty" : f.value}</code></td>
+                                    <td>{f.reason}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function Ring({ value, label, sub, tone }: { value: number; label: string; sub: string; tone: string }) {
@@ -79,8 +220,43 @@ function Ring({ value, label, sub, tone }: { value: number; label: string; sub: 
   );
 }
 
-export function ValidateDashboard({ preflight, running = false, confidenceThreshold = 0.85 }: ValidateDashboardProps) {
+export function ValidateDashboard({
+  preflight,
+  running = false,
+  confidenceThreshold = 0.85,
+  destType,
+  validationMode,
+  onApplyAction,
+}: ValidateDashboardProps) {
   const [progress, setProgress] = useState(0);
+  const [explain, setExplain] = useState<ValidationExplanation | null>(null);
+  const [explaining, setExplaining] = useState(false);
+  const [explainError, setExplainError] = useState<string | null>(null);
+
+  // A new preflight run invalidates any prior explanation.
+  useEffect(() => {
+    setExplain(null);
+    setExplainError(null);
+  }, [preflight]);
+
+  const runExplain = async () => {
+    if (!preflight) return;
+    setExplaining(true);
+    setExplainError(null);
+    try {
+      const result = await explainPreflight({
+        preflight,
+        dest_type: destType,
+        validation_mode: validationMode,
+        use_llm: true,
+      });
+      setExplain(result);
+    } catch (e) {
+      setExplainError(e instanceof Error ? e.message : "Could not generate an explanation.");
+    } finally {
+      setExplaining(false);
+    }
+  };
 
   useEffect(() => {
     if (!running) {
@@ -200,6 +376,90 @@ export function ValidateDashboard({ preflight, running = false, confidenceThresh
           <Ring value={(1 - complianceRisk) * 100} label="Compliance" sub={`Risk ${complianceRisk.toFixed(2)}`} tone={complianceRisk > 0.4 ? "review" : "approve"} />
         </div>
       )}
+
+      {!running && preflight && (
+        <div className="df2-vd-assist">
+          <div className="df2-vd-assist-head">
+            <div className="df2-vd-assist-title">
+              <span className="df2-vd-assist-icon"><DtIcon name="sparkle" size={16} /></span>
+              <div>
+                <strong>Explain &amp; fix with AI</strong>
+                <span>Turn the validation result into a plain-language explanation with one-click fixes.</span>
+              </div>
+            </div>
+            <Button
+              variant={explain ? "ghost" : "primary"}
+              onClick={() => void runExplain()}
+              loading={explaining}
+              loadingLabel="Analyzing…"
+              leadingIcon={<DtIcon name="sparkle" size={14} />}
+            >
+              {explain ? "Re-analyze" : "Explain & fix with AI"}
+            </Button>
+          </div>
+
+          {explainError && (
+            <div className="df2-vd-assist-error" role="alert">
+              <DtIcon name="alert" size={14} />
+              <span>{explainError}</span>
+            </div>
+          )}
+
+          {explaining && !explain && (
+            <div className="df2-vd-assist-loading">
+              <Spinner size="sm" label="" /> Reviewing gates, columns, and offending values…
+            </div>
+          )}
+
+          {explain && (
+            <div className="df2-vd-assist-body">
+              <div className="df2-vd-assist-meta">
+                <span className={`df2-vd-provider provider-${explain.assistant_provider === "deterministic" ? "det" : "llm"}`}>
+                  <DtIcon name={explain.assistant_provider === "deterministic" ? "shield" : "sparkle"} size={11} />
+                  {explain.assistant_provider === "deterministic" ? "deterministic" : explain.assistant_provider}
+                </span>
+                <span className="df2-vd-assist-summary">{explain.summary}</span>
+              </div>
+              {explain.narrative && (
+                <div className="df2-vd-assist-narrative">
+                  {explain.narrative.split("\n").filter(Boolean).map((line, i) => (
+                    <p key={i}>{line}</p>
+                  ))}
+                </div>
+              )}
+              {explain.suggested_actions.length > 0 && (
+                <div className="df2-vd-assist-actions">
+                  <span className="df2-vd-assist-actions-title">Suggested fixes</span>
+                  <div className="df2-vd-chip-row">
+                    {explain.suggested_actions.map((action, i) => (
+                      <button
+                        key={`${action.kind}-${action.column ?? ""}-${i}`}
+                        type="button"
+                        className={`df2-vd-chip kind-${action.kind}`}
+                        onClick={() => onApplyAction?.(action)}
+                        disabled={!onApplyAction}
+                        title={action.label}
+                      >
+                        <DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={13} />
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {explain.suggested_actions.length === 0 && explain.passed && (
+                <p className="df2-vd-assist-clean">
+                  <DtIcon name="check" size={13} /> No fixes needed — all gates passed.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!running && preflight?.coercion_report?.columns?.length ? (
+        <CoercionTable columns={preflight.coercion_report.columns} />
+      ) : null}
 
       <div className="df2-vd-rules">
         <div className="df2-vd-rules-head">

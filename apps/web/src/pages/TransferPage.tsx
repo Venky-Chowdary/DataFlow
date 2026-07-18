@@ -48,6 +48,7 @@ import {
   editableFromPipelineMappings,
   mappingsFromAnalysis,
   type EditableMapping,
+  type MappingTransform,
 } from "../lib/mapping";
 import {
   Connector,
@@ -57,6 +58,7 @@ import {
   TransferPlan,
   TransferResult,
   JobProgress,
+  ValidationSuggestedAction,
 } from "../lib/types";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
@@ -187,6 +189,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
+  const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
   const [preflighting, setPreflighting] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -1062,11 +1065,21 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     if (!tableOrPath) return;
     const t = window.setTimeout(() => {
       setSourceIntrospecting(true);
+      setSourceIntrospectError(null);
       setAnalyzing(true);
-      introspectConnectorSource().finally(() => {
-        setSourceIntrospecting(false);
-        setAnalyzing(false);
-      });
+      introspectConnectorSource()
+        .then((res) => {
+          setSourceIntrospectError(
+            res ? null : "Could not read the source schema. Verify the table or collection name and connector credentials.",
+          );
+        })
+        .catch((e) => {
+          setSourceIntrospectError(e instanceof Error ? e.message : "Source introspection failed.");
+        })
+        .finally(() => {
+          setSourceIntrospecting(false);
+          setAnalyzing(false);
+        });
     }, 300);
     return () => window.clearTimeout(t);
   }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceCollection, sourceTable, cloudPath, introspectConnectorSource]);
@@ -1174,6 +1187,104 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setColumnMappings(approved);
     setStep(STEP_VALIDATE);
     await executePreflight(approved);
+  };
+
+  /** Reverse of `buildPreflightMappings`' engine-transform map, back to the Studio's UI transforms. */
+  const ENGINE_TO_UI_TRANSFORM: Record<string, MappingTransform> = {
+    trim: "trim",
+    upper: "upper",
+    lower: "lower",
+    datetime: "date_iso",
+    date_iso: "date_iso",
+    hash_pii: "hash_pii",
+    decimal: "cast_number",
+    cast_number: "cast_number",
+    boolean: "cast_boolean",
+    cast_boolean: "cast_boolean",
+    json: "parse_json",
+    parse_json: "parse_json",
+  };
+
+  /** Map an AI `suggested_action` onto the real Studio controls. */
+  const applySuggestedAction = (action: ValidationSuggestedAction) => {
+    const matches = (m: EditableMapping) =>
+      (action.target && m.target === action.target) || (action.column && m.source === action.column);
+
+    switch (action.kind) {
+      case "change_target_type": {
+        if (!action.to_type) return;
+        let hit = false;
+        setColumnMappings((prev) =>
+          prev.map((m) => {
+            if (matches(m)) {
+              hit = true;
+              return { ...m, destType: action.to_type, approved: true };
+            }
+            return m;
+          }),
+        );
+        toast({
+          title: hit ? "Target type updated" : "Column not found",
+          message: hit
+            ? `${action.column ?? action.target} → ${action.to_type}. Re-run preflight to apply the change.`
+            : `Couldn't find '${action.column ?? action.target}' in the current mappings.`,
+          tone: hit ? "success" : "warning",
+        });
+        break;
+      }
+      case "add_transform": {
+        const uiTransform = action.transform ? ENGINE_TO_UI_TRANSFORM[action.transform] : undefined;
+        if (!uiTransform) {
+          toast({
+            title: "Transform unavailable",
+            message: `No Studio transform matches '${action.transform ?? "?"}'. Adjust it in the Map step.`,
+            tone: "warning",
+          });
+          setStep(STEP_MAP);
+          return;
+        }
+        let hit = false;
+        setColumnMappings((prev) =>
+          prev.map((m) => {
+            if (matches(m)) {
+              hit = true;
+              return { ...m, transform: uiTransform };
+            }
+            return m;
+          }),
+        );
+        toast({
+          title: hit ? "Transform applied" : "Column not found",
+          message: hit
+            ? `Applied ${uiTransform} to '${action.column ?? action.target}'. Re-run preflight to apply.`
+            : `Couldn't find '${action.column ?? action.target}' in the current mappings.`,
+          tone: hit ? "success" : "warning",
+        });
+        break;
+      }
+      case "review_mappings":
+      case "rerun_mapping":
+        setStep(STEP_MAP);
+        toast({
+          title: "Opened Map step",
+          message:
+            action.kind === "rerun_mapping"
+              ? "Re-run mapping to accept the new schema, then re-run preflight."
+              : "Review and approve the flagged mappings, then re-run preflight.",
+          tone: "info",
+        });
+        break;
+      case "check_connection":
+        setStep(STEP_DESTINATION);
+        toast({
+          title: "Opened connection settings",
+          message: "Check the source/destination connection, then re-run preflight.",
+          tone: "info",
+        });
+        break;
+      default:
+        break;
+    }
   };
 
   const executePreflight = async (overrideMappings?: EditableMapping[], validationOverride?: ValidationMode) => {
@@ -1998,6 +2109,14 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
                 cloudConnectors={cloudSourceConnectors}
                 uploading={uploading}
                 sourceIntrospecting={sourceIntrospecting}
+                sourceIntrospectError={sourceIntrospectError}
+                sourceObjectLabel={
+                  sourceKind === "cloud"
+                    ? cloudPath.trim()
+                    : sourceConnector?.type === "mongodb"
+                      ? sourceCollection || sourceTable
+                      : sourceTable
+                }
               />
             </div>
           </div>
@@ -2448,6 +2567,9 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             preflight={preflight}
             running={preflighting}
             confidenceThreshold={confidenceThreshold}
+            destType={destKindMode === "file_export" ? exportFormat : destType}
+            validationMode={validationMode}
+            onApplyAction={applySuggestedAction}
           />
         </div>
       )}

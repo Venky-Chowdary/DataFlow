@@ -49,7 +49,8 @@ def test_poll_parses_binlog_events(base_cfg: dict) -> None:
     write = MagicMock(spec=WriteRowsEvent)
     write.schema = "test"
     write.table = "orders"
-    write.rows = [{"id": 1, "amount": 100.0}]
+    # Real pymysqlreplication wraps write rows as {"values": {...}}.
+    write.rows = [{"values": {"id": 1, "amount": 100.0}}]
     write.log_pos = 100
 
     update = MagicMock(spec=UpdateRowsEvent)

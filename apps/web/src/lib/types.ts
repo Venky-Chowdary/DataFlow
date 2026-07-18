@@ -190,6 +190,41 @@ export interface PreflightProofBundle {
   };
 }
 
+export interface CoercionSampleFailure {
+  row: number;
+  value: string;
+  reason: string;
+}
+
+/** Per-column value-aware coercion prediction (from `coercion_report.columns[]`). */
+export interface CoercionColumn {
+  source: string;
+  target: string;
+  source_type: string;
+  target_type: string;
+  target_logical?: string;
+  transform?: string;
+  sampled: number;
+  ok: number;
+  nulls: number;
+  sentinel_nulls: number;
+  failed: number;
+  sample_failures: CoercionSampleFailure[];
+  sentinel_examples?: { row: number; value: string }[];
+  severity: "ok" | "warn" | "block";
+  suggested_fix?: string;
+  suggested_target_type?: string | null;
+  suggested_transform?: string | null;
+}
+
+export interface CoercionReport {
+  checked: number;
+  sampled_rows: number;
+  has_blocking_failures: boolean;
+  columns: CoercionColumn[];
+  by_source?: Record<string, CoercionColumn>;
+}
+
 export interface PreflightResult {
   passed: boolean;
   passed_count: number;
@@ -198,6 +233,61 @@ export interface PreflightResult {
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
   proof_bundle?: PreflightProofBundle;
+  coercion_report?: CoercionReport;
+}
+
+/** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
+export type ValidationActionKind =
+  | "change_target_type"
+  | "add_transform"
+  | "review_mappings"
+  | "rerun_mapping"
+  | "check_connection";
+
+export interface ValidationSuggestedAction {
+  kind: ValidationActionKind | string;
+  column?: string;
+  target?: string;
+  to_type?: string;
+  transform?: string;
+  label: string;
+}
+
+export interface ValidationIssue {
+  gate: string;
+  title: string;
+  severity: "block" | "warning" | string;
+  what: string;
+  why: string;
+  fix: string;
+  examples: string[];
+  columns: string[];
+  detail_messages: string[];
+}
+
+export interface ValidationColumnFix {
+  column: string;
+  target?: string;
+  source_type?: string;
+  target_type?: string;
+  severity: "block" | "warn" | "ok" | string;
+  failed: number;
+  sentinel_nulls: number;
+  sampled: number;
+  sample_failures: CoercionSampleFailure[];
+  suggested_fix?: string;
+  suggested_target_type?: string | null;
+  suggested_transform?: string | null;
+}
+
+export interface ValidationExplanation {
+  passed: boolean;
+  summary: string;
+  issues: ValidationIssue[];
+  column_fixes: ValidationColumnFix[];
+  suggested_actions: ValidationSuggestedAction[];
+  narrative: string;
+  assistant_provider: string;
 }
 
 export interface TransferResult {
