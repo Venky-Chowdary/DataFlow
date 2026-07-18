@@ -12,6 +12,8 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.value_serializer import cell_to_string
+
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
     "maximum": {"confidence": 0.95, "null_rate_max": 0.0, "parse_fail_max": 0.0},
@@ -103,7 +105,7 @@ def _check_transform_dry_run(
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
     headers = source_columns or list(rows[0].keys())
-    sample_rows = [[str(row.get(h, "")) for h in headers] for row in rows[:200]]
+    sample_rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in rows[:200]]
     from services.transform_engine import dry_run_sample
 
     ok, errors = dry_run_sample(
@@ -151,7 +153,7 @@ def _check_financial_precision(
         )
         if transform not in {"decimal", "integer", "currency", "percentage"}:
             continue
-        values = [str(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
+        values = [cell_to_string(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
                 continue
@@ -248,7 +250,7 @@ def _check_duplicate_keys(
             continue
         seen: dict[str, int] = {}
         for row in rows:
-            val = str(row.get(src, "")).strip()
+            val = cell_to_string(row.get(src, "")).strip()
             if not val:
                 continue
             seen[val] = seen.get(val, 0) + 1

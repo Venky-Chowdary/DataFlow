@@ -26,6 +26,7 @@ from services.connector_capability_registry import (
     classify_payload,
     recommended_batch_size,
 )
+from services.value_serializer import cell_to_string
 from services.validation_plan import build_validation_plan
 
 
@@ -41,7 +42,9 @@ class FilePreflightContext(PreflightContext):
             return False, ["No sample rows available for dry-run validation"]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
-        rows = [[str(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
+        # Use cell_to_string so nested lists/dicts from schemaless sources become
+        # valid JSON strings instead of Python repr() artifacts.
+        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
         dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
         mapping_dicts = [
@@ -85,7 +88,7 @@ class FilePreflightContext(PreflightContext):
         seen: dict[str, int] = {}
         dupes: list[dict[str, Any]] = []
         for row in self.sample_rows:
-            val = str(row.get(source_col, ""))
+            val = cell_to_string(row.get(source_col, ""))
             seen[val] = seen.get(val, 0) + 1
         for val, count in seen.items():
             if count > 1 and val:

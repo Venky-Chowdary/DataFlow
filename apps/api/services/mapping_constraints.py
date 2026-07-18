@@ -48,8 +48,11 @@ def enforce_destination_constraints(
             dropped.append(src)
             continue
         out = dict(m)
-        # Resolve canonical target spelling from destination schema
-        canon = next((c for c in target_columns if _norm(c) == _norm(tgt)), tgt)
+        # Resolve canonical target spelling from the destination schema.
+        # Prefer an exact (case-insensitive) match so columns like `id` and
+        # `_id` do not collapse to the first normalized hit.
+        exact = next((c for c in target_columns if c.lower() == tgt.lower()), None)
+        canon = exact or next((c for c in target_columns if _norm(c) == _norm(tgt)), tgt)
         out["target"] = canon
         kept.append(out)
 
