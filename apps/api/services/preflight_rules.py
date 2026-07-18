@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.db_type_utils import SCHEMALESS_DESTS
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Gate taxonomy
 # ═══════════════════════════════════════════════════════════════════════════
@@ -330,7 +332,7 @@ def explain_issue(
     """Return human-readable why/why/guidance for a preflight issue string."""
     entry = _match_issue(message) or {}
     guidance = entry.get("why", "A preflight gate detected a condition that violates a transfer-safety rule.")
-    if dest_kind.lower() in {"mongodb", "dynamodb", "redis"} and "key" in message.lower():
+    if dest_kind.lower() in SCHEMALESS_DESTS and "key" in message.lower():
         guidance += " For schemaless destinations, only the real '_id' key is enforced; other identifier-like columns may repeat."
     return {
         "message": message,
