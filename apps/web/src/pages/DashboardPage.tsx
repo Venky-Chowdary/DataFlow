@@ -19,6 +19,7 @@ import {
 } from "../components/overview/OverviewCharts";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { ProgressCell } from "../components/ui/ProgressCell";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
@@ -90,6 +91,13 @@ export function DashboardPage({
   );
   const routeCount = topology.edges.length;
 
+  const lastActivityAt = useMemo(() => {
+    const times = jobs
+      .map((j) => new Date(j.created_at).getTime())
+      .filter((t) => Number.isFinite(t) && t > 0);
+    return times.length ? Math.max(...times) : null;
+  }, [jobs]);
+
   const healthScore = useMemo(() => {
     if (connectors.length === 0 && jobs.length === 0) return null;
     let score = 100;
@@ -116,20 +124,41 @@ export function DashboardPage({
       description="Live health, throughput, and recent migrations for this workspace."
     >
       <PageFrame className="df2-overview-v3">
-        {running.length > 0 && (
-          <section className="df2-overview-v3-ops" aria-label="Live operations">
-            <button
-              type="button"
-              className="df2-overview-v3-ops-chip is-live"
-              onClick={() => onOpenJobs?.()}
-              disabled={!onOpenJobs}
-            >
-              <DtIcon name="activity" size={14} />
-              <strong>{running.length}</strong>
-              <span>transfer{running.length === 1 ? "" : "s"} running</span>
-            </button>
-          </section>
-        )}
+        <PageContextBar
+          ariaLabel="Live workspace status"
+          stats={[
+            {
+              label: "Running",
+              value: running.length,
+              icon: "activity",
+              tone: running.length > 0 ? "warn" : "muted",
+              title: running.length > 0 ? "Transfers in progress right now" : "No transfers running",
+            },
+            { label: "Completed", value: completed.length, icon: "check", tone: completed.length > 0 ? "ok" : "muted" },
+            {
+              label: "Failed",
+              value: failed.length,
+              icon: "alert",
+              tone: failed.length > 0 ? "danger" : "muted",
+              title: failed.length > 0 ? "Failed transfers — review in Job Theater" : "No failed transfers",
+            },
+            { label: "Active routes", value: routeCount, icon: "transfer", tone: "muted", title: "Distinct source → destination routes in the data plane" },
+            {
+              label: "Last activity",
+              value: lastActivityAt ? formatRelativeTime(new Date(lastActivityAt).toISOString()) : "—",
+              icon: "clock",
+              tone: "muted",
+              title: "Most recent transfer job",
+            },
+          ]}
+          actions={
+            onOpenJobs && jobs.length > 0 ? (
+              <button type="button" className="df2-btn df2-btn-sm" onClick={onOpenJobs}>
+                <DtIcon name="jobs" size={14} /> Job Theater
+              </button>
+            ) : undefined
+          }
+        />
 
         <section className="df2-overview-v3-kpis" aria-label="Key metrics">
           <MetricGlassTile

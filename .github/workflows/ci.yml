@@ -14,6 +14,44 @@ jobs:
         image: mongo:7
         ports:
           - 27017:27017
+      # MySQL 8 enables ROW-based binlog by default, so MySQL matrix + binlog
+      # CDC tests run here instead of silently skipping.
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: dataflow
+          POSTGRES_PASSWORD: dataflow
+          POSTGRES_DB: dataflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U dataflow"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=5
     steps:
       - name: Checkout
         uses: actions/checkout@v4

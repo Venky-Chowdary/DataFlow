@@ -255,16 +255,22 @@ function AppShell({
           ? "df2-content-viewport"
           : "df2-content-document";
 
+  /** Document pages own the scroll on the host; immersive/viewport pages lock it
+      and scroll internally. Deterministic class beats the legacy :has() toggles. */
+  const contentScrolls = contentInnerClass === "df2-content-document";
+  const contentModeClass = contentScrolls ? "df2-content-scroll" : "df2-content-fixed";
+
   useEffect(() => {
     const scrollHost = document.querySelector<HTMLElement>(".df2-content");
     if (!scrollHost) return;
 
-    scrollHost.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" } as ScrollToOptions);
-
-    // Force scroll host to recognize content height after route / keep-alive swap
+    // Reset to top on every route / keep-alive swap. Overflow is governed purely
+    // by the .df2-content-scroll / .df2-content-fixed class (no inline mutation
+    // that could get stuck fighting !important rules).
+    scrollHost.scrollTop = 0;
     const raf = window.requestAnimationFrame(() => {
-      scrollHost.style.overflowY = "auto";
-      void scrollHost.offsetHeight;
+      void scrollHost.offsetHeight; // force reflow so scrollHeight is recomputed
+      scrollHost.scrollTop = 0;
     });
     return () => window.cancelAnimationFrame(raf);
   }, [screen, bootLoading]);
@@ -463,7 +469,7 @@ function AppShell({
           </div>
         )}
 
-        <div className="df2-content">
+        <div className={`df2-content ${contentModeClass}`}>
         {bootLoading && (
           <div className="df2-boot-progress" role="progressbar" aria-label="Loading workspace">
             <div className="df2-boot-progress-fill" />

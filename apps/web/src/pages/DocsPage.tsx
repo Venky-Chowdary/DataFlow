@@ -18,12 +18,106 @@ interface CatalogStats {
   roadmap?: number;
 }
 
-function RevealSection({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+function RevealSection({
+  children,
+  className = "",
+  id,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  id?: string;
+}) {
   const { ref, visible } = useRevealOnScroll();
   return (
-    <div ref={ref} className={`df2-docs-reveal ${visible ? "df2-docs-reveal--in" : ""} ${className}`.trim()}>
+    <section
+      id={id}
+      ref={ref}
+      className={`df2-docs-reveal ${visible ? "df2-docs-reveal--in" : ""} ${className}`.trim()}
+    >
       {children}
-    </div>
+    </section>
+  );
+}
+
+const DOC_SECTIONS = [
+  { id: "architecture", label: "Architecture", icon: "layers" },
+  { id: "coverage", label: "Connector coverage", icon: "connectors" },
+  { id: "pipeline", label: "How it works", icon: "transfer" },
+  { id: "preflight", label: "Preflight gates", icon: "shield" },
+  { id: "trust", label: "Trust & fidelity", icon: "check" },
+  { id: "use-cases", label: "Use cases", icon: "database" },
+  { id: "security", label: "Security & compliance", icon: "lock" },
+  { id: "troubleshooting", label: "Troubleshooting", icon: "alert" },
+] as const;
+
+function DocsHero({
+  transferLive,
+  total,
+  activeSection,
+  onJump,
+}: {
+  transferLive: number;
+  total: number;
+  activeSection: string;
+  onJump: (id: string) => void;
+}) {
+  return (
+    <header className="df2-docs-hero">
+      <div className="df2-docs-hero-copy">
+        <span className="df2-docs-hero-kicker">
+          <DtIcon name="book" size={14} /> Product documentation
+        </span>
+        <h2 className="df2-docs-hero-title">Move any data, prove every row.</h2>
+        <p className="df2-docs-hero-sub">
+          DataFlow runs one canonical pipeline — profile, map, validate, execute, reconcile —
+          so any source reaches any destination with zero silent data loss. Everything below is
+          how it works, end to end.
+        </p>
+        <div className="df2-docs-hero-actions">
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => onJump("pipeline")}>
+            <DtIcon name="transfer" size={14} /> How a transfer runs
+          </button>
+          <button type="button" className="df2-btn df2-btn-sm" onClick={() => onJump("preflight")}>
+            <DtIcon name="shield" size={14} /> Preflight gates
+          </button>
+        </div>
+        <div className="df2-docs-hero-stats">
+          <div className="df2-docs-hero-stat">
+            <strong>{transferLive.toLocaleString()}</strong>
+            <span>Transfer-ready connectors</span>
+          </div>
+          <div className="df2-docs-hero-stat">
+            <strong>{total.toLocaleString()}</strong>
+            <span>Catalog connectors</span>
+          </div>
+          <div className="df2-docs-hero-stat">
+            <strong>6</strong>
+            <span>Preflight gates</span>
+          </div>
+          <div className="df2-docs-hero-stat">
+            <strong>10k+</strong>
+            <span>Any-to-any routes</span>
+          </div>
+        </div>
+      </div>
+      <nav className="df2-docs-hero-progress" aria-label="On this page">
+        <span className="df2-docs-hero-progress-label">On this page</span>
+        <ol>
+          {DOC_SECTIONS.map((s) => (
+            <li key={s.id}>
+              <button
+                type="button"
+                className={activeSection === s.id ? "is-active" : ""}
+                onClick={() => onJump(s.id)}
+              >
+                <span className="df2-docs-hero-progress-dot" aria-hidden />
+                {s.label}
+              </button>
+            </li>
+          ))}
+        </ol>
+      </nav>
+    </header>
   );
 }
 
@@ -276,6 +370,7 @@ function UseCase({ title, body }: { title: string; body: string }) {
 export function DocsPage() {
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [statsError, setStatsError] = useState(false);
+  const [activeSection, setActiveSection] = useState<string>(DOC_SECTIONS[0].id);
 
   useEffect(() => {
     fetchCatalogStats()
@@ -283,64 +378,90 @@ export function DocsPage() {
       .catch(() => setStatsError(true));
   }, []);
 
+  useEffect(() => {
+    const els = DOC_SECTIONS
+      .map((s) => document.getElementById(s.id))
+      .filter((el): el is HTMLElement => Boolean(el));
+    if (els.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+        if (visible[0]) setActiveSection(visible[0].target.id);
+      },
+      { rootMargin: "-18% 0px -68% 0px", threshold: [0, 0.25, 0.5] },
+    );
+    els.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, []);
+
+  const jumpTo = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setActiveSection(id);
+  };
+
   const transferLive = stats?.transfer_live ?? stats?.live ?? 130;
   const total = stats?.total ?? 734;
-  const planned = stats?.planned ?? 600;
 
   return (
     <PageShell
-      title="Docs"
+      title="Help & documentation"
       description="How DataFlow plans, maps, validates, and proves every transfer."
       fit={false}
       className="df2-page-docs"
     >
       <PageFrame className="df2-docs-workspace">
-      <div className="df2-docs dt-stagger">
-        <RevealSection>
+      <DocsHero transferLive={transferLive} total={total} activeSection={activeSection} onJump={jumpTo} />
+
+      <div className="df2-docs-shell">
+        <aside className="df2-docs-toc" aria-label="Documentation sections">
+          <span className="df2-docs-toc-label">Contents</span>
+          <nav>
+            {DOC_SECTIONS.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className={`df2-docs-toc-item ${activeSection === s.id ? "is-active" : ""}`}
+                onClick={() => jumpTo(s.id)}
+                aria-current={activeSection === s.id ? "true" : undefined}
+              >
+                <DtIcon name={s.icon} size={15} />
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="df2-docs-toc-card">
+            <StatCard
+              label="Connector catalog"
+              value={total.toLocaleString()}
+              sub={statsError ? "Catalog offline" : `${transferLive.toLocaleString()} transfer-ready`}
+              icon="database"
+              tone="blue"
+            />
+          </div>
+        </aside>
+
+        <div className="df2-docs dt-stagger">
+        <RevealSection id="architecture">
           <PageSection title="Architecture" subtitle="One canonical pipeline for every source and destination" asCard>
             <ArchitectureDiagram />
-          </PageSection>
-        </RevealSection>
-
-        <RevealSection>
-          <div className="df2-docs-stats">
-            <StatCard label="Connector catalog" value={total.toLocaleString()} sub={statsError ? "Catalog offline" : "Source and destination connectors"} icon="database" tone="blue" />
-            <StatCard label="Live routes" value="10,000+" sub="Any source to any destination" icon="transfer" tone="teal" />
-            <StatCard label="Preflight gates" value="6" sub="Hard and soft validation gates" icon="shield" tone="green" />
-            <StatCard label="Test coverage" value="753" sub="API tests + preflight suite" icon="check" tone="default" />
-          </div>
-        </RevealSection>
-
-        <RevealSection>
-          <PageSection title="Data flow" subtitle="From any source to any verified target">
             <img
               src="/docs/pipeline.png"
-              alt="DataFlow pipeline illustration"
+              alt="DataFlow pipeline illustration — source ingestion through verified target write"
               className="df2-docs-illustration"
               loading="lazy"
             />
           </PageSection>
         </RevealSection>
 
-        <RevealSection>
+        <RevealSection id="coverage">
           <PageSection title="Connector coverage" subtitle="A single platform for the systems you already use">
             <ConnectorOrbit />
           </PageSection>
         </RevealSection>
 
-        <RevealSection>
-          <PageSection title="Preflight rules" subtitle="Why transfers are blocked or approved">
-            <PreflightRules />
-          </PageSection>
-        </RevealSection>
-
-        <RevealSection>
-          <PageSection title="Trust pillars" subtitle="Built for data governance and compliance">
-            <TrustPillars />
-          </PageSection>
-        </RevealSection>
-
-        <RevealSection>
+        <RevealSection id="pipeline">
           <PageSection title="How it works" subtitle="From raw source to verified target">
             <div className="df2-docs-steps">
               <div className="df2-docs-step">
@@ -372,7 +493,19 @@ export function DocsPage() {
           </PageSection>
         </RevealSection>
 
-        <RevealSection>
+        <RevealSection id="preflight">
+          <PageSection title="Preflight gates" subtitle="Why transfers are blocked or approved before any write">
+            <PreflightRules />
+          </PageSection>
+        </RevealSection>
+
+        <RevealSection id="trust">
+          <PageSection title="Trust & fidelity" subtitle="Built for data governance and compliance">
+            <TrustPillars />
+          </PageSection>
+        </RevealSection>
+
+        <RevealSection id="use-cases">
           <PageSection title="Real-world use cases" subtitle="From logistics to warehouses">
             <div className="df2-docs-use-cases">
               <UseCase
@@ -395,7 +528,7 @@ export function DocsPage() {
           </PageSection>
         </RevealSection>
 
-        <RevealSection>
+        <RevealSection id="security">
           <PageSection title="Security & compliance" subtitle="Defense in depth for sensitive data">
             <ul className="df2-docs-list">
               <li><strong>Encryption in transit and at rest</strong> — all cloud connectors use TLS by default; credentials are encrypted at rest.</li>
@@ -407,8 +540,8 @@ export function DocsPage() {
           </PageSection>
         </RevealSection>
 
-        <RevealSection>
-          <PageSection title="What to do when a transfer is blocked" subtitle="Reading the preflight result">
+        <RevealSection id="troubleshooting">
+          <PageSection title="Troubleshooting a blocked transfer" subtitle="Reading the preflight result">
             <div className="df2-docs-faq">
               <p><strong>Mapping confidence too low?</strong> Review the map step, pin the correct target column, and the gate will re-score.</p>
               <p><strong>Target DDL incompatible?</strong> Check the target schema. DataFlow can create the target for you or report a type/precision conflict.</p>
@@ -417,6 +550,7 @@ export function DocsPage() {
             </div>
           </PageSection>
         </RevealSection>
+        </div>
       </div>
       </PageFrame>
     </PageShell>

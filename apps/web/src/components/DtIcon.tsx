@@ -225,6 +225,12 @@ const paths: Record<string, React.ReactNode> = {
     </>
   ),
   play: <polygon points="5,3 19,12 5,21 5,3" />,
+  pause: (
+    <>
+      <rect x="6" y="4" width="4" height="16" rx="1" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+    </>
+  ),
   cpu: (
     <>
       <rect x="6" y="6" width="12" height="12" rx="2" />

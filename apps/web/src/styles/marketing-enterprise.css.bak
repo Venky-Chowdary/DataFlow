@@ -1,0 +1,375 @@
+/**
+ * Enterprise polish for marketing subpages (help, pricing, product, etc.).
+ * Scoped to .lp-subpage — app interior (.df2-app) is unchanged.
+ */
+
+.lp.lp-subpage {
+  --mkt-accent: #0d9488;
+  --mkt-accent-soft: #f0fdfa;
+  --mkt-ink: #0f172a;
+  --mkt-muted: #475569;
+  --mkt-line: #e2e8f0;
+  background: #fafbfc;
+}
+
+/* ── Hero band — richer enterprise header ── */
+.lp.lp-subpage .lp-mkt-hero-band {
+  padding: 56px clamp(20px, 5vw, 48px) 64px;
+  background:
+    radial-gradient(900px 420px at 12% 0%, rgba(13, 148, 136, 0.12), transparent 58%),
+    radial-gradient(700px 360px at 88% 10%, rgba(15, 23, 42, 0.06), transparent 52%),
+    linear-gradient(180deg, #ffffff 0%, #f8fafb 72%, #f1f5f9 100%);
+  border-bottom: 1px solid var(--mkt-line);
+}
+
+.lp.lp-subpage .lp-mkt-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: var(--mkt-accent-soft);
+  color: #0f766e;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+
+.lp.lp-subpage .lp-mkt-hero-copy h1 {
+  font-size: clamp(2rem, 4vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: var(--mkt-ink);
+}
+
+.lp.lp-subpage .lp-mkt-lead {
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  color: var(--mkt-muted);
+  max-width: 540px;
+}
+
+.lp.lp-subpage .lp-mkt-illustration {
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+}
+
+/* ── Stats strip ── */
+.lp.lp-subpage .lp-mkt-stats-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  max-width: 1120px;
+  margin: 0 auto;
+  border: 1px solid var(--mkt-line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.lp.lp-subpage .lp-mkt-stats-item {
+  padding: 1.25rem 1rem;
+  text-align: center;
+  border-right: 1px solid var(--mkt-line);
+}
+
+.lp.lp-subpage .lp-mkt-stats-item:last-child {
+  border-right: none;
+}
+
+.lp.lp-subpage .lp-mkt-stats-item strong {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--mkt-accent);
+  letter-spacing: -0.02em;
+}
+
+.lp.lp-subpage .lp-mkt-stats-item span {
+  font-size: 0.8125rem;
+  color: var(--mkt-muted);
+  line-height: 1.4;
+}
+
+/* ── Body sections ── */
+.lp.lp-subpage .lp-mkt-page-rich .lp-mkt-body {
+  padding: 48px clamp(20px, 5vw, 48px);
+}
+
+.lp.lp-subpage .lp-mkt-body > h2 {
+  font-size: clamp(1.35rem, 2.5vw, 1.65rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.lp.lp-subpage .lp-mkt-feature-card,
+.lp.lp-subpage .lp-mkt-workflow-step,
+.lp.lp-subpage .lp-mkt-card,
+.lp.lp-subpage .lp-mkt-quote {
+  border-radius: 14px;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.2s ease;
+}
+
+.lp.lp-subpage .lp-mkt-feature-card:hover,
+.lp.lp-subpage .lp-mkt-workflow-step:hover,
+.lp.lp-subpage .lp-mkt-card--button:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(13, 148, 136, 0.1);
+}
+
+.lp.lp-subpage .lp-mkt-feature-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+}
+
+/* ── Help / docs layout ── */
+.lp-mkt-docs-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 2rem;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 clamp(20px, 5vw, 48px) 48px;
+}
+
+.lp-mkt-docs-nav {
+  position: sticky;
+  top: 5.5rem;
+  align-self: start;
+  padding: 1.25rem;
+  background: #fff;
+  border: 1px solid var(--mkt-line);
+  border-radius: 14px;
+}
+
+.lp-mkt-docs-nav h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mkt-muted);
+}
+
+.lp-mkt-docs-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.lp-mkt-docs-nav li + li {
+  margin-top: 0.25rem;
+}
+
+.lp-mkt-docs-nav button {
+  width: 100%;
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--mkt-ink);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.lp-mkt-docs-nav button:hover,
+.lp-mkt-docs-nav button.is-active {
+  background: var(--mkt-accent-soft);
+  color: #0f766e;
+}
+
+.lp-mkt-docs-main {
+  min-width: 0;
+}
+
+.lp-mkt-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  max-width: 480px;
+  margin: 0 0 1.5rem;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border: 1px solid var(--mkt-line);
+  border-radius: 12px;
+  color: var(--mkt-muted);
+  font-size: 0.9375rem;
+}
+
+.lp-mkt-search-bar input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font: inherit;
+  color: var(--mkt-ink);
+  outline: none;
+}
+
+.lp-mkt-code-block {
+  margin: 1rem 0;
+  padding: 1rem 1.15rem;
+  background: #0f172a;
+  border-radius: 12px;
+  overflow-x: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: #e2e8f0;
+}
+
+.lp-mkt-code-block .cm {
+  color: #94a3b8;
+}
+
+.lp-mkt-code-block .kw {
+  color: #7dd3fc;
+}
+
+.lp-mkt-code-block .str {
+  color: #86efac;
+}
+
+.lp-mkt-api-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  margin: 1rem 0;
+  border: 1px solid var(--mkt-line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.lp-mkt-api-table th,
+.lp-mkt-api-table td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--mkt-line);
+}
+
+.lp-mkt-api-table th {
+  background: #f8fafc;
+  font-weight: 700;
+  color: var(--mkt-ink);
+}
+
+.lp-mkt-api-table code {
+  font-size: 0.8125rem;
+  padding: 0.15rem 0.4rem;
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+.lp-mkt-changelog {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.lp-mkt-changelog-item {
+  padding: 1.15rem 1.25rem;
+  background: #fff;
+  border: 1px solid var(--mkt-line);
+  border-radius: 12px;
+}
+
+.lp-mkt-changelog-item time {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--mkt-accent);
+}
+
+.lp-mkt-changelog-item h4 {
+  margin: 0.35rem 0 0.25rem;
+  font-size: 0.9375rem;
+}
+
+.lp-mkt-changelog-item p {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--mkt-muted);
+  line-height: 1.5;
+}
+
+.lp-mkt-video-placeholder {
+  aspect-ratio: 16 / 9;
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(13, 148, 136, 0.15) 0%, rgba(15, 23, 42, 0.08) 100%),
+    #f8fafc;
+  border: 1px solid var(--mkt-line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  color: var(--mkt-muted);
+  margin-bottom: 1.5rem;
+}
+
+.lp-mkt-video-placeholder strong {
+  color: var(--mkt-ink);
+  font-size: 1rem;
+}
+
+/* ── FAQ on subpages ── */
+.lp.lp-subpage .lp-mkt-faq dl div {
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--mkt-line);
+}
+
+.lp.lp-subpage .lp-mkt-faq dt {
+  font-weight: 650;
+  color: var(--mkt-ink);
+  margin-bottom: 0.35rem;
+}
+
+.lp.lp-subpage .lp-mkt-faq dd {
+  margin: 0;
+  color: var(--mkt-muted);
+  line-height: 1.6;
+  font-size: 0.9375rem;
+}
+
+/* ── Compliance badges ── */
+.lp.lp-subpage .lp-mkt-compliance-badge {
+  padding: 0.5rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .lp.lp-subpage .lp-mkt-stats-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lp.lp-subpage .lp-mkt-stats-item:nth-child(2) {
+    border-right: none;
+  }
+
+  .lp-mkt-docs-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-mkt-docs-nav {
+    position: static;
+  }
+}
+
+@media (max-width: 560px) {
+  .lp.lp-subpage .lp-mkt-stats-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .lp.lp-subpage .lp-mkt-stats-item {
+    border-right: none;
+    border-bottom: 1px solid var(--mkt-line);
+  }
+}

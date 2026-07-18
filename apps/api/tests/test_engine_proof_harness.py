@@ -323,6 +323,103 @@ def test_scale_csv_to_dest_with_proof(tmp_path: Path, dest_format: str) -> None:
         assert rps > 50, f"throughput too low: {rps:.1f} rows/s"
 
 
+def _seed_sqlite_source(path: Path, table: str, rows: int) -> None:
+    """Seed a SQLite source table with `rows` typed records (fast, direct)."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            f"CREATE TABLE {table} ("
+            "id INTEGER, full_name TEXT, email TEXT, amount NUMERIC, "
+            "created_at TEXT, is_active INTEGER, payload TEXT)"
+        )
+        conn.executemany(
+            f"INSERT INTO {table} VALUES (?,?,?,?,?,?,?)",
+            (
+                (
+                    i + 1,
+                    f"User {i}",
+                    f"user{i}@example.com",
+                    round(10.5 + (i % 1000) * 0.01, 2),
+                    f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                    1 if i % 2 == 0 else 0,
+                    json.dumps({"i": i % 7, "ok": True}),
+                )
+                for i in range(rows)
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_scale_sqlite_to_sqlite_db2db_with_proof(tmp_path: Path) -> None:
+    """DB→DB volume proof: seed SCALE_ROWS in SQLite, transfer sqlite→sqlite,
+    verify strict reconciliation and native row count, emit a proof artifact.
+
+    SQLite is a real database engine (not a file parser), so this exercises the
+    engine's DB read → typed write → reconcile path at scale on every runner,
+    without needing an external server. Set SCALE_ROWS for larger proofs."""
+    rows = SCALE_ROWS
+    if rows > 200_000 and os.getenv("CI"):
+        pytest.skip("Skip multi-hundred-k scale on CI; run SCALE_ROWS locally/nightly")
+
+    src_path = tmp_path / "scale_src.db"
+    dst_path = tmp_path / "scale_dst.db"
+    _seed_sqlite_source(src_path, "scale_src", rows)
+
+    source = _sqlite_endpoint(src_path, "scale_src")
+    dest = _sqlite_endpoint(dst_path, "scale_dst")
+    columns = ["id", "full_name", "email", "amount", "created_at", "is_active", "payload"]
+
+    engine = UniversalTransferEngine()
+    t0 = time.perf_counter()
+    result = engine.execute_tracked(
+        TransferRequest(
+            source=source,
+            destination=dest,
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=True,
+            validation_mode="strict",
+            mappings=[{"source": c, "target": c} for c in columns],
+        ),
+        job_id=f"proof-db2db-scale-{uuid.uuid4().hex[:8]}",
+    )
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    assert result.success, result.error
+    assert result.records_transferred == rows
+
+    conn = sqlite3.connect(str(dst_path))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM scale_dst").fetchone()[0]
+        assert n == rows
+        # Spot-check a deterministic row survived the typed round-trip.
+        row = conn.execute(
+            "SELECT full_name, is_active FROM scale_dst WHERE id = 1"
+        ).fetchone()
+        assert row[0] == "User 0"
+    finally:
+        conn.close()
+
+    rps = rows / max(elapsed_ms / 1000.0, 0.001)
+    proof = _write_proof(
+        f"scale-sqlite-sqlite-{rows}",
+        {
+            "tier": "scale",
+            "route": "sqlite→sqlite",
+            "rows": rows,
+            "success": True,
+            "records_transferred": result.records_transferred,
+            "elapsed_ms": elapsed_ms,
+            "rows_per_sec": round(rps, 1),
+            "destination_summary": result.destination_summary,
+            "checks": ["row_count", "strict_recon", "native_count", "typed_roundtrip"],
+        },
+    )
+    assert proof.exists()
+    if rows >= 10_000:
+        assert rps > 50, f"db2db throughput too low: {rps:.1f} rows/s"
+
+
 def test_production_sku_fidelity_smoke(tmp_path: Path) -> None:
     """Run a committed SKU subset (csv/sqlite routes) with proof artifacts."""
     from src.transfer.registry import PRODUCTION_SKU

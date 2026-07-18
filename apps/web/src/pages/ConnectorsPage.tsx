@@ -9,6 +9,7 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
@@ -96,6 +97,18 @@ export function ConnectorsPage({
   }, [connectors, query, statusFilter]);
   const healthyCount = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
   const errorCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
+  const connectorsInUse = useMemo(() => {
+    const ids = new Set<string>();
+    schedules.forEach((s) => {
+      if (s.source_connector_id) ids.add(s.source_connector_id);
+      if (s.dest_connector_id) ids.add(s.dest_connector_id);
+    });
+    return connectors.filter((c) => ids.has(c.id)).length;
+  }, [connectors, schedules]);
+  const distinctTypes = useMemo(
+    () => new Set(connectors.map((c) => c.type)).size,
+    [connectors],
+  );
   const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? connectors[0];
   const workbench = useMemo(
     () => (selectedConnection ? buildConnectionWorkbenchContext(selectedConnection, jobs, schedules) : null),
@@ -168,6 +181,24 @@ export function ConnectorsPage({
       description="Saved connections and the transfer-ready catalog."
     >
       <PageFrame className="df2-connectors-page">
+        {connectors.length > 0 && (
+          <PageContextBar
+            ariaLabel="Connections summary"
+            stats={[
+              { label: "Connections", value: connectors.length, icon: "connectors" },
+              { label: "Healthy", value: healthyCount, icon: "check", tone: healthyCount > 0 ? "ok" : "muted" },
+              {
+                label: "Needs attention",
+                value: errorCount,
+                icon: "alert",
+                tone: errorCount > 0 ? "danger" : "muted",
+                title: errorCount > 0 ? "Connections failing their last test" : "All connections passing",
+              },
+              { label: "In pipelines", value: connectorsInUse, icon: "activity", tone: "muted", title: "Connections referenced by scheduled pipelines" },
+              { label: "Data systems", value: distinctTypes, icon: "layers", tone: "muted", title: "Distinct connector types in use" },
+            ]}
+          />
+        )}
         <PageToolbar
           searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}

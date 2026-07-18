@@ -7,6 +7,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -70,6 +71,14 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     completed: jobs.filter((j) => j.status === "completed").length,
     failed: jobs.filter((j) => j.status === "failed").length,
   }), [jobs]);
+
+  const rowsMoved = useMemo(
+    () => jobs.reduce((sum, j) => sum + (j.records_processed || 0), 0),
+    [jobs],
+  );
+  const successRate = counts.all
+    ? Math.round((counts.completed / counts.all) * 100)
+    : null;
 
   const filtered = useMemo(() => {
     let list = jobs;
@@ -221,6 +230,32 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
           />
         ) : (
           <>
+            <PageContextBar
+              ariaLabel="Jobs summary"
+              stats={[
+                { label: "Total jobs", value: counts.all, icon: "jobs" },
+                { label: "Rows moved", value: rowsMoved.toLocaleString(), icon: "layers", tone: "muted", title: "Records processed across all transfer jobs" },
+                {
+                  label: "Success rate",
+                  value: successRate != null ? `${successRate}%` : "—",
+                  icon: "check",
+                  tone: successRate != null && successRate >= 90 ? "ok" : successRate != null ? "warn" : "muted",
+                  title: `${counts.completed} of ${counts.all} jobs completed`,
+                },
+                {
+                  label: "Running",
+                  value: counts.running,
+                  icon: "activity",
+                  tone: counts.running > 0 ? "warn" : "muted",
+                },
+                {
+                  label: "Failed",
+                  value: counts.failed,
+                  icon: "alert",
+                  tone: counts.failed > 0 ? "danger" : "muted",
+                },
+              ]}
+            />
             <PageToolbar
               searchValue={jobSearch}
               onSearchChange={setJobSearch}

@@ -11,8 +11,10 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
+import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   createSchedule,
   deleteSchedule,
@@ -79,6 +81,12 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
 
   const enabledCount = schedules.filter((s) => s.enabled).length;
   const pausedCount = schedules.length - enabledCount;
+  const lastRunAt = useMemo(() => {
+    const times = schedules
+      .map((s) => (s.last_run_at ? new Date(s.last_run_at).getTime() : 0))
+      .filter((t) => t > 0);
+    return times.length ? Math.max(...times) : null;
+  }, [schedules]);
   const filteredSchedules = useMemo(() => {
     let list = schedules;
     if (filter === "active") list = schedules.filter((s) => s.enabled);
@@ -176,6 +184,23 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
       description="Schedule recurring syncs with the same governed transfer engine."
     >
       <PageFrame className="df2-pipeline-page">
+      {!loading && schedules.length > 0 && (
+        <PageContextBar
+          ariaLabel="Pipelines summary"
+          stats={[
+            { label: "Pipelines", value: schedules.length, icon: "activity" },
+            { label: "Active", value: enabledCount, icon: "check", tone: enabledCount > 0 ? "ok" : "muted" },
+            { label: "Paused", value: pausedCount, icon: "pause", tone: pausedCount > 0 ? "warn" : "muted" },
+            {
+              label: "Last run",
+              value: lastRunAt ? formatRelativeTime(new Date(lastRunAt).toISOString()) : "—",
+              icon: "clock",
+              tone: "muted",
+              title: "Most recent scheduled run across all pipelines",
+            },
+          ]}
+        />
+      )}
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}

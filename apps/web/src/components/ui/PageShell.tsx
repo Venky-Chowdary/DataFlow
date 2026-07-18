@@ -1,12 +1,21 @@
 /**
- * Page chrome with visible title — enterprise ops pages need identity in-content,
- * not only in the topbar breadcrumb.
+ * Page chrome — the visible page name lives in the topbar breadcrumb
+ * (`Workspace > {page}`), so this shell intentionally does NOT render a
+ * duplicated in-content title. The reclaimed vertical space is handed back
+ * to each page for high-signal content (KPIs, status, context, actions).
+ *
+ * An `sr-only` <h1> is always emitted so the document keeps one accessible,
+ * SEO-friendly page heading. When a page supplies `actions`, they render in a
+ * slim right-aligned action bar (no title beside them).
  */
 import { ReactNode } from "react";
 
 interface PageShellProps {
+  /** Accessible page name — rendered sr-only (mirrors the topbar breadcrumb). */
   title: string;
+  /** Accessible page summary — rendered sr-only for context/SEO. */
   description?: string;
+  /** @deprecated The breadcrumb owns page identity; kicker is no longer shown. */
   kicker?: string;
   actions?: ReactNode;
   className?: string;
@@ -15,8 +24,8 @@ interface PageShellProps {
   /** Fit content in one viewport — scroll only inside .df2-scroll-pane regions */
   fit?: boolean;
   /**
-   * When false, no header chrome (Transfer Studio / Pilot immersive).
-   * When true, show a compact page header with title + optional description.
+   * When false, no chrome at all (Transfer Studio / Pilot immersive) — only the
+   * sr-only heading is kept. When true, a slim action bar renders if actions exist.
    */
   showHeader?: boolean;
   children: ReactNode;
@@ -25,7 +34,6 @@ interface PageShellProps {
 export function PageShell({
   title,
   description,
-  kicker,
   actions,
   className,
   fit,
@@ -40,7 +48,7 @@ export function PageShell({
         "df2-page",
         "df2-page-fluid",
         "df2-page-compact",
-        "df2-page-titled",
+        "df2-page-untitled",
         fit ? "df2-page-fit" : "",
         !showHeader ? "df2-page-no-header" : "",
         !hasActions ? "df2-page-no-actions" : "",
@@ -49,24 +57,18 @@ export function PageShell({
         .filter(Boolean)
         .join(" ")}
     >
-      {showHeader ? (
-        <header className="df2-page-header">
-          <div className="df2-page-header-text">
-            {kicker ? <span className="df2-page-kicker">{kicker}</span> : null}
-            <h1 className="df2-page-title" id="df2-page-title">{title}</h1>
-            {description ? (
-              <p className="df2-page-description" id="df2-page-description">{description}</p>
-            ) : null}
+      <h1 className="df2-sr-only" id="df2-page-title">{title}</h1>
+      {description ? (
+        <p className="df2-sr-only" id="df2-page-description">{description}</p>
+      ) : null}
+
+      {showHeader && hasActions ? (
+        <div className="df2-page-actionbar">
+          <div className="df2-page-actions" aria-label={`${title} actions`}>
+            {actions}
           </div>
-          {hasActions ? (
-            <div className="df2-page-actions" aria-label={`${title} actions`}>
-              {actions}
-            </div>
-          ) : null}
-        </header>
-      ) : (
-        <h1 className="df2-sr-only" id="df2-page-title">{title}</h1>
-      )}
+        </div>
+      ) : null}
 
       {fit ? <div className="df2-page-body">{children}</div> : children}
     </div>
