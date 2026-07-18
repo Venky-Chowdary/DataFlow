@@ -974,6 +974,24 @@ def write_destination_database(
             **_writer_diagnostics(result),
         }
 
+    if db_type == "qdrant":
+        from connectors.qdrant_writer import write_mapped_rows
+        common["content_column"] = endpoint.extra.get("content_column")
+        common["embedding_column"] = endpoint.extra.get("embedding_column")
+        common["metadata_columns"] = endpoint.extra.get("metadata_columns")
+        common["embedding_model"] = endpoint.extra.get("embedding_model")
+        common["chunk_size"] = int(endpoint.extra.get("chunk_size", 512)) if endpoint.extra.get("chunk_size") else 512
+        common["chunk_overlap"] = int(endpoint.extra.get("chunk_overlap", 50)) if endpoint.extra.get("chunk_overlap") else 50
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Qdrant write failed")
+        ddl_log.insert(0, f"UPSERT qdrant collection {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "qdrant", "collection": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
     raise ValueError(f"Database destination '{db_type}' write not implemented")
 
 

@@ -605,7 +605,7 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "pgvector"):
+    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "pgvector", "qdrant"):
         writers = {
             "s3": "connectors.s3_writer",
             "gcs": "connectors.gcs_writer",
@@ -614,6 +614,7 @@ def _write_batch(
             "elasticsearch": "connectors.elasticsearch_writer",
             "redis": "connectors.redis_writer",
             "pgvector": "connectors.pgvector_writer",
+            "qdrant": "connectors.qdrant_writer",
         }
         import importlib
         mod = importlib.import_module(writers[dest_type])
@@ -640,7 +641,7 @@ def _write_batch(
             "create_table": create_table,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         }
-        if dest_type == "pgvector":
+        if dest_type in ("pgvector", "qdrant"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
             kwargs["embedding_column"] = extra.get("embedding_column")

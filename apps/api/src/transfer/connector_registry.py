@@ -172,6 +172,12 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="",
         writer="connectors.pgvector_writer",
     ),
+    "qdrant": ConnectorModules(
+        probe=("connectors.qdrant_writer", "test_qdrant"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.qdrant_writer",
+    ),
 }
 
 

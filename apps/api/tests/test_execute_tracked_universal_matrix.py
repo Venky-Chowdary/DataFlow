@@ -32,10 +32,8 @@ from src.transfer.engine import UniversalTransferEngine  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 from src.transfer.registry import (  # noqa: E402
     LIVE_DEST_DATABASES,
-    LIVE_DEST_FILE_FORMATS,
     LIVE_MATRIX,
     LIVE_SOURCE_DATABASES,
-    LIVE_SOURCE_FORMATS,
 )
 
 try:
@@ -97,9 +95,9 @@ for _param in EMULATOR_CASES:
 
 def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> EndpointConfig:
     """Return a database EndpointConfig for a live driver with a unique table/key."""
-    # SFTP and email require external network services; the universal matrix test
-    # cannot stand up a real server here, so these routes are skipped.
-    if driver in {"sftp", "email"}:
+    # SFTP, email, and Qdrant require external network services; the universal
+    # matrix test cannot stand up a real server here, so these routes are skipped.
+    if driver in {"sftp", "email", "qdrant"}:
         pytest.skip(f"No local emulator for {driver}")
     if driver == "generic_sql":
         db_path = tmp_path / f"duckdb_{role}_{suffix}.duckdb"

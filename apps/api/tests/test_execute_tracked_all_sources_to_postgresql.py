@@ -43,9 +43,9 @@ def test_all_source_to_postgresql(source: EndpointConfig):
     if not _is_reachable("localhost", 5432):
         pytest.skip("PostgreSQL emulator not reachable on localhost:5432")
 
-    # pgvector is a destination-only vector store in this release.
-    if source.format == "pgvector":
-        pytest.skip("pgvector is destination-only and cannot act as a transfer source")
+    # pgvector and qdrant are destination-only vector stores in this release.
+    if source.format in ("pgvector", "qdrant"):
+        pytest.skip("destination-only vector store cannot act as a transfer source")
 
     if source.format == "snowflake":
         fakesnow = pytest.importorskip("fakesnow")
