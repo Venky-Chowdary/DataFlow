@@ -34,13 +34,15 @@ def _redis_client(cfg: dict[str, Any]):
 
 
 def _decode(value: Any) -> str:
+    from services.value_serializer import json_default
+
     if value is None:
         return ""
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
     if isinstance(value, str):
         return value
-    return json.dumps(value, default=str)
+    return json.dumps(value, default=json_default)
 
 
 def read_keys_batch(

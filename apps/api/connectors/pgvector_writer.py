@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from connectors.postgresql_conn import get_connection
 from connectors.writer_common import WriteResult as _WriteResult
+from services.value_serializer import sanitize_json_value
 from services.vectorization import vectorize_records
 
 
@@ -166,7 +167,7 @@ def write_mapped_rows(
                         row["id"],
                         row.get("content", ""),
                         vector,
-                        json.dumps(metadata, ensure_ascii=False, default=str),
+                        json.dumps(metadata, ensure_ascii=False, default=sanitize_json_value),
                         row.get("source_id", ""),
                         row.get("chunk_index", 0),
                     ))

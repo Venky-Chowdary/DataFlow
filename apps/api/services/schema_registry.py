@@ -35,7 +35,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _save(path: Path, data: dict[str, Any]) -> None:
-    write_json_atomic(path, data, indent=2, default=str)
+    write_json_atomic(path, data, indent=2)
 
 
 @dataclass

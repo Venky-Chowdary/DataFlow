@@ -9,6 +9,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from services.value_serializer import json_default
+
 _WRITE_LOCK = threading.Lock()
 
 
@@ -17,7 +19,7 @@ def write_json_atomic(
     data: dict[str, Any],
     *,
     indent: int = 2,
-    default: Any | None = str,
+    default: Any | None = json_default,
 ) -> None:
     """Write ``data`` to ``path`` atomically using a temp file and ``os.replace``."""
     path.parent.mkdir(parents=True, exist_ok=True)

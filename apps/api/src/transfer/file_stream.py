@@ -567,9 +567,11 @@ def stream_file_to_database(
     dest_type = resolve_driver_type(destination.format)
     dest_cfg = resolve_connector_config(destination)
 
+    from services.value_serializer import json_default
+
     avg_row_size = 100
     if sample_rows:
-        avg_row_size = max(1, int(sum(len(json.dumps(row, default=str)) for row in sample_rows) / len(sample_rows)))
+        avg_row_size = max(1, int(sum(len(json.dumps(row, default=json_default)) for row in sample_rows) / len(sample_rows)))
     # MongoDB can safely ingest larger batches; keep other destinations under 8 MB
     # to avoid payload limits (e.g. BigQuery streaming insert ~10 MB).
     target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024

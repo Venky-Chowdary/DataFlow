@@ -18,6 +18,8 @@ from datetime import timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from services.value_serializer import json_default
+
 SPILL_THRESHOLD = int(os.getenv("DATAFLOW_FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
@@ -974,8 +976,8 @@ def normalize_cell(value: Any) -> str:
         except Exception:
             pass
         return base64.b64encode(value).decode("ascii")
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, sort_keys=True, default=str)
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        return json.dumps(value, sort_keys=True, default=json_default)
     text = str(value).strip()
     # Boolean and empty fast paths.
     if not text:
@@ -997,7 +999,7 @@ def normalize_cell(value: Any) -> str:
         try:
             parsed = json.loads(text)
             if isinstance(parsed, (dict, list)):
-                return json.dumps(parsed, sort_keys=True, default=str)
+                return json.dumps(parsed, sort_keys=True, default=json_default)
         except (json.JSONDecodeError, TypeError):
             pass
     # Date/time normalization: cheap heuristic first to avoid running the date

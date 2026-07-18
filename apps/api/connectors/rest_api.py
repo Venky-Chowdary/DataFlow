@@ -57,7 +57,8 @@ def _flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
             if isinstance(v, dict):
                 out.update(_flatten(v, key))
             elif isinstance(v, list):
-                out[key] = json.dumps(v, default=str)
+                from services.value_serializer import json_default
+                out[key] = json.dumps(v, default=json_default)
             else:
                 out[key] = v
     else:

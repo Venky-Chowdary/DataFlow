@@ -321,9 +321,11 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 return
             # Serialize MongoDB-native types to JSON-safe scalars so the
             # introspection response can be returned without FastAPI serialization errors.
+            from services.value_serializer import json_default
+
             safe_records = []
             for r in records:
-                safe_records.append(json.loads(json.dumps(r, default=str)))
+                safe_records.append(json.loads(json.dumps(r, default=json_default)))
             columns = list(safe_records[0].keys()) if safe_records else []
             # Infer logical types from the raw sampled values (not just "string").
             # cell_to_string normalizes ObjectId, datetime, Decimal128, and nested

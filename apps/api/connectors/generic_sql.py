@@ -590,7 +590,8 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
 
         if isinstance(parsed, (dict, list)):
             if _is_string_type(sa_type):
-                return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=str)
+                from services.value_serializer import json_default
+                return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default)
             return parsed
         if isinstance(value, str):
             return value

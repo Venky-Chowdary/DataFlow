@@ -243,7 +243,7 @@ def save_profile(
         except Exception:
             pass
 
-    write_json_atomic(_profile_path(key), payload, default=str)
+    write_json_atomic(_profile_path(key), payload)
 
 
 def detect_anomalies(
