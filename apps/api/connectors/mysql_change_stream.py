@@ -107,6 +107,9 @@ class MySqlChangeStreamCdc:
         return kwargs
 
     def snapshot(self) -> Iterator[ChangeBatch]:
+        # Capture binlog file/pos BEFORE the snapshot so poll() starts from a
+        # consistent handoff point (at-least-once; duplicates possible, no gaps).
+        start_pos = self._current_binlog_position()
         offset = 0
         while True:
             batch = read_table_batch(
@@ -130,8 +133,26 @@ class MySqlChangeStreamCdc:
             offset += len(batch.rows)
             if len(batch.rows) < self.batch_size:
                 break
-        # Marker batch so the scheduler stores a position-less resume token.
-        yield ChangeBatch(resume_token={"table": self.table, "pos": None})
+        yield ChangeBatch(resume_token=start_pos or {"table": self.table, "file": None, "pos": None})
+
+    def _current_binlog_position(self) -> dict[str, Any] | None:
+        try:
+            conn = self._conn()
+            try:
+                with conn.cursor() as cur:
+                    for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+                        try:
+                            cur.execute(sql)
+                            row = cur.fetchone()
+                            if row:
+                                return {"file": row[0], "pos": int(row[1]), "table": self.table}
+                        except Exception:
+                            continue
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        return None
 
     def _row_to_record(self, row: dict[str, Any]) -> dict[str, str]:
         return {k: _serialize(v) for k, v in row.items()}

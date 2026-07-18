@@ -76,7 +76,13 @@ def run_reconciliation(
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
-    source_rows = len(records) if records else rows_written + rejected_rows
+    # Prefer independent source accounting when the caller provides it
+    # (streaming paths should pass source_row_count from the read side).
+    source_row_count = dest_summary.get("source_row_count")
+    if isinstance(source_row_count, int) and source_row_count >= 0:
+        source_rows = source_row_count
+    else:
+        source_rows = len(records) if records else rows_written + rejected_rows
     expected_written = max(source_rows - rejected_rows, 0)
 
     if endpoint.kind != "database":
@@ -170,9 +176,21 @@ def run_reconciliation(
                 sort_key=sort_key,
             )
 
-    # No read-back verifier available for this destination. Trust the writer row
-    # count but do not fake a matching checksum.
+    # No read-back verifier available for this destination.
     if target_rows < 0:
+        if strict_checksum:
+            return {
+                "passed": False,
+                "message": (
+                    "Strict reconciliation requires an independent destination read-back; "
+                    f"verifier unavailable for '{db_type}'"
+                ),
+                "source_rows": source_rows,
+                "target_rows": -1,
+                "source_checksum": source_checksum,
+                "target_checksum": "",
+                "rejected_rows": rejected_rows,
+            }
         if rows_written == expected_written:
             return {
                 "passed": True,

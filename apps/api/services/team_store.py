@@ -256,15 +256,31 @@ def list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def require_workspace_isolation() -> bool:
+    """When True, empty workspace_id is denied (hard multi-tenant isolation)."""
+    import os
+
+    if os.getenv("DATAFLOW_REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes"):
+        return True
+    if os.getenv("DATAFLOW_REQUIRE_WORKSPACE", "").lower() in ("0", "false", "no"):
+        return False
+    try:
+        from services.platform_config import is_production
+
+        return is_production()
+    except Exception:
+        return False
+
+
 def can_read_workspace(workspace_id: str, email: str) -> bool:
     if not workspace_id:
-        return True
+        return not require_workspace_isolation()
     return get_workspace_role(workspace_id=workspace_id, email=email) in _ROLES
 
 
 def can_write_workspace(workspace_id: str, email: str) -> bool:
     if not workspace_id:
-        return True
+        return not require_workspace_isolation()
     return get_workspace_role(workspace_id=workspace_id, email=email) in ("owner", "editor")
 
 

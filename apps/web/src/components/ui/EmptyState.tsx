@@ -1,5 +1,5 @@
 import { ReactNode } from "react";
-import { DtIcon } from "./DtIcon";
+import { DtIcon } from "../DtIcon";
 
 interface EmptyStateProps {
   icon?: string;

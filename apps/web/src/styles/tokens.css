@@ -1,6 +1,13 @@
 /**
  * DataFlow design tokens — unified light enterprise theme
  * Fonts loaded via @fontsource in main.tsx (no Google CSS import).
+ *
+ * Single source of truth for spacing, type, and color primitives (the
+ * `--df-*` custom properties below). Other stylesheets must reference these
+ * variables, not redefine literal spacing/color/radius values — that
+ * redefinition is what caused the shell-selector duplication this file's
+ * neighbors were consolidated to fix. When adding a new page or component
+ * style, check here first for an existing token before hardcoding a value.
  */
 
 :root {

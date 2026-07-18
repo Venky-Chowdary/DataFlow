@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../../components/DtIcon";
-import { EmptyState } from "../../components/EmptyState";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { SectionLoader } from "../../components/LoadingState";
 import { useToast } from "../../components/Toast";
 import {

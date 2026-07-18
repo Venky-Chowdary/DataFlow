@@ -844,12 +844,76 @@ def _normalize_connector_id(key: str) -> str:
     return CONNECTOR_ALIASES.get(k, k)
 
 
+def _align_registry_honesty() -> None:
+    """Demote transfer_ready on registry entries that have no real driver modules."""
+    fiction = {
+        "kafka", "kinesis", "pubsub", "iceberg", "delta", "hudi",
+        "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
+        "dynamics365", "msgraph", "google_workspace", "sharepoint",
+        "shopify", "zendesk", "oracle", "sqlserver", "duckdb",
+    }
+    for key in fiction:
+        if key in CAPABILITY_REGISTRY:
+            CAPABILITY_REGISTRY[key]["transfer_ready"] = False
+
+
+_align_registry_honesty()
+
+
 def get_connector_capability(key: str) -> dict[str, Any]:
-    """Return the capability record for a connector, with alias resolution."""
+    """Return the capability record for a connector, with alias resolution.
+
+    ``transfer_ready`` is forced to match the real driver capability table
+    (``connector_capabilities._DRIVER_CAPS`` / file caps), not marketing catalog
+    entries for kafka/iceberg/etc. that have no implemented modules.
+    """
     normalized = _normalize_connector_id(key)
     cap = CAPABILITY_REGISTRY.get(normalized, DEFAULT_CAPABILITY).copy()
     cap["requested_key"] = key
     cap["normalized_key"] = normalized
+    _FICTION = {
+        "kafka", "kinesis", "pubsub", "iceberg", "delta", "hudi",
+        "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
+        "dynamics365", "msgraph", "google_workspace", "sharepoint",
+        "shopify", "zendesk", "oracle", "sqlserver", "duckdb",
+    }
+    try:
+        from src.transfer.connector_capabilities import (
+            _DRIVER_CAPS,
+            _FILE_CAPS,
+            _source_only_ready,
+            get_capabilities,
+            resolve_driver_type,
+            transfer_ready,
+        )
+
+        driver = resolve_driver_type(normalized)
+        caps = get_capabilities(driver, normalized)
+        # Honest: ready only when this key is a first-class driver/file, not a
+        # SaaS catch-all (rest_api) mapping for a marketing catalog id.
+        first_class = (
+            normalized in _DRIVER_CAPS
+            or normalized in _FILE_CAPS
+            or normalized == "generic_sql"
+            or driver in _FILE_CAPS
+            and normalized in _FILE_CAPS
+        )
+        # Aliases that intentionally point at real drivers (e.g. minio→s3) are OK
+        # when the registry key itself is not fiction.
+        if normalized in _FICTION:
+            cap["transfer_ready"] = False
+        elif first_class or (driver in _DRIVER_CAPS and normalized == driver):
+            cap["transfer_ready"] = bool(transfer_ready(caps) or _source_only_ready(caps))
+        elif driver in _DRIVER_CAPS and normalized not in _FICTION and driver != "rest_api":
+            cap["transfer_ready"] = bool(transfer_ready(caps) or _source_only_ready(caps))
+        else:
+            # Catch-all rest_api / unknown → not transfer_ready under this brand name
+            cap["transfer_ready"] = False
+        cap["driver_type"] = driver
+        cap["driver_capabilities"] = caps
+    except Exception:
+        if normalized in _FICTION:
+            cap["transfer_ready"] = False
     return cap
 
 

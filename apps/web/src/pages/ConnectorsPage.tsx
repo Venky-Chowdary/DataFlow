@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorCatalogPanel } from "../components/ConnectorCatalogPanel";
 import { ConnectionWorkbench, CONNECTION_TABS } from "../components/ConnectionWorkbench";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
@@ -14,7 +14,7 @@ import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { buildConnectionWorkbenchContext } from "../lib/connectionWorkbench";
+import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/connectionWorkbench";
 
 interface ConnectorsPageProps {
   connectors: Connector[];
@@ -24,6 +24,7 @@ interface ConnectorsPageProps {
   onEdit: (connector: Connector) => void;
   onDelete: (id: string) => void;
   onRefresh?: () => void | Promise<void>;
+  onOpenTransfer?: () => void;
   showConnectionsTab?: number;
   highlightConnectorId?: string;
 }
@@ -32,7 +33,18 @@ function catalogType(id: string) {
   return resolveCatalogIdToType(id);
 }
 
-export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, onEdit, onDelete, onRefresh, showConnectionsTab, highlightConnectorId }: ConnectorsPageProps) {
+export function ConnectorsPage({
+  connectors,
+  jobs = [],
+  schedules = [],
+  onAdd,
+  onEdit,
+  onDelete,
+  onRefresh,
+  onOpenTransfer,
+  showConnectionsTab,
+  highlightConnectorId,
+}: ConnectorsPageProps) {
   const { toast } = useToast();
   const [tab, setTab] = useState<"connections" | "catalog">("connections");
   const [role, setRole] = useState<"all" | "source" | "destination">("all");
@@ -270,6 +282,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                         selected={selectedConnectionId === c.id}
                         highlighted={highlightConnectorId === c.id}
                         testing={testingId === c.id}
+                        lastUsedAt={lastUsedAtForConnector(c, jobs)}
                         onSelect={() => setSelectedConnectionId(c.id)}
                         onTest={() => void handleTest(c.id)}
                         onEdit={() => onEdit(c)}
@@ -294,6 +307,7 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                   setConnectionTab={setConnectionTab}
                   connectors={connectors}
                   onSelectConnection={setSelectedConnectionId}
+                  onOpenTransfer={onOpenTransfer}
                 />
               </section>
             </div>

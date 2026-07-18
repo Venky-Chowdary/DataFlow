@@ -26,8 +26,6 @@ interface DashboardPageProps {
   connectors: Connector[];
   jobs: TransferJob[];
   schedules?: PipelineSchedule[];
-  onNewTransfer: () => void;
-  onOpenPilot?: () => void;
   onOpenConnectors?: () => void;
   onOpenJobs?: () => void;
 }
@@ -110,7 +108,13 @@ export function DashboardPage({
   const hasJobs = jobs.length > 0;
 
   return (
-    <PageShell wide className="df2-page-overview-v3" title="Overview">
+    <PageShell
+      wide
+      className="df2-page-overview-v3"
+      title="Overview"
+      kicker="Workspace"
+      description="Live health, throughput, and recent migrations for this workspace."
+    >
       <PageFrame className="df2-overview-v3">
         {running.length > 0 && (
           <section className="df2-overview-v3-ops" aria-label="Live operations">
@@ -130,8 +134,8 @@ export function DashboardPage({
         <section className="df2-overview-v3-kpis" aria-label="Key metrics">
           <MetricGlassTile
             label="Rows moved"
-            value={totalRecords.toLocaleString()}
-            sub="Completed transfers"
+            value={jobs.length ? totalRecords.toLocaleString() : "—"}
+            sub={jobs.length ? "Completed transfers" : "No transfers yet"}
             icon="trend"
             tone="teal"
             sparkline={throughputSpark}

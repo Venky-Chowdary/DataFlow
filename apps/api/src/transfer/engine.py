@@ -878,11 +878,23 @@ class UniversalTransferEngine:
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
             if request.destination.kind == "database":
-                is_streaming = False
+                # Buffered path still reloads all rows; only skip the destructive
+                # full-refresh DROP when resuming with a durable checkpoint that
+                # already wrote progress (avoids wiping destination on resume).
+                checkpoint_has_progress = _checkpoint_has_progress(checkpoint)
                 should_drop_full_refresh = (
                     request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite")
-                    and (not resume or not is_streaming or not _checkpoint_has_progress(checkpoint))
+                    and not (resume and checkpoint_has_progress)
                 )
+                if resume and checkpoint_has_progress and write_mode == "insert":
+                    # Non-idempotent resume would duplicate; force upsert when PK known.
+                    if conflict_columns:
+                        write_mode = "upsert"
+                    else:
+                        raise ValueError(
+                            "Cannot safely resume a buffered insert without primary key; "
+                            "use upsert sync mode or restart with full_refresh_overwrite"
+                        )
 
                 def _write_destination_with_drop():
                     # Drop inside the retry boundary so a failed full-refresh write
@@ -1030,6 +1042,18 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
                 explanation=explanation,
             )
+            try:
+                from services.usage_metering import record_transfer_usage
+
+                record_transfer_usage(
+                    job_id=job_id,
+                    workspace_id=str(getattr(request, "workspace_id", "") or ""),
+                    rows_written=rows_written,
+                    source_type=request.source.format,
+                    dest_type=request.destination.format,
+                )
+            except Exception:
+                pass
             if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
                 try:
                     samples = {c: [cell_to_string(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}

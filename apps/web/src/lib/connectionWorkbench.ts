@@ -35,6 +35,12 @@ export function jobsForConnector(connector: Connector, jobs: TransferJob[]): Tra
   return jobs.filter((j) => matchesConnector(j, connector));
 }
 
+/** Most recent transfer touching this connector — drives the "last used" signal in status-first lists. */
+export function lastUsedAtForConnector(connector: Connector, jobs: TransferJob[]): string | null {
+  const related = jobsForConnector(connector, jobs);
+  return related[0]?.created_at ?? null;
+}
+
 export function schedulesForConnector(connectorId: string, schedules: PipelineSchedule[]): PipelineSchedule[] {
   return schedules.filter(
     (s) => s.source_connector_id === connectorId || s.dest_connector_id === connectorId,

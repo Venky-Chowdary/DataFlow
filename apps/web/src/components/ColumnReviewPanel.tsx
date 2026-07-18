@@ -516,13 +516,15 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {compact ? (
+      {(compact || filtered.length > pageSize) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
-          <span>
-            {filtered.length === 0
-              ? "No matching columns"
-              : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
-          </span>
+          {compact && (
+            <span>
+              {filtered.length === 0
+                ? "No matching columns"
+                : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
+            </span>
+          )}
           {filtered.length > pageSize && (
             <div className="df2-column-workbench-pagination">
               <button
@@ -547,29 +549,7 @@ export function ColumnReviewPanel({
             </div>
           )}
         </div>
-      ) : filtered.length > pageSize ? (
-        <div className="df2-column-review-footer df2-column-workbench-pagination">
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm"
-            disabled={page <= 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-          >
-            ← Previous
-          </button>
-          <span className="df2-column-workbench-page-label">
-            Page {page} of {pages}
-          </span>
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm"
-            disabled={page >= pages}
-            onClick={() => setPage((p) => Math.min(pages, p + 1))}
-          >
-            Next →
-          </button>
-        </div>
-      ) : null}
+      )}
       </div>
     </div>
   );

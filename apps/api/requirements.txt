@@ -77,3 +77,4 @@ thrift==0.16.0               # shared pin for databricks<4.3 and impyla
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
 httpx>=0.25.0
+responses>=0.24.0  # HTTP mocking for SaaS connector tests

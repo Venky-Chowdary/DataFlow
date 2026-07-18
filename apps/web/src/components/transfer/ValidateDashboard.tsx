@@ -114,6 +114,8 @@ export function ValidateDashboard({ preflight, running = false, confidenceThresh
   const quality = proof?.quality_score ?? 0;
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
   const reconciliation = proof?.reconciliation;
+  const sampleCompare = reconciliation?.sample_compare;
+  const mismatches = sampleCompare?.mismatches ?? [];
 
   // While validating we don't have real gate results yet, so animate the rules
   // sequentially with the progress bar — one "running" at a time reads far
@@ -239,6 +241,46 @@ export function ValidateDashboard({ preflight, running = false, confidenceThresh
           <span>{reconciliation.extra_key_count?.toLocaleString() ?? 0} extra</span>
           {reconciliation.row_fidelity_score != null && (
             <span>fidelity {(reconciliation.row_fidelity_score * 100).toFixed(0)}%</span>
+          )}
+        </div>
+      )}
+
+      {sampleCompare && !sampleCompare.skipped && (
+        <div className="df2-vd-diff">
+          <div className="df2-vd-diff-head">
+            <DtIcon name="scan" size={15} />
+            <strong>Row-level value check</strong>
+            <span>
+              {sampleCompare.compared.toLocaleString()} cell{sampleCompare.compared === 1 ? "" : "s"} compared, source read-back vs. destination read-back
+            </span>
+          </div>
+          {mismatches.length === 0 ? (
+            <p className="df2-vd-diff-clean">
+              <DtIcon name="check" size={13} /> Every sampled value matched exactly — no drift between source and destination.
+            </p>
+          ) : (
+            <div className="df2-vd-diff-table-wrap">
+              <table className="df2-vd-diff-table">
+                <thead>
+                  <tr>
+                    <th>Row</th>
+                    <th>Column</th>
+                    <th>Source value</th>
+                    <th>Destination value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mismatches.map((m, i) => (
+                    <tr key={`${m.row}-${m.source}-${i}`}>
+                      <td>{m.row}</td>
+                      <td title={`${m.source} → ${m.target}`}>{m.source}</td>
+                      <td className="df2-vd-diff-source">{m.source_value || "—"}</td>
+                      <td className="df2-vd-diff-target">{m.target_value || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

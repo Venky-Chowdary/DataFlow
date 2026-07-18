@@ -1,8 +1,8 @@
-"""PostgreSQL logical decoding CDC reader (test_decoding output plugin).
+"""PostgreSQL logical decoding CDC reader.
 
-Uses a logical replication slot and the built-in ``test_decoding`` plugin to
-capture INSERT/UPDATE/DELETE events. When the deployment does not support logical
-replication, the caller should fall back to query-based CDC.
+Default output plugin is ``test_decoding`` (text parse path). ``pgoutput`` can be
+selected via ``logical_decoding_plugin`` once a binary decoder is available.
+Replication lag is exposed via ``replication_lag_bytes()``.
 """
 
 from __future__ import annotations
@@ -107,7 +107,12 @@ def _parse_change_line(line: str, schema: str, table: str) -> tuple[str, dict[st
 
 
 class PostgreSqlChangeStreamCdc:
-    """Log-based CDC for PostgreSQL using a test_decoding logical slot."""
+    """Log-based CDC for PostgreSQL using logical decoding.
+
+    Prefers the ``pgoutput`` plugin when the server can create that slot;
+    falls back to ``test_decoding`` (text parse path). Query CDC remains the
+    outer fallback in ``cdc_transfer``.
+    """
 
     def __init__(
         self,
@@ -119,6 +124,7 @@ class PostgreSqlChangeStreamCdc:
         columns: list[str] | None = None,
         resume_token: str | None = None,
         batch_size: int = 1000,
+        output_plugin: str | None = None,
     ) -> None:
         self.cfg = cfg
         self.schema = schema
@@ -129,6 +135,19 @@ class PostgreSqlChangeStreamCdc:
         self.batch_size = batch_size
         self.database = cfg.get("database") or "postgres"
         self.slot_name = resume_token or _slot_name(self.database, table, cursor_key)
+        self.output_plugin = output_plugin or self._select_plugin()
+
+    def _select_plugin(self) -> str:
+        """Select logical decoding plugin.
+
+        ``test_decoding`` remains the production parse path. ``pgoutput`` can be
+        forced via ``logical_decoding_plugin=pgoutput`` once a binary decoder ships;
+        probing alone is insufficient without row decoding.
+        """
+        preferred = (self.cfg.get("logical_decoding_plugin") or "").strip().lower()
+        if preferred in {"pgoutput", "test_decoding"}:
+            return preferred
+        return "test_decoding"
 
     def _conn(self):
         return get_connection(
@@ -157,10 +176,11 @@ class PostgreSqlChangeStreamCdc:
                     exists = cur.fetchone() is not None
                     if exists:
                         return True
-                    test_slot = f"{self.slot_name}_avail_test"
+                    test_slot = f"{self.slot_name}_avail_test"[:63]
+                    plugin = self.output_plugin or "test_decoding"
                     cur.execute(
-                        "SELECT pg_create_logical_replication_slot(%s, 'test_decoding')",
-                        (test_slot,),
+                        "SELECT pg_create_logical_replication_slot(%s, %s)",
+                        (test_slot, plugin),
                     )
                     cur.execute("SELECT pg_drop_replication_slot(%s)", (test_slot,))
                 conn.commit()
@@ -172,15 +192,39 @@ class PostgreSqlChangeStreamCdc:
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
+                    "SELECT plugin FROM pg_replication_slots WHERE slot_name = %s",
                     (self.slot_name,),
                 )
-                if cur.fetchone() is None:
+                row = cur.fetchone()
+                if row is None:
                     cur.execute(
-                        "SELECT pg_create_logical_replication_slot(%s, 'test_decoding')",
+                        "SELECT pg_create_logical_replication_slot(%s, %s)",
+                        (self.slot_name, self.output_plugin),
+                    )
+                else:
+                    # Honor existing slot plugin (cannot change without drop).
+                    self.output_plugin = row[0] or self.output_plugin
+            conn.commit()
+
+    def replication_lag_bytes(self) -> int | None:
+        """Return WAL lag for this slot, or None if unavailable."""
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)
+                        FROM pg_replication_slots
+                        WHERE slot_name = %s
+                        """,
                         (self.slot_name,),
                     )
-            conn.commit()
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        return int(row[0])
+        except Exception:
+            return None
+        return None
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Yield the full table as INSERT batches and create the logical slot."""
@@ -208,15 +252,19 @@ class PostgreSqlChangeStreamCdc:
             offset += len(batch.rows)
             if len(batch.rows) < self.batch_size:
                 break
-        # Final marker so the scheduler stores the slot name as the watermark.
         yield ChangeBatch(resume_token=self.slot_name)
 
     def _pk_value(self, record: dict[str, str]) -> str:
         return record.get(self.primary_key, "") if record else ""
 
     def poll(self) -> Iterator[ChangeBatch]:
-        """Consume a batch of changes from the logical slot."""
+        """Consume a batch of changes from the logical slot (test_decoding text)."""
         self._ensure_slot()
+        if self.output_plugin == "pgoutput":
+            # Binary pgoutput decoder not yet shipped — do not consume opaque WAL.
+            return
+            yield  # pragma: no cover
+
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(

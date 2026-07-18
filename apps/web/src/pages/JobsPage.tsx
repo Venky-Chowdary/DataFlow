@@ -3,7 +3,7 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
 import { JobTheater } from "../components/JobTheater";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
@@ -15,6 +15,7 @@ import { fetchJob, retryJob, resumeJob } from "../lib/api";
 import { jobStatusBadgeClass } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
+import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
@@ -177,19 +178,31 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
-  const jobPhases = liveJob?.phases?.length
-    ? liveJob.phases
-    : selected
-      ? [{ name: selected.phase || "Transfer", status: selected.status === "failed" ? "failed" : selected.status === "completed" ? "done" : "active" }]
-      : [];
   const ddlLog = liveJob?.ddl_log ?? [];
+  const timelineEntries = useMemo(
+    () =>
+      liveJob && selected
+        ? buildJobTimeline({
+            createdAt: selected.created_at,
+            startedAt: liveJob.started_at,
+            completedAt: liveJob.completed_at,
+            status: selected.status,
+            retryOf: selected.retry_of,
+            phases: liveJob.phases,
+            notifications: liveJob.notifications,
+            rejectedRows: liveJob.rejected_rows,
+          })
+        : [],
+    [liveJob, selected],
+  );
 
   return (
     <PageShell
       fit
       className="df2-page-jobs"
-      title="Job Theater"
-      description="Live batch progress, phases, and proof for every transfer."
+      title="Jobs"
+      kicker="Operations"
+      description="Live progress, phases, quarantine, and Gate-8 proof for every transfer."
     >
       <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
         {jobs.length === 0 ? (
@@ -341,27 +354,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       <article><strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong><span>Mode</span></article>
                     </div>
 
-                    <div className="df2-jobs-v3-summary-phases">
-                      {jobPhases.map((phase) => (
-                        <span
-                          key={phase.name}
-                          className={`df2-jobs-v3-phase-pill ${
-                            phase.status === "done" || phase.status === "completed" ? "done"
-                              : phase.status === "failed" ? "failed"
-                              : "active"
-                          }`}
-                        >
-                          {phase.name}
-                        </span>
-                      ))}
+                    <div className="df2-jobs-v3-timeline-block">
+                      <h3>Timeline</h3>
+                      <JobTimeline entries={timelineEntries} />
                     </div>
 
-                    <dl className="df2-jobs-v3-summary-dl">
-                      {liveJob.phase && <div><dt>Phase</dt><dd>{liveJob.phase}</dd></div>}
-                      {liveJob.message && <div><dt>Message</dt><dd>{liveJob.message}</dd></div>}
-                      {liveJob.started_at && <div><dt>Started</dt><dd>{new Date(liveJob.started_at).toLocaleString()}</dd></div>}
-                      {liveJob.completed_at && <div><dt>Completed</dt><dd>{new Date(liveJob.completed_at).toLocaleString()}</dd></div>}
-                    </dl>
+                    {liveJob.message && (
+                      <dl className="df2-jobs-v3-summary-dl">
+                        <div><dt>Latest message</dt><dd>{liveJob.message}</dd></div>
+                      </dl>
+                    )}
 
                     {liveJob.error && (
                       <div className="df2-jobs-v3-failure-panel" role="alert">
@@ -451,21 +453,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       <div className="df2-jobs-v3-log">
                         <h3>DDL log</h3>
                         <pre>{ddlLog.join("\n")}</pre>
-                      </div>
-                    )}
-
-                    {liveJob.notifications && liveJob.notifications.length > 0 && (
-                      <div className="df2-jobs-v3-notifications">
-                        <h3>Notifications</h3>
-                        <ul>
-                          {liveJob.notifications.map((n, i) => (
-                            <li key={`${n.channel_id}-${i}`} className={n.ok ? "ok" : "failed"}>
-                              <DtIcon name={n.ok ? "check" : "alert"} size={14} />
-                              <span>{n.kind}</span>
-                              {n.ok ? <span className="status">Sent</span> : <span className="status failed">Failed{n.error ? `: ${n.error}` : ""}</span>}
-                            </li>
-                          ))}
-                        </ul>
                       </div>
                     )}
 

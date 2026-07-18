@@ -23,6 +23,9 @@ from connectors.writer_common import (  # noqa: E402
     row_fingerprints,
 )
 
+# Keep resilient batch/quarantine path importable for streaming callers.
+from services.resilience import ResilientBatcher, adaptive_chunk_size  # noqa: E402, F401
+
 from .adapters import (
     _introspect_table_schema,
     resolve_connector_config,
@@ -738,6 +741,16 @@ def stream_database_transfer(
     if contract and contract.primary_key:
         pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    # Parallel/chunked resume is only safe with idempotent writes.
+    resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
+    if resuming and write_mode == "insert":
+        if pk_target_cols:
+            write_mode = "upsert"
+        else:
+            raise ValueError(
+                "Cannot resume a streaming insert without a primary key; "
+                "set primary_key on the stream contract or use an upsert sync mode"
+            )
     watermark = None
     cursor_key = ""
     if incremental and cursor_source_col:

@@ -335,11 +335,30 @@ class MongoDBService:
             except Exception:
                 pass
 
-        result = collection.update_one(
-            {"_id": oid},
-            {"$set": updates}
-        )
-        return result.modified_count > 0
+        # Fencing: reject stale worker progress when lease_fence is provided.
+        fence = updates.pop("lease_fence", None)
+        if fence is None:
+            try:
+                from services.worker_leases import active_fence
+
+                fence = active_fence(job_id)
+            except Exception:
+                fence = None
+        filt: dict = {"_id": oid}
+        if fence is not None:
+            updates["lease_fence"] = fence
+            # Allow first write (no fence yet) or matching fence only.
+            filt = {
+                "_id": oid,
+                "$or": [
+                    {"lease_fence": {"$exists": False}},
+                    {"lease_fence": None},
+                    {"lease_fence": fence},
+                ],
+            }
+
+        result = collection.update_one(filt, {"$set": updates})
+        return result.modified_count > 0 or result.matched_count > 0
 
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
@@ -500,6 +519,19 @@ class MemoryMongoDBService:
         rec = self._jobs.get(job_id)
         if not rec:
             return False
+        fence = kwargs.pop("lease_fence", None)
+        if fence is None:
+            try:
+                from services.worker_leases import active_fence
+
+                fence = active_fence(job_id)
+            except Exception:
+                fence = None
+        if fence is not None:
+            existing_fence = rec.get("lease_fence")
+            if existing_fence is not None and existing_fence != fence:
+                return False
+            kwargs["lease_fence"] = fence
         rec.update(kwargs)
         rec["status"] = status
         rec["updated_at"] = datetime.now(timezone.utc)

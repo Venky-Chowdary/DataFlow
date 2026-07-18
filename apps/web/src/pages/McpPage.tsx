@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";

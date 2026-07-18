@@ -31,3 +31,4 @@ apps/api/exports/
 apps/api/test
 .devin-files/
 apps/web/tsconfig.tsbuildinfo
+apps/api/data/proofs/

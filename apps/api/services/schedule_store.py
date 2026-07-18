@@ -99,6 +99,10 @@ def _mongo_backend():
 
 def _load_mongo(svc) -> list[PipelineSchedule]:
     db = svc.get_database()
+    # Prefer per-schedule documents (CAS-safe). Fall back to legacy blob.
+    docs = list(db["pipeline_schedules"].find({}))
+    if docs:
+        return [PipelineSchedule.from_dict({**d, "id": d.get("id") or str(d.get("_id"))}) for d in docs]
     doc = db["schedule_store"].find_one({"_id": "primary"})
     if not doc:
         return []
@@ -106,12 +110,37 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
 
 
 def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
+    """Persist schedules as individual docs with version CAS (no whole-blob races)."""
     db = svc.get_database()
-    db["schedule_store"].replace_one(
-        {"_id": "primary"},
-        {"_id": "primary", "schedules": [s.to_dict() for s in schedules]},
-        upsert=True,
-    )
+    coll = db["pipeline_schedules"]
+    seen = set()
+    for s in schedules:
+        seen.add(s.id)
+        payload = s.to_dict()
+        payload["_id"] = s.id
+        for attempt in range(5):
+            existing = coll.find_one({"_id": s.id})
+            version = int((existing or {}).get("version") or 0)
+            filt = {"_id": s.id, "$or": [{"version": version}, {"version": {"$exists": False}}]}
+            if existing is None:
+                filt = {"_id": s.id}
+            result = coll.find_one_and_update(
+                filt,
+                {
+                    "$set": {**payload, "version": version + 1},
+                    "$setOnInsert": {"_id": s.id},
+                },
+                upsert=True,
+                return_document=True,
+            )
+            if result is not None:
+                break
+        else:
+            # Last writer wins for this schedule id after CAS retries.
+            coll.replace_one({"_id": s.id}, {**payload, "version": 1}, upsert=True)
+    # Remove schedules deleted from the in-memory snapshot.
+    if seen:
+        coll.delete_many({"_id": {"$nin": list(seen)}})
 
 
 def _load_all() -> list[PipelineSchedule]:

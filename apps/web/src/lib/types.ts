@@ -175,7 +175,12 @@ export interface PreflightProofBundle {
     missing_key_count?: number;
     extra_key_count?: number;
     message?: string;
-    sample_compare?: { passed: boolean; compared: number; mismatches: Record<string, unknown>[]; skipped?: boolean };
+    sample_compare?: {
+      passed: boolean;
+      compared: number;
+      mismatches: { row: string; source: string; target: string; source_value: string; target_value: string }[];
+      skipped?: boolean;
+    };
   };
   transfer_decision: {
     decision: "approve" | "review" | "block";

@@ -194,8 +194,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               {pilotInsightPill}
             </span>
           </div>
-          <div className="df2-page-actions-group">
-            {pilotOnline && modelCapabilities && !anyCloudReady && (
+          {pilotOnline && modelCapabilities && !anyCloudReady && (
+            <div className="df2-page-actions-group">
               <button
                 type="button"
                 className="df2-btn df2-btn-ghost df2-btn-sm"
@@ -205,16 +205,13 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 <DtIcon name="settings" size={14} />
                 Models
               </button>
-            )}
-            <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={startNewChat}>
-              <DtIcon name="plus" size={14} /> New chat
-            </button>
-          </div>
+            </div>
+          )}
         </div>
       <div className="df2-pilot-body">
       <aside className="df2-pilot-aside">
-        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-btn-block" onClick={startNewChat}>
-          <DtIcon name="plus" size={14} /> New session
+        <button type="button" className="df2-btn df2-btn-primary df2-btn-sm df2-btn-block" onClick={startNewChat}>
+          <DtIcon name="plus" size={14} /> New chat
         </button>
 
         <div className="df2-pilot-aside-scroll">

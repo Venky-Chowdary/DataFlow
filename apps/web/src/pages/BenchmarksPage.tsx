@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
@@ -73,16 +73,14 @@ export function BenchmarksPage() {
     }));
   }, [report]);
 
-  useEffect(() => {
-    handleRun();
-  }, []);
-
+  // Intentionally no auto-run on mount — proofs are explicit operator actions.
   return (
     <PageShell
       wide
       className="df2-page-benchmarks"
-      title="Benchmarks"
-      description="Scale proofs against baseline ETL throughput."
+      title="Proofs"
+      kicker="Scale & fidelity"
+      description="Run reproducible transfer proofs. Results are measured — not marketing claims."
     >
       <PageFrame className="df2-page-benchmarks-workspace">
       <div className="df2-page-benchmarks-content">
@@ -234,12 +232,7 @@ export function BenchmarksPage() {
               page
               icon="speed"
               title="Generate a live scale proof"
-              description="Run a synthetic CSV → SQLite transfer and compare throughput, memory, and correctness against Fivetran, Airbyte, and Stitch baselines."
-              action={
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => void handleRun()} disabled={running}>
-                  <DtIcon name="play" size={14} /> Run benchmark
-                </button>
-              }
+              description="Pick a row count above and run a synthetic CSV → SQLite transfer to compare throughput, memory, and correctness against Fivetran, Airbyte, and Stitch baselines."
             />
           )}
         </PageSection>

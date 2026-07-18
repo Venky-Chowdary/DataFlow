@@ -1,7 +1,12 @@
 /**
- * DataFlow — single enterprise UI layer (canonical).
- * Loaded last. Do not add enterprise-ui-vN / page-redesign-vN siblings.
+ * DataFlow — single enterprise UI layer (canonical, genuinely last).
+ * Do not add enterprise-ui-vN / page-redesign-vN siblings; extend this
+ * file or tokens.css instead.
+ * Merged from enterprise-ui.css + workspace-enterprise.css (previously
+ * adjacent in cascade order — transfer-studio.css sits between them but
+ * shares no selectors with either, so merging changes nothing).
  */
+
 
 /* ═══════════════════════════════════════════════════════════
    PILOT — fix flush flex chain (page was collapsing to 0 height)
@@ -478,24 +483,89 @@
   color: var(--df-text-muted, #64748b);
 }
 
-.df2-jobs-v3-summary-phases {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.df2-jobs-v3-timeline-block h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
-.df2-jobs-v3-phase-pill {
-  padding: 5px 10px;
+/* Chronological event log: queued -> started -> each phase -> notifications
+   -> terminal state. Replaces the flat phase-pill row so job history reads
+   as a sequence of events, not a bag of unordered badges. */
+.df2-job-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-job-timeline-item {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 0 0 14px;
+}
+
+.df2-job-timeline-item:last-child { padding-bottom: 0; }
+
+.df2-job-timeline-item::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 20px;
+  bottom: 0;
+  width: 1px;
+  background: var(--df-border, #e5e7eb);
+}
+
+.df2-job-timeline-item:last-child::before { display: none; }
+
+.df2-job-timeline-dot {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
   border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: #f1f5f9;
   color: #64748b;
+  z-index: 1;
 }
 
-.df2-jobs-v3-phase-pill.done { background: #dcfce7; color: #16a34a; }
-.df2-jobs-v3-phase-pill.failed { background: #fee2e2; color: #dc2626; }
-.df2-jobs-v3-phase-pill.active { background: #ccfbf1; color: #0f766e; }
+.df2-job-timeline-item.is-done .df2-job-timeline-dot { background: #dcfce7; color: #16a34a; }
+.df2-job-timeline-item.is-failed .df2-job-timeline-dot { background: #fee2e2; color: #dc2626; }
+.df2-job-timeline-item.is-active .df2-job-timeline-dot { background: #ccfbf1; color: #0f766e; }
+.df2-job-timeline-item.is-skipped .df2-job-timeline-dot { background: #fef3c7; color: #b45309; }
+
+.df2-job-timeline-body { flex: 1; min-width: 0; padding-top: 1px; }
+
+.df2-job-timeline-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.df2-job-timeline-row strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--df-text-primary, #111827);
+  text-transform: capitalize;
+}
+
+.df2-job-timeline-row time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-job-timeline-body p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--df-text-muted, #64748b);
+}
 
 .df2-jobs-v3-summary-dl {
   display: grid;
@@ -560,8 +630,7 @@
 }
 
 .df2-jobs-v3-alert,
-.df2-jobs-v3-log,
-.df2-jobs-v3-notifications {
+.df2-jobs-v3-log {
   padding: 12px 14px;
   border-radius: 8px;
   border: 1px solid var(--df-border, #e5e7eb);
@@ -574,38 +643,10 @@
   color: #991b1b;
 }
 
-.df2-jobs-v3-log h3,
-.df2-jobs-v3-notifications h3 {
+.df2-jobs-v3-log h3 {
   margin: 0 0 8px;
   font-size: 13px;
   font-weight: 600;
-}
-
-.df2-jobs-v3-notifications ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.df2-jobs-v3-notifications li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.df2-jobs-v3-notifications li .status {
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--df-success, #16a34a);
-}
-
-.df2-jobs-v3-notifications li.failed .status {
-  color: var(--df-danger, #dc2626);
 }
 
 @media (max-width: 900px) {
@@ -5586,3 +5627,130 @@
   transform: none;
 }
 
+
+/* ─────────────────────────────────────────────────────────────
+   Workspace polish — page headers, tables, workbench honesty.
+   ───────────────────────────────────────────────────────────── */
+
+
+.df2-page-titled {
+  gap: 16px;
+}
+
+.df2-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 0 12px;
+  border-bottom: 1px solid var(--df-border);
+  margin-bottom: 4px;
+}
+
+.df2-page-header-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.df2-page-kicker {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
+  margin-bottom: 4px;
+}
+
+.df2-page-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary);
+  line-height: 1.25;
+}
+
+.df2-page-description {
+  margin: 6px 0 0;
+  max-width: 52rem;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--df-text-secondary);
+}
+
+.df2-page-header .df2-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.df2-schema-live-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.df2-schema-live-toolbar h4 {
+  margin: 2px 0 4px;
+  font-size: 15px;
+}
+
+.df2-schema-live .df2-muted,
+.df2-muted {
+  color: var(--df-text-muted);
+  font-size: 13px;
+}
+
+.df2-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.df2-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--df-border-strong);
+  background: var(--df-bg-subtle);
+}
+
+.df2-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--df-border);
+  vertical-align: top;
+  color: var(--df-text-primary);
+}
+
+.df2-table tbody tr:hover td {
+  background: var(--df-brand-muted);
+}
+
+.df2-cell-title {
+  font-weight: 600;
+}
+
+.df2-cell-meta {
+  font-size: 12px;
+  color: var(--df-text-muted);
+  margin-top: 2px;
+}
+
+.df2-nav-group-label {
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .df2-page-header {
+    flex-direction: column;
+  }
+}

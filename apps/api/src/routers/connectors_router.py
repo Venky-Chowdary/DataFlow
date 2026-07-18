@@ -390,9 +390,12 @@ async def list_connectors(
 
 def _can_access_job(request: Request, job: dict) -> bool:
     """True if the actor may see or mutate this job."""
+    from services.team_store import require_workspace_isolation
+
     workspace_id = job.get("workspace_id") or ""
     if not workspace_id:
-        return True
+        # Deny cross-tenant reads of unscoped jobs when isolation is on.
+        return not require_workspace_isolation()
     return can_read_workspace(workspace_id, _actor_email(request))
 
 

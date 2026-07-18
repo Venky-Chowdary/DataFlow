@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
@@ -104,8 +104,9 @@ export function QueryPage({ connectors }: QueryPageProps) {
     <PageShell
       wide
       className="df2-page-query"
-      title="Query Playground"
-      description="Run ad-hoc queries and export results to files or destinations."
+      title="Query"
+      kicker="Operations"
+      description="Run ad-hoc queries against saved connectors and export results."
     >
       <PageFrame className="df2-query-page">
         {connectors.length === 0 ? (

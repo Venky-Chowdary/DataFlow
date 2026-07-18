@@ -4,7 +4,7 @@ import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
 import { CadenceTiles } from "../components/ui/CadenceTiles";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterBar } from "../components/ui/FilterBar";

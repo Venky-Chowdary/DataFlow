@@ -41,23 +41,24 @@ import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 
-const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "developers" }[] = [
-  { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology", group: "platform" },
-  { id: "transfer", label: "Transfer Studio", icon: "transfer", desc: "Move any data anywhere", group: "platform" },
-  { id: "query", label: "Query", icon: "search", desc: "Run and export ad-hoc queries", group: "platform" },
-  { id: "pilot", label: "Data Pilot", icon: "sparkle", desc: "AI agent · natural language", group: "platform" },
-  { id: "connectors", label: "Connectors", icon: "connectors", desc: "Sources & destinations", group: "platform" },
-  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs", group: "platform" },
-  { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress", group: "platform" },
-  { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code", group: "developers" },
-  { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works", group: "developers" },
-  { id: "benchmarks", label: "Benchmarks", icon: "speed", desc: "Scale proofs vs Fivetran & Airbyte", group: "developers" },
-  { id: "settings", label: "Settings", icon: "settings", desc: "Security & team", group: "developers" },
+const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "ops" | "system" }[] = [
+  { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Health, throughput, and recent jobs", group: "platform" },
+  { id: "transfer", label: "Transfer", icon: "transfer", desc: "Move data with preflight gates", group: "platform" },
+  { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
+  { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
+  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring syncs", group: "ops" },
+  { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
+  { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
+  { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
+  { id: "mcp", label: "MCP", icon: "zap", desc: "IDE tool integrations", group: "system" },
+  { id: "docs", label: "Help", icon: "book", desc: "How DataFlow works", group: "system" },
+  { id: "benchmarks", label: "Proofs", icon: "speed", desc: "Scale and fidelity benchmarks", group: "system" },
 ];
 
 const PLATFORM_NAV = NAV.filter((item) => item.group === "platform");
-const DEVELOPER_NAV = NAV.filter((item) => item.group === "developers");
-
+const OPS_NAV = NAV.filter((item) => item.group === "ops");
+const SYSTEM_NAV = NAV.filter((item) => item.group === "system");
+const DEVELOPER_NAV = SYSTEM_NAV;
 function readStoredUser() {
   return readSession()?.email ?? "";
 }
@@ -316,14 +317,30 @@ function AppShell({
               {item.id === "connectors" && connectors.length > 0 && (
                 <span className="df2-nav-badge" aria-hidden="true"> {connectors.length}</span>
               )}
+            </button>
+          ))}
+
+          <div className="df2-nav-group-label">Operations</div>
+          {OPS_NAV.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`df2-nav-item ${screen === item.id ? "active" : ""}`}
+              onClick={() => { setScreen(item.id); setMobileNavOpen(false); }}
+              title={item.desc}
+            >
+              <span className="dt-nav-icon" aria-hidden>
+                <DtIcon name={item.icon} size={18} />
+              </span>
+              <span>{item.label}</span>
               {item.id === "jobs" && jobs.length > 0 && (
                 <span className="df2-nav-badge" aria-hidden="true"> {jobs.length}</span>
               )}
             </button>
           ))}
 
-          <div className="df2-nav-group-label">Developers</div>
-          {DEVELOPER_NAV.map((item) => (
+          <div className="df2-nav-group-label">System</div>
+          {SYSTEM_NAV.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -463,8 +480,6 @@ function AppShell({
                     connectors={connectors}
                     jobs={jobs}
                     schedules={schedules}
-                    onNewTransfer={() => setScreen("transfer")}
-                    onOpenPilot={() => setScreen("pilot")}
                     onOpenConnectors={() => setScreen("connectors")}
                     onOpenJobs={() => setScreen("jobs")}
                   />
@@ -511,6 +526,7 @@ function AppShell({
                     onEdit={openEditModal}
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
+                    onOpenTransfer={() => setScreen("transfer")}
                     showConnectionsTab={connectorsViewToken}
                     highlightConnectorId={
                       searchFocus?.screen === "connectors" ? searchFocus.connectorId : undefined

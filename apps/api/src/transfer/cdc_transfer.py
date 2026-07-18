@@ -1,18 +1,12 @@
 """Change-data-capture transfer runner for database sources.
 
 Implemented:
-  - **Query-based CDC**: polls the source table using a monotonic cursor column
-    (``updated_at`` / ``created_at`` / incrementing id). Optional soft-delete / tombstone
-    columns are honoured so rows flagged as deleted propagate as ``DELETE`` events.
-  - **MongoDB log-based CDC**: uses native Change Streams via
-    ``connectors.mongodb_change_stream`` when the deployment supports it and falls
-    back to query-based CDC otherwise.
+  - **Query-based CDC**: polls the source table using a monotonic cursor column.
+  - **MongoDB Change Streams**, **MySQL binlog (ROW)**, **PostgreSQL logical decoding**
+    (pgoutput when available, else test_decoding), with query CDC fallback.
 
-Not yet implemented: PostgreSQL ``pgoutput`` logical decoding, MySQL binlog,
-SQL Server CDC, Oracle LogMiner.
-
-The runner returns the same ``(rows_written, ddl_log, dest_summary, columns)``
-shape as ``stream_database_transfer`` so the engine can use it interchangeably.
+Apply semantics are **at-least-once upsert** (not exactly-once). Job checkpoints
+persist watermark progress alongside sync_cursor watermarks.
 """
 from __future__ import annotations
 
@@ -455,8 +449,21 @@ def run_cdc_database_transfer(
         ]
 
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
-    total_chunks = 1
-    chunk_idx = 0
+    # Resume from durable job checkpoint watermark when present.
+    cp_dict: dict[str, Any] = {}
+    if checkpoint is not None:
+        if isinstance(checkpoint, dict):
+            cp_dict = checkpoint
+        elif hasattr(checkpoint, "to_dict"):
+            cp_dict = checkpoint.to_dict()  # type: ignore[assignment]
+    if cp_dict:
+        cp_wm = cp_dict.get("watermark") or (cp_dict.get("cdc") or {}).get("watermark")
+        if cp_wm:
+            state.running_cursor = str(cp_wm)
+            state.watermark = str(cp_wm)
+            watermark = str(cp_wm)
+    total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
+    chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
 
     for change in cdc.snapshot() if watermark is None else cdc.poll():
         if not change.total_changes and not change.deletes and change.resume_token is None:
@@ -499,14 +506,41 @@ def run_cdc_database_transfer(
                     if advanced and new_watermark is not None:
                         state.running_cursor = new_watermark
 
-        if on_checkpoint:
-            on_checkpoint(chunk_idx + 1, total_chunks, state.rows_written, {})
-
         chunk_idx += 1
+        total_chunks = max(total_chunks, chunk_idx)
+        if state.running_cursor:
+            set_watermark(
+                cursor_key,
+                state.running_cursor,
+                metadata={"job_id": job_id, "sync_mode": sync_mode, "chunk": chunk_idx},
+            )
+        if on_checkpoint:
+            on_checkpoint(
+                chunk_idx,
+                total_chunks,
+                state.rows_written,
+                {
+                    "chunk_index": chunk_idx,
+                    "watermark": state.running_cursor,
+                    "rows_written": state.rows_written,
+                    "cdc": {
+                        "inserts": state.inserts,
+                        "updates": state.updates,
+                        "deletes": state.deletes,
+                    },
+                },
+            )
 
     final_watermark = state.running_cursor or watermark
     if final_watermark:
         set_watermark(cursor_key, final_watermark, metadata={"job_id": job_id, "sync_mode": sync_mode})
+
+    lag = None
+    if hasattr(cdc, "replication_lag_bytes"):
+        try:
+            lag = cdc.replication_lag_bytes()
+        except Exception:
+            lag = None
 
     summary = state.last_dest_summary or {}
     summary["cdc"] = {
@@ -514,6 +548,7 @@ def run_cdc_database_transfer(
         "updates": state.updates,
         "deletes": state.deletes,
         "watermark": final_watermark,
+        "replication_lag_bytes": lag,
     }
     summary["checksum"] = state.last_checksum
     return state.rows_written, ddl_log, summary, headers

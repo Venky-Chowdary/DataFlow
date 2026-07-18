@@ -43,26 +43,51 @@ def _mongo_backend():
 def _acquire_scheduler_lock() -> bool:
     """Try to acquire a short-lived distributed lock for this scheduler beat.
 
-    When a real MongoDB is shared across Railway instances this prevents
-    multiple replicas from running the same scheduled pipelines simultaneously.
-    Falls back to an in-process lock when MongoDB is unavailable.
+    When a real MongoDB is shared across replicas this prevents duplicate runs.
+    When multi-replica coordination is required and Mongo is unavailable, fail
+    closed (return False). Single-instance / memory mode may proceed without a
+    shared lock.
     """
+    from services.worker_leases import requires_distributed_backend
+
     svc = _mongo_backend()
     if not svc:
+        if requires_distributed_backend():
+            logger.error("Scheduler lock unavailable; refuse beat (multi-replica fail-closed)")
+            return False
         return True
     db = svc.get_database()
     now = datetime.now(timezone.utc)
     instance = _scheduler_instance_id()
     try:
         result = db["schedule_locks"].find_one_and_update(
-            {"_id": "global_scheduler_lock", "$or": [{"expires_at": {"$lte": now}}, {"expires_at": None}]},
-            {"$set": {"_id": "global_scheduler_lock", "instance": instance, "acquired_at": now, "expires_at": _lock_expiry()}},
+            {
+                "_id": "global_scheduler_lock",
+                "$or": [
+                    {"expires_at": {"$lte": now}},
+                    {"expires_at": None},
+                    {"instance": instance},
+                ],
+            },
+            {
+                "$set": {
+                    "instance": instance,
+                    "acquired_at": now,
+                    "expires_at": _lock_expiry(),
+                },
+                "$setOnInsert": {"_id": "global_scheduler_lock"},
+            },
             upsert=True,
             return_document=True,
         )
         return bool(result and result.get("instance") == instance)
-    except Exception:
+    except Exception as exc:
+        name = type(exc).__name__
+        if "DuplicateKey" in name:
+            return False
         logger.exception("Failed to acquire scheduler lock")
+        if requires_distributed_backend():
+            return False
         return False
 
 

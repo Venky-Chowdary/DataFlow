@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
@@ -2003,34 +2003,31 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
           </div>
         </div>
 
-        {sourceKind === "file" && parsed && (
-          <div className="df2-card-footer df2-wizard-footer">
-            <span className="df2-label-hint">Source profiled — choose where data should land next.</span>
-            <button
-              type="button"
-              className="df2-btn df2-btn-primary"
-              onClick={() => void proceedToDestination()}
-              disabled={uploading}
-            >
-              Continue to Destination →
-            </button>
-          </div>
-        )}
-        {isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0) && (
-          <div className="df2-card-footer df2-wizard-footer">
-            <span className="df2-label-hint">
-              {sourceKind === "cloud" ? "Select connector and path to continue" : "Select connector and table to continue"}
-            </span>
-            <button
-              type="button"
-              className="df2-btn df2-btn-primary"
-              disabled={!canConfigureDest || sourceIntrospecting}
-              onClick={() => void proceedToDestination()}
-            >
-              {sourceIntrospecting ? <ButtonLoader label="Reading schema…" /> : "Continue to Destination →"}
-            </button>
-          </div>
-        )}
+        {(() => {
+          const fileReady = sourceKind === "file" && !!parsed;
+          const connectorReady =
+            isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0);
+          if (!fileReady && !connectorReady) return null;
+          const hint = fileReady
+            ? "Source profiled — choose where data should land next."
+            : sourceKind === "cloud"
+              ? "Select connector and path to continue"
+              : "Select connector and table to continue";
+          const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
+          return (
+            <div className="df2-card-footer df2-wizard-footer">
+              <span className="df2-label-hint">{hint}</span>
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary"
+                disabled={disabled}
+                onClick={() => void proceedToDestination()}
+              >
+                {sourceIntrospecting ? <ButtonLoader label="Reading schema…" /> : "Continue to Destination →"}
+              </button>
+            </div>
+          );
+        })()}
       </div>
       )}
 

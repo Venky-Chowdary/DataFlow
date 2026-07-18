@@ -4,11 +4,9 @@
 @import "./jarvis-ui.css";
 @import "./landing.css";
 @import "./enterprise-platform.css";
-@import "./enterprise-motion.css";
 @import "./premium-theme.css";
 @import "./brand-system.css";
 @import "./shell-polish.css";
-@import "./transfer-studio.css";
 @import "./enterprise-pages.css";
 @import "./ui-consistency.css";
 @import "./settings-workspace.css";
@@ -16,20 +14,21 @@
 @import "./mcp-enterprise.css";
 @import "./responsive-fixes.css";
 @import "./pipeline-topology.css";
-@import "./transfer-studio-v2.css";
 @import "./responsive-shell-fixes.css";
 @import "./column-workbench.css";
-@import "./transfer-viewport.css";
-@import "./transfer-studio-polish.css";
 @import "./connectors-page.css";
 @import "./pilot-chat.css";
 @import "./docs-page.css";
 @import "./query-playground.css";
 @import "./benchmarks.css";
-/* Canonical final layer — do not add enterprise-ui-vN / enterprise-primitives siblings.
-   Extend enterprise-ui.css or tokens.css only. */
+/* transfer-studio.css is a self-contained, exclusively-namespaced merge of what
+   used to be 5 separate files; no other stylesheet touches its selectors, so it
+   is safe to load ahead of the canonical layer below. */
+@import "./transfer-studio.css";
+/* Canonical final layer (genuinely last now) — do not add enterprise-ui-vN /
+   enterprise-primitives / workspace-enterprise-vN siblings. Extend this file
+   or tokens.css only. Includes former workspace-enterprise.css content. */
 @import "./enterprise-ui.css";
-@import "./transfer-studio-refresh.css";
 
 .df2-map-step-body {
   display: flex;

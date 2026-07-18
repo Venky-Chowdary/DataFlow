@@ -703,6 +703,20 @@ def read_source_database(
         schema = FileParser.infer_schema(records) if records else {c: "string" for c in batch.headers}
         return records, batch.headers, schema
 
+    if db_type == "singer_tap":
+        from connectors.sdk import sdk_read_as_matrix
+
+        stream = endpoint.table or endpoint.collection or "stream"
+        headers, rows, schema = sdk_read_as_matrix(
+            "singer_tap",
+            cfg,
+            stream,
+            offset=0,
+            limit=limit or 1000,
+        )
+        records = [dict(zip(headers, row)) for row in rows]
+        return records, headers, schema or {c: "string" for c in headers}
+
     if db_type == "email":
         raise ValueError("Email cannot be a transfer source; configure it as a destination only.")
 

@@ -89,11 +89,34 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     def _leased_fn(*a: Any, **kw: Any) -> Any:
         stop_event = threading.Event()
         interval = max(5, ttl_seconds // 2)
+        fence = _lease_store.get_fence(job_id)
+
+        def _mark_lease_lost() -> None:
+            """Cooperative cancel so the transfer aborts on next checkpoint poll."""
+            try:
+                from services.mongodb_service import get_mongodb_service
+
+                mongo = get_mongodb_service()
+                mongo.update_job_status(
+                    job_id,
+                    "cancelled",
+                    phase="cancelled",
+                    error="Lease lost to another worker; aborting to prevent dual writes",
+                    message="Lease lost — cooperative cancel",
+                    lease_fence=fence,
+                )
+            except Exception:
+                _logger.exception("Failed to mark job %s cancelled after lease loss", job_id)
 
         def _heartbeat() -> None:
             while not stop_event.wait(interval):
                 if not _lease_store.heartbeat(job_id, ttl_seconds=ttl_seconds):
-                    _logger.warning("Lease heartbeat failed for job %s; another worker may have taken over", job_id)
+                    _logger.warning(
+                        "Lease heartbeat failed for job %s; aborting transfer (fence=%s)",
+                        job_id,
+                        fence,
+                    )
+                    _mark_lease_lost()
                     break
 
         beat_thread = threading.Thread(target=_heartbeat, name=f"df-lease-{job_id}", daemon=True)
