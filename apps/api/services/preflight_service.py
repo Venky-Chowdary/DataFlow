@@ -390,6 +390,12 @@ def run_file_preflight(
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
+    # Preflight is a sample-based safety check, not a full table scan.  Cap the
+    # sample size so very large file previews or database samples cannot make the
+    # validate step hang.
+    if sample_rows and len(sample_rows) > 500:
+        sample_rows = sample_rows[:500]
+
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
     # being treated as all-VARCHAR against a typed warehouse target.
@@ -523,7 +529,7 @@ def run_file_preflight(
     )
 
     ctx = FilePreflightContext(plan, sample_rows)
-    engine = PreflightEngine(fail_fast=False)
+    engine = PreflightEngine(fail_fast=True)
     result = engine.run(ctx)
 
     from services.preflight_proof_bundle import build_preflight_proof_bundle

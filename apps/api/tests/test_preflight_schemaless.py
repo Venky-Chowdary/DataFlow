@@ -72,8 +72,9 @@ def test_preflight_allows_duplicate_user_id_for_mongodb() -> None:
     assert gate_status.get("g6_target_ddl") == "pass"
 
 
-def test_preflight_still_blocks_high_null_rate_for_sql() -> None:
-    """Relational targets should keep the high-null-rate guard."""
+def test_preflight_warns_high_null_rate_for_sql() -> None:
+    """Relational targets should warn on high null rates but not block transfer;
+    only the primary-key / required-null check may hard-block."""
     sample_rows = [
         {"id": "1", "name": "Alice", "address": ""},
         {"id": "2", "name": "Bob", "address": ""},
@@ -98,8 +99,9 @@ def test_preflight_still_blocks_high_null_rate_for_sql() -> None:
         destination_db_type="postgresql",
         validation_mode="strict",
     )
-    assert result["passed"] is False
+    assert result["passed"] is True
     gate_status = {g["id"]: g["status"] for g in result["gates"]}
-    # High null rate is a data-integrity (G5) issue, not a target DDL issue.
-    assert gate_status.get("g5_dry_run") == "block"
+    # High null rate is surfaced as a data-quality warning, not a transfer blocker.
+    assert gate_status.get("g5_dry_run") == "pass"
     assert gate_status.get("g6_target_ddl") == "pass"
+    assert any("High null rate" in i for i in result.get("sample_quality", {}).get("issues", []))

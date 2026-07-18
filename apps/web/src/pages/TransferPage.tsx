@@ -266,7 +266,11 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setPreflight(null);
     setPersistedPlanId(null);
     setParsed(null);
-  }, [sourceConnectorId, sourceTable, sourceCollection, cloudPath, sourceKind]);
+    // Only reset when the connector or source kind changes, not while the user
+    // is still typing a table/collection name.  That prevents the preview from
+    // flickering blank between keystrokes and keeps the last valid schema
+    // visible until the new introspection completes.
+  }, [sourceConnectorId, sourceKind]);
 
   const buildDestinationEndpoint = () => {
     const isMongo = destDriverType === "mongodb";

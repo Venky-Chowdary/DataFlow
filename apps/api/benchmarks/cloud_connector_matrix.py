@@ -8,8 +8,12 @@ Usage (from repo root):
 
 Environment:
     DATAFLOW_BENCHMARK_SNOWFLAKE_ACCOUNT/USER/PASSWORD/DATABASE/WAREHOUSE/SCHEMA
+    DATAFLOW_BENCHMARK_PG_HOST/PORT/DATABASE/USER/PASSWORD[/SCHEMA]
+    DATAFLOW_BENCHMARK_MYSQL_HOST/PORT/DATABASE/USER/PASSWORD[/SCHEMA]
+    DATAFLOW_BENCHMARK_MONGO_HOST/PORT
 
-The harness skips any leg whose source or destination is not reachable.
+The harness skips any leg whose source or destination credentials are not
+configured or are not reachable; no credentials are hard-coded.
 """
 
 from __future__ import annotations
@@ -88,19 +92,72 @@ def _generate_rows(count: int, *, seed: int = 42) -> list[dict[str, Any]]:
     return rows
 
 
+def _pg_config() -> dict[str, Any] | None:
+    keys = ["HOST", "PORT", "DATABASE", "USER", "PASSWORD"]
+    if not _has_env("DATAFLOW_BENCHMARK_PG", keys):
+        return None
+    return {
+        "host": os.environ["DATAFLOW_BENCHMARK_PG_HOST"],
+        "port": int(os.environ["DATAFLOW_BENCHMARK_PG_PORT"]),
+        "database": os.environ["DATAFLOW_BENCHMARK_PG_DATABASE"],
+        "username": os.environ["DATAFLOW_BENCHMARK_PG_USER"],
+        "password": os.environ["DATAFLOW_BENCHMARK_PG_PASSWORD"],
+        "schema": os.environ.get("DATAFLOW_BENCHMARK_PG_SCHEMA") or "public",
+    }
+
+
+def _mysql_config() -> dict[str, Any] | None:
+    keys = ["HOST", "PORT", "DATABASE", "USER", "PASSWORD"]
+    if not _has_env("DATAFLOW_BENCHMARK_MYSQL", keys):
+        return None
+    return {
+        "host": os.environ["DATAFLOW_BENCHMARK_MYSQL_HOST"],
+        "port": int(os.environ["DATAFLOW_BENCHMARK_MYSQL_PORT"]),
+        "database": os.environ["DATAFLOW_BENCHMARK_MYSQL_DATABASE"],
+        "username": os.environ["DATAFLOW_BENCHMARK_MYSQL_USER"],
+        "password": os.environ["DATAFLOW_BENCHMARK_MYSQL_PASSWORD"],
+        "schema": os.environ.get("DATAFLOW_BENCHMARK_MYSQL_SCHEMA") or os.environ["DATAFLOW_BENCHMARK_MYSQL_DATABASE"],
+    }
+
+
+def _mongo_config() -> dict[str, Any] | None:
+    keys = ["HOST", "PORT"]
+    if not _has_env("DATAFLOW_BENCHMARK_MONGO", keys):
+        return None
+    return {
+        "host": os.environ["DATAFLOW_BENCHMARK_MONGO_HOST"],
+        "port": int(os.environ["DATAFLOW_BENCHMARK_MONGO_PORT"]),
+    }
+
+
 def _pg_conn():
     import psycopg2
-    return psycopg2.connect(host="localhost", port=5432, database="dataflow", user="dataflow", password="dataflow")
+    cfg = _pg_config()
+    if cfg is None:
+        raise RuntimeError("Set DATAFLOW_BENCHMARK_PG_* environment variables")
+    return psycopg2.connect(
+        host=cfg["host"], port=cfg["port"], database=cfg["database"],
+        user=cfg["username"], password=cfg["password"],
+    )
 
 
 def _mysql_conn():
     import pymysql
-    return pymysql.connect(host="localhost", port=3306, user="dataflow", password="dataflow", database="dataflow")
+    cfg = _mysql_config()
+    if cfg is None:
+        raise RuntimeError("Set DATAFLOW_BENCHMARK_MYSQL_* environment variables")
+    return pymysql.connect(
+        host=cfg["host"], port=cfg["port"], user=cfg["username"],
+        password=cfg["password"], database=cfg["database"],
+    )
 
 
 def _mongo_client():
     from pymongo import MongoClient
-    return MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=5000)
+    cfg = _mongo_config()
+    if cfg is None:
+        raise RuntimeError("Set DATAFLOW_BENCHMARK_MONGO_* environment variables")
+    return MongoClient(f"mongodb://{cfg['host']}:{cfg['port']}/", serverSelectionTimeoutMS=5000)
 
 
 def _sf_conn(cfg: dict[str, Any]):
@@ -301,9 +358,15 @@ def _cleanup_snowflake(sf_cfg: dict[str, Any], table: str) -> None:
 
 
 def _ensure_postgres_db() -> bool:
+    cfg = _pg_config()
+    if cfg is None:
+        return False
     try:
         import psycopg2
-        conn = psycopg2.connect(host="localhost", port=5432, database="dataflow", user="dataflow", password="dataflow")
+        conn = psycopg2.connect(
+            host=cfg["host"], port=cfg["port"], database=cfg["database"],
+            user=cfg["username"], password=cfg["password"],
+        )
         conn.close()
         return True
     except Exception:
@@ -311,9 +374,15 @@ def _ensure_postgres_db() -> bool:
 
 
 def _ensure_mysql_db() -> bool:
+    cfg = _mysql_config()
+    if cfg is None:
+        return False
     try:
         import pymysql
-        conn = pymysql.connect(host="localhost", port=3306, user="dataflow", password="dataflow", database="dataflow")
+        conn = pymysql.connect(
+            host=cfg["host"], port=cfg["port"], user=cfg["username"],
+            password=cfg["password"], database=cfg["database"],
+        )
         conn.close()
         return True
     except Exception:
@@ -344,7 +413,7 @@ def main(rows: int = 1000) -> None:
             _seed_postgres(pg_table, rows_list)
             try:
                 report.results.append(_run_transfer(
-                    {"format": "postgresql", "host": "localhost", "port": 5432, "database": "dataflow", "username": "dataflow", "password": "dataflow", "schema": "public", "table": pg_table},
+                    {"format": "postgresql", "table": pg_table, **_pg_config()},
                     {"kind": "database", "format": "snowflake", "table": f"{sf_dst_prefix}_from_pg", **sf_cfg},
                     rows,
                 ))
@@ -354,7 +423,7 @@ def main(rows: int = 1000) -> None:
             try:
                 report.results.append(_run_transfer(
                     {"format": "snowflake", "host": sf_cfg["host"], "port": 443, "database": sf_cfg["database"], "username": sf_cfg["username"], "password": sf_cfg["password"], "schema": sf_cfg["schema"], "warehouse": sf_cfg["warehouse"], "table": sf_src_table},
-                    {"kind": "database", "format": "postgresql", "host": "localhost", "port": 5432, "database": "dataflow", "username": "dataflow", "password": "dataflow", "schema": "public", "table": f"{pg_table}_from_sf"},
+                    {"kind": "database", "format": "postgresql", "table": f"{pg_table}_from_sf", **_pg_config()},
                     rows,
                 ))
             finally:
@@ -365,7 +434,7 @@ def main(rows: int = 1000) -> None:
             _seed_mysql(mysql_table, rows_list)
             try:
                 report.results.append(_run_transfer(
-                    {"format": "mysql", "host": "localhost", "port": 3306, "database": "dataflow", "username": "dataflow", "password": "dataflow", "schema": "dataflow", "table": mysql_table},
+                    {"format": "mysql", "table": mysql_table, **_mysql_config()},
                     {"kind": "database", "format": "snowflake", "table": f"{sf_dst_prefix}_from_mysql", **sf_cfg},
                     rows,
                 ))
@@ -375,18 +444,19 @@ def main(rows: int = 1000) -> None:
             try:
                 report.results.append(_run_transfer(
                     {"format": "snowflake", "host": sf_cfg["host"], "port": 443, "database": sf_cfg["database"], "username": sf_cfg["username"], "password": sf_cfg["password"], "schema": sf_cfg["schema"], "warehouse": sf_cfg["warehouse"], "table": sf_src_table},
-                    {"kind": "database", "format": "mysql", "host": "localhost", "port": 3306, "database": "dataflow", "username": "dataflow", "password": "dataflow", "schema": "dataflow", "table": f"{mysql_table}_from_sf"},
+                    {"kind": "database", "format": "mysql", "table": f"{mysql_table}_from_sf", **_mysql_config()},
                     rows,
                 ))
             finally:
                 _cleanup_mysql(f"{mysql_table}_from_sf")
 
         # MongoDB <-> Snowflake
-        if _reachable("localhost", 27017):
+        mongo_cfg = _mongo_config()
+        if mongo_cfg and _reachable(mongo_cfg["host"], mongo_cfg["port"]):
             _seed_mongodb(mongo_db, mongo_collection, rows_list)
             try:
                 report.results.append(_run_transfer(
-                    {"format": "mongodb", "host": "localhost", "port": 27017, "database": mongo_db, "collection": mongo_collection},
+                    {"format": "mongodb", "database": mongo_db, "collection": mongo_collection, **mongo_cfg},
                     {"kind": "database", "format": "snowflake", "table": f"{sf_dst_prefix}_from_mongo", **sf_cfg},
                     rows,
                 ))
@@ -396,7 +466,7 @@ def main(rows: int = 1000) -> None:
             try:
                 report.results.append(_run_transfer(
                     {"format": "snowflake", "host": sf_cfg["host"], "port": 443, "database": sf_cfg["database"], "username": sf_cfg["username"], "password": sf_cfg["password"], "schema": sf_cfg["schema"], "warehouse": sf_cfg["warehouse"], "table": sf_src_table},
-                    {"kind": "database", "format": "mongodb", "host": "localhost", "port": 27017, "database": mongo_db, "collection": f"{mongo_collection}_from_sf"},
+                    {"kind": "database", "format": "mongodb", "database": mongo_db, "collection": f"{mongo_collection}_from_sf", **mongo_cfg},
                     rows,
                 ))
             finally:

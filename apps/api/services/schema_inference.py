@@ -178,7 +178,10 @@ def infer_type(
             else:
                 inferred = "TIME"
         else:
-            inferred = best_type if ratio >= 0.6 else "VARCHAR"
+            # Mixed columns that are not clearly numeric or date/time should stay
+            # as VARCHAR.  This prevents aggressive boolean/date inference from
+            # turning values like "pending" or partial dates into transform errors.
+            inferred = "VARCHAR"
 
     # Disambiguate 0/1 numeric columns from boolean flags using the field name
     if (

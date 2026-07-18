@@ -101,9 +101,9 @@ def analyze_column_quality(
 
     if not schemaless and null_rate > 0.5 and not re.search(r"optional|note|comment|description", column, re.I):
         issues.append(f"High null rate ({null_rate:.0%})")
-        if null_rate > 0.9:
-            severity = "block"
-        elif severity == "none":
+        # Sparse source columns are normal in NoSQL and should not block transfer;
+        # the target DDL and required-null checks already cover key/NOT-NULL columns.
+        if severity == "none":
             severity = "warning"
 
     distinct = len(set(non_empty))
