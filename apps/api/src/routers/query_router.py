@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from connectors.mongodb_common import (
+    _mongo_client,
     mongodb_database_from_uri,
     normalize_mongodb_connection_string,
 )
@@ -324,7 +325,7 @@ def _run_mongodb_query(connector, body):
         raise HTTPException(status_code=500, detail=f"MongoDB driver unavailable: {exc}") from exc
 
     conn_str = connector.connection_string or _build_mongodb_connection_string(connector)
-    client = pymongo.MongoClient(conn_str)
+    client = _mongo_client(conn_str)
     db_name = body.database or connector.database or mongodb_database_from_uri(conn_str) or "test"
     db = client[db_name]
     coll_name = body.collection or "data"
@@ -459,6 +460,7 @@ def _run_snowflake_query(connector, body):
     warehouse = connector.warehouse or ""
     role = getattr(connector, "auth_role", "")
 
+    conn = None
     try:
         conn = snowflake.connector.connect(
             account=account,
@@ -496,4 +498,8 @@ def _run_snowflake_query(connector, body):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
