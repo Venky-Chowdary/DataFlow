@@ -2020,7 +2020,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
             <button
               type="button"
               className="df2-btn df2-btn-primary"
-              disabled={!sourceInputsReady || sourceIntrospecting}
+              disabled={!canConfigureDest || sourceIntrospecting}
               onClick={() => void proceedToDestination()}
             >
               {sourceIntrospecting ? <ButtonLoader label="Reading schema…" /> : "Continue to Destination →"}

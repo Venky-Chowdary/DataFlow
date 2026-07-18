@@ -286,7 +286,7 @@ def introspect_endpoint(
     return out
 
 
-def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 200) -> None:
+def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 100) -> None:
     """Bounded schema discovery — safe for million-row tables."""
     try:
         cfg = resolve_connector_config(endpoint)
@@ -305,7 +305,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
             if not coll_name:
                 return
             try:
-                client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
+                client = MongoClient(
+                    mongodb_connection_string(cfg),
+                    serverSelectionTimeoutMS=10000,
+                    connectTimeoutMS=10000,
+                    socketTimeoutMS=15000,
+                    appname="DataFlow",
+                )
                 db = client[endpoint.database or cfg["database"] or "test"]
                 coll = db[coll_name]
                 cursor = coll.find().max_time_ms(5000).limit(sample_limit)
@@ -332,7 +338,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 2
             out["sample_data"] = safe_records[:10]
             out["data"] = safe_records[:10]
             try:
-                out["row_estimate"] = coll.estimated_document_count() if columns else 0
+                out["row_estimate"] = coll.estimated_document_count(maxTimeMS=5000) if columns else 0
             except Exception:
                 out["row_estimate"] = len(records)
             out["table_exists"] = bool(columns)
