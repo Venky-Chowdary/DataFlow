@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import tempfile
 import time
 import uuid
@@ -24,6 +25,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
 
 
 def _now() -> str:
@@ -174,11 +179,11 @@ def _seed_postgres(table: str, rows: list[dict[str, Any]]) -> None:
     cur.execute(
         f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, amount TEXT, active BOOLEAN, created_at TEXT, name TEXT, meta JSONB, tags JSONB)"
     )
-    for r in rows:
-        cur.execute(
-            f"INSERT INTO {table} VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (r["id"], r["amount"], r["active"], r["created_at"], r["name"], Json(r["meta"]), Json(r["tags"])),
-        )
+    params = [
+        (r["id"], r["amount"], r["active"], r["created_at"], r["name"], Json(r["meta"]), Json(r["tags"]))
+        for r in rows
+    ]
+    cur.executemany(f"INSERT INTO {table} VALUES (%s, %s, %s, %s, %s, %s, %s)", params)
     conn.close()
 
 
@@ -191,11 +196,11 @@ def _seed_mysql(table: str, rows: list[dict[str, Any]]) -> None:
     cur.execute(
         f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, amount VARCHAR(50), active BOOLEAN, created_at VARCHAR(50), name VARCHAR(100), meta JSON, tags JSON)"
     )
-    for r in rows:
-        cur.execute(
-            f"INSERT INTO {table} VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (r["id"], r["amount"], r["active"], r["created_at"], r["name"], json.dumps(r["meta"]), json.dumps(r["tags"])),
-        )
+    params = [
+        (r["id"], r["amount"], r["active"], r["created_at"], r["name"], json.dumps(r["meta"]), json.dumps(r["tags"]))
+        for r in rows
+    ]
+    cur.executemany(f"INSERT INTO {table} VALUES (%s, %s, %s, %s, %s, %s, %s)", params)
     conn.close()
 
 
@@ -208,17 +213,52 @@ def _seed_mongodb(db_name: str, collection: str, rows: list[dict[str, Any]]) -> 
 
 def _seed_snowflake(sf_cfg: dict[str, Any], table: str, rows: list[dict[str, Any]]) -> None:
     import snowflake.connector
+    import tempfile
+    import csv
+    from pathlib import Path
+    from services.value_serializer import cell_to_string
+
     conn = _sf_conn(sf_cfg)
     cur = conn.cursor()
     cur.execute(f'DROP TABLE IF EXISTS "{table}"')
     cur.execute(
         f'CREATE TABLE "{table}" (id BIGINT, amount VARCHAR(50), active BOOLEAN, created_at VARCHAR(50), name VARCHAR(100), meta VARIANT, tags VARIANT)'
     )
-    for r in rows:
+    # Bulk-load via temp CSV and COPY INTO to avoid thousands of round-trips.
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix="matrix_sf_")
+    os.close(fd)
+    tmp = Path(tmp_path)
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
+            writer.writerow(["id", "amount", "active", "created_at", "name", "meta", "tags"])
+            for r in rows:
+                writer.writerow([
+                    cell_to_string(r["id"]),
+                    cell_to_string(r["amount"]),
+                    cell_to_string(r["active"]),
+                    cell_to_string(r["created_at"]),
+                    cell_to_string(r["name"]),
+                    cell_to_string(r["meta"]),
+                    cell_to_string(r["tags"]),
+                ])
+        stage_ref = f'@"{table}_STAGE"'
+        cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{table}_STAGE"')
+        cur.execute(f"PUT file://{tmp.resolve()} {stage_ref} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
         cur.execute(
-            f'INSERT INTO "{table}" SELECT %s, %s, %s, %s, %s, parse_json(%s), parse_json(%s)',
-            (r["id"], r["amount"], r["active"], r["created_at"], r["name"], json.dumps(r["meta"]), json.dumps(r["tags"])),
+            f"""
+            COPY INTO "{table}" (id, amount, active, created_at, name, meta, tags)
+            FROM (SELECT $1, $2, $3, $4, $5, PARSE_JSON($6), PARSE_JSON($7) FROM {stage_ref})
+            FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1 FIELD_OPTIONALLY_ENCLOSED_BY = '"' NULL_IF = ('', 'NULL') ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE)
+            ON_ERROR = 'CONTINUE'
+            """
         )
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+            cur.execute(f'DROP STAGE IF EXISTS "{table}_STAGE"')
+        except Exception:
+            pass
     conn.close()
 
 
