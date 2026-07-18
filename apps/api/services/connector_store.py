@@ -224,29 +224,29 @@ def _seed_enabled() -> bool:
 
 
 def _seed_defaults() -> list[SavedConnector]:
-    """Example profiles — user replaces with real connection strings."""
+    """Example profiles — loaded from the environment so no credentials are hard-coded."""
     defaults = [
         SavedConnector(
             id="demo-pg-source",
             name="PostgreSQL · Source (demo)",
             type="postgresql",
             role="source",
-            connection_string="postgresql://readonly:pass@localhost:5432/source_db",
+            connection_string=os.getenv("DATAFLOW_DEMO_PG_CONNECTION_STRING", ""),
         ),
         SavedConnector(
             id="demo-snowflake-dest",
             name="Snowflake · Warehouse (demo)",
             type="snowflake",
             role="destination",
-            connection_string="snowflake://user:pass@account.snowflakecomputing.com/warehouse_db",
-            warehouse="COMPUTE_WH",
+            connection_string=os.getenv("DATAFLOW_DEMO_SNOWFLAKE_CONNECTION_STRING", ""),
+            warehouse=os.getenv("DATAFLOW_DEMO_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
         ),
         SavedConnector(
             id="demo-mongo-dest",
             name="MongoDB · Analytics (demo)",
             type="mongodb",
             role="destination",
-            connection_string="mongodb://user:pass@localhost:27017/analytics",
+            connection_string=os.getenv("DATAFLOW_DEMO_MONGO_CONNECTION_STRING", ""),
         ),
     ]
     _save_all(defaults)
