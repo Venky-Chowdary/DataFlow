@@ -29,6 +29,7 @@ try:
     from services.mirror_engine import apply_inferred_soft_deletes
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
+    from services.value_serializer import cell_to_string
     from services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -55,6 +56,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
     from src.services.mirror_engine import apply_inferred_soft_deletes
     from src.services.mongodb_service import get_mongodb_service
     from src.services.pipeline_explanation import build_pipeline_explanation
+    from src.services.value_serializer import cell_to_string
     from src.services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -361,7 +363,7 @@ def _auto_map(
                         {
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
-                            "samples": [str(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                            "samples": [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]],
                         }
                         for c in columns
                     ]
@@ -371,7 +373,7 @@ def _auto_map(
                         for c in target_columns
                     ]
                     source_samples = {
-                        c: [str(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        c: [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]]
                         for c in columns
                     }
                     result = run_mapping_pipeline(
@@ -1030,7 +1032,7 @@ class UniversalTransferEngine:
             )
             if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
                 try:
-                    samples = {c: [str(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
+                    samples = {c: [cell_to_string(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
                     schedule_training_on_transfer(
                         request.source_filename or dest_summary.get("table", "transfer"),
                         columns, len(records), samples,

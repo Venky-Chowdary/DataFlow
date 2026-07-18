@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.team_store import can_write_workspace
+from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
@@ -230,7 +231,7 @@ async def map_columns_route(body: MapColumnsRequest):
         {
             "name": c,
             "inferred_type": body.source_schema.get(c, "VARCHAR"),
-            "samples": [str(x) for x in samples_by_col.get(c, [])[:8]],
+            "samples": [cell_to_string(x) for x in samples_by_col.get(c, [])[:8]],
         }
         for c in body.source_columns
     ]

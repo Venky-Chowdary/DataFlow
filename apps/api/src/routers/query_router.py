@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from services.value_serializer import sanitize_json_value
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -359,13 +361,8 @@ def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, 
 
 
 def _jsonify_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (dict, list, tuple)):
-        return json.loads(json.dumps(value, default=str))
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
+    """Return a JSON-safe Python value (no Python repr() artifacts)."""
+    return sanitize_json_value(value)
 
 
 def _build_mongodb_connection_string(connector) -> str:
