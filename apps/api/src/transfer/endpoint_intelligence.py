@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from connectors.mongodb_common import _mongo_client
+
 from .adapters import (
     _introspect_table_schema,
     mongodb_connection_string,
@@ -87,8 +89,6 @@ def introspect_endpoint(
 
     if fmt == "mongodb":
         try:
-            from pymongo import MongoClient
-
             from .connector_registry import humanize_connection_error, run_probe
 
             ok, msg = run_probe(fmt, cfg)
@@ -98,7 +98,7 @@ def introspect_endpoint(
             # Carry the resolved auth_source into the endpoint so subsequent
             # sample reads use the same authentication database.
             endpoint.auth_source = cfg.get("auth_source", "") or endpoint.auth_source
-            client = MongoClient(mongodb_connection_string(cfg), serverSelectionTimeoutMS=10000)
+            client = _mongo_client(mongodb_connection_string(cfg))
             db_name = endpoint.database or cfg["database"] or "test"
             db = client[db_name]
             colls = db.list_collection_names()
@@ -107,7 +107,6 @@ def introspect_endpoint(
             out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
             if endpoint.collection:
                 _attach_db_sample(out, endpoint)
-            client.close()
         except Exception as e:
             out["message"] = humanize_connection_error("mongodb", e)
         return out
@@ -305,13 +304,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if not coll_name:
                 return
             try:
-                client = MongoClient(
-                    mongodb_connection_string(cfg),
-                    serverSelectionTimeoutMS=10000,
-                    connectTimeoutMS=10000,
-                    socketTimeoutMS=15000,
-                    appname="DataFlow",
-                )
+                # Reuse the cached MongoClient to avoid repeated connection handshakes
+                # when the UI polls/retries introspection for the same connector.
+                client = _mongo_client(mongodb_connection_string(cfg))
                 db = client[endpoint.database or cfg["database"] or "test"]
                 coll = db[coll_name]
                 cursor = coll.find().max_time_ms(5000).limit(sample_limit)
@@ -344,7 +339,6 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             except Exception:
                 out["row_estimate"] = len(records)
             out["table_exists"] = bool(columns)
-            client.close()
             return
 
         if fmt == "redis":
