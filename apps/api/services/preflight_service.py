@@ -687,28 +687,32 @@ def inspect_destination_for_preflight(
         if not conn:
             out["message"] = f"Connector '{connector_id}' not found"
             return out
-        db_type = (conn.get("type") or "mongodb").lower()
+        # Inline form values take precedence over saved connector fields.
+        # resolve_connector_config() will merge the saved connector into the
+        # EndpointConfig, so we only need to populate the fields the user may
+        # have overridden in the current step.
+        db_type = (dest_type or conn.get("type") or "mongodb").lower()
         out["db_type"] = db_type
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
             connector_id=connector_id,
-            host=conn.get("host", ""),
-            port=int(conn.get("port") or 0),
-            database=conn.get("database", ""),
-            schema=conn.get("schema", "public"),
+            host=dest_host or "",
+            port=int(dest_port or 0),
+            database=dest_database or "",
+            schema=dest_schema or "",
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
-            username=conn.get("username", ""),
-            password=conn.get("password", ""),
-            connection_string=conn.get("connection_string", ""),
-            warehouse=conn.get("warehouse", ""),
-            ssl=conn.get("ssl", False),
-            auth_source=conn.get("auth_source", ""),
-            auth_mode=conn.get("auth_mode", ""),
-            auth_role=conn.get("auth_role", ""),
-            api_key=conn.get("api_key", ""),
-            service_account=conn.get("service_account", ""),
+            username=dest_username or "",
+            password=dest_password or "",
+            connection_string=dest_connection_string or "",
+            warehouse=dest_warehouse or "",
+            ssl=False,
+            auth_source=dest_auth_source or "",
+            auth_mode=dest_auth_mode or "",
+            auth_role=dest_auth_role or "",
+            api_key=dest_api_key or "",
+            service_account=dest_service_account or "",
         )
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
