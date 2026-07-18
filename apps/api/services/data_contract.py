@@ -342,8 +342,10 @@ def build_contract_from_preflight(
         "collection": request.destination.collection,
     }
 
+    status = ContractStatus.SIGNED if pf.get("passed") else ContractStatus.DRAFT
     return DataContract(
         name=f"{request.source.format}-to-{request.destination.format}-{uuid.uuid4().hex[:8]}",
+        status=status,
         source=source_ep,
         destination=dest_ep,
         columns=columns,
