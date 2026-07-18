@@ -205,7 +205,7 @@ def _check_required_nulls(
         values = [row.get(src) for row in rows]
         if not values:
             continue
-        empty = sum(1 for v in values if v is None or str(v).strip() == "")
+        empty = sum(1 for v in values if cell_to_string(v) == "")
         rate = empty / len(values)
         if rate > null_rate_max:
             issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
@@ -343,7 +343,7 @@ def _check_encoding_anomalies(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for val in row.values():
             if val is None:
                 continue
-            text = str(val)
+            text = cell_to_string(val)
             if "\ufffd" in text:
                 issues.append("replacement character () detected — encoding mismatch")
                 break
