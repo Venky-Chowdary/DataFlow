@@ -23,6 +23,9 @@ _PUBLIC_PREFIXES = (
     "/",
     "/api/v1/auth/login",
     "/api/v1/auth/bootstrap",
+    "/auth/login",
+    "/auth/bootstrap",
+    "/auth/sso/providers",
     "/api/v1/auth/sso/providers",
     "/api/v1/mcp",
 )

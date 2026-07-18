@@ -102,6 +102,9 @@ _PUBLIC_PATHS = {
     "/api/v1/auth/sso/providers",
     "/api/v1/auth/sso/start",
     "/api/v1/auth/sso/callback",
+    "/auth/login",
+    "/auth/bootstrap",
+    "/auth/sso/providers",
     "/api/v1/transfer/capabilities",
     "/api/v1/transfer/platform",
     "/api/v1/transfer/readiness",
@@ -158,7 +161,7 @@ def has_permission(user: dict[str, str] | None, permission: str) -> bool:
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
-    for prefix in ("/api/v1/auth/sso/", "/api/v1/catalog/", "/api/v1/mcp"):
+    for prefix in ("/api/v1/auth/sso/", "/auth/sso/", "/api/v1/catalog/", "/api/v1/mcp"):
         if path.startswith(prefix):
             return True
     return False

@@ -1,7 +1,17 @@
-export const API_BASE =
-  (typeof window !== "undefined" && (window as any).DATAFLOW_API_BASE) ||
-  import.meta.env.VITE_API_BASE ||
-  "/api/v1";
+/** Normalize API origin so login and all routes hit `/api/v1/...`. */
+function resolveApiBase(): string {
+  const raw =
+    (typeof window !== "undefined" && (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE) ||
+    import.meta.env.VITE_API_BASE ||
+    "/api/v1";
+  const trimmed = String(raw).trim().replace(/\/+$/, "");
+  if (!trimmed) return "/api/v1";
+  if (trimmed === "/api/v1" || trimmed.endsWith("/api/v1")) return trimmed;
+  // Operators often set the Railway host without the version prefix.
+  return `${trimmed}/api/v1`;
+}
+
+export const API_BASE = resolveApiBase();
 
 export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
 

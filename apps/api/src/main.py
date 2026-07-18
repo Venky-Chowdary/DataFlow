@@ -255,6 +255,8 @@ app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
+# Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
+app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")

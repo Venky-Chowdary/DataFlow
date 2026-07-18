@@ -69,6 +69,39 @@ def test_public_route_without_token(auth_env):
     assert response.status_code == 200
 
 
+def test_auth_login_alias_is_public(auth_env):
+    """Mis-set VITE_API_BASE hits /auth/login — must not require a bearer token."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.middleware.auth_middleware import AuthMiddleware
+
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.post("/auth/login")
+    def login_alias():
+        return {"ok": True}
+
+    @app.post("/api/v1/auth/login")
+    def login_canonical():
+        return {"ok": True}
+
+    @app.get("/auth/bootstrap")
+    def bootstrap_alias():
+        return {"ok": True}
+
+    client = TestClient(app)
+    for path, method in (
+        ("/auth/login", "post"),
+        ("/api/v1/auth/login", "post"),
+        ("/auth/bootstrap", "get"),
+    ):
+        response = getattr(client, method)(path, json={"email": "a@b.c", "password": "x"}) if method == "post" else client.get(path)
+        assert response.status_code == 200, path
+        assert response.json() == {"ok": True}
+
+
 def test_protected_route_without_token_is_401(auth_env):
     client = _app_client(auth_env)
     response = client.get("/api/v1/jobs")

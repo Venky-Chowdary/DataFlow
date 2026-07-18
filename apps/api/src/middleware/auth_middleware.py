@@ -11,6 +11,10 @@ _PUBLIC_PREFIXES = (
     "/api/v1/auth/login",
     "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
+    # Alias paths when the web client omits /api/v1 (mis-set VITE_API_BASE).
+    "/auth/login",
+    "/auth/bootstrap",
+    "/auth/sso/providers",
     # MCP discovery + Streamable HTTP handshake (tools/call still checks auth in-handler)
     "/api/v1/mcp",
 )
@@ -20,9 +24,9 @@ if docs_enabled():
 
 
 def _is_public_sso_path(path: str) -> bool:
-    return path.startswith("/api/v1/auth/sso/") and (
-        path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
-    )
+    if path.startswith("/api/v1/auth/sso/") or path.startswith("/auth/sso/"):
+        return path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
+    return False
 
 
 def _attach_user(request: Request, token: str) -> bool:
