@@ -143,7 +143,7 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     """
     from urllib.parse import parse_qs, urlparse
 
-    from pymongo import MongoClient
+    from connectors.mongodb_common import _mongo_client
 
     connection_string = (cfg.get("connection_string") or "").strip()
     qs = parse_qs(urlparse(connection_string).query, keep_blank_values=True)
@@ -163,9 +163,8 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
     for auth_source in candidates:
         try:
             conn_str = mongodb_connection_string({**cfg, "auth_source": auth_source})
-            client = MongoClient(conn_str, serverSelectionTimeoutMS=2500)
+            client = _mongo_client(conn_str)
             client.admin.command("ping")
-            client.close()
             cfg["auth_source"] = auth_source
             return True, f"MongoDB reachable (authSource={auth_source})"
         except Exception as exc:

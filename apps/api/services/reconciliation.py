@@ -727,9 +727,7 @@ def verify_mongodb_collection(
 ) -> tuple[int, str]:
     """Reconcile a MongoDB target by counting and fingerprinting documents."""
     try:
-        from pymongo import MongoClient
-
-        from connectors.mongodb_common import normalize_mongodb_connection_string
+        from connectors.mongodb_common import _mongo_client, normalize_mongodb_connection_string
 
         conn_str = normalize_mongodb_connection_string(
             connection_string or "",
@@ -741,7 +739,7 @@ def verify_mongodb_collection(
             ssl=ssl,
             auth_source=auth_source,
         )
-        client = MongoClient(conn_str, serverSelectionTimeoutMS=5000)
+        client = _mongo_client(conn_str)
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
@@ -758,7 +756,6 @@ def verify_mongodb_collection(
             set(k for doc in coll.find({}).limit(100) for k in doc.keys())
         )
         checksum = canonical_checksum_from_iter(_doc_iter(), columns, limit=limit)
-        client.close()
         return int(count), checksum
     except Exception:
         return -1, ""
