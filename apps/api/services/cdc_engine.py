@@ -19,6 +19,8 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+from services.value_serializer import cell_to_string
+
 
 class WatermarkType(str, Enum):
     INTEGER = "integer"
@@ -148,7 +150,7 @@ def row_fingerprint(row: dict[str, Any], columns: list[str] | None = None) -> st
     parts = []
     for col in cols:
         val = row.get(col)
-        parts.append(f"{col}={'' if val is None else str(val).strip()}")
+        parts.append(f"{col}={'' if val is None else cell_to_string(val)}")
     payload = "\x1f".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
