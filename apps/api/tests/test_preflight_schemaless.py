@@ -100,4 +100,6 @@ def test_preflight_still_blocks_high_null_rate_for_sql() -> None:
     )
     assert result["passed"] is False
     gate_status = {g["id"]: g["status"] for g in result["gates"]}
-    assert gate_status.get("g6_target_ddl") == "block"
+    # High null rate is a data-integrity (G5) issue, not a target DDL issue.
+    assert gate_status.get("g5_dry_run") == "block"
+    assert gate_status.get("g6_target_ddl") == "pass"

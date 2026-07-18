@@ -21,10 +21,7 @@ _MODE_THRESHOLDS = {
     "balanced": {"confidence": 0.75, "null_rate_max": 0.15, "parse_fail_max": 0.05},
 }
 
-_REQUIRED_NAME_PATTERNS = re.compile(
-    r"(^id$|_id$|^uuid$|_uuid$|_key$|^key$|_code$|account_no|acct_no|ssn|mrn)",
-    re.IGNORECASE,
-)
+
 _FINANCIAL_NAME_PATTERNS = re.compile(
     r"(amount|amt|price|cost|total|balance|payment|revenue|salary|premium|fee)",
     re.IGNORECASE,
@@ -191,17 +188,44 @@ def _check_required_nulls(
     *,
     null_rate_max: float,
     dest_kind: str = "",
+    primary_key: str | None = None,
 ) -> dict[str, Any]:
+    """Only enforce nullability on the inferred primary key and canonical key columns.
+
+    Foreign-key / PII columns (email, phone, ssn, user_id, etc.) can legitimately
+    be sparse in source data; blocking transfer because of nulls in those
+    columns causes false preflight failures for schemaless/NoSQL sources.
+    """
     issues: list[str] = []
     schemaless = (dest_kind or "").lower() in {"mongodb", "dynamodb", "redis"}
+
+    # Resolve the source column that maps to the primary key target.
+    pk_source = ""
+    if primary_key:
+        for m in mappings:
+            if (m.get("target") or "").lower() == primary_key.lower():
+                pk_source = m.get("source", "")
+                break
+        if not pk_source:
+            pk_source = primary_key
+
     for m in mappings:
         src = m.get("source", "")
         tgt = m.get("target", "")
-        if schemaless and tgt.lower() != "_id" and src.lower() != "_id":
+        src_lower = src.lower()
+        tgt_lower = tgt.lower()
+
+        if schemaless and src_lower != "_id":
             # Schemaless documents generate `_id` and do not require every FK.
             continue
-        if not (_REQUIRED_NAME_PATTERNS.search(src) or _REQUIRED_NAME_PATTERNS.search(tgt)):
+
+        # The inferred primary key is always required.
+        is_pk = bool(pk_source and src == pk_source)
+        # In addition, exact canonical key columns are required when present.
+        is_reserved_key = src_lower in {"id", "_id", "uuid", "pk", "key"} or tgt_lower in {"id", "_id", "uuid", "pk", "key"}
+        if not is_pk and not is_reserved_key:
             continue
+
         values = [row.get(src) for row in rows]
         if not values:
             continue
@@ -422,7 +446,7 @@ def run_integrity_audit(
         checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind, schema_policy=schema_policy))
         checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
         checks.append(_check_financial_precision(mappings, source_types, rows))
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind))
+        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk))
         checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
@@ -444,6 +468,7 @@ def run_integrity_audit(
             source_types,
             primary_key=pk,
             dest_kind=dest_kind,
+            validation_mode=validation_mode,
         )
         checks.append({
             "check": "expectations_suite",

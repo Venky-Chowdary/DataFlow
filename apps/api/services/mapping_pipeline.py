@@ -100,7 +100,9 @@ def generate_transforms(
 
 
 def _normalize_col_token(name: str) -> str:
-    return re.sub(r"[_\s-]+", "_", name.lower()).strip("_")
+    # Preserve leading/trailing underscores so columns like `id` and `_id`
+    # are not entailed to the same target column.
+    return re.sub(r"[\s-]+", "_", name.strip().lower()).strip()
 
 
 def _column_entailed(candidate: str, target: str) -> bool:

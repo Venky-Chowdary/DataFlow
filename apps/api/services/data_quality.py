@@ -89,20 +89,13 @@ def _parse_iso_date(value: Any) -> datetime | None:
 
 
 def _is_required_target(target: str) -> bool:
+    """Return True for canonical primary/foreign-key columns.
+
+    PII fields (email, phone, ssn) are not treated as required by default because
+    real-world sources frequently contain sparse optional contact data.
+    """
     lowered = target.lower()
-    return lowered in {
-        "_id",
-        "id",
-        "pk",
-        "key",
-        "uuid",
-        "email",
-        "phone",
-        "ssn",
-        "customer_id",
-        "account_id",
-        "order_id",
-    } or lowered.endswith("_id") or lowered.endswith("key")
+    return lowered in {"_id", "id", "pk", "key", "uuid"} or lowered.endswith("_id") or lowered.endswith("key")
 
 
 def _is_amount_column(name: str) -> bool:

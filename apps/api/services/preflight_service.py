@@ -485,13 +485,10 @@ def run_file_preflight(
         from services.sample_quality import analyze_dataset_quality
 
         sample_quality = analyze_dataset_quality(columns, sample_rows, schema=column_types, dest_kind=dest_kind)
-        # For schemaless destinations (MongoDB, DynamoDB, Redis) missing/optional fields
-        # are normal; high null rates should not be treated as DDL blockers.
-        if sample_quality.get("blocks_transfer") and not schemaless:
-            ddl_compatible = False
-            for issue in sample_quality.get("issues", [])[:10]:
-                if issue not in ddl_issues:
-                    ddl_issues.append(issue)
+        # Sample-quality findings (high null rates, outliers, etc.) describe the data,
+        # not the target schema.  They are surfaced by the data-integrity gate (G9);
+        # conflating them with DDL compatibility causes false "Target DDL incompatible"
+        # blockers for real-world sparse collections.
         if schemaless:
             sample_quality["blocks_transfer"] = False
 
