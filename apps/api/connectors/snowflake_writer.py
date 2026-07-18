@@ -47,7 +47,11 @@ def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]
             writer.writerow(["" if v is None else v for v in row])
 
 
-def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str]) -> int:
+def _is_json_type(sf_type: str) -> bool:
+    return sf_type and sf_type.split("(")[0].upper() in {"VARIANT", "JSON", "OBJECT", "ARRAY"}
+
+
+def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str], target_types: list[str]) -> int:
     stage_name = f"{table_name}_STAGE"
     # Temporary stages must be referenced with a quoted @"name" so Snowflake
     # resolves them in the session stage namespace instead of current schema.
@@ -55,10 +59,19 @@ def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[st
     cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
     cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
     col_list = ", ".join(f'"{c}"' for c in target_cols)
+    # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
+    # all other columns are loaded directly by position.
+    select_items = []
+    for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
+        if _is_json_type(t):
+            select_items.append(f"PARSE_JSON(${i})")
+        else:
+            select_items.append(f"${i}")
+    select_sql = ", ".join(select_items)
     cur.execute(
         f"""
         COPY INTO "{table_name}" ({col_list})
-        FROM {stage_ref}
+        FROM (SELECT {select_sql} FROM {stage_ref})
         FILE_FORMAT = (
             TYPE = CSV
             SKIP_HEADER = 1
@@ -71,8 +84,17 @@ def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[st
     )
     rows = cur.fetchall()
     loaded = 0
-    if rows and len(rows[0]) >= 4:
-        loaded = int(rows[0][3] or 0)
+    errors_seen = 0
+    first_error = None
+    for row in rows:
+        if len(row) >= 4:
+            loaded += int(row[3] or 0)
+        if len(row) >= 6 and row[5]:
+            errors_seen += int(row[5] or 0)
+            if first_error is None and len(row) >= 7:
+                first_error = row[6]
+    if errors_seen:
+        raise RuntimeError(f"COPY INTO loaded {loaded} rows with {errors_seen} errors: {first_error or 'unknown'}")
     return loaded
 
 
@@ -254,7 +276,7 @@ def write_mapped_rows(
                 tmp = Path(tempfile.gettempdir()) / f"df_sf_{table_name.lower()}_{os.getpid()}.csv"
                 try:
                     _write_temp_csv(tmp, target_cols, mapped_rows)
-                    written = _copy_into_table(cur, table_name, str(tmp.resolve()), target_cols)
+                    written = _copy_into_table(cur, table_name, str(tmp.resolve()), target_cols, target_types)
                     if written <= 0:
                         written = total
                 finally:
@@ -264,7 +286,6 @@ def write_mapped_rows(
             else:
                 chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
                 col_list = ", ".join(f'"{c}"' for c in target_cols)
-                placeholders = ", ".join(["%s"] * len(target_cols))
                 source_cols = ", ".join(f's."{c}"' for c in target_cols)
                 conflict = [c for c in (conflict_columns or []) if c in target_cols]
                 for chunk_idx in range(chunks):
@@ -276,7 +297,10 @@ def write_mapped_rows(
                         pk = conflict[0]
                         update_cols = [c for c in target_cols if c not in conflict]
                         for row in batch:
-                            sel = ", ".join(f'%s AS "{c}"' for c in target_cols)
+                            sel = ", ".join(
+                                f'PARSE_JSON(%s) AS "{c}"' if _is_json_type(t) else f'%s AS "{c}"'
+                                for c, t in zip(target_cols, target_types)
+                            )
                             if update_cols:
                                 set_clause = ", ".join(f't."{c}" = s."{c}"' for c in update_cols)
                                 merge_sql = (
@@ -296,9 +320,24 @@ def write_mapped_rows(
                             cur.execute(merge_sql, row)
                             written += 1
                     else:
-                        insert_sql = f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders})'
-                        cur.executemany(insert_sql, batch)
-                        written += len(batch)
+                        has_json = any(_is_json_type(t) for t in target_types)
+                        if has_json:
+                            # VALUES clause does not allow PARSE_JSON, and
+                            # executemany cannot rewrite SELECT statements, so we
+                            # execute one SELECT row at a time for VARIANT/JSON.
+                            select_items = ", ".join(
+                                f'PARSE_JSON(%s)' if _is_json_type(t) else '%s'
+                                for c, t in zip(target_cols, target_types)
+                            )
+                            insert_sql = f'INSERT INTO "{table_name}" ({col_list}) SELECT {select_items}'
+                            for row in batch:
+                                cur.execute(insert_sql, row)
+                                written += 1
+                        else:
+                            value_placeholders = ", ".join(["%s"] * len(target_cols))
+                            insert_sql = f'INSERT INTO "{table_name}" ({col_list}) VALUES ({value_placeholders})'
+                            cur.executemany(insert_sql, batch)
+                            written += len(batch)
                     if on_checkpoint:
                         on_checkpoint(chunk_idx + 1, chunks, written)
 
