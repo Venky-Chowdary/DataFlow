@@ -198,9 +198,15 @@ async def add_timing_header(request: Request, call_next):
     request.state.correlation_id = correlation_id
     try:
         response = await call_next(request)
-    except Exception as exc:
-        # Catch unhandled endpoint exceptions here so the outer Starlette/anyio
-        # task group does not surface an ExceptionGroup and crash the worker.
+    except (Exception, BaseException) as exc:
+        # Catch unhandled endpoint and TaskGroup exceptions here so the outer
+        # Starlette/anyio task group does not surface an ExceptionGroup and
+        # crash the worker. Re-raise process-control exceptions.
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
+        # Unwrap a single ExceptionGroup so a clear message reaches the client.
+        if isinstance(exc, BaseExceptionGroup) and len(getattr(exc, "exceptions", [])) == 1:
+            exc = exc.exceptions[0]
         logger.exception("Unhandled error on %s", request.url.path)
         detail = str(exc) if not is_production() else "An unexpected error occurred"
         response = JSONResponse(
