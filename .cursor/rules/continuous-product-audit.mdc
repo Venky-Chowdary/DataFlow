@@ -1,0 +1,29 @@
+---
+description: Continuous real engine/product audit vs market — improve until operators feel DataFlow makes work easy
+alwaysApply: true
+---
+
+# Continuous Product & Engine Audit
+
+Every non-trivial DataFlow change must recollect this loop. Do not treat marketing docs or prior chat claims as proof.
+
+## Standing mandate
+- Run **real** engine audits (code + tests + proof artifacts), not slideware.
+- Position vs **Airbyte / Fivetran / Estuary / Debezium-class CDC** and reverse-ETL where relevant.
+- Judge: robustness, accuracy/fidelity, connector reality, operator UX, observability, business fit.
+- Improve algorithms from research (CDC snapshot+LSN handoff, idempotent MERGE, schema contracts, quarantine, reconcile).
+- Ship features that make an operator’s work **feel easy and trustworthy**.
+
+## Honesty bar
+- Catalog count ≠ transfer-live drivers. Never claim “650+ live” without `TRANSFER_READY` / PRODUCTION_SKU evidence.
+- Prefer real-service or emulator matrices; report pass/fail/skip counts. No silent data loss — quarantine + surface.
+- CDC/resume default is **at-least-once upsert** until proven otherwise — say so.
+
+## When working, default questions
+1. What competitor already solves this better, and what algorithm do they use?
+2. Which source×dest×schema cases prove or falsify this change?
+3. Does the UI make the next correct action obvious (fix, approve drift, resume, quarantine)?
+4. What is the smallest proof we can attach (test, reconcile report, preflight run_id)?
+
+## Priority wedge (defend & deepen)
+Semantic mapping · preflight fail-fast · quarantine/replay · checksum reconcile · contracts — then close CDC, connector depth, GitOps, lakehouse gaps.

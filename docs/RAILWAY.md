@@ -141,6 +141,7 @@ railway up --service dataflow-web -c deploy/railway/web.toml
 |-------|-----|
 | API crash on boot | Check **Deploy Logs** — usually missing `DATAFLOW_AUTH_SECRET` or `MONGODB_URI` |
 | CORS error in browser | Set `DATAFLOW_WEB_DOMAIN` on API to match web URL exactly |
+| Data Pilot “Could not reach” | Web nginx proxies `/api/` → API. Set `DATAFLOW_API_BASE=https://YOUR-API.up.railway.app/api/v1` on **web** (runtime) and redeploy web. Confirm you are signed in. Chat uses a 120s timeout. |
 | Login fails | Verify `DATAFLOW_AUTH_USERS` JSON is valid one-line string |
 | Jobs empty / transfer fails | Confirm MongoDB reference is linked to `MONGODB_URI` |
 | Connectors lost after deploy | Add **Volume** mounted at `/data` |

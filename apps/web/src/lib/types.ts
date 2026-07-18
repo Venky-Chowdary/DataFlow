@@ -1,17 +1,27 @@
 /** Normalize API origin so login and all routes hit `/api/v1/...`. */
 function resolveApiBase(): string {
-  const raw =
-    (typeof window !== "undefined" && (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE) ||
-    import.meta.env.VITE_API_BASE ||
-    "/api/v1";
-  const trimmed = String(raw).trim().replace(/\/+$/, "");
+  const fromWindow =
+    typeof window !== "undefined"
+      ? (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE
+      : undefined;
+  const raw = fromWindow || import.meta.env.VITE_API_BASE || "/api/v1";
+  // Strip quotes/whitespace (Railway paste / "white" blank env values).
+  let trimmed = String(raw).trim().replace(/^['"]|['"]$/g, "").replace(/\/+$/, "");
   if (!trimmed) return "/api/v1";
   if (trimmed === "/api/v1" || trimmed.endsWith("/api/v1")) return trimmed;
+  if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith("/")) {
+    trimmed = `https://${trimmed}`;
+  }
   // Operators often set the Railway host without the version prefix.
   return `${trimmed}/api/v1`;
 }
 
 export const API_BASE = resolveApiBase();
+
+/** Human-readable API target for Pilot / Settings diagnostics. */
+export function describeApiBase(): string {
+  return API_BASE;
+}
 
 export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
 

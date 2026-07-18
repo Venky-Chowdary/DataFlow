@@ -316,6 +316,28 @@ export interface ModelCapabilities {
   guarantees: string[];
 }
 
+/** Map Pilot / API failures to an actionable message (not a generic URL blame). */
+export function formatPilotReachError(error: unknown, apiBase: string = API_BASE): string {
+  const raw = error instanceof Error ? error.message : String(error || "Unknown error");
+  const lower = raw.toLowerCase();
+  if (lower.includes("timed out") || lower.includes("abort")) {
+    return "Data Pilot timed out waiting for the API. The model may be slow — retry, or check AI provider keys on the API service.";
+  }
+  if (lower.includes("401") || lower.includes("authentication required") || lower.includes("not authenticated")) {
+    return "Sign-in required or session expired. Sign in again, then retry Data Pilot.";
+  }
+  if (lower.includes("403") || lower.includes("forbidden")) {
+    return "Your account is not allowed to use Data Pilot. Check workspace role / RBAC.";
+  }
+  if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
+    return `Could not reach the API at ${apiBase}. On Railway, set DATAFLOW_API_BASE (or VITE_API_BASE) on the web service to your API URL ending in /api/v1, redeploy web, and set DATAFLOW_WEB_DOMAIN on the API for CORS.`;
+  }
+  if (lower.includes("503") || lower.includes("no ai") || lower.includes("provider")) {
+    return raw;
+  }
+  return `Data Pilot error: ${raw}`;
+}
+
 export async function copilotChat(
   message: string,
   history: CopilotChatMessage[] = [],
@@ -336,12 +358,22 @@ export async function copilotChat(
       blockers: dataContext.blockers,
     };
   }
-  const res = await apiFetch(`${API_BASE}/copilot/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error("Copilot chat failed");
+  let res: Response;
+  try {
+    res = await apiFetch(`${API_BASE}/copilot/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      // Agent + tool loops routinely exceed the default 15s API timeout.
+      timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    throw new Error(formatPilotReachError(error, API_BASE));
+  }
+  if (!res.ok) {
+    const detail = await parseApiError(res, `Copilot chat failed (${res.status})`);
+    throw new Error(formatPilotReachError(new Error(`${res.status}: ${detail}`), API_BASE));
+  }
   return res.json();
 }
 

@@ -7,12 +7,13 @@ import {
   fetchCopilotPrompts,
   fetchCopilotStatus,
   fetchModelCapabilities,
+  formatPilotReachError,
   ModelCapabilities,
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
 import { useStudioActions } from "../lib/StudioActionsContext";
-import { Screen } from "../lib/types";
+import { API_BASE, Screen } from "../lib/types";
 import { useToast } from "../components/Toast";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
@@ -160,11 +161,12 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
       applyActions(res.suggested_actions);
       if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
-    } catch {
+    } catch (error) {
       setPilotOnline(false);
-      toast({ title: "Data Pilot unavailable", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in and retry.", tone: "error" });
+      const detail = formatPilotReachError(error, API_BASE);
+      toast({ title: "Data Pilot unavailable", message: detail, tone: "error" });
       updateSession(activeId, {
-        messages: [...nextMessages, { role: "assistant", text: "Data Pilot unavailable — the DataFlow API could not be reached. Check the API URL or sign in and retry." }],
+        messages: [...nextMessages, { role: "assistant", text: detail }],
       });
     }
     setLoading(false);

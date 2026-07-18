@@ -34,3 +34,7 @@ zero silent data loss. Hold every change to enterprise product quality.
 - `npm run build` (tsc + vite) must pass clean after frontend changes.
 - Trend `pytest` collection errors to zero; run real-service matrices and report actual
   pass/fail counts with proof artifacts before claiming quality.
+
+## Continuous market loop
+- Recollect `.cursor/rules/continuous-product-audit.mdc` on every non-trivial change:
+  real engine audits, competitor algorithms, catalog honesty, and operator feel-good UX.

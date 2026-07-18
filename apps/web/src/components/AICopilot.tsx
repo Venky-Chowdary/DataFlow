@@ -4,13 +4,14 @@ import {
   copilotChat,
   fetchCopilotPrompts,
   fetchPilotTools,
+  formatPilotReachError,
   CopilotAction,
   CopilotChatMessage,
   PilotToolRegistry,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { useStudioActions } from "../lib/StudioActionsContext";
-import { Screen } from "../lib/types";
+import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 
 interface Message {
@@ -135,10 +136,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       if (res.suggested_prompts?.length) {
         setPrompts(res.suggested_prompts);
       }
-    } catch {
+    } catch (error) {
+      const detail = formatPilotReachError(error, API_BASE);
       setMessages((m) => [
         ...m,
-        { role: "assistant", text: "Could not reach Data Pilot. Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in." },
+        { role: "assistant", text: detail },
       ]);
     }
     setLoading(false);
