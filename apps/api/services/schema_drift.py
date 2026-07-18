@@ -4,50 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.schema_fingerprint import fingerprint_schema, schemas_match
 from services.type_system import is_lossy_coercion
-
-_SCHEMALESS_DESTS = {"mongodb", "dynamodb", "redis"}
-_DB_TYPE_ALIASES = {
-    "mongo": "mongodb",
-    "mongodb+srv": "mongodb",
-    "mongodb_atlas": "mongodb",
-    "atlas": "mongodb",
-    "cosmos-mongodb": "mongodb",
-    "cosmos_mongodb": "mongodb",
-    "documentdb": "mongodb",
-    "aws_documentdb": "mongodb",
-    "dynamo": "dynamodb",
-    "redis-kv": "redis",
-    "redis_kv": "redis",
-}
 
 
 def _norm_type(value: str | None) -> str:
     return (value or "VARCHAR").strip().upper()
-
-
-def _ci_get(schema: dict[str, str], key: str) -> str | None:
-    key_l = key.lower()
-    for existing_key, value in schema.items():
-        if existing_key.lower() == key_l:
-            return value
-    return None
-
-
-def _normalize_dest_kind(dest_db_type: str | None) -> str:
-    raw = (dest_db_type or "").strip().lower().replace(" ", "_")
-    if not raw:
-        return ""
-    if raw in _DB_TYPE_ALIASES:
-        return _DB_TYPE_ALIASES[raw]
-    if raw.startswith("mongodb"):
-        return "mongodb"
-    if raw.startswith("dynamodb"):
-        return "dynamodb"
-    if raw.startswith("redis"):
-        return "redis"
-    return raw
 
 
 def detect_schema_drift(
@@ -69,8 +32,8 @@ def detect_schema_drift(
     target_columns = target_columns or []
     target_schema = target_schema or {}
     mappings = mappings or []
-    dest_kind = _normalize_dest_kind(destination_db_type)
-    schemaless = dest_kind in _SCHEMALESS_DESTS
+    dest_kind = normalize_dest_kind(destination_db_type)
+    schemaless = dest_kind in SCHEMALESS_DESTS
 
     live_source_fp = fingerprint_schema(source_columns, source_schema)
     live_target_fp = fingerprint_schema(target_columns, target_schema) if target_columns else ""
@@ -91,7 +54,7 @@ def detect_schema_drift(
             if not src or not tgt:
                 continue
             src_type = source_schema.get(src) or "VARCHAR"
-            tgt_type = _ci_get(target_schema, tgt) or "VARCHAR"
+            tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
             if target_schema and is_lossy_coercion(src_type, tgt_type):
                 type_mismatches.append({"source": src, "target": tgt, "source_type": src_type.upper(), "target_type": tgt_type.upper()})
 
