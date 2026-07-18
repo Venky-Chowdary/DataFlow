@@ -10,6 +10,7 @@ from typing import Any
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
+from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "sync_cursors.json"
 
@@ -84,7 +85,7 @@ def _load() -> dict[str, Any]:
 
 
 def _save(data: dict[str, Any]) -> None:
-    write_json_atomic(STORE_PATH, data, indent=2, default=None)
+    write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
 
 
 def get_watermark(cursor_key: str) -> str | None:

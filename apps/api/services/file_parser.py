@@ -52,7 +52,7 @@ def _save_registry() -> None:
         "files": [_registry_record_for_disk(r) for r in _file_registry.values()],
         "count": len(_file_registry),
     }
-    REGISTRY_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    REGISTRY_PATH.write_text(json.dumps(payload, indent=2, default=json_default), encoding="utf-8")
 
 
 _load_registry()

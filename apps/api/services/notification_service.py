@@ -41,7 +41,7 @@ def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None
     try:
         import urllib.request
 
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(payload, default=json_default).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=data,
