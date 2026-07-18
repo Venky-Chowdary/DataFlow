@@ -157,6 +157,7 @@ export function SourceStepAside({
       <StructurePreview
         columns={sourceColumns}
         schema={sourceSchema}
+        rows={samplePreviewRows}
         title="Source schema"
         subtitle={
           sourceConnector

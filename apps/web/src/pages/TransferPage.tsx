@@ -265,6 +265,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     setTransferPlan(null);
     setPreflight(null);
     setPersistedPlanId(null);
+    setParsed(null);
   }, [sourceConnectorId, sourceTable, sourceCollection, cloudPath, sourceKind]);
 
   const buildDestinationEndpoint = () => {
@@ -330,10 +331,10 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
   const isConnectorSource = sourceKind === "database" || sourceKind === "cloud";
   const currentSourceColumns = sourceKind === "file"
     ? parsed?.columns ?? []
-    : transferPlan?.source_columns ?? [];
+    : (transferPlan?.source_columns ?? parsed?.columns ?? []);
   const currentSourceSchema = sourceKind === "file"
     ? parsed?.schema ?? {}
-    : transferPlan?.source_schema ?? {};
+    : (transferPlan?.source_schema ?? parsed?.schema ?? {});
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
   const cursorCandidate = findColumn(currentSourceColumns, [
@@ -1029,6 +1030,15 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       row_count: intro.row_estimate ?? 0,
       samples: columnSamples,
       schema: intro.schema ?? {},
+    });
+    // Populate parsed so the SourceStepAside preview table (samplePreviewRows)
+    // renders live connector samples the same way it does for file uploads.
+    setParsed({
+      columns: intro.columns,
+      schema: intro.schema ?? {},
+      row_count: intro.row_estimate ?? 0,
+      data: intro.data ?? intro.sample_data ?? [],
+      file_type: sourceConnector.type,
     });
     return true;
   };
