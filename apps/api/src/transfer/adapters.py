@@ -1168,3 +1168,18 @@ def write_destination_file(
         "transform_errors": transform_errors[:10],
         "mapped": bool(mappings),
     }
+
+
+def resolve_endpoint_dict(endpoint_dict: dict[str, Any], workspace_id: str | None = None) -> dict[str, Any]:
+    """Resolve a saved connector into a plain endpoint dict (format, credentials, etc.)."""
+    from .models import EndpointConfig, endpoint_to_dict
+
+    kind = endpoint_dict.get("kind") or "database"
+    ep = EndpointConfig.from_dict(kind, endpoint_dict)
+    resolved = resolve_endpoint(ep, workspace_id=workspace_id)
+    out = endpoint_to_dict(resolved)
+    # Preserve keys the UI may rely on that are not in endpoint_to_dict.
+    for key, value in endpoint_dict.items():
+        if key not in out and value is not None:
+            out[key] = value
+    return out

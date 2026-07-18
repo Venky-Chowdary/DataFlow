@@ -616,8 +616,9 @@ def probe_destination(endpoint) -> tuple[bool, str]:
     if endpoint.kind != "database":
         return True, "Non-database destination"
 
-    db_type = (endpoint.format or "").lower()
     cfg = resolve_connector_config(endpoint)
+    # Prefer the saved connector's driver type over any inline format string.
+    db_type = (cfg.get("type") or endpoint.format or "").lower()
     # DynamoDB uses the table name as the database identifier; ensure the
     # connectivity probe sees the intended destination table.
     if db_type == "dynamodb":
@@ -687,11 +688,9 @@ def inspect_destination_for_preflight(
         if not conn:
             out["message"] = f"Connector '{connector_id}' not found"
             return out
-        # Inline form values take precedence over saved connector fields.
-        # resolve_connector_config() will merge the saved connector into the
-        # EndpointConfig, so we only need to populate the fields the user may
-        # have overridden in the current step.
-        db_type = (dest_type or conn.get("type") or "mongodb").lower()
+        # Saved connector type is authoritative; inline form values only fill
+        # fields the user may have overridden in the current step.
+        db_type = (conn.get("type") or dest_type or "mongodb").lower()
         out["db_type"] = db_type
         endpoint = EndpointConfig(
             kind="database",
