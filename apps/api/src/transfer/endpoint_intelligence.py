@@ -101,12 +101,26 @@ def introspect_endpoint(
             client = _mongo_client(mongodb_connection_string(cfg))
             db_name = endpoint.database or cfg["database"] or "test"
             db = client[db_name]
-            colls = db.list_collection_names()
-            out["connected"] = True
-            out["objects"] = [{"name": c, "type": "collection"} for c in colls[:50]]
-            out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
-            if endpoint.collection:
+            # When the caller already supplied a collection/table, target it
+            # directly instead of listing every collection. This avoids slow
+            # namespace scans on large MongoDB deployments and makes the source
+            # preview load in one round-trip.
+            requested_coll = endpoint.collection
+            if requested_coll:
+                try:
+                    db[requested_coll].find_one({})
+                except Exception as coll_err:
+                    out["message"] = f"Collection `{requested_coll}` not found or unreadable: {coll_err}"
+                    return out
+                out["connected"] = True
+                out["objects"] = [{"name": requested_coll, "type": "collection"}]
+                out["message"] = f"MongoDB connected — reading `{requested_coll}` in `{db_name}`"
                 _attach_db_sample(out, endpoint)
+            else:
+                colls = db.list_collection_names()
+                out["connected"] = True
+                out["objects"] = [{"name": c, "type": "collection"} for c in colls[:50]]
+                out["message"] = f"MongoDB connected — {len(colls)} collections in `{db_name}`"
         except Exception as e:
             out["message"] = humanize_connection_error("mongodb", e)
         return out

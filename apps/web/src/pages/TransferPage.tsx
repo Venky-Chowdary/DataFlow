@@ -978,8 +978,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
     return false;
   };
 
-  const introspectConnectorSource = useCallback(async (): Promise<boolean> => {
-    if (!sourceConnector) return false;
+  const introspectConnectorSource = useCallback(async () => {
+    if (!sourceConnector) return null;
     const isMongo = sourceConnector.type === "mongodb";
     const tableOrPath = sourceKind === "cloud"
       ? cloudPath.trim()
@@ -1005,7 +1005,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         message: intro.message || "Verify table, collection, or object path and credentials.",
         tone: "error",
       });
-      return false;
+      return null;
     }
     if (intro.row_estimate != null && intro.row_estimate > 0) {
       setSourceRowEstimate(intro.row_estimate);
@@ -1044,7 +1044,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       data: intro.data ?? intro.sample_data ?? [],
       file_type: sourceConnector.type,
     });
-    return true;
+    return intro;
   }, [sourceConnector, sourceKind, sourceCollection, sourceTable, cloudPath, sourceConnectorId, toast, setActiveData]);
 
   // Auto-introspect connector sources as soon as the user enters a table or
@@ -1063,7 +1063,7 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
         setSourceIntrospecting(false);
         setAnalyzing(false);
       });
-    }, 600);
+    }, 300);
     return () => window.clearTimeout(t);
   }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceCollection, sourceTable, cloudPath, introspectConnectorSource]);
 
@@ -1073,8 +1073,8 @@ export function TransferPage({ connectors, onTransferComplete, onOpenSchedules }
       setSourceIntrospecting(true);
       setAnalyzing(true);
       try {
-        const ok = await introspectConnectorSource();
-        if (!ok) return;
+        const intro = await introspectConnectorSource();
+        if (!intro?.columns?.length) return;
       } catch (e) {
         const message = e instanceof Error ? e.message : "Source introspection failed.";
         toast({ title: "Schema read failed", message, tone: "error" });
