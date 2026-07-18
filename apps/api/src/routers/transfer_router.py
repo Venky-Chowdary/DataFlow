@@ -168,13 +168,14 @@ async def transfer_readiness():
 async def analyze_route(body: AnalyzeRequest):
     """Score a source → destination route with conversion and driver hints."""
     from services.universal_router import analyze_route as score_route
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
 
-    return score_route(
-        body.source.kind,
-        body.source.format or ("csv" if body.source.kind == "file" else body.source.format),
-        body.destination.kind,
-        body.destination.format or ("json" if body.destination.kind == "file_export" else body.destination.format),
-    )
+    src = resolve_endpoint(EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True)))
+    dst = resolve_endpoint(EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True)))
+    src_fmt = src.format or ("csv" if src.kind == "file" else src.format or "")
+    dst_fmt = dst.format or ("json" if dst.kind == "file_export" else dst.format or "")
+    return score_route(src.kind, src_fmt, dst.kind, dst_fmt)
 
 
 @router.post("/analyze")
