@@ -69,6 +69,70 @@ def test_resolve_connector_config_merges_inline():
     assert cfg["database"] == "WH_DB"
 
 
+def test_resolve_connector_config_inline_overrides_saved_connector(monkeypatch):
+    """Per-transfer inline values must win over saved connector values."""
+    from transfer import adapters
+
+    saved = {
+        "host": "saved.snowflakecomputing.com",
+        "port": 443,
+        "database": "SNOWFLAKE",
+        "schema": "PUBLIC",
+        "username": "saved_user",
+        "password": "saved_pass",
+        "warehouse": "SAVED_WH",
+        "type": "snowflake",
+        "role": "SAVED_ROLE",
+    }
+    monkeypatch.setattr(
+        adapters, "_lookup_saved_connector", lambda connector_id, workspace_id=None: saved
+    )
+
+    # User overrides database and warehouse per transfer.
+    ep = EndpointConfig(
+        format="snowflake",
+        connector_id="conn-1",
+        database="DATAFLOW",
+        warehouse="COMPUTE_WH",
+        table="orders",
+    )
+    cfg = resolve_connector_config(ep)
+    assert cfg["database"] == "DATAFLOW"
+    assert cfg["warehouse"] == "COMPUTE_WH"
+    # Saved credentials fill missing inline fields.
+    assert cfg["host"] == "saved.snowflakecomputing.com"
+    assert cfg["username"] == "saved_user"
+    assert cfg["password"] == "saved_pass"
+
+
+def test_resolve_connector_config_placeholder_database_uses_saved(monkeypatch):
+    """The UI form default 'test_db' should not override the saved connector database."""
+    from transfer import adapters
+
+    saved = {
+        "host": "saved.snowflakecomputing.com",
+        "port": 443,
+        "database": "DATAFLOW",
+        "schema": "PUBLIC",
+        "username": "user",
+        "password": "pass",
+        "warehouse": "COMPUTE_WH",
+        "type": "snowflake",
+    }
+    monkeypatch.setattr(
+        adapters, "_lookup_saved_connector", lambda connector_id, workspace_id=None: saved
+    )
+
+    ep = EndpointConfig(
+        format="snowflake",
+        connector_id="conn-1",
+        database="test_db",
+        table="orders",
+    )
+    cfg = resolve_connector_config(ep)
+    assert cfg["database"] == "DATAFLOW"
+
+
 def test_records_to_matrix_csv_like_rows():
     records = [
         {"order_id": "1", "amount": "10.50", "active": "true"},

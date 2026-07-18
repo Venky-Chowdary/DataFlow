@@ -26,6 +26,7 @@ try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect
     from sqlalchemy.dialects import postgresql
+    from sqlalchemy.exc import NoSuchModuleError
 
     SQLALCHEMY_AVAILABLE = True
 
@@ -356,11 +357,20 @@ def _engine(cfg: dict[str, Any]) -> Any:
     connection_string = (cfg.get("connection_string") or "").lower()
     # DuckDB and SQLite are file-based; use NullPool so the file lock is released
     # after each operation and external readers can open the database.
-    if db_type in ("duckdb", "sqlite") or "duckdb" in connection_string or "sqlite://" in connection_string:
-        from sqlalchemy.pool import NullPool
+    try:
+        if db_type in ("duckdb", "sqlite") or "duckdb" in connection_string or "sqlite://" in connection_string:
+            from sqlalchemy.pool import NullPool
 
-        return create_engine(url, poolclass=NullPool)
-    return create_engine(url, pool_pre_ping=True, pool_recycle=600)
+            return create_engine(url, poolclass=NullPool)
+        return create_engine(url, pool_pre_ping=True, pool_recycle=600)
+    except (NoSuchModuleError, ImportError) as exc:
+        # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
+        # Convert it to a clear RuntimeError so callers can surface a 4xx/5xx
+        # response instead of an unhandled ExceptionGroup crashing the worker.
+        raise RuntimeError(
+            f"SQLAlchemy dialect for '{db_type or url.drivername}' is not installed. "
+            f"Install the matching driver package (e.g. snowflake-sqlalchemy, databricks-sqlalchemy)."
+        ) from exc
 
 
 def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
