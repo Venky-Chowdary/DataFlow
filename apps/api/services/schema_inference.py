@@ -153,34 +153,41 @@ def _classify_value(value: str) -> str:
 def infer_type(
     samples: list[str], *, threshold: float = 0.85, field_name: str | None = None
 ) -> str:
-    """Majority-vote type inference across sample values."""
+    """Type inference across sample values.
+
+    A column is only given a typed (INTEGER/DECIMAL/DATE/etc.) classification
+    when every non-empty sample can be parsed as that type.  If any sample is an
+    unparseable string, the whole column falls back to VARCHAR so downstream
+    transforms never fail on a value like "N/A" or "pending" in a numeric field.
+    """
     non_empty = [s.strip() for s in samples if s and str(s).strip()]
     if not non_empty:
         return "VARCHAR"
 
     counts: Counter[str] = Counter(_classify_value(s) for s in non_empty)
-    best_type, best_count = counts.most_common(1)[0]
-    ratio = best_count / len(non_empty)
+    types = set(counts.keys())
 
-    if ratio >= threshold:
-        inferred = best_type
+    # A column is only typed when every non-empty sample fits that type family.
+    # If any sample is an unparseable string, fall back to VARCHAR so transforms
+    # never fail on values like "N/A" or "pending" in a numeric field.
+    if types <= {"INTEGER", "DECIMAL"}:
+        inferred = "DECIMAL" if "DECIMAL" in types else "INTEGER"
+    elif types <= {"DATE", "TIMESTAMP", "TIME"}:
+        # Mixed date/datetime values choose the most common precision; a lone
+        # timestamp in a date column does not force TIMESTAMP if dates dominate.
+        if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
+            inferred = "TIMESTAMP"
+        elif counts.get("DATE", 0) >= counts.get("TIME", 0):
+            inferred = "DATE"
+        else:
+            inferred = "TIME"
+    elif len(types) == 1:
+        inferred = next(iter(types))
     else:
         # Mixed column — prefer safer wider types
-        if "TEXT" in counts and max(len(s) for s in non_empty) > 255:
+        if "TEXT" in counts and max(len(s) for s in non_empty if _classify_value(s) == "TEXT") > 255:
             inferred = "TEXT"
-        elif counts.get("DECIMAL", 0) + counts.get("INTEGER", 0) >= len(non_empty) * 0.66:
-            inferred = "DECIMAL" if counts.get("DECIMAL", 0) > 0 else "INTEGER"
-        elif counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) + counts.get("TIME", 0) >= len(non_empty) * 0.7:
-            if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
-                inferred = "TIMESTAMP"
-            elif counts.get("DATE", 0) >= counts.get("TIME", 0):
-                inferred = "DATE"
-            else:
-                inferred = "TIME"
         else:
-            # Mixed columns that are not clearly numeric or date/time should stay
-            # as VARCHAR.  This prevents aggressive boolean/date inference from
-            # turning values like "pending" or partial dates into transform errors.
             inferred = "VARCHAR"
 
     # Disambiguate 0/1 numeric columns from boolean flags using the field name

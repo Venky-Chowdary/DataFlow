@@ -529,7 +529,10 @@ def run_file_preflight(
     )
 
     ctx = FilePreflightContext(plan, sample_rows)
-    engine = PreflightEngine(fail_fast=True)
+    # Fail fast only once both source and destination are known to be connected.
+    # When either side is not yet connected we want every reachable gate to run
+    # (and be reported) so source-only or destination-only problems are visible.
+    engine = PreflightEngine(fail_fast=source_connected and destination_connected)
     result = engine.run(ctx)
 
     from services.preflight_proof_bundle import build_preflight_proof_bundle
