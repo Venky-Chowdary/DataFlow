@@ -653,7 +653,9 @@ def stream_file_to_database(
 
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
-    if dest_type == "sqlite":
+    # Snowflake COPY INTO uses a named temporary stage per table; concurrent batches
+    # overwrite each other's stage files, so it must also be sequential.
+    if dest_type in ("sqlite", "snowflake"):
         max_workers = 1
 
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:

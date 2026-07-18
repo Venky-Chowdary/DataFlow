@@ -43,7 +43,7 @@ def count_table_rows(
     try:
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                cur.execute(f'USE WAREHOUSE "{warehouse}"')
             sch = schema or "PUBLIC"
             cur.execute(f'SELECT COUNT(*) FROM "{sch}"."{table}"')
             return int(cur.fetchone()[0])
@@ -82,7 +82,7 @@ def read_table_batch(
     try:
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                cur.execute(f'USE WAREHOUSE "{warehouse}"')
             sch = schema or "PUBLIC"
             if known_total_rows is not None:
                 total = known_total_rows
@@ -136,7 +136,7 @@ def read_table_cursor_batch(
     try:
         with conn.cursor() as cur:
             if warehouse:
-                cur.execute(f"USE WAREHOUSE {warehouse}")
+                cur.execute(f'USE WAREHOUSE "{warehouse}"')
             sch = schema or "PUBLIC"
             col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
             if cursor_after:

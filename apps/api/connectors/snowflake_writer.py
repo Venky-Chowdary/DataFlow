@@ -49,7 +49,9 @@ def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]
 
 def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[str]) -> int:
     stage_name = f"{table_name}_STAGE"
-    stage_ref = f"@{stage_name}"
+    # Temporary stages must be referenced with a quoted @"name" so Snowflake
+    # resolves them in the session stage namespace instead of current schema.
+    stage_ref = f'@"{stage_name}"'
     cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
     cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
     col_list = ", ".join(f'"{c}"' for c in target_cols)
@@ -214,13 +216,21 @@ def write_mapped_rows(
         with conn.cursor() as cur:
             if warehouse:
                 try:
-                    cur.execute(f"USE WAREHOUSE {warehouse}")
+                    cur.execute(f'USE WAREHOUSE "{warehouse}"')
                 except Exception:
                     # fakesnow and some local mocks do not support USE WAREHOUSE.
                     pass
             if database:
-                cur.execute(f"USE DATABASE {database}")
-            cur.execute(f"USE SCHEMA {schema}")
+                # The built-in SNOWFLAKE database is read-only and cannot be written.
+                if database.upper() == "SNOWFLAKE":
+                    raise RuntimeError(
+                        "The SNOWFLAKE database is read-only system data. "
+                        "Please specify a user database (for example, DATAFLOW) in the connector."
+                    )
+                cur.execute(f'CREATE DATABASE IF NOT EXISTS "{database}"')
+                cur.execute(f'USE DATABASE "{database}"')
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+            cur.execute(f'USE SCHEMA "{schema}"')
 
             if create_table:
                 col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))

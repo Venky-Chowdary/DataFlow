@@ -453,12 +453,13 @@ def verify_snowflake_table(
         with conn.cursor() as cur:
             if warehouse:
                 try:
-                    cur.execute(f"USE WAREHOUSE {warehouse}")
+                    cur.execute(f'USE WAREHOUSE "{warehouse}"')
                 except Exception:
                     pass
-            cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+            qualified_name = f'"{schema or "PUBLIC"}"."{table_name}"'
+            cur.execute(f'SELECT COUNT(*) FROM {qualified_name}')
             count = int(cur.fetchone()[0])
-            cur.execute(f'SELECT * FROM "{table_name}"')
+            cur.execute(f'SELECT * FROM {qualified_name}')
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
