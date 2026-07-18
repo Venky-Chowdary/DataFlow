@@ -397,31 +397,24 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: prefer exact id/_id target (e.g. id -> _id for MongoDB),
-    # then exact id/_id source, then first *_id source. Schemaless stores only enforce _id.
+    # Primary-key heuristic: prefer the document/SQL primary key (`_id` or `id`)
+    # first, then other *_id columns. Schemaless stores only enforce `_id`.
     pk = None
-    if dest_kind in {"mongodb", "dynamodb", "redis"}:
+    preferred = ("_id", "id") if dest_kind not in {"mongodb", "dynamodb", "redis"} else ("_id",)
+    for key in preferred:
         for m in mappings:
-            if (m.get("target") or "").lower() == "_id":
+            if (m.get("target") or "").lower() == key:
                 pk = m.get("source")
                 break
         if not pk:
-            pk = next((c for c in source_columns if c.lower() == "_id"), None)
-    else:
-        for m in mappings:
-            if (m.get("target") or "").lower() in {"id", "_id"}:
-                pk = m.get("source")
+            pk = next((c for c in source_columns if c.lower() == key), None)
+        if pk:
+            break
+    if not pk:
+        for col in source_columns:
+            if col.lower().endswith("_id"):
+                pk = col
                 break
-        if not pk:
-            for col in source_columns:
-                if col.lower() in {"id", "_id"}:
-                    pk = col
-                    break
-        if not pk:
-            for col in source_columns:
-                if col.lower().endswith("_id"):
-                    pk = col
-                    break
 
     checks: list[dict[str, Any]] = []
 

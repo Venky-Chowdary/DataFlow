@@ -7,7 +7,9 @@ from typing import Any
 
 
 def _norm(name: str) -> str:
-    return re.sub(r"[_\s-]+", "_", name.strip().lower()).strip("_")
+    """Normalize internal whitespace/dashes to a single underscore while preserving
+    leading and trailing underscores so `id` and `_id` stay distinct."""
+    return re.sub(r"[\s-]+", "_", name.strip().lower())
 
 
 def known_target(name: str, target_columns: list[str]) -> bool:
