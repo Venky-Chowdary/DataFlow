@@ -700,6 +700,8 @@ def _write_batch(
             "api_key": cfg.get("api_key", ""),
             "service_account": cfg.get("service_account", ""),
             "auth_source": cfg.get("auth_source", ""),
+            "endpoint_url": cfg.get("endpoint_url", ""),
+            "path_style": cfg.get("path_style", False),
             "table_name": table_name,
             "headers": headers,
             "data_rows": data_rows,
