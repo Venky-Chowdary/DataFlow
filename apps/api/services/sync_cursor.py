@@ -61,10 +61,19 @@ class SyncContract:
 
 def resolve_sync_contract(stream_contracts: list[dict[str, Any]] | None) -> SyncContract | None:
     """Pick the first selected stream contract."""
+    selected = resolve_selected_sync_contracts(stream_contracts)
+    return selected[0] if selected else None
+
+
+def resolve_selected_sync_contracts(
+    stream_contracts: list[dict[str, Any]] | None,
+) -> list[SyncContract]:
+    """Return every selected stream contract (multi-stream foundation)."""
+    out: list[SyncContract] = []
     for raw in stream_contracts or []:
         if raw.get("selected", True):
-            return SyncContract.from_dict(raw)
-    return None
+            out.append(SyncContract.from_dict(raw))
+    return out
 
 
 def build_cursor_key(

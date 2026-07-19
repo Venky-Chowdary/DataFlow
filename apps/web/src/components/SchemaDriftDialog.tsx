@@ -38,11 +38,18 @@ export function SchemaDriftDialog({
             Severity: <strong>{report.severity || (hasBreaking ? "breaking" : "additive")}</strong>
             {report.summary ? ` — ${report.summary}` : ""}
           </p>
+          <p className="df2-muted">
+            {hasBreaking
+              ? "Next: open remapping or Reject — do not approve until types and keys are safe."
+              : hasAdditive
+                ? "Next: Approve additive to extend the contract, or open remapping if names should change."
+                : "Next: Reject to keep the previous contract, or open remapping to redefine fields."}
+          </p>
         </header>
         <div className="df2-modal-body">
           {hasAdditive && (
             <section className="df2-drift-section">
-              <h3>Additive (safe)</h3>
+              <h3>Additive (safe to approve)</h3>
               <ul>
                 {report.additive.map((a, i) => (
                   <li key={`a-${i}`}>

@@ -110,6 +110,16 @@ export interface RejectedDetail {
   policy?: string;
 }
 
+export interface CdcStreamHealth {
+  name: string;
+  status?: string;
+  records_processed?: number;
+  cdc_lag_seconds?: number | null;
+  replication_lag_bytes?: number | null;
+  watermark?: string | null;
+  error?: string | null;
+}
+
 export interface TransferJob {
   _id: string;
   source_type: string;
@@ -135,6 +145,12 @@ export interface TransferJob {
   updated_at?: string;
   started_at?: string;
   completed_at?: string;
+  /** CDC heartbeat / event age in seconds (not end-to-end pipeline latency). */
+  cdc_lag_seconds?: number | null;
+  replication_lag_bytes?: number | null;
+  cdc_heartbeat_at?: string | null;
+  cdc_last_ddl_at?: string | null;
+  streams?: CdcStreamHealth[];
 }
 
 export interface JobPhase {

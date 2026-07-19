@@ -16,13 +16,16 @@ from connectors.snowflake_conn import get_connection, normalize_account
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
+    DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
     dedupe_rows,
+    dedupe_rows_by_pk_and_lsn,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
+    snowflake_lsn_match_predicate,
     transform_error_policy,
 )
 from services.value_serializer import cell_to_string
@@ -296,7 +299,12 @@ def write_mapped_rows(
 
     # Within a single batch, the last occurrence of an upsert key wins.
     if write_mode == "upsert" and conflict_columns:
-        mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+        if DF_LSN_COL in target_cols:
+            mapped_rows = dedupe_rows_by_pk_and_lsn(
+                mapped_rows, conflict_columns, target_cols
+            )
+        else:
+            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
     rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
@@ -417,8 +425,13 @@ def write_mapped_rows(
                     if not batch:
                         break
                     if write_mode == "upsert" and conflict:
-                        pk = conflict[0]
+                        on_clause = " AND ".join(f't."{c}" = s."{c}"' for c in conflict)
                         update_cols = [c for c in target_cols if c not in conflict]
+                        lsn_guard = (
+                            f" AND {snowflake_lsn_match_predicate()}"
+                            if DF_LSN_COL in target_cols
+                            else ""
+                        )
                         for row in batch:
                             sel = ", ".join(
                                 f'PARSE_JSON(%s) AS "{c}"' if _is_json_type(t) else f'%s AS "{c}"'
@@ -429,15 +442,15 @@ def write_mapped_rows(
                                 merge_sql = (
                                     f'MERGE INTO "{table_name}" t '
                                     f'USING (SELECT {sel}) s '
-                                    f'ON t."{pk}" = s."{pk}" '
-                                    f'WHEN MATCHED THEN UPDATE SET {set_clause} '
+                                    f'ON {on_clause} '
+                                    f'WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} '
                                     f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})'
                                 )
                             else:
                                 merge_sql = (
                                     f'MERGE INTO "{table_name}" t '
                                     f'USING (SELECT {sel}) s '
-                                    f'ON t."{pk}" = s."{pk}" '
+                                    f'ON {on_clause} '
                                     f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})'
                                 )
                             cur.execute(merge_sql, row)

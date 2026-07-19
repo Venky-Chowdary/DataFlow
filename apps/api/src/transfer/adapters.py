@@ -838,7 +838,12 @@ def write_destination_database(
         common["schema"] = cfg.get("schema", "dataflow")
         for col in columns:
             ddl_log.append(f"BQ COLUMN {col} {ddl_type('bigquery', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common, warehouse=cfg.get("warehouse", ""))
+        result = write_mapped_rows(
+            **common,
+            warehouse=cfg.get("warehouse", ""),
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+        )
         if not result.ok:
             raise RuntimeError(result.error or "BigQuery write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {cfg['database']}.{result.target_schema}.{result.table_name}")

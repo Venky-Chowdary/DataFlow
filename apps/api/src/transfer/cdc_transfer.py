@@ -31,10 +31,12 @@ from services.cdc_engine import (
 )
 from services.error_handling import RetryBudget, with_retry
 from services.value_serializer import cell_to_string
+from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
 from services.sync_cursor import (
     build_cursor_key,
     get_watermark,
     map_source_to_target,
+    resolve_selected_sync_contracts,
     resolve_sync_contract,
     set_watermark,
 )
@@ -232,6 +234,33 @@ def _max_cursor_value(records: list[dict[str, Any]], cursor_field: str, wm_type:
     return max_watermark(values, wm_type)
 
 
+def _stamp_cdc_lsn(
+    change: ChangeBatch,
+    headers: list[str],
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+) -> tuple[list[str], list[dict[str, Any]], dict[str, str]]:
+    """Attach ``_df_lsn`` from the batch resume token for monotonic MERGE at the dest."""
+    lsn = extract_cdc_lsn(change.resume_token)
+    if not lsn:
+        return headers, mappings, column_types
+    for record in change.inserts:
+        record[DF_LSN_COL] = lsn
+    for record in change.updates:
+        record[DF_LSN_COL] = lsn
+    out_headers = list(headers)
+    out_mappings = list(mappings)
+    out_types = dict(column_types)
+    if DF_LSN_COL not in out_headers:
+        out_headers.append(DF_LSN_COL)
+    if not any(m.get("source") == DF_LSN_COL for m in out_mappings):
+        out_mappings.append(
+            {"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1.0}
+        )
+    out_types.setdefault(DF_LSN_COL, "string")
+    return out_headers, out_mappings, out_types
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -246,6 +275,9 @@ def _apply_change_batch(
     total_chunks: int,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
+    headers, mappings, column_types = _stamp_cdc_lsn(
+        change, headers, mappings, column_types
+    )
     source_headers, target_cols = _source_headers(headers, mappings)
     rows_written = 0
     deleted = 0
@@ -333,7 +365,191 @@ def run_cdc_database_transfer(
     validation_mode: str = "strict",
     limit: int = 0,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
-    """Run a CDC transfer from a database source to a database destination."""
+    """Run a CDC transfer from a database source to a database destination.
+
+    When multiple stream contracts are selected, each stream runs with its own
+    cursor key and destination object; job summary includes ``streams[]`` health.
+    """
+    selected = resolve_selected_sync_contracts(stream_contracts)
+    if len(selected) > 1:
+        return _run_cdc_multi_stream(
+            source,
+            destination,
+            mappings,
+            schema,
+            on_checkpoint,
+            sync_mode=sync_mode,
+            stream_contracts=stream_contracts or [],
+            selected=selected,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service,
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            limit=limit,
+        )
+    return _run_cdc_single_stream(
+        source,
+        destination,
+        mappings,
+        schema,
+        on_checkpoint,
+        sync_mode=sync_mode,
+        stream_contracts=stream_contracts,
+        job_id=job_id,
+        checkpoint=checkpoint,
+        checkpoint_service=checkpoint_service,
+        backfill_new_fields=backfill_new_fields,
+        validation_mode=validation_mode,
+        limit=limit,
+    )
+
+
+def _run_cdc_multi_stream(
+    source: Any,
+    destination: Any,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Any | None,
+    *,
+    sync_mode: str,
+    stream_contracts: list[dict],
+    selected: list[Any],
+    job_id: str,
+    checkpoint: Any | None,
+    checkpoint_service: Any | None,
+    backfill_new_fields: bool,
+    validation_mode: str,
+    limit: int,
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """Run CDC for each selected stream with independent watermarks."""
+    total_rows = 0
+    ddl_log: list[str] = []
+    headers: list[str] = list(schema.keys())
+    stream_health: list[dict[str, Any]] = []
+    worst_lag: float | None = None
+    last_summary: dict[str, Any] = {}
+
+    original_table = getattr(source, "table", None)
+    original_collection = getattr(source, "collection", None)
+    original_dest_table = getattr(destination, "table", None)
+    original_dest_collection = getattr(destination, "collection", None)
+
+    try:
+        for contract in selected:
+            stream_name = (contract.name or "").strip() or "stream"
+            # Bind source/dest object to this stream (table/collection name).
+            if getattr(source, "format", "") == "mongodb" or original_collection:
+                source.collection = stream_name
+            else:
+                source.table = stream_name
+            if original_dest_table is not None or original_dest_collection is not None:
+                if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
+                    destination.collection = stream_name
+                else:
+                    destination.table = stream_name
+
+            single_contracts = [
+                {
+                    **(
+                        next(
+                            (c for c in stream_contracts if c.get("name") == stream_name),
+                            {},
+                        )
+                    ),
+                    "name": stream_name,
+                    "selected": True,
+                    "sync_mode": contract.sync_mode or sync_mode,
+                    "cursor_field": contract.cursor_field,
+                    "primary_key": contract.primary_key,
+                    "schema_policy": contract.schema_policy,
+                    "validation_mode": contract.validation_mode or validation_mode,
+                }
+            ]
+            status = "completed"
+            error: str | None = None
+            rows = 0
+            summary: dict[str, Any] = {}
+            try:
+                rows, stream_ddl, summary, headers = _run_cdc_single_stream(
+                    source,
+                    destination,
+                    mappings,
+                    schema,
+                    on_checkpoint,
+                    sync_mode=sync_mode,
+                    stream_contracts=single_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=backfill_new_fields,
+                    validation_mode=validation_mode,
+                    limit=limit,
+                )
+                ddl_log.extend(stream_ddl)
+                total_rows += rows
+                last_summary = summary
+                lag = summary.get("cdc_lag_seconds")
+                if isinstance(lag, (int, float)):
+                    worst_lag = lag if worst_lag is None else max(worst_lag, float(lag))
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+                stream_health.append(
+                    {
+                        "name": stream_name,
+                        "status": status,
+                        "records_processed": rows,
+                        "error": error,
+                    }
+                )
+                raise
+            cdc_meta = summary.get("cdc") if isinstance(summary.get("cdc"), dict) else {}
+            stream_health.append(
+                {
+                    "name": stream_name,
+                    "status": status,
+                    "records_processed": rows,
+                    "cdc_lag_seconds": summary.get("cdc_lag_seconds"),
+                    "replication_lag_bytes": cdc_meta.get("replication_lag_bytes"),
+                    "watermark": cdc_meta.get("watermark"),
+                    "error": error,
+                }
+            )
+    finally:
+        if original_table is not None:
+            source.table = original_table
+        if original_collection is not None:
+            source.collection = original_collection
+        if original_dest_table is not None:
+            destination.table = original_dest_table
+        if original_dest_collection is not None:
+            destination.collection = original_dest_collection
+
+    last_summary = dict(last_summary or {})
+    last_summary["streams"] = stream_health
+    if worst_lag is not None:
+        last_summary["cdc_lag_seconds"] = worst_lag
+    return total_rows, ddl_log, last_summary, headers
+
+
+def _run_cdc_single_stream(
+    source: Any,
+    destination: Any,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Any | None = None,
+    *,
+    sync_mode: str = "cdc",
+    stream_contracts: list[dict] | None = None,
+    job_id: str = "",
+    checkpoint: Any | None = None,
+    checkpoint_service: Any | None = None,
+    backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+    limit: int = 0,
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """Run a CDC transfer for a single stream contract."""
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
@@ -444,7 +660,7 @@ def run_cdc_database_transfer(
                 raise RuntimeError("PostgreSQL logical decoding not available; falling back to query CDC")
             ddl_log = [
                 f"CDC(logical_decoding) {src_type}.{table_name} → {dest_type}.{dest_table} "
-                f"(pk={primary_key}, slot={'set' if watermark else 'initial'})"
+                f"(pk={primary_key}, resume={'set' if watermark else 'initial+slot+lsn'})"
             ]
         except Exception:
             cdc = CdcEngine(
@@ -559,6 +775,8 @@ def run_cdc_database_transfer(
                     "watermark": state.running_cursor,
                     "rows_written": state.rows_written,
                     "cdc_lag_seconds": lag_fields.get("cdc_lag_seconds"),
+                    "replication_lag_bytes": lag_fields.get("replication_lag_bytes"),
+                    "cdc_heartbeat_at": lag_fields.get("cdc_heartbeat_at"),
                     "cdc_last_ddl_at": lag_fields.get("cdc_last_ddl_at"),
                     "cdc": {
                         "inserts": state.inserts,
@@ -587,6 +805,8 @@ def run_cdc_database_transfer(
         **lag_fields,
     }
     summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
+    summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
+    summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")
     summary["cdc_last_ddl_at"] = lag_fields.get("cdc_last_ddl_at")
     summary["checksum"] = state.last_checksum
     return state.rows_written, ddl_log, summary, headers

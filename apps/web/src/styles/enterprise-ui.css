@@ -2978,6 +2978,30 @@
   letter-spacing: 0.03em;
 }
 
+.df2-theater-v3-streams {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.df2-theater-v3-stream {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+  color: #334155;
+}
+
+.df2-theater-v3-stream strong {
+  color: #0f172a;
+  min-width: 7rem;
+}
+
 .df2-theater-v3-phases {
   display: flex;
   flex-wrap: wrap;

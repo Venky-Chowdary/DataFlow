@@ -355,7 +355,7 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   const raw = error instanceof Error ? error.message : String(error || "Unknown error");
   const lower = raw.toLowerCase();
   if (lower.includes("timed out") || lower.includes("abort")) {
-    return "Data Pilot timed out waiting for the API. The model may be slow — retry, or check AI provider keys on the API service.";
+    return "Data Pilot timed out waiting for the API. Retry once — if it keeps happening, set ANTHROPIC_API_KEY or OPENAI_API_KEY on the API service (or leave them unset so the local Pilot agent answers immediately), then redeploy.";
   }
   if (lower.includes("401") || lower.includes("authentication required") || lower.includes("not authenticated")) {
     return "Sign-in required or session expired. Sign in again, then retry Data Pilot.";
@@ -980,15 +980,19 @@ export interface EndpointIntrospection {
   message: string;
 }
 
-export async function introspectTransferEndpoints(payload: {
-  source: Record<string, unknown>;
-  destination: Record<string, unknown>;
-}): Promise<{ source: EndpointIntrospection; destination: EndpointIntrospection }> {
+export async function introspectTransferEndpoints(
+  payload: {
+    source: Record<string, unknown>;
+    destination: Record<string, unknown>;
+  },
+  options?: { timeoutMs?: number },
+): Promise<{ source: EndpointIntrospection; destination: EndpointIntrospection }> {
   const res = await apiFetch(`${API_BASE}/transfer/introspect`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    // Destination probes should fail soft quickly — never block the wizard for 2+ minutes.
+    timeoutMs: options?.timeoutMs ?? 45_000,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
   return res.json();

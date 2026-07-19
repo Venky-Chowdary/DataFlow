@@ -460,6 +460,22 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       <article><strong>{liveJob.progress_pct ?? 100}%</strong><span>Progress</span></article>
                       <article><strong>{jobMappings.length || Object.keys(columnTypes).length || "—"}</strong><span>Columns</span></article>
                       <article><strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong><span>Mode</span></article>
+                      {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
+                        <article>
+                          <strong>{`${Number(liveJob.cdc_lag_seconds).toFixed(1)}s`}</strong>
+                          <span>CDC lag</span>
+                        </article>
+                      )}
+                      {liveJob.replication_lag_bytes != null && Number.isFinite(Number(liveJob.replication_lag_bytes)) && (
+                        <article>
+                          <strong>
+                            {Number(liveJob.replication_lag_bytes) >= 1_048_576
+                              ? `${(Number(liveJob.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
+                              : `${Number(liveJob.replication_lag_bytes).toLocaleString()} B`}
+                          </strong>
+                          <span>WAL / binlog</span>
+                        </article>
+                      )}
                     </div>
 
                     <div className="df2-jobs-v3-timeline-block">

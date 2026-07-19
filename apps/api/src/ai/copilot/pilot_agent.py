@@ -26,8 +26,11 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
-_LLM_TURN_TIMEOUT_S = 45
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pilot-llm")
+# Per-provider hard cap. Client abort is 120s — keep total LLM attempts well under that
+# so the local agent can always answer before the browser times out.
+_LLM_TURN_TIMEOUT_S = 20
+_LLM_TOTAL_BUDGET_S = 55
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
 
 
 class _UnavailableAnthropic:
@@ -112,7 +115,16 @@ class DataPilotAgent:
         data_context: dict | None = None,
     ) -> CopilotResponse:
         message = message.strip()
-        if not message:
+        if not message or message.lower() in {
+            "hi",
+            "hello",
+            "hey",
+            "help",
+            "yo",
+            "good morning",
+            "good afternoon",
+            "good evening",
+        }:
             return CopilotResponse(
                 answer=(
                     "I'm **Data Pilot** — your AI agent for all things data. "
@@ -128,46 +140,89 @@ class DataPilotAgent:
         ctx = self.context_builder.build(data_context, message)
         system = self._build_system_prompt(ctx)
 
-        def _timed(label: str, fn):
-            """Run an LLM path with a hard timeout so the UI never hangs."""
-            fut = _executor.submit(fn)
-            try:
-                return fut.result(timeout=_LLM_TURN_TIMEOUT_S)
-            except FuturesTimeout:
-                logger.warning("Data Pilot %s timed out after %ss — falling back", label, _LLM_TURN_TIMEOUT_S)
-                fut.cancel()
-                return None
-            except Exception as exc:
-                logger.warning("Data Pilot %s failed: %s", label, exc)
-                return None
+        import time as _time
+        from concurrent.futures import wait, FIRST_COMPLETED
 
-        # Anthropic agent loop with tools
+        # Race local agent vs cloud LLMs. Prefer a finished LLM answer, but never
+        # make the UI wait on a hung provider once the local agent is ready.
+        local_fut = _executor.submit(
+            self._local_agent, message, history or [], ctx, data_context
+        )
+        llm_futs: list = []
+
+        openai_ready = False
+        try:
+            from ..llm.provider import DataTransferOpenAIProvider
+
+            openai_ready = DataTransferOpenAIProvider().is_available()
+        except Exception:
+            openai_ready = False
+
         if self.anthropic.is_available():
-            result = _timed(
-                "anthropic",
-                lambda: self._anthropic_agent_loop(message, history or [], system),
+            llm_futs.append(
+                _executor.submit(
+                    self._anthropic_agent_loop, message, history or [], system
+                )
             )
-            if result:
-                return result
+        if openai_ready:
+            llm_futs.append(
+                _executor.submit(
+                    self._openai_agent, message, history or [], system, data_context
+                )
+            )
+        if self._ollama_available_quick():
+            llm_futs.append(
+                _executor.submit(
+                    self._ollama_agent, message, history or [], system, data_context
+                )
+            )
 
-        # OpenAI fallback with tool results injected
-        openai_result = _timed(
-            "openai",
-            lambda: self._openai_agent(message, history or [], system, data_context),
-        )
-        if openai_result:
-            return openai_result
+        pending = {local_fut, *llm_futs}
+        deadline = _time.monotonic() + _LLM_TOTAL_BUDGET_S
+        local_result: CopilotResponse | None = None
 
-        # Ollama local LLM fallback
-        ollama_result = _timed(
-            "ollama",
-            lambda: self._ollama_agent(message, history or [], system, data_context),
-        )
-        if ollama_result:
-            return ollama_result
+        while pending and _time.monotonic() < deadline:
+            timeout = max(0.1, min(1.0, deadline - _time.monotonic()))
+            done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+            for fut in done:
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    logger.warning("Data Pilot worker failed: %s", exc)
+                    continue
+                if fut is local_fut:
+                    local_result = result
+                    # Tiny grace so a nearly-finished LLM can still win; don't stall the UI.
+                    deadline = min(deadline, _time.monotonic() + 0.4)
+                    continue
+                if isinstance(result, CopilotResponse):
+                    return result
 
-        # Local agent: infer tools + data analyst + compose (always returns)
-        return self._local_agent(message, history or [], ctx, data_context)
+        if local_result is not None:
+            return local_result
+        try:
+            return local_fut.result(timeout=5)
+        except Exception as exc:
+            logger.warning("Data Pilot local agent failed: %s", exc)
+            return CopilotResponse(
+                answer=(
+                    "Data Pilot hit an internal error answering that. "
+                    "Retry, or ask about a specific job_id / preflight run_id."
+                ),
+                intent="error",
+                confidence=0.2,
+                method="pilot_error",
+                suggested_prompts=self._starter_prompts()[:3],
+            )
+
+    @staticmethod
+    def _ollama_available_quick() -> bool:
+        try:
+            from ..llm.provider import DataTransferOllamaProvider
+
+            return DataTransferOllamaProvider().is_available()
+        except Exception:
+            return False
 
     @staticmethod
     def _append_tool_actions(turn: PilotTurn, tr: ToolResult) -> None:

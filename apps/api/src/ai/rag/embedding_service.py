@@ -8,12 +8,15 @@ Uses sentence-transformers when available, falls back to TF-IDF.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
+import os
 import re
 from typing import Optional
 
 import numpy as np
 
+_logger = logging.getLogger(__name__)
 _embedding_service: Optional["DataTransferEmbeddingService"] = None
 
 
@@ -31,11 +34,30 @@ class DataTransferEmbeddingService:
         self._init_backend()
 
     def _init_backend(self):
+        prefer = (os.environ.get("DATAFLOW_EMBEDDING_BACKEND") or "").strip().lower()
+        if prefer in {"tfidf", "fallback", "off", "none"}:
+            self._backend = "tfidf_fallback"
+            return
         try:
+            # Never let Pilot/chat wait on HuggingFace hub retries (can take minutes).
+            os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.MODEL_NAME)
+
+            try:
+                self._model = SentenceTransformer(self.MODEL_NAME, local_files_only=True)
+            except Exception:
+                allow_dl = (os.environ.get("DATAFLOW_ALLOW_EMBEDDING_DOWNLOAD") or "").lower() in {
+                    "1",
+                    "true",
+                    "on",
+                    "yes",
+                }
+                if not allow_dl:
+                    raise
+                self._model = SentenceTransformer(self.MODEL_NAME)
             self._backend = "sentence_transformers"
-        except (ImportError, OSError, RuntimeError):
+        except Exception as exc:
+            _logger.info("Embedding backend falling back to TF-IDF (%s)", exc)
             self._backend = "tfidf_fallback"
 
     @property

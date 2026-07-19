@@ -121,6 +121,105 @@ def dedupe_rows(
     return list(seen.values())
 
 
+# Destination metadata column for CDC monotonic apply (PK + LSN guard).
+DF_LSN_COL = "_df_lsn"
+
+
+def lsn_sort_key(lsn: Any) -> tuple:
+    """Return a sortable key for PG-style ``hi/lo`` LSNs or opaque resume tokens."""
+    if lsn is None:
+        return (-1, -1, "")
+    text = str(lsn).strip()
+    if not text:
+        return (-1, -1, "")
+    if "/" in text:
+        hi, _, lo = text.partition("/")
+        try:
+            return (int(hi, 16), int(lo, 16), "")
+        except ValueError:
+            pass
+    return (0, 0, text)
+
+
+def compare_lsn(left: Any, right: Any) -> int:
+    """Compare two LSN-like values. Returns -1, 0, or 1."""
+    a, b = lsn_sort_key(left), lsn_sort_key(right)
+    if a < b:
+        return -1
+    if a > b:
+        return 1
+    return 0
+
+
+def dedupe_rows_by_pk_and_lsn(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+    *,
+    lsn_column: str = DF_LSN_COL,
+) -> list[tuple]:
+    """Keep the highest-LSN row per PK; fall back to last-wins when LSN absent."""
+    if not conflict_columns or not rows:
+        return rows
+    if lsn_column not in target_cols:
+        return dedupe_rows(rows, conflict_columns, target_cols)
+    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
+    if not indices:
+        return rows
+    lsn_idx = target_cols.index(lsn_column)
+    best: dict[tuple, tuple] = {}
+    for row in rows:
+        key = tuple(row[i] for i in indices)
+        prev = best.get(key)
+        if prev is None or compare_lsn(row[lsn_idx], prev[lsn_idx]) >= 0:
+            best[key] = row
+    return list(best.values())
+
+
+def extract_cdc_lsn(resume_token: Any) -> str | None:
+    """Pull a sortable LSN/position string from a CDC resume token."""
+    if resume_token is None:
+        return None
+    if isinstance(resume_token, dict):
+        file_name = resume_token.get("file") or resume_token.get("filename")
+        pos = resume_token.get("pos")
+        if file_name is not None and pos is not None:
+            return f"{file_name}:{pos}"
+        for key in ("lsn", "position", "resume_lsn", "pos"):
+            value = resume_token.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return None
+    text = str(resume_token).strip()
+    if not text or text in {"None", "null"}:
+        return None
+    if "lsn=" in text:
+        for part in text.split("|"):
+            if part.startswith("lsn=") and part[4:].strip():
+                return part[4:].strip()
+    return text
+
+
+def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
+    """WHERE fragment: apply upsert only when EXCLUDED LSN is newer (pg_lsn cast)."""
+    # Identifiers are sanitized by callers; values are column/table names we control.
+    return (
+        f'EXCLUDED."{lsn_column}"::pg_lsn > '
+        f'COALESCE("{table_name}"."{lsn_column}"::pg_lsn, \'0/0\'::pg_lsn)'
+    )
+
+
+def snowflake_lsn_match_predicate(
+    target_alias: str = "t",
+    source_alias: str = "s",
+    lsn_column: str = DF_LSN_COL,
+) -> str:
+    """MATCHED guard for Snowflake MERGE using lexicographic LSN text order."""
+    return (
+        f'{source_alias}."{lsn_column}" > COALESCE({target_alias}."{lsn_column}", \'\')'
+    )
+
+
 def transform_error_policy(policy: str | None = None) -> str:
     selected = (policy or TRANSFORM_ERROR_POLICY or "quarantine").strip().lower()
     return selected if selected in VALID_ERROR_POLICIES else "quarantine"

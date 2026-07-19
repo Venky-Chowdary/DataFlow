@@ -85,6 +85,12 @@ export function DashboardPage({
   const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
   const healthyConnectors = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
+  const cdcLagSeconds = useMemo(() => {
+    const lags = [...running, ...completed]
+      .map((j) => j.cdc_lag_seconds)
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    return lags.length ? Math.max(...lags) : null;
+  }, [running, completed]);
 
   const throughputSeries = useMemo(() => buildThroughputSeries(jobs), [jobs]);
   const statusSlices = useMemo(() => buildStatusDistribution(jobs), [jobs]);
@@ -207,6 +213,17 @@ export function DashboardPage({
             }
             icon="activity"
             tone="teal"
+          />
+          <MetricGlassTile
+            label="CDC lag"
+            value={cdcLagSeconds != null ? `${cdcLagSeconds.toFixed(1)}s` : "—"}
+            sub={
+              cdcLagSeconds != null
+                ? "Worst heartbeat lag on recent CDC jobs"
+                : "No CDC lag reported yet"
+            }
+            icon="activity"
+            tone={cdcLagSeconds != null && cdcLagSeconds > 60 ? "amber" : "default"}
           />
         </section>
 

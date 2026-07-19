@@ -140,10 +140,26 @@ const SYNC_MODES: { id: SyncMode; label: string; detail: string }[] = [
 ];
 
 const SCHEMA_POLICIES: { id: SchemaPolicy; label: string; detail: string }[] = [
-  { id: "manual_review", label: "Manual approval", detail: "Detect drift, continue on saved contract." },
-  { id: "propagate_columns", label: "Column changes", detail: "Auto-apply field additions and removals." },
-  { id: "propagate_all", label: "All changes", detail: "Auto-apply streams, fields, and type updates." },
-  { id: "pause_on_change", label: "Pause on change", detail: "Stop future runs when drift appears." },
+  {
+    id: "manual_review",
+    label: "Manual approval",
+    detail: "Detect drift; keep the approved contract until you review (safest default).",
+  },
+  {
+    id: "propagate_columns",
+    label: "Propagate columns",
+    detail: "Auto-apply additive field adds/removes — type changes still need review.",
+  },
+  {
+    id: "propagate_all",
+    label: "Propagate everything",
+    detail: "Auto-apply streams, fields, and compatible type updates (higher blast radius).",
+  },
+  {
+    id: "pause_on_change",
+    label: "Pause on drift",
+    detail: "Stop scheduled runs when schema changes — best for production warehouses.",
+  },
 ];
 
 const VALIDATION_MODES: { id: ValidationMode; label: string; threshold: string }[] = [
@@ -465,16 +481,25 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     : sourceKind === "cloud"
       ? cloudPath.split("/").filter(Boolean).pop() || "cloud_object"
       : sourceCollection || sourceTable || "source_stream";
-  const streamContracts = [{
-    name: sourceStreamName,
-    selected: true,
-    sync_mode: syncMode,
-    cursor_field: requiresCursor ? cursorField : "",
-    primary_key: requiresPrimaryKey ? primaryKeyField : "",
-    schema_policy: schemaPolicy,
-    field_count: currentSourceColumns.length,
-    validation_mode: validationMode,
-  }];
+  // Comma-separated tables → multi-stream contracts (each gets its own watermark).
+  const multiStreamNames = sourceKind === "database"
+    ? (sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  const streamContracts = (multiStreamNames.length > 1 ? multiStreamNames : [sourceStreamName]).map(
+    (name) => ({
+      name,
+      selected: true,
+      sync_mode: syncMode,
+      cursor_field: requiresCursor ? cursorField : "",
+      primary_key: requiresPrimaryKey ? primaryKeyField : "",
+      schema_policy: schemaPolicy,
+      field_count: currentSourceColumns.length,
+      validation_mode: validationMode,
+    }),
+  );
   const streamNeedsReview =
     currentSourceColumns.length > 0 &&
     ((requiresCursor && !cursorField) || (requiresPrimaryKey && !primaryKeyField));
@@ -679,21 +704,34 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     setDestSchemaLoading(true);
     setDestTableExists(null);
     try {
+      // Destination-only probe: stub file source so we do not re-sample Mongo/SQL
+      // (that was hanging the Destination step for minutes on large collections).
       const { destination } = await introspectTransferEndpoints({
-        source: buildSourceEndpoint(),
+        source: { kind: "file", format: "csv" },
         destination: buildDestinationEndpoint(),
       });
       setDestColumns(destination.columns ?? []);
       setDestSchemaMap(destination.schema ?? {});
-      setDestTableExists(destination.table_exists ?? (destination.columns?.length > 0));
-      const hasSourceSchema = Boolean(parsed || analysis?.columns.length || currentSourceColumns.length);
-      if (hasSourceSchema) {
-        await remapWithDestination(destination.columns ?? [], destination.schema ?? {});
+      const exists = destination.table_exists ?? ((destination.columns?.length ?? 0) > 0);
+      setDestTableExists(exists);
+      if (!exists) {
+        toast({
+          title: "New table will be created",
+          message: `${targetCollection.trim()} was not found on the destination — DataFlow will CREATE TABLE on first write.`,
+          tone: "info",
+        });
       }
-    } catch {
+      // Mapping pipeline runs on the Map step — never block Destination on AI remap.
+    } catch (e) {
+      // Missing / unreachable schema must not trap the wizard: treat as create-new.
       setDestColumns([]);
       setDestSchemaMap({});
-      setDestTableExists(null);
+      setDestTableExists(false);
+      toast({
+        title: "Could not read destination schema",
+        message: e instanceof Error ? e.message : "Continuing — table will be created on first write if missing.",
+        tone: "warning",
+      });
     }
     setDestSchemaLoading(false);
   };
@@ -2004,7 +2042,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   const canRunPreflight =
     canConfigureDest &&
     (destKindMode === "file_export" ||
-      (Boolean(targetDb && targetCollection) && !destSchemaLoading && destTableExists !== null));
+      (Boolean(targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
   const canExecute =
@@ -2475,12 +2513,15 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
                   }}
                   placeholder={
                     sourceConnector?.type === "mongodb"
-                      ? "orders"
+                      ? "orders, customers"
                       : sourceConnector?.type === "dynamodb"
                         ? sourceConnector.database || "orders"
-                        : "public.orders"
+                        : "public.orders, public.items"
                   }
                 />
+                <span className="df2-label-hint">
+                  CDC / incremental: comma-separate tables for multi-stream (one watermark each).
+                </span>
               </div>
             </div>
           )}
@@ -2691,6 +2732,15 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
                 {destDriverType === "mongodb" ? "Collection" : destDriverType === "dynamodb" ? "DynamoDB table" : "Table"}
               </label>
               <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destDriverType === "mongodb" ? "my_collection" : destDriverType === "dynamodb" ? "orders" : "my_table"} />
+              {destDriverType !== "mongodb" && destDriverType !== "dynamodb" && (
+                <span className="df2-label-hint">
+                  {destTableExists === false
+                    ? "Table not found — it will be created automatically on first write."
+                    : destTableExists === true
+                      ? "Existing table detected — rows will append unless you change sync mode."
+                      : "Any name works. If the table does not exist, DataFlow creates it."}
+                </span>
+              )}
             </div>
             {getGenericSqlGroup(destType) === "postgresql+psycopg2" && (
               <div className="df2-field df2-field-120">

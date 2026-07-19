@@ -13,10 +13,13 @@ from connectors.postgresql_conn import get_connection
 from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
+    DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
     dedupe_rows,
+    dedupe_rows_by_pk_and_lsn,
+    postgres_lsn_update_guard_sql,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -209,10 +212,15 @@ def write_mapped_rows(
                 preserve_case=True,
             )
 
-            # Within a single batch, the last occurrence of an upsert key wins.
-            # This avoids target-row count mismatches and ON CONFLICT churn.
+            # Within a single batch: highest LSN wins when CDC meta is present,
+            # otherwise last occurrence of each upsert key wins.
             if write_mode == "upsert" and conflict_columns:
-                mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+                if DF_LSN_COL in target_cols:
+                    mapped_rows = dedupe_rows_by_pk_and_lsn(
+                        mapped_rows, conflict_columns, target_cols
+                    )
+                else:
+                    mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
             # Convert base64-encoded strings to raw bytes for BYTEA columns
             if any(t == "BYTEA" for t in target_types):
@@ -276,19 +284,37 @@ def write_mapped_rows(
                         if conflict:
                             update_cols = [c for c in target_cols if c not in conflict]
                             if update_cols:
-                                insert = sql.SQL(
-                                    "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
-                                ).format(
-                                    sql.Identifier(schema),
-                                    sql.Identifier(table_name),
-                                    sql.SQL(", ").join(map(sql.Identifier, target_cols)),
-                                    placeholders,
-                                    sql.SQL(", ").join(map(sql.Identifier, conflict)),
-                                    sql.SQL(", ").join(
-                                        sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
-                                        for c in update_cols
-                                    ),
+                                set_clause = sql.SQL(", ").join(
+                                    sql.SQL("{} = EXCLUDED.{}").format(
+                                        sql.Identifier(c), sql.Identifier(c)
+                                    )
+                                    for c in update_cols
                                 )
+                                if DF_LSN_COL in target_cols:
+                                    # Monotonic CDC apply: never overwrite a newer LSN with an older replay.
+                                    insert = sql.SQL(
+                                        "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) "
+                                        "DO UPDATE SET {} WHERE {}"
+                                    ).format(
+                                        sql.Identifier(schema),
+                                        sql.Identifier(table_name),
+                                        sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                                        placeholders,
+                                        sql.SQL(", ").join(map(sql.Identifier, conflict)),
+                                        set_clause,
+                                        sql.SQL(postgres_lsn_update_guard_sql(table_name)),
+                                    )
+                                else:
+                                    insert = sql.SQL(
+                                        "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
+                                    ).format(
+                                        sql.Identifier(schema),
+                                        sql.Identifier(table_name),
+                                        sql.SQL(", ").join(map(sql.Identifier, target_cols)),
+                                        placeholders,
+                                        sql.SQL(", ").join(map(sql.Identifier, conflict)),
+                                        set_clause,
+                                    )
                             else:
                                 insert = sql.SQL(
                                     "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"

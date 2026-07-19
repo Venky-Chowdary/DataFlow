@@ -476,7 +476,47 @@ export function JobTheaterView({
             <span>Elapsed</span>
           </div>
         </article>
+        {job.cdc_lag_seconds != null && Number.isFinite(Number(job.cdc_lag_seconds)) && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="activity" size={16} />
+            <div>
+              <strong>{`${Number(job.cdc_lag_seconds).toFixed(1)}s`}</strong>
+              <span>CDC lag</span>
+            </div>
+          </article>
+        )}
+        {job.replication_lag_bytes != null && Number.isFinite(Number(job.replication_lag_bytes)) && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>
+                {Number(job.replication_lag_bytes) >= 1_048_576
+                  ? `${(Number(job.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
+                  : Number(job.replication_lag_bytes) >= 1024
+                    ? `${(Number(job.replication_lag_bytes) / 1024).toFixed(1)} KB`
+                    : `${Number(job.replication_lag_bytes)} B`}
+              </strong>
+              <span>WAL / binlog lag</span>
+            </div>
+          </article>
+        )}
       </div>
+
+      {Array.isArray(job.streams) && job.streams.length > 1 && (
+        <div className="df2-theater-v3-streams" aria-label="Per-stream health">
+          {job.streams.map((stream) => (
+            <div key={stream.name} className="df2-theater-v3-stream">
+              <strong>{stream.name}</strong>
+              <span>{stream.status || "—"}</span>
+              <span>{(stream.records_processed ?? 0).toLocaleString()} rows</span>
+              {stream.cdc_lag_seconds != null && (
+                <span>{Number(stream.cdc_lag_seconds).toFixed(1)}s lag</span>
+              )}
+              {stream.error && <span className="df2-muted">{stream.error}</span>}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="df2-theater-v3-phases" aria-label="Pipeline phases">
         {timelinePhases.map((phase) => {

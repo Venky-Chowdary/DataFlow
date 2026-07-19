@@ -1,7 +1,8 @@
-"""BigQuery bulk writer — load rows via insert_rows_json with checkpoints."""
+"""BigQuery bulk writer — insert_rows_json + optional MERGE upsert with ``_df_lsn``."""
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -9,9 +10,12 @@ from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
+    DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
+    dedupe_rows,
+    dedupe_rows_by_pk_and_lsn,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -30,6 +34,40 @@ class WriteResult(_WriteResult):
 
 def bq_type(inferred: str) -> str:
     return ddl_type("bigquery", inferred)
+
+
+def build_bigquery_merge_sql(
+    target_table: str,
+    staging_table: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    *,
+    lsn_column: str | None = None,
+) -> str:
+    """Build a BigQuery MERGE for PK upsert with optional monotonic LSN guard."""
+    conflict = [c for c in conflict_columns if c in target_cols]
+    if not conflict:
+        raise ValueError("BigQuery MERGE requires conflict_columns present in target_cols")
+    on_clause = " AND ".join(f"T.`{c}` = S.`{c}`" for c in conflict)
+    update_cols = [c for c in target_cols if c not in conflict]
+    set_clause = ", ".join(f"T.`{c}` = S.`{c}`" for c in update_cols) or "T.`{0}` = S.`{0}`".format(
+        conflict[0]
+    )
+    matched = "WHEN MATCHED"
+    if lsn_column and lsn_column in target_cols:
+        matched += (
+            f" AND S.`{lsn_column}` > COALESCE(T.`{lsn_column}`, '')"
+        )
+    matched += f" THEN UPDATE SET {set_clause}"
+    insert_cols = ", ".join(f"`{c}`" for c in target_cols)
+    insert_vals = ", ".join(f"S.`{c}`" for c in target_cols)
+    return (
+        f"MERGE `{target_table}` T\n"
+        f"USING `{staging_table}` S\n"
+        f"ON {on_clause}\n"
+        f"{matched}\n"
+        f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
+    )
 
 
 def write_mapped_rows(
@@ -52,6 +90,8 @@ def write_mapped_rows(
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
     service_account: str = "",
+    write_mode: str = "insert",
+    conflict_columns: list[str] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     del username, password, ssl, warehouse, _kwargs
@@ -59,6 +99,7 @@ def write_mapped_rows(
     dataset_id = schema or "dataflow"
     table_name = sanitize_identifier(table_name)
     policy = transform_error_policy(error_policy)
+    conflict_columns = list(conflict_columns or [])
 
     if stub_writes_allowed():
         rows, checksum, chunks = simulate_stub_write(
@@ -141,6 +182,13 @@ def write_mapped_rows(
             dest_types=dest_types,
             error_policy=policy,
         )
+        if write_mode == "upsert" and conflict_columns:
+            if DF_LSN_COL in target_cols:
+                mapped_rows = dedupe_rows_by_pk_and_lsn(
+                    mapped_rows, conflict_columns, target_cols
+                )
+            else:
+                mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
@@ -156,23 +204,60 @@ def write_mapped_rows(
         total = len(mapped_rows)
         chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
         written = 0
+        use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
 
-        for chunk_idx in range(chunks):
-            start = chunk_idx * CHUNK_SIZE
-            batch = mapped_rows[start : start + CHUNK_SIZE]
-            if not batch:
-                break
-            records = [dict(zip(target_cols, row)) for row in batch]
-            errors = client.insert_rows_json(table_id, records)
-            if errors:
-                return WriteResult(
-                    ok=False, rows_written=written, table_name=table_name, target_schema=dataset_id,
-                    checksum="", chunks_completed=chunk_idx,
-                    error=str(errors[:2]),
+        if use_merge:
+            staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
+            staging_id = f"{project_id}.{dataset_id}.{staging_name}"
+            staging = bigquery.Table(staging_id, schema=schema_fields)
+            client.create_table(staging, exists_ok=True)
+            try:
+                # Load jobs (not streaming inserts) so staging is immediately MERGE-readable.
+                load_config = bigquery.LoadJobConfig(
+                    schema=schema_fields,
+                    write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                    source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                 )
-            written += len(batch)
-            if on_checkpoint:
-                on_checkpoint(chunk_idx + 1, chunks, written)
+                for chunk_idx in range(chunks):
+                    start = chunk_idx * CHUNK_SIZE
+                    batch = mapped_rows[start : start + CHUNK_SIZE]
+                    if not batch:
+                        break
+                    records = [dict(zip(target_cols, row)) for row in batch]
+                    load_job = client.load_table_from_json(
+                        records, staging_id, job_config=load_config
+                    )
+                    load_job.result()
+                    merge_sql = build_bigquery_merge_sql(
+                        table_id,
+                        staging_id,
+                        target_cols,
+                        conflict_columns,
+                        lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+                    )
+                    client.query(merge_sql).result()
+                    written += len(batch)
+                    if on_checkpoint:
+                        on_checkpoint(chunk_idx + 1, chunks, written)
+            finally:
+                client.delete_table(staging_id, not_found_ok=True)
+        else:
+            for chunk_idx in range(chunks):
+                start = chunk_idx * CHUNK_SIZE
+                batch = mapped_rows[start : start + CHUNK_SIZE]
+                if not batch:
+                    break
+                records = [dict(zip(target_cols, row)) for row in batch]
+                errors = client.insert_rows_json(table_id, records)
+                if errors:
+                    return WriteResult(
+                        ok=False, rows_written=written, table_name=table_name, target_schema=dataset_id,
+                        checksum="", chunks_completed=chunk_idx,
+                        error=str(errors[:2]),
+                    )
+                written += len(batch)
+                if on_checkpoint:
+                    on_checkpoint(chunk_idx + 1, chunks, written)
 
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,

@@ -320,6 +320,53 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
     )
 
 
+_CDC_JOB_FIELDS = (
+    "cdc_lag_seconds",
+    "replication_lag_bytes",
+    "cdc_heartbeat_at",
+    "cdc_last_ddl_at",
+)
+
+
+def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) -> None:
+    """Copy CDC lag/health fields onto the job document for SSE + UI tiles."""
+    if not isinstance(checkpoint, dict):
+        return
+    for key in _CDC_JOB_FIELDS:
+        if key in checkpoint and key not in update:
+            update[key] = checkpoint.get(key)
+    cdc_meta = checkpoint.get("cdc") or {}
+    if isinstance(cdc_meta, dict):
+        for key in _CDC_JOB_FIELDS:
+            if key in cdc_meta and key not in update:
+                update[key] = cdc_meta.get(key)
+    streams = checkpoint.get("streams")
+    if isinstance(streams, list) and streams:
+        update["streams"] = streams
+    summary_streams = (checkpoint.get("destination_summary") or {}).get("streams")
+    if isinstance(summary_streams, list) and summary_streams and "streams" not in update:
+        update["streams"] = summary_streams
+
+
+def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Top-level job fields from a CDC destination summary."""
+    if not isinstance(dest_summary, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _CDC_JOB_FIELDS:
+        if key in dest_summary:
+            out[key] = dest_summary.get(key)
+    cdc_meta = dest_summary.get("cdc") or {}
+    if isinstance(cdc_meta, dict):
+        for key in _CDC_JOB_FIELDS:
+            if key in cdc_meta and key not in out:
+                out[key] = cdc_meta.get(key)
+    streams = dest_summary.get("streams")
+    if isinstance(streams, list) and streams:
+        out["streams"] = streams
+    return out
+
+
 def _drop_destination_table(destination: EndpointConfig) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes."""
     if destination.kind != "database":
@@ -894,17 +941,7 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
-                    # Surface CDC lag SLO fields on the job document for status JSON.
-                    if "cdc_lag_seconds" in checkpoint:
-                        update["cdc_lag_seconds"] = checkpoint.get("cdc_lag_seconds")
-                    if "cdc_last_ddl_at" in checkpoint:
-                        update["cdc_last_ddl_at"] = checkpoint.get("cdc_last_ddl_at")
-                    cdc_meta = checkpoint.get("cdc") or {}
-                    if isinstance(cdc_meta, dict):
-                        if "cdc_lag_seconds" in cdc_meta and "cdc_lag_seconds" not in update:
-                            update["cdc_lag_seconds"] = cdc_meta.get("cdc_lag_seconds")
-                        if "cdc_last_ddl_at" in cdc_meta and "cdc_last_ddl_at" not in update:
-                            update["cdc_last_ddl_at"] = cdc_meta.get("cdc_last_ddl_at")
+                    _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1320,17 +1357,7 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
-                    # Surface CDC lag SLO fields on the job document for status JSON.
-                    if "cdc_lag_seconds" in checkpoint:
-                        update["cdc_lag_seconds"] = checkpoint.get("cdc_lag_seconds")
-                    if "cdc_last_ddl_at" in checkpoint:
-                        update["cdc_last_ddl_at"] = checkpoint.get("cdc_last_ddl_at")
-                    cdc_meta = checkpoint.get("cdc") or {}
-                    if isinstance(cdc_meta, dict):
-                        if "cdc_lag_seconds" in cdc_meta and "cdc_lag_seconds" not in update:
-                            update["cdc_lag_seconds"] = cdc_meta.get("cdc_lag_seconds")
-                        if "cdc_last_ddl_at" in cdc_meta and "cdc_last_ddl_at" not in update:
-                            update["cdc_last_ddl_at"] = cdc_meta.get("cdc_last_ddl_at")
+                    _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1451,6 +1478,7 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                **_cdc_fields_from_summary(dest_summary),
             )
 
             lineage.emit_preflight_completed(
@@ -1669,17 +1697,7 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
-                    # Surface CDC lag SLO fields on the job document for status JSON.
-                    if "cdc_lag_seconds" in checkpoint:
-                        update["cdc_lag_seconds"] = checkpoint.get("cdc_lag_seconds")
-                    if "cdc_last_ddl_at" in checkpoint:
-                        update["cdc_last_ddl_at"] = checkpoint.get("cdc_last_ddl_at")
-                    cdc_meta = checkpoint.get("cdc") or {}
-                    if isinstance(cdc_meta, dict):
-                        if "cdc_lag_seconds" in cdc_meta and "cdc_lag_seconds" not in update:
-                            update["cdc_lag_seconds"] = cdc_meta.get("cdc_lag_seconds")
-                        if "cdc_last_ddl_at" in cdc_meta and "cdc_last_ddl_at" not in update:
-                            update["cdc_last_ddl_at"] = cdc_meta.get("cdc_last_ddl_at")
+                    _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)

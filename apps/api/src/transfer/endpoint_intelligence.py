@@ -430,14 +430,31 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
 
         table = endpoint.table or endpoint.collection
         if not table:
+            out["table_exists"] = False
             return
         schema_map = _introspect_table_schema(fmt, cfg, table, [])
         if schema_map:
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map
             out["table_exists"] = True
+            out["message"] = out.get("message") or f"Found existing table `{table}`"
+        else:
+            # Missing table is a valid destination — writers CREATE TABLE IF NOT EXISTS.
+            out["columns"] = []
+            out["schema"] = {}
+            out["table_exists"] = False
+            out["auto_create"] = list(out.get("auto_create") or []) + [
+                f'CREATE TABLE IF NOT EXISTS "{table}" (from source schema on first write)'
+            ]
+            out["message"] = (
+                f"Table `{table}` not found — it will be created automatically on first write"
+            )
     except Exception as e:
-        out["message"] = f"{out.get('message', '')} · schema probe: {e}"
+        # Soft-fail: still allow the wizard to continue with auto-create.
+        out["table_exists"] = False
+        out["columns"] = out.get("columns") or []
+        out["schema"] = out.get("schema") or {}
+        out["message"] = f"{out.get('message', '')} · schema probe: {e}".strip(" ·")
 
 
 def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, source_info: dict) -> dict:

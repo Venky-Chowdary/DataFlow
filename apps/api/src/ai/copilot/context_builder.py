@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from .data_analyst import get_data_analyst
 
 
@@ -29,7 +31,9 @@ class PilotContextBuilder:
         connectors = self._safe_connectors()
         jobs = self._safe_jobs()
         capabilities = self._safe_capabilities()
-        rag_snippets = self._safe_rag(message)
+        # RAG is optional — hub/embedding init must never block chat.
+        rag_on = (os.environ.get("DATAFLOW_PILOT_RAG") or "").lower() in {"1", "true", "on", "yes"}
+        rag_snippets = self._safe_rag(message) if rag_on else []
 
         dataset_summaries = []
         for ds in datasets[:12]:
@@ -41,12 +45,8 @@ class PilotContextBuilder:
                 "row_count": ds["row_count"],
                 "industry": ds.get("industry"),
             }
-            if message and self._dataset_relevant(ds, message):
-                schema = analyst.resolve_dataset(ds["name"])
-                if schema:
-                    insight = analyst.analyze_schema(schema)
-                    entry["pii_columns"] = insight.pii_columns
-                    entry["quality_score"] = insight.quality_score
+            # Skip heavy per-dataset PII/quality scans during chat context build.
+            # Tools (analyze_dataset) still run that work on demand.
             dataset_summaries.append(entry)
 
         return {
@@ -178,13 +178,21 @@ class PilotContextBuilder:
     def _safe_rag(self, message: str) -> list[str]:
         if not message.strip():
             return []
-        try:
+        # Hard-cap RAG so Pilot never hangs on embedding model downloads / hub retries.
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        def _run() -> list[str]:
             from ..rag.pipeline import get_rag_pipeline
+
             rag = get_rag_pipeline()
             rag.ingestion.ensure_knowledge_loaded()
             result = rag.retriever.retrieve(message, n_results=4)
             return [d.text[:400] for d in result.documents]
-        except Exception:
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_run).result(timeout=3.0)
+        except (FuturesTimeout, Exception):
             return []
 
     def _training_profile_count(self) -> int:

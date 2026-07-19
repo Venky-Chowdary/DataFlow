@@ -9,8 +9,29 @@ from connectors.postgresql_change_stream import (
     _parse_change_line,
     _parse_columns,
     _slot_name,
+    decode_pg_resume_token,
+    encode_pg_resume_token,
 )
 from services.cdc_engine import ChangeBatch
+
+
+def test_encode_decode_pg_resume_token_roundtrip() -> None:
+    token = encode_pg_resume_token("df_test_orders_abcd1234", lsn="0/16B3748", phase="streaming")
+    slot, lsn, phase = decode_pg_resume_token(
+        token, database="test", table="orders", cursor_key="k"
+    )
+    assert slot == "df_test_orders_abcd1234"
+    assert lsn == "0/16B3748"
+    assert phase == "streaming"
+
+
+def test_decode_legacy_bare_slot_name() -> None:
+    slot, lsn, phase = decode_pg_resume_token(
+        "df_test_orders_legacy", database="test", table="orders", cursor_key="k"
+    )
+    assert slot == "df_test_orders_legacy"
+    assert lsn is None
+    assert phase == "streaming"
 
 
 def test_slot_name_is_lowercase_and_truncated() -> None:
@@ -50,6 +71,59 @@ def test_parse_change_line_update() -> None:
     assert new_tuple == {"id": "1", "amount": "200.00"}
 
 
+def test_snapshot_uses_repeatable_read_and_lsn_token() -> None:
+    cfg = {
+        "host": "localhost",
+        "port": 5432,
+        "database": "test",
+        "username": "",
+        "password": "",
+        "connection_string": "",
+        "ssl": False,
+        "schema": "public",
+    }
+    cdc = PostgreSqlChangeStreamCdc(
+        cfg,
+        table="orders",
+        primary_key="id",
+        cursor_key="pg:test:orders→sql:test:dst:stream",
+        columns=["id", "amount"],
+    )
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [("id",), ("amount",)]
+    cur.fetchone.side_effect = [("0/16B3600",), None]
+    cur.fetchall.side_effect = [
+        [("1", "10.00"), ("2", "20.00")],
+        [],
+    ]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    conn.autocommit = True
+
+    with patch("connectors.postgresql_change_stream.get_connection", return_value=conn), \
+         patch.object(cdc, "_ensure_slot", return_value="0/16B3500"), \
+         patch.object(cdc, "_ensure_decode_schema", return_value={}), \
+         patch(
+             "connectors.postgresql_reader._order_by_clause",
+             return_value='"id"',
+         ):
+        batches = list(cdc.snapshot())
+
+    assert len(batches) >= 2
+    assert len(batches[0].inserts) == 2
+    assert "phase=snapshot" in str(batches[0].resume_token)
+    assert "lsn=0/16B3600" in str(batches[0].resume_token)
+    assert batches[-1].resume_token == encode_pg_resume_token(
+        cdc.slot_name, lsn="0/16B3600", phase="streaming"
+    )
+    executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list if c.args)
+    assert "REPEATABLE READ" in executed
+
+
 def test_poll_parses_slot_changes() -> None:
     cfg = {
         "host": "localhost",
@@ -84,7 +158,8 @@ def test_poll_parses_slot_changes() -> None:
     conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
     with patch("connectors.postgresql_change_stream.get_connection", return_value=conn), \
-         patch.object(cdc, "_ensure_slot"), \
+         patch.object(cdc, "_ensure_slot", return_value="0/16B3700"), \
+         patch.object(cdc, "_read_slot_lsn", return_value="0/16B3748"), \
          patch.object(cdc, "_ensure_decode_schema", return_value={}), \
          patch.object(cdc, "_maybe_record_schema_change"):
         changes = list(cdc.poll())
@@ -94,7 +169,9 @@ def test_poll_parses_slot_changes() -> None:
     assert len(batch.inserts) == 1
     assert len(batch.updates) == 1
     assert batch.deletes == ["3"]
-    assert batch.resume_token == "df_test_orders_12345678"
+    assert batch.resume_token == encode_pg_resume_token(
+        "df_test_orders_12345678", lsn="0/16B3748", phase="streaming"
+    )
 
 
 def test_run_cdc_database_transfer_uses_postgresql_logical_decoding():

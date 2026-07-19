@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
-from connectors.postgresql_reader import read_table_batch
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -38,6 +37,59 @@ def _slot_name(database: str, table: str, cursor_key: str) -> str:
     token = hashlib.sha256(cursor_key.encode()).hexdigest()[:8]
     raw = f"df_{database}_{table}_{token}".lower()
     return re.sub(r"[^a-z0-9_]", "_", raw)[:63]
+
+
+def encode_pg_resume_token(
+    slot: str,
+    *,
+    lsn: str | None = None,
+    phase: str = "streaming",
+) -> str:
+    """Compact watermark: slot + optional consistent-point LSN + phase.
+
+    Phase is ``snapshot`` while the initial table dump is in progress and
+    ``streaming`` once the dump finishes and logical decoding owns the cursor.
+    Legacy bare slot names remain valid inputs via :func:`decode_pg_resume_token`.
+    """
+    parts = [f"slot={slot}", f"phase={phase}"]
+    if lsn:
+        parts.append(f"lsn={lsn}")
+    return "|".join(parts)
+
+
+def decode_pg_resume_token(
+    token: str | None,
+    *,
+    database: str,
+    table: str,
+    cursor_key: str,
+) -> tuple[str, str | None, str]:
+    """Return ``(slot_name, lsn_or_none, phase)`` from a watermark or legacy slot."""
+    default_slot = _slot_name(database, table, cursor_key)
+    if not token:
+        return default_slot, None, "initial"
+    raw = str(token).strip()
+    if not raw:
+        return default_slot, None, "initial"
+    if "=" not in raw and "|" not in raw:
+        # Legacy: watermark was the bare replication slot name.
+        return raw[:63], None, "streaming"
+    slot = default_slot
+    lsn: str | None = None
+    phase = "streaming"
+    for part in raw.split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "slot" and value:
+            slot = value[:63]
+        elif key == "lsn" and value:
+            lsn = value
+        elif key == "phase" and value:
+            phase = value
+    return slot, lsn, phase
 
 
 def _parse_value(raw: str) -> str:
@@ -145,7 +197,15 @@ class PostgreSqlChangeStreamCdc:
         self.columns = columns
         self.batch_size = batch_size
         self.database = cfg.get("database") or "postgres"
-        self.slot_name = resume_token or _slot_name(self.database, table, cursor_key)
+        slot, lsn, phase = decode_pg_resume_token(
+            resume_token,
+            database=self.database,
+            table=table,
+            cursor_key=cursor_key,
+        )
+        self.slot_name = slot
+        self.consistent_point_lsn = lsn
+        self.phase = phase if phase != "initial" else "snapshot"
         self.output_plugin = output_plugin or self._select_plugin()
         self.source_key = connection_fingerprint(
             {**cfg, "type": "postgresql"},
@@ -208,7 +268,36 @@ class PostgreSqlChangeStreamCdc:
         except Exception:
             return False
 
-    def _ensure_slot(self) -> None:
+    def _resume_token(self, *, phase: str | None = None) -> str:
+        return encode_pg_resume_token(
+            self.slot_name,
+            lsn=self.consistent_point_lsn,
+            phase=phase or self.phase,
+        )
+
+    def _read_slot_lsn(self, cur) -> str | None:
+        """Return confirmed_flush_lsn or restart_lsn for this slot."""
+        cur.execute(
+            """
+            SELECT confirmed_flush_lsn::text, restart_lsn::text
+            FROM pg_replication_slots
+            WHERE slot_name = %s
+            """,
+            (self.slot_name,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        value = row[0] or row[1]
+        return str(value) if value else None
+
+    def _ensure_slot(self) -> str | None:
+        """Create the logical slot if needed; return consistent-point LSN.
+
+        Slot is created *before* the initial snapshot so WAL from the snapshot
+        window is retained (Debezium / PG logical-decoding handoff pattern).
+        Semantics remain at-least-once; destination upserts must be idempotent.
+        """
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -218,13 +307,19 @@ class PostgreSqlChangeStreamCdc:
                 row = cur.fetchone()
                 if row is None:
                     cur.execute(
-                        "SELECT pg_create_logical_replication_slot(%s, %s)",
+                        "SELECT lsn::text FROM pg_create_logical_replication_slot(%s, %s)",
                         (self.slot_name, self.output_plugin),
                     )
+                    created = cur.fetchone()
+                    lsn = str(created[0]) if created and created[0] else None
                 else:
                     # Honor existing slot plugin (cannot change without drop).
                     self.output_plugin = row[0] or self.output_plugin
+                    lsn = self._read_slot_lsn(cur)
             conn.commit()
+        if lsn and not self.consistent_point_lsn:
+            self.consistent_point_lsn = lsn
+        return self.consistent_point_lsn
 
     def replication_lag_bytes(self) -> int | None:
         """Return WAL lag for this slot, or None if unavailable."""
@@ -352,34 +447,88 @@ class PostgreSqlChangeStreamCdc:
         )
 
     def snapshot(self) -> Iterator[ChangeBatch]:
-        """Yield the full table as INSERT batches and create the logical slot."""
+        """Initial dump after slot create, then hand off to streaming at the LSN.
+
+        Order matches industry CDC practice:
+        1. Create logical slot (consistent point LSN reserved).
+        2. Read the table under ``REPEATABLE READ`` on one connection so the
+           dump is a single MVCC snapshot (not N independent page reads).
+        3. Persist ``phase=streaming`` + LSN so poll resumes without a gap window
+           outside the slot (duplicates during the dump are possible; upserts OK).
+        """
+        from psycopg2 import sql
+
+        from connectors.postgresql_reader import _cell, _order_by_clause
+
         self._ensure_slot()
+        self.phase = "snapshot"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self.heartbeat()
-        offset = 0
-        while True:
-            batch = read_table_batch(
-                host=self.cfg.get("host") or "localhost",
-                port=self.cfg.get("port") or 5432,
-                database=self.database,
-                username=self.cfg.get("username") or "",
-                password=self.cfg.get("password") or "",
-                schema=self.schema,
-                connection_string=self.cfg.get("connection_string") or "",
-                ssl=bool(self.cfg.get("ssl")),
-                table=self.table,
-                columns=self.columns,
-                offset=offset,
-                limit=self.batch_size,
-            )
-            if not batch.rows:
-                break
-            records = [dict(zip(batch.headers, row)) for row in batch.rows]
-            yield ChangeBatch(inserts=records, resume_token=self.slot_name)
-            offset += len(batch.rows)
-            if len(batch.rows) < self.batch_size:
-                break
-        yield ChangeBatch(resume_token=self.slot_name)
+
+        with self._conn() as conn:
+            # One RR transaction = one consistent table view for the dump.
+            prev_autocommit = getattr(conn, "autocommit", True)
+            try:
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    cur.execute("SELECT pg_current_wal_lsn()::text")
+                    snap_lsn_row = cur.fetchone()
+                    if snap_lsn_row and snap_lsn_row[0]:
+                        # Prefer the dump's WAL position when newer than slot create.
+                        self.consistent_point_lsn = str(snap_lsn_row[0])
+                    order_by = _order_by_clause(cur, self.schema, self.table, self.columns)
+                    if self.columns:
+                        col_sql = sql.SQL(", ").join(map(sql.Identifier, self.columns))
+                        query = sql.SQL(
+                            "SELECT {} FROM {}.{} ORDER BY " + order_by + " LIMIT %s OFFSET %s"
+                        ).format(
+                            col_sql,
+                            sql.Identifier(self.schema),
+                            sql.Identifier(self.table),
+                        )
+                    else:
+                        query = sql.SQL(
+                            "SELECT * FROM {}.{} ORDER BY " + order_by + " LIMIT %s OFFSET %s"
+                        ).format(
+                            sql.Identifier(self.schema),
+                            sql.Identifier(self.table),
+                        )
+                    offset = 0
+                    headers: list[str] = list(self.columns or [])
+                    while True:
+                        cur.execute(query, (self.batch_size, offset))
+                        fetched = cur.fetchall()
+                        if not fetched:
+                            break
+                        if cur.description:
+                            headers = [desc[0] for desc in cur.description]
+                        records = [
+                            {headers[i]: _cell(v) for i, v in enumerate(row)}
+                            for row in fetched
+                        ]
+                        yield ChangeBatch(
+                            inserts=records,
+                            resume_token=self._resume_token(phase="snapshot"),
+                        )
+                        offset += len(fetched)
+                        if len(fetched) < self.batch_size:
+                            break
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    conn.autocommit = prev_autocommit
+                except Exception:
+                    pass
+
+        self.phase = "streaming"
+        yield ChangeBatch(resume_token=self._resume_token(phase="streaming"))
 
     def _pk_value(self, record: dict[str, str]) -> str:
         return record.get(self.primary_key, "") if record else ""
@@ -387,6 +536,7 @@ class PostgreSqlChangeStreamCdc:
     def poll(self) -> Iterator[ChangeBatch]:
         """Consume a batch of changes from the logical slot (test_decoding text)."""
         self._ensure_slot()
+        self.phase = "streaming"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self._maybe_record_schema_change(offset=self.slot_name)
         self.heartbeat()
@@ -402,7 +552,10 @@ class PostgreSqlChangeStreamCdc:
                     (self.slot_name, self.batch_size),
                 )
                 rows = cur.fetchall()
+                flush_lsn = self._read_slot_lsn(cur)
             conn.commit()
+        if flush_lsn:
+            self.consistent_point_lsn = flush_lsn
 
         inserts: list[dict[str, str]] = []
         updates: list[dict[str, str]] = []
@@ -431,10 +584,14 @@ class PostgreSqlChangeStreamCdc:
                 if pk:
                     deletes.append(pk)
 
+        token = self._resume_token(phase="streaming")
         if inserts or updates or deletes:
             yield ChangeBatch(
                 inserts=inserts,
                 updates=updates,
                 deletes=deletes,
-                resume_token=self.slot_name,
+                resume_token=token,
             )
+        elif self.consistent_point_lsn:
+            # Heartbeat watermark so lag/resume stay LSN-aware even on quiet polls.
+            yield ChangeBatch(resume_token=token)

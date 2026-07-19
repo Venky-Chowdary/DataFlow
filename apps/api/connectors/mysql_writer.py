@@ -10,10 +10,12 @@ from typing import Any, Callable
 from connectors.mysql_conn import get_connection
 from connectors.writer_common import (
     CHUNK_SIZE,
+    DF_LSN_COL,
     _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
     dedupe_rows,
+    dedupe_rows_by_pk_and_lsn,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -168,9 +170,14 @@ def write_mapped_rows(
                 preserve_case=True,
             )
 
-            # Within a single batch, the last occurrence of an upsert key wins.
+            # Within a single batch: highest LSN wins when CDC meta is present.
             if write_mode == "upsert" and conflict_columns:
-                mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+                if DF_LSN_COL in target_cols:
+                    mapped_rows = dedupe_rows_by_pk_and_lsn(
+                        mapped_rows, conflict_columns, target_cols
+                    )
+                else:
+                    mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
 
             rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
             coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
@@ -194,7 +201,17 @@ def write_mapped_rows(
                 if conflict:
                     update_cols = [c for c in target_cols if c not in conflict]
                     if update_cols:
-                        updates = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in update_cols)
+                        if DF_LSN_COL in target_cols:
+                            # Lexicographic LSN guard (MySQL has no pg_lsn type).
+                            newer = (
+                                f"VALUES(`{DF_LSN_COL}`) > COALESCE(`{DF_LSN_COL}`, '')"
+                            )
+                            updates = ", ".join(
+                                f"`{c}`=IF({newer}, VALUES(`{c}`), `{c}`)"
+                                for c in update_cols
+                            )
+                        else:
+                            updates = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in update_cols)
                         insert_sql = (
                             f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders}) "
                             f"ON DUPLICATE KEY UPDATE {updates}"
