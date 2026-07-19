@@ -2458,15 +2458,22 @@
   border-radius: 9px !important;
 }
 
-/* Validate panel: scroll body, no page-level scroll fight */
-.df2-validate-step.df2-validate-split {
+/* Validate panel: HOST is the scroll container (content grows inside).
+   overflow-y:auto — scrollbar only when content overflows. */
+.df2-validate-step.df2-validate-split,
+.df2-transfer-step-viewport.df2-validate-dashboard-host,
+.df2-validate-dashboard-host {
   display: flex !important;
   flex-direction: column !important;
   flex: 1 1 0 !important;
   min-height: 0 !important;
+  max-height: 100% !important;
   height: 100% !important;
-  overflow: hidden !important;
-  padding: 10px 12px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 !important;
   gap: 0 !important;
 }
 
@@ -6945,4 +6952,49 @@
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Validate scroll — canonical last-word (wins over any prior
+   overflow:hidden / height:auto on the same host).
+   ═══════════════════════════════════════════════════════════ */
+.df2-content-studio:has(.df2-validate-dashboard-host),
+.df2-content-studio:has(.is-validate-step) {
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.df2-transfer-studio-body.is-validate-step {
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.df2-transfer-step-viewport.df2-validate-dashboard-host.df2-validate-step,
+.df2-validate-dashboard-host.df2-validate-split,
+.df2-validate-dashboard-host {
+  position: relative !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  height: 100% !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain !important;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Content grows; host scrolls only when needed — never clip the dashboard */
+.df2-validate-dashboard-host > .df2-vd {
+  flex: 0 0 auto !important;
+  min-height: min-content !important;
+  overflow: visible !important;
+  height: auto !important;
 }

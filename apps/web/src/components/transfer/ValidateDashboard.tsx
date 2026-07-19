@@ -106,6 +106,10 @@ interface ValidateDashboardProps {
   onQuarantineAndRerun?: () => void | Promise<void>;
   /** Cell-level will-quarantine / will-coerce preview from sample rows. */
   cellPreview?: CellPreviewResult | null;
+  /** Jump back to Map so the operator can fix coerced column mappings. */
+  onReviewMappings?: () => void;
+  /** Trigger preflight from the dashboard (same as the rail CTA). */
+  onRunPreflight?: () => void;
 }
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
@@ -333,6 +337,8 @@ export function ValidateDashboard({
   onStripControlChars,
   onQuarantineAndRerun,
   cellPreview = null,
+  onReviewMappings,
+  onRunPreflight,
 }: ValidateDashboardProps) {
   const [progress, setProgress] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
@@ -441,7 +447,8 @@ export function ValidateDashboard({
   }, [running]);
 
   const proof = preflight?.proof_bundle;
-  const decision = proof?.transfer_decision?.decision ?? (preflight?.passed ? "approve" : preflight ? "review" : "review");
+  const decision = proof?.transfer_decision?.decision
+    ?? (preflight?.passed ? "approve" : preflight ? "review" : "pending");
   const readiness = preflight?.readiness_score ?? 0;
   const totalGates = preflight?.total_gates || GATE_META.length;
   const passedCount = preflight?.passed_count ?? 0;
@@ -458,7 +465,13 @@ export function ValidateDashboard({
     ? preflight.gates.map((g) => metaForGate(g.id))
     : GATE_META;
 
-  const decisionTone = decision === "block" ? "block" : decision === "review" ? "review" : "approve";
+  const decisionTone = decision === "block"
+    ? "block"
+    : decision === "review"
+      ? "review"
+      : decision === "pending"
+        ? "pending"
+        : "approve";
   const heroTone = running ? "live" : preflight ? decisionTone : "idle";
 
   const semantic = proof?.semantic_mapping_score ?? 0;
@@ -572,8 +585,17 @@ export function ValidateDashboard({
         <div className="df2-vd-hero-copy">
           <div className="df2-vd-hero-head">
             <span className={`df2-vd-decision df2-vd-decision-${decisionTone}`}>
-              <DtIcon name={decision === "approve" ? "check" : decision === "block" ? "x" : "shield"} size={13} />
-              {running ? "VALIDATING" : decision.toUpperCase()}
+              <DtIcon
+                name={
+                  running ? "activity"
+                    : decision === "approve" ? "check"
+                      : decision === "block" ? "x"
+                        : decision === "pending" ? "gate"
+                          : "shield"
+                }
+                size={13}
+              />
+              {running ? "VALIDATING" : decision === "pending" ? "NOT RUN" : decision.toUpperCase()}
             </span>
             <h3>
               {running
@@ -629,34 +651,106 @@ export function ValidateDashboard({
         </div>
       )}
 
-      {cellPreview && (cellPreview.quarantine_count > 0 || cellPreview.coerce_count > 0) && (
-        <div className="df2-vd-cell-preview" aria-label="Sample cell quarantine preview">
-          <div className="df2-vd-cell-preview-head">
-            <strong>Sample cell preview</strong>
-            <span>
-              {cellPreview.quarantine_count} will quarantine · {cellPreview.coerce_count} will coerce ·{" "}
-              {cellPreview.sample_rows_scanned} rows scanned
-            </span>
+      {cellPreview && (cellPreview.quarantine_count > 0 || cellPreview.coerce_count > 0) && (() => {
+        const quarantineOnly = cellPreview.quarantine_count > 0;
+        const coerceOnly = cellPreview.coerce_count > 0 && cellPreview.quarantine_count === 0;
+        const coercedPairs = Array.from(
+          new Map(
+            cellPreview.cells
+              .filter((c) => c.status === "coerced")
+              .map((c) => [`${c.source}→${c.target}`, { source: c.source, target: c.target }]),
+          ).values(),
+        ).slice(0, 6);
+        return (
+          <div
+            className={`df2-vd-cell-preview${coerceOnly ? " is-info" : " is-warn"}`}
+            aria-label="Sample cell transform preview"
+          >
+            <div className="df2-vd-cell-preview-head">
+              <strong>{coerceOnly ? "Type coercions in sample" : "Sample cells need attention"}</strong>
+              <span>
+                {cellPreview.quarantine_count} will quarantine · {cellPreview.coerce_count} will coerce ·{" "}
+                {cellPreview.sample_rows_scanned} rows scanned
+              </span>
+            </div>
+            <p className="df2-vd-cell-preview-hint">
+              {coerceOnly ? (
+                <>
+                  This is <strong>not a failed validation</strong> and not silent data loss.
+                  Coerce means a value will be converted to fit the destination type
+                  (example: boolean <code>false</code> written into a text column becomes the string <code>&quot;false&quot;</code>).
+                  {!preflight && (
+                    <> The ring shows 0% ready because you have not run preflight yet — use <strong>Run preflight</strong> to score the gates.</>
+                  )}
+                </>
+              ) : (
+                <>
+                  Quarantine isolates unfit cells for Inspect / CSV export after Run — they are not silently deleted.
+                  Fix mappings or types below, then re-run preflight.
+                </>
+              )}
+            </p>
+            {coercedPairs.length > 0 && (
+              <div className="df2-vd-cell-preview-pairs">
+                <span className="df2-vd-assist-actions-title">Columns being coerced</span>
+                <div className="df2-vd-chip-row">
+                  {coercedPairs.map((p) => (
+                    <span key={`${p.source}-${p.target}`} className="df2-vd-chip is-static">
+                      {p.source} → {p.target}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <ul className="df2-vd-cell-preview-list">
+              {cellPreview.cells.slice(0, 8).map((cell, i) => (
+                <li key={`${cell.source}-${cell.row}-${i}`} className={`df2-vd-cell-preview-item is-${cell.status}`}>
+                  <span className="df2-vd-cell-preview-status">{cell.status}</span>
+                  <span>
+                    row {cell.row + 1} · {cell.source}→{cell.target}
+                    {cell.message ? ` — ${cell.message}` : ""}
+                    {cell.coerced != null ? ` → ${cell.coerced}` : ""}
+                  </span>
+                  {cell.raw ? <code title={cell.raw}>{cell.raw.slice(0, 48)}</code> : null}
+                </li>
+              ))}
+            </ul>
+            <div className="df2-vd-cell-preview-actions">
+              {onReviewMappings && (
+                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onReviewMappings}>
+                  <DtIcon name="layers" size={14} /> Review mappings
+                </button>
+              )}
+              {onRunPreflight && !preflight && !running && (
+                <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onRunPreflight}>
+                  <DtIcon name="gate" size={14} /> Run preflight
+                </button>
+              )}
+              {quarantineOnly && onQuarantineAndRerun && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-ghost"
+                  onClick={() => void onQuarantineAndRerun()}
+                >
+                  <DtIcon name="shield" size={14} /> Quarantine &amp; re-check
+                </button>
+              )}
+              {preflight && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-ghost"
+                  onClick={() => {
+                    setAssistExpanded(true);
+                    void runExplain();
+                  }}
+                >
+                  <DtIcon name="sparkle" size={14} /> Explain &amp; fix with AI
+                </button>
+              )}
+            </div>
           </div>
-          <p className="df2-vd-cell-preview-hint">
-            Quarantine means bad cells are kept on the job for Inspect / CSV export after Run — not deleted.
-            Use <strong>Strip controls</strong> for U+200B, or open Jobs → the completed/failed job → Inspect Quarantine.
-          </p>
-          <ul className="df2-vd-cell-preview-list">
-            {cellPreview.cells.slice(0, 8).map((cell, i) => (
-              <li key={`${cell.source}-${cell.row}-${i}`} className={`df2-vd-cell-preview-item is-${cell.status}`}>
-                <span className="df2-vd-cell-preview-status">{cell.status}</span>
-                <span>
-                  row {cell.row + 1} · {cell.source}→{cell.target}
-                  {cell.message ? ` — ${cell.message}` : ""}
-                  {cell.coerced != null ? ` → ${cell.coerced}` : ""}
-                </span>
-                {cell.raw ? <code title={cell.raw}>{cell.raw.slice(0, 48)}</code> : null}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+        );
+      })()}
 
       {!running && preflight && (
         <div className="df2-vd-metrics">

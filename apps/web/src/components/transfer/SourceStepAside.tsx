@@ -2,8 +2,10 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { StructurePreview } from "../ui/StructurePreview";
+import { MultiStreamSchemaPreview } from "./MultiStreamSchemaPreview";
 import type { Connector } from "../../lib/types";
 import type { SourceKind } from "../ui/SourceKindTiles";
+import type { StreamSchemaPreview } from "../../lib/sourceStreams";
 
 const FILE_FORMATS = ["CSV", "JSON", "JSONL", "TSV", "Parquet"];
 
@@ -30,6 +32,10 @@ interface SourceStepAsideProps {
   sourceIntrospectError?: string | null;
   onRetrySourceIntrospect?: () => void;
   sourceObjectLabel?: string;
+  streamNames?: string[];
+  streamPreviews?: StreamSchemaPreview[];
+  activeStreamTab?: string;
+  onActiveStreamTabChange?: (name: string) => void;
 }
 
 function ProfilingSteps({ active }: { active: boolean }) {
@@ -220,7 +226,15 @@ export function SourceStepAside({
   sourceIntrospectError,
   onRetrySourceIntrospect,
   sourceObjectLabel,
+  streamNames,
+  streamPreviews = [],
+  activeStreamTab,
+  onActiveStreamTabChange,
 }: SourceStepAsideProps) {
+  const multiStream = (streamNames?.length ?? 0) > 1 || streamPreviews.length > 1;
+  // Tabbed card only when the user entered multiple streams — single-stream keeps the simple preview.
+  const hasStreamTabs = multiStream && streamPreviews.length > 0;
+
   if (sourceKind === "file" && parsed) {
     return (
       <StructurePreview
@@ -237,6 +251,32 @@ export function SourceStepAside({
     );
   }
 
+  // Comma-separated multi-stream: one tab per table/collection with its own schema.
+  if (sourceKind === "database" && hasStreamTabs) {
+    return (
+      <div className="df2-source-aside df2-source-aside-multistream">
+        <MultiStreamSchemaPreview
+          streams={streamPreviews}
+          connectorName={sourceConnector?.name}
+          activeName={activeStreamTab}
+          onActiveChange={onActiveStreamTabChange}
+          loading={sourceIntrospecting}
+        />
+        {sourceIntrospectError && (
+          <div className="df2-source-aside-stream-warn" role="status">
+            <DtIcon name="alert" size={14} />
+            <p>{sourceIntrospectError}</p>
+            {onRetrySourceIntrospect && (
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onRetrySourceIntrospect}>
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (sourceColumns.length > 0 && !sourceIntrospecting) {
     return (
       <StructurePreview
@@ -247,7 +287,9 @@ export function SourceStepAside({
         title="Source schema"
         subtitle={
           sourceConnector
-            ? `${sourceColumns.length} fields${samplePreviewRows.length ? ` · ${samplePreviewRows.length} sample rows` : ""} from ${sourceConnector.name}`
+            ? `${sourceColumns.length} fields${samplePreviewRows.length ? ` · ${samplePreviewRows.length} sample rows` : ""} from ${sourceConnector.name}${
+              sourceObjectLabel ? ` · ${sourceObjectLabel}` : ""
+            }`
             : "Fields discovered from the selected connector"
         }
         fill
@@ -280,7 +322,7 @@ export function SourceStepAside({
               {sourceManual
                 ? `Manual ${sourceManualType} source. Schema loads when you continue.`
                 : sourceConnector
-                  ? `Schema from ${sourceConnector.name} loads when you continue.`
+                  ? `Enter table/collection name(s) on the left — each is read separately for preview.`
                   : pool.length
                     ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
                     : "Add a database connector to read tables and collections, or use manual connection."}
@@ -289,17 +331,24 @@ export function SourceStepAside({
         </div>
 
         {sourceConnector ? (
-          <article className="df2-source-aside-connector">
-            <ConnectorIcon id={sourceConnector.type} size={28} />
-            <div>
-              <strong>{sourceConnector.name}</strong>
-              <span>{sourceConnector.type} · {sourceConnector.host}:{sourceConnector.port}</span>
-              <span>{sourceConnector.database || "default database"}</span>
-            </div>
-            <span className={`df2-badge df2-badge-xs ${sourceConnector.last_test_ok !== false ? "df2-badge-live" : "df2-badge-run"}`}>
-              {sourceConnector.last_test_ok !== false ? "Tested" : "Untested"}
-            </span>
-          </article>
+          <>
+            <article className="df2-source-aside-connector">
+              <ConnectorIcon id={sourceConnector.type} size={28} />
+              <div>
+                <strong>{sourceConnector.name}</strong>
+                <span>{sourceConnector.type} · {sourceConnector.host}:{sourceConnector.port}</span>
+                <span>{sourceConnector.database || "default database"}</span>
+              </div>
+              <span className={`df2-badge df2-badge-xs ${sourceConnector.last_test_ok !== false ? "df2-badge-live" : "df2-badge-run"}`}>
+                {sourceConnector.last_test_ok !== false ? "Tested" : "Untested"}
+              </span>
+            </article>
+            <p className="df2-source-aside-path">
+              {sourceObjectLabel
+                ? <>Waiting for schema from <strong>{sourceObjectLabel}</strong></>
+                : "Enter one name, or comma-separate several for multi-stream CDC / incremental (one preview tab each)."}
+            </p>
+          </>
         ) : pool.length > 0 ? (
           <div className="df2-source-aside-connector-list">
             {pool.slice(0, 6).map((c) => (
@@ -324,7 +373,9 @@ export function SourceStepAside({
 
         <div className="df2-source-aside-hint">
           <DtIcon name="sparkle" size={14} />
-          Table or collection schema appears here after you continue.
+          {multiStream
+            ? "Multi-stream preview opens one tab per name once schemas are read."
+            : "Schema appears here as soon as the table or collection is readable."}
         </div>
       </div>
     );

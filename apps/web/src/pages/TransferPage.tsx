@@ -48,6 +48,11 @@ import {
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType } from "../lib/connectorTypes";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
+  parseStreamNames,
+  primaryStreamName,
+  type StreamSchemaPreview,
+} from "../lib/sourceStreams";
+import {
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
@@ -68,6 +73,7 @@ import {
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
+import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 
 interface TransferPageProps {
   connectors: Connector[];
@@ -228,6 +234,9 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
+  /** Per-stream schema previews for comma-separated multi-stream sources. */
+  const [streamPreviews, setStreamPreviews] = useState<StreamSchemaPreview[]>([]);
+  const [activeStreamTab, setActiveStreamTab] = useState("");
   /** Prevents auto-introspect from looping after timeout/error for the same source. */
   const sourceIntrospectGateRef = useRef<{ key: string; status: "idle" | "running" | "ok" | "error" }>({
     key: "",
@@ -314,6 +323,10 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     setPreflight(null);
     setPersistedPlanId(null);
     setParsed(null);
+    setStreamPreviews([]);
+    setActiveStreamTab("");
+    setSourceIntrospectError(null);
+    sourceIntrospectGateRef.current = { key: "", status: "idle" };
     // Only reset when the connector or source kind changes, not while the user
     // is still typing a table/collection name.  That prevents the preview from
     // flickering blank between keystrokes and keeps the last valid schema
@@ -482,13 +495,14 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
       ? cloudPath.split("/").filter(Boolean).pop() || "cloud_object"
       : sourceCollection || sourceTable || "source_stream";
   // Comma-separated tables → multi-stream contracts (each gets its own watermark).
-  const multiStreamNames = sourceKind === "database"
+  const sourceStreamInputRaw = sourceKind === "database"
     ? (sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable)
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
-  const streamContracts = (multiStreamNames.length > 1 ? multiStreamNames : [sourceStreamName]).map(
+    : "";
+  const multiStreamNames = parseStreamNames(sourceStreamInputRaw);
+  /** First named stream — API table/collection field (never the raw CSV string). */
+  const primarySourceStream = primaryStreamName(sourceStreamInputRaw);
+  const isMultiStreamSource = multiStreamNames.length > 1;
+  const streamContracts = (isMultiStreamSource ? multiStreamNames : [sourceStreamName]).map(
     (name) => ({
       name,
       selected: true,
@@ -517,9 +531,12 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     if (!sourceConnector) return { kind: "database", format: "", connector_id: sourceConnectorId };
     const isMongo = sourceConnector.type === "mongodb";
     const isDynamo = sourceConnector.type === "dynamodb";
+    // Never send "a, b" as one object name — multi-stream uses stream_contracts.
     const tableOrPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (isMongo ? (sourceCollection || sourceTable) : (isDynamo ? (sourceTable || sourceConnector.database || "") : sourceTable));
+      : (isDynamo
+        ? (primarySourceStream || sourceConnector.database || "")
+        : primarySourceStream);
     return {
       kind: "database",
       format: sourceConnector.type,
@@ -565,6 +582,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     sourceConnectorId,
     sourceCollection,
     sourceTable,
+    primarySourceStream,
     cloudPath,
     destKindMode,
     exportFormat,
@@ -1123,35 +1141,18 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     return false;
   };
 
-  const introspectConnectorSource = useCallback(async () => {
-    if (!sourceConnector) return null;
-    const isMongo = sourceConnector.type === "mongodb";
-    const tableOrPath = sourceKind === "cloud"
-      ? cloudPath.trim()
-      : (isMongo ? (sourceCollection || sourceTable) : sourceTable);
-    const sourceEndpoint: Record<string, unknown> = {
-      kind: "database",
-      format: sourceConnector.type,
-      connector_id: sourceConnectorId,
-      database: sourceConnector.database,
-    };
-    if (isMongo) {
-      sourceEndpoint.collection = tableOrPath;
-    } else {
-      sourceEndpoint.table = tableOrPath;
-    }
-    const { source: intro } = await introspectTransferEndpoints({
-      source: sourceEndpoint,
-      destination: { kind: "file_export", format: "json" },
-    });
-    if (!intro.connected || !intro.columns?.length) {
-      toast({
-        title: "Could not read source schema",
-        message: intro.message || "Verify table, collection, or object path and credentials.",
-        tone: "error",
-      });
-      return null;
-    }
+  const applyPrimaryStreamSchema = useCallback((
+    streamName: string,
+    intro: {
+      columns: string[];
+      schema?: Record<string, string>;
+      row_estimate?: number;
+      data?: Record<string, unknown>[];
+      sample_data?: Record<string, unknown>[];
+      message?: string;
+    },
+  ) => {
+    if (!sourceConnector) return;
     if (intro.row_estimate != null && intro.row_estimate > 0) {
       setSourceRowEstimate(intro.row_estimate);
     }
@@ -1162,10 +1163,9 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         sampleRows.slice(0, 8).map((row) => String(row[col] ?? "")).filter((v) => v.length > 0),
       ]),
     );
-    // Apply live schema immediately — do not block the Source step on AI.
     setTransferPlan((prev) => ({
       supported: prev?.supported ?? true,
-      message: intro.message,
+      message: intro.message ?? prev?.message ?? "",
       operation: prev?.operation ?? "insert",
       auto_create: prev?.auto_create ?? [],
       type_mappings: prev?.type_mappings ?? [],
@@ -1173,7 +1173,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
       source_schema: intro.schema ?? {},
     }));
     setActiveData({
-      name: tableOrPath || sourceConnector.name,
+      name: streamName || sourceConnector.name,
       columns: intro.columns,
       row_count: intro.row_estimate ?? 0,
       samples: columnSamples,
@@ -1189,18 +1189,171 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     const fallbackAnalysis = analysisFromPipeline(
       intro.columns,
       intro.schema ?? {},
-      intro.columns.map((col) => ({ source: col, target: col, confidence: 0.75, reasoning: "Inferred from live connector schema" })),
+      intro.columns.map((col) => ({
+        source: col,
+        target: col,
+        confidence: 0.75,
+        reasoning: "Inferred from live connector schema",
+      })),
     );
     setAnalysis(fallbackAnalysis);
-    // Enrich with AI when available; never fail the source read if AI times out.
-    try {
-      const dbAnalysis = await analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 });
-      setAnalysis(dbAnalysis);
-    } catch (aiErr) {
-      console.warn("AI schema enrichment skipped after successful introspect:", aiErr);
+    void analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 })
+      .then((dbAnalysis) => setAnalysis(dbAnalysis))
+      .catch((aiErr) => {
+        console.warn("AI schema enrichment skipped after successful introspect:", aiErr);
+      });
+  }, [sourceConnector, setActiveData]);
+
+  const introspectOneStream = useCallback(async (streamName: string) => {
+    if (!sourceConnector) {
+      return { ok: false as const, error: "No source connector selected" };
     }
-    return intro;
-  }, [sourceConnector, sourceKind, sourceCollection, sourceTable, cloudPath, sourceConnectorId, toast, setActiveData]);
+    const isMongo = sourceConnector.type === "mongodb";
+    const sourceEndpoint: Record<string, unknown> = {
+      kind: "database",
+      format: sourceConnector.type,
+      connector_id: sourceConnectorId,
+      database: sourceConnector.database,
+    };
+    if (isMongo) sourceEndpoint.collection = streamName;
+    else sourceEndpoint.table = streamName;
+
+    const { source: intro } = await introspectTransferEndpoints({
+      source: sourceEndpoint,
+      destination: { kind: "file_export", format: "json" },
+    });
+    if (!intro.connected || !intro.columns?.length) {
+      return {
+        ok: false as const,
+        error: intro.message || `“${streamName}” was not found or could not be read on this connector.`,
+      };
+    }
+    return { ok: true as const, intro };
+  }, [sourceConnector, sourceConnectorId]);
+
+  const introspectConnectorSource = useCallback(async () => {
+    if (!sourceConnector) return null;
+    const isMongo = sourceConnector.type === "mongodb";
+
+    if (sourceKind === "cloud") {
+      const tableOrPath = cloudPath.trim();
+      if (!tableOrPath) return null;
+      setStreamPreviews([]);
+      const result = await introspectOneStream(tableOrPath);
+      if (!result.ok) {
+        setSourceIntrospectError(result.error);
+        toast({ title: "Could not read source schema", message: result.error, tone: "error" });
+        return null;
+      }
+      applyPrimaryStreamSchema(tableOrPath, result.intro);
+      setSourceIntrospectError(null);
+      return result.intro;
+    }
+
+    const raw = isMongo ? (sourceCollection || sourceTable) : sourceTable;
+    const names = parseStreamNames(raw);
+    if (!names.length) return null;
+
+    // Show tabs immediately while each stream loads independently.
+    setStreamPreviews(names.map((name) => ({
+      name,
+      status: "loading",
+      columns: [],
+      schema: {},
+      rows: [],
+    })));
+    setActiveStreamTab(names[0]);
+    setSourceIntrospectError(null);
+
+    const settled = await Promise.all(
+      names.map(async (name) => {
+        try {
+          const result = await introspectOneStream(name);
+          if (!result.ok) {
+            return {
+              name,
+              status: "error" as const,
+              columns: [] as string[],
+              schema: {} as Record<string, string>,
+              rows: [] as Record<string, unknown>[],
+              error: result.error,
+            };
+          }
+          return {
+            name,
+            status: "ok" as const,
+            columns: result.intro.columns,
+            schema: result.intro.schema ?? {},
+            rows: (result.intro.data ?? result.intro.sample_data ?? []) as Record<string, unknown>[],
+            rowEstimate: result.intro.row_estimate,
+          };
+        } catch (e) {
+          return {
+            name,
+            status: "error" as const,
+            columns: [] as string[],
+            schema: {} as Record<string, string>,
+            rows: [] as Record<string, unknown>[],
+            error: e instanceof Error ? e.message : `Failed to read “${name}”.`,
+          };
+        }
+      }),
+    );
+
+    setStreamPreviews(settled);
+
+    const primaryOk = settled.find((s) => s.name === names[0] && s.status === "ok")
+      || settled.find((s) => s.status === "ok");
+    const failed = settled.filter((s) => s.status === "error");
+
+    if (!primaryOk) {
+      const detail = failed.map((f) => `${f.name}: ${f.error}`).join(" · ");
+      const message = names.length > 1
+        ? `None of the ${names.length} streams could be read. ${detail}`
+        : (failed[0]?.error || "Could not read source schema.");
+      setSourceIntrospectError(message);
+      toast({ title: "Could not read source schema", message, tone: "error" });
+      return null;
+    }
+
+    // Drive mapping / continue from the first successful stream (prefer listed order).
+    applyPrimaryStreamSchema(primaryOk.name, {
+      columns: primaryOk.columns,
+      schema: primaryOk.schema,
+      row_estimate: primaryOk.rowEstimate,
+      data: primaryOk.rows,
+      message: failed.length
+        ? `${failed.length} of ${names.length} streams failed — using “${primaryOk.name}” for mapping preview.`
+        : undefined,
+    });
+
+    if (failed.length) {
+      const warn = `${failed.length} of ${names.length} streams failed (${failed.map((f) => f.name).join(", ")}). Preview tabs show details; remove or fix those names before run.`;
+      setSourceIntrospectError(warn);
+      toast({ title: "Partial stream schema", message: warn, tone: "warning" });
+    } else {
+      setSourceIntrospectError(null);
+    }
+
+    setActiveStreamTab(primaryOk.name);
+    return {
+      connected: true,
+      columns: primaryOk.columns,
+      schema: primaryOk.schema,
+      row_estimate: primaryOk.rowEstimate,
+      data: primaryOk.rows,
+      message: failed.length ? `${failed.length} stream(s) failed` : "ok",
+    };
+  }, [
+    sourceConnector,
+    sourceKind,
+    sourceCollection,
+    sourceTable,
+    cloudPath,
+    introspectOneStream,
+    applyPrimaryStreamSchema,
+    toast,
+  ]);
 
   const introspectConnectorSourceRef = useRef(introspectConnectorSource);
   introspectConnectorSourceRef.current = introspectConnectorSource;
@@ -1210,12 +1363,17 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   useEffect(() => {
     if (sourceKind !== "database" && sourceKind !== "cloud") return;
     if (!sourceConnectorId || !sourceConnector) return;
-    const tableOrPath = sourceKind === "cloud"
+    const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
       : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    if (!tableOrPath?.trim()) return;
+    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+    if (!names.length) {
+      setStreamPreviews([]);
+      return;
+    }
 
-    const key = `${sourceKind}|${sourceConnectorId}|${tableOrPath.trim()}`;
+    // Gate on the full stream list so adding/removing a name re-reads schemas.
+    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
     const gate = sourceIntrospectGateRef.current;
     if (gate.key === key && (gate.status === "ok" || gate.status === "error" || gate.status === "running")) {
       return;
@@ -1233,13 +1391,13 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         .then((res) => {
           if (gen !== sourceIntrospectGenRef.current) return;
           if (res) {
+            // Keep any partial-stream warning set inside introspectConnectorSource.
             sourceIntrospectGateRef.current = { key, status: "ok" };
-            setSourceIntrospectError(null);
           } else {
             sourceIntrospectGateRef.current = { key, status: "error" };
-            setSourceIntrospectError(
-              "Could not read the source schema. Verify the table or collection name and connector credentials.",
-            );
+            setSourceIntrospectError((prev) => prev || (
+              "Could not read the source schema. Verify each table/collection name and connector credentials."
+            ));
           }
         })
         .catch((e) => {
@@ -1278,11 +1436,12 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     setAnalyzing(false);
     // Nudge effect by clearing then relying on current collection key — force via
     // a microtask re-entry of the same inputs.
-    const tableOrPath = sourceKind === "cloud"
+    const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
       : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    if (!sourceConnectorId || !tableOrPath?.trim()) return;
-    const key = `${sourceKind}|${sourceConnectorId}|${tableOrPath.trim()}`;
+    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+    if (!sourceConnectorId || !names.length) return;
+    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
     const gen = ++sourceIntrospectGenRef.current;
     sourceIntrospectGateRef.current = { key, status: "running" };
     setSourceIntrospecting(true);
@@ -1647,38 +1806,78 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
           setStep(STEP_SOURCE);
           return;
         }
-        const routePlan = await analyzeDbTransfer({
-          sourceConnectorId: sourceConnectorId,
-          sourceFormat: sourceConnector.type,
-          sourceDatabase: sourceConnector.database,
-          sourceTable: sourceKind === "cloud" ? cloudPath || undefined : sourceTable || undefined,
-          sourceCollection: sourceKind === "cloud"
-            ? cloudPath || undefined
-            : sourceCollection || undefined,
-          destFormat: destType,
-          destDatabase: targetDb,
-          destTable: destType !== "mongodb" ? targetCollection : undefined,
-          destCollection: destDriverType === "mongodb" ? targetCollection : undefined,
-          destConnectorId: connectorId || undefined,
-        });
-        columns = routePlan.source_columns ?? [];
-        columnTypes = routePlan.source_schema ?? {};
-        if (!columns.length) {
-          toast({
-            title: "Schema introspection failed",
-            message: routePlan.message || "Could not read columns from source — verify table/collection and credentials.",
-            tone: "error",
+
+        // Prefer schema already loaded on Source/Map — re-analyze often returns
+        // empty columns while message is the useless success token "supported".
+        const cachedColumns =
+          currentSourceColumns.length
+            ? currentSourceColumns
+            : (transferPlan?.source_columns?.length
+              ? transferPlan.source_columns
+              : (parsed?.columns?.length ? parsed.columns : []));
+        const cachedSchema =
+          Object.keys(currentSourceSchema).length
+            ? currentSourceSchema
+            : (transferPlan?.source_schema || parsed?.schema || {});
+
+        if (cachedColumns.length > 0) {
+          columns = cachedColumns;
+          columnTypes = cachedSchema;
+          rowCount = parsed?.row_count ?? sourceRowEstimate ?? 0;
+          sampleRows = (parsed?.data ?? parsed?.sample_data)?.slice(0, 100);
+          mappings = buildPreflightMappings(
+            analysis?.columns ?? cachedColumns.map((c) => ({
+              column_name: c,
+              inferred_type: cachedSchema[c] || "string",
+              semantic_type: "unknown",
+              confidence: 1,
+              is_pii: false,
+              compliance: [],
+            })),
+            activeMappings.length ? activeMappings : columnMappings,
+          );
+        } else {
+          const routePlan = await analyzeDbTransfer({
+            sourceConnectorId: sourceConnectorId,
+            sourceFormat: sourceConnector.type,
+            sourceDatabase: sourceConnector.database,
+            sourceTable: sourceKind === "cloud"
+              ? cloudPath || undefined
+              : sourceConnector.type !== "mongodb" ? primarySourceStream || undefined : undefined,
+            sourceCollection: sourceKind === "cloud"
+              ? cloudPath || undefined
+              : sourceConnector.type === "mongodb" ? primarySourceStream || undefined : undefined,
+            destFormat: destType,
+            destDatabase: targetDb,
+            destTable: destType !== "mongodb" ? targetCollection : undefined,
+            destCollection: destDriverType === "mongodb" ? targetCollection : undefined,
+            destConnectorId: connectorId || undefined,
           });
-          return;
+          const nestedSource = (routePlan as { source?: { columns?: string[]; schema?: Record<string, string> } }).source;
+          columns = routePlan.source_columns?.length
+            ? routePlan.source_columns
+            : (nestedSource?.columns ?? []);
+          columnTypes = routePlan.source_schema && Object.keys(routePlan.source_schema).length
+            ? routePlan.source_schema
+            : (nestedSource?.schema ?? {});
+          if (!columns.length) {
+            toast({
+              title: "Schema introspection failed",
+              message: schemaIntrospectionFailureMessage(routePlan.message, primarySourceStream),
+              tone: "error",
+            });
+            setStep(STEP_SOURCE);
+            return;
+          }
+          const columnSamples = buildColumnSamples(columns, []);
+          const dbAnalysis = await analyzeSchemaEnhanced(columnSamples);
+          setAnalysis((prev) => prev ?? dbAnalysis);
+          mappings = buildPreflightMappings(
+            dbAnalysis.columns,
+            activeMappings.length ? activeMappings : columnMappings,
+          );
+          setTransferPlan(routePlan);
         }
-        const columnSamples = buildColumnSamples(columns, []);
-        const dbAnalysis = await analyzeSchemaEnhanced(columnSamples);
-        setAnalysis((prev) => prev ?? dbAnalysis);
-        mappings = buildPreflightMappings(
-          dbAnalysis.columns,
-          activeMappings.length ? activeMappings : columnMappings,
-        );
-        setTransferPlan(routePlan);
       }
 
       const planId = await ensurePersistedPlan();
@@ -1871,10 +2070,10 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         sourceDatabase: sourceConnector?.database,
         sourceTable: sourceKind === "cloud"
           ? cloudPath || undefined
-          : sourceConnector?.type !== "mongodb" ? sourceTable || sourceCollection : undefined,
+          : sourceConnector?.type !== "mongodb" ? primarySourceStream || undefined : undefined,
         sourceCollection: sourceKind === "cloud"
           ? cloudPath || undefined
-          : sourceConnector?.type === "mongodb" ? sourceCollection || sourceTable : undefined,
+          : sourceConnector?.type === "mongodb" ? primarySourceStream || undefined : undefined,
         sourceAuthSource: sourceConnector?.auth_source,
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
@@ -1996,7 +2195,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
       });
       return;
     }
-    const sourceTableName = sourceKind === "cloud" ? cloudPath.trim() : (sourceCollection || sourceTable);
+    const sourceTableName = sourceKind === "cloud" ? cloudPath.trim() : primarySourceStream;
     if (!sourceTableName || !targetCollection.trim()) {
       toast({ title: "Route incomplete", message: "Source and destination table names are required.", tone: "warning" });
       return;
@@ -2071,7 +2270,13 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     : sourceKind === "cloud"
       ? `Cloud object${cloudPath ? ` · ${cloudPath}` : ""}`
       : sourceConnector
-        ? `${sourceConnector.type}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${(sourceCollection || sourceTable) ? ` · ${sourceCollection || sourceTable}` : ""}`
+        ? `${sourceConnector.type}${sourceConnector.database ? ` · ${sourceConnector.database}` : ""}${
+          isMultiStreamSource
+            ? ` · ${multiStreamNames.length} streams`
+            : primarySourceStream
+              ? ` · ${primarySourceStream}`
+              : ""
+        }`
         : "Database source";
   const mapDestRouteLabel = destKindMode === "file_export"
     ? `${exportFormat.toUpperCase()} export`
@@ -2338,7 +2543,10 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         <div className="df2-card-head">
           <div>
             <h3 className="df2-card-title">Source</h3>
-            <p className="df2-card-sub">Upload a file or connect a database / cloud bucket.</p>
+            <p className="df2-card-sub">
+              Upload a file or pick a saved connector, then name the table or collection to read.
+              For CDC / incremental multi-stream, comma-separate several names.
+            </p>
           </div>
         </div>
         <div className="df2-card-body">
@@ -2490,41 +2698,83 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
               compact
             />
           ) : (
-            <div className="df2-form-row">
-              <ConnectorSelect
-                id="source-connector"
-                label="Source Connector"
-                value={sourceConnectorId}
-                onChange={setSourceConnectorId}
-                connectors={dbSourceConnectors}
-                placeholder="Select connector…"
-              />
-              <div className="df2-field df2-field-md">
-                <label className="df2-label">
-                  {sourceConnector?.type === "mongodb"
-                    ? "Collection"
-                    : sourceConnector?.type === "dynamodb"
-                      ? "Table"
-                      : "Table"}
-                </label>
-                <input
-                  className="df2-input"
-                  value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
-                  onChange={(e) => {
-                    if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
-                    else setSourceTable(e.target.value);
-                  }}
-                  placeholder={
-                    sourceConnector?.type === "mongodb"
-                      ? "orders, customers"
-                      : sourceConnector?.type === "dynamodb"
-                        ? sourceConnector.database || "orders"
-                        : "public.orders, public.items"
-                  }
+            <div className="df2-source-endpoint">
+              <div className="df2-source-endpoint-fields">
+                <ConnectorSelect
+                  id="source-connector"
+                  label="Source connector"
+                  value={sourceConnectorId}
+                  onChange={setSourceConnectorId}
+                  connectors={dbSourceConnectors}
+                  placeholder="Select connector…"
+                  hint="Saved connection (host, database, credentials)."
                 />
-                <span className="df2-label-hint">
-                  CDC / incremental: comma-separate tables for multi-stream (one watermark each).
-                </span>
+                <div className="df2-field">
+                  <label className="df2-label" htmlFor="source-stream-input">
+                    {sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
+                  </label>
+                  <input
+                    id="source-stream-input"
+                    className="df2-input"
+                    value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
+                    onChange={(e) => {
+                      if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
+                      else setSourceTable(e.target.value);
+                    }}
+                    placeholder={
+                      sourceConnector?.type === "mongodb"
+                        ? "orders — or orders, customers"
+                        : sourceConnector?.type === "dynamodb"
+                          ? sourceConnector.database || "orders"
+                          : "public.orders — or public.orders, public.items"
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <span className="df2-label-hint">
+                    {sourceConnector?.type === "mongodb"
+                      ? "One collection, or several separated by commas."
+                      : "One table, or several separated by commas."}
+                  </span>
+                </div>
+              </div>
+
+              <div className="df2-source-multistream" role="note">
+                <div className="df2-source-multistream-head">
+                  <DtIcon name="activity" size={15} />
+                  <strong>
+                    {isMultiStreamSource
+                      ? `${multiStreamNames.length} streams — each read separately`
+                      : "Single stream or multi-stream"}
+                  </strong>
+                </div>
+                <p>
+                  {isMultiStreamSource
+                    ? "Each comma-separated name is a real table/collection. We never look up “sessions, users” as one object — the preview card opens one tab per stream. Mapping uses the first successful stream; configure cursor / primary key in Destination → Advanced for CDC."
+                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark."}
+                </p>
+                {isMultiStreamSource && (
+                  <ul className="df2-source-stream-chips" aria-label="Streams to sync">
+                    {multiStreamNames.map((name, i) => {
+                      const preview = streamPreviews.find((s) => s.name === name);
+                      return (
+                        <li
+                          key={`${name}-${i}`}
+                          className={
+                            preview?.status === "error" ? "is-error"
+                              : preview?.status === "ok" ? "is-ok"
+                                : i === 0 ? "is-primary" : undefined
+                          }
+                        >
+                          <span>{name}</span>
+                          {preview?.status === "ok" && <em>ready</em>}
+                          {preview?.status === "error" && <em>failed</em>}
+                          {preview?.status === "loading" && <em>reading…</em>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </div>
             </div>
           )}
@@ -2549,10 +2799,18 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
                 sourceObjectLabel={
                   sourceKind === "cloud"
                     ? cloudPath.trim()
-                    : sourceConnector?.type === "mongodb"
-                      ? sourceCollection || sourceTable
-                      : sourceTable
+                    : isMultiStreamSource
+                      ? `${primarySourceStream} (+${multiStreamNames.length - 1} more)`
+                      : primarySourceStream || (
+                        sourceConnector?.type === "mongodb"
+                          ? sourceCollection || sourceTable
+                          : sourceTable
+                      )
                 }
+                streamNames={sourceKind === "database" ? multiStreamNames : undefined}
+                streamPreviews={sourceKind === "database" ? streamPreviews : undefined}
+                activeStreamTab={activeStreamTab}
+                onActiveStreamTabChange={setActiveStreamTab}
               />
             </div>
           </div>
@@ -2567,7 +2825,9 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
-              : "Select connector and table to continue";
+              : isMultiStreamSource
+                ? `${multiStreamNames.length} streams selected — continue to pick a destination`
+                : "Select connector and table/collection to continue";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
           return (
             <div className="df2-card-footer df2-wizard-footer">
@@ -2713,7 +2973,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
 
           <div className="df2-dest-section df2-dest-target-fields">
             <label className="df2-label">Target location</label>
-            <div className="df2-form-row">
+            <div className="df2-form-row df2-dest-target-row">
             <div className="df2-field df2-field-flex">
               <label className="df2-label" htmlFor="dest-db">
                 {destDriverType === "bigquery"
@@ -2735,15 +2995,6 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
                 {destDriverType === "mongodb" ? "Collection" : destDriverType === "dynamodb" ? "DynamoDB table" : "Table"}
               </label>
               <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destDriverType === "mongodb" ? "my_collection" : destDriverType === "dynamodb" ? "orders" : "my_table"} />
-              {destDriverType !== "mongodb" && destDriverType !== "dynamodb" && (
-                <span className="df2-label-hint">
-                  {destTableExists === false
-                    ? "Table not found — it will be created automatically on first write."
-                    : destTableExists === true
-                      ? "Existing table detected — rows will append unless you change sync mode."
-                      : "Any name works. If the table does not exist, DataFlow creates it."}
-                </span>
-              )}
             </div>
             {getGenericSqlGroup(destType) === "postgresql+psycopg2" && (
               <div className="df2-field df2-field-120">
@@ -2752,6 +3003,37 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
               </div>
             )}
           </div>
+            {/* Status lives below the row so dynamic copy never shifts aligned inputs */}
+            {destDriverType !== "mongodb" && destDriverType !== "dynamodb" && (
+              <div
+                className={`df2-dest-target-status${
+                  destTableExists === true ? " is-existing" : destTableExists === false ? " is-create" : ""
+                }`}
+                aria-live="polite"
+              >
+                {destTableExists === true ? (
+                  <>
+                    <DtIcon name="database" size={14} />
+                    <p>
+                      <strong>Existing table detected.</strong> New rows will <strong>append</strong> by default.
+                      Open Advanced to switch to overwrite or incremental sync.
+                    </p>
+                  </>
+                ) : destTableExists === false ? (
+                  <>
+                    <DtIcon name="sparkle" size={14} />
+                    <p>
+                      <strong>Table not found.</strong> DataFlow will create it automatically on first write.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <DtIcon name="activity" size={14} />
+                    <p>Enter a table name. If it does not exist yet, DataFlow creates it on first write.</p>
+                  </>
+                )}
+              </div>
+            )}
           </div>
           {destDriverType === "dynamodb" && (
             <p className="df2-label-hint df2-field-note">
@@ -2958,12 +3240,6 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
             </p>
           )}
 
-          {destKindMode === "database" && destTableExists && destColumns.length > 0 && (
-            <p className="df2-label-hint df2-append-hint">
-              Existing {destType} table detected — new rows will <strong>append</strong> by default. Open Advanced to switch to overwrite or incremental sync.
-            </p>
-          )}
-
           {transferPlan && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>
               <p className="df2-plan-callout-title">
@@ -3026,6 +3302,8 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
             onStripControlChars={stripControlCharsAndRerun}
             onQuarantineAndRerun={quarantineAndRerun}
             cellPreview={cellPreview}
+            onReviewMappings={() => setStep(STEP_MAP)}
+            onRunPreflight={() => void executePreflight()}
           />
         </div>
       )}

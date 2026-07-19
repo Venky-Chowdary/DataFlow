@@ -119,17 +119,17 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
     # Source-only SaaS connectors can feed any live destination.
     if source_kind == "database" and _source_only_supported(src_fmt):
         if dest_kind == "database" and _dest_supported(dst_fmt):
-            return True, "supported"
+            return True, f"Live route: {src_fmt} → {dst_fmt}"
         if dest_kind == "file_export" and dst_fmt.lower() in LIVE_DEST_FILE_FORMATS:
-            return True, "supported"
+            return True, f"Live route: {src_fmt} → {dst_fmt} export"
 
     key = (source_kind, src_fmt.lower(), dest_kind, dst_fmt.lower())
     if key in LIVE_MATRIX:
-        return True, "supported"
+        return True, f"Live route: {src_fmt} → {dst_fmt}"
     for sk, sf, dk, df in LIVE_MATRIX:
         if sk == source_kind and dk == dest_kind and df == dst_fmt.lower():
             if source_kind == "file" and src_fmt.lower() in LIVE_SOURCE_FORMATS:
-                return True, "supported"
+                return True, f"Live route: {src_fmt} → {dst_fmt}"
     return False, f"Combination {source_kind}/{source_format} → {dest_kind}/{dest_format} not yet live"
 
 
