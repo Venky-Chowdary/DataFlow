@@ -13,10 +13,12 @@ from typing import Any
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    build_mapped_rows,
+    _rejected_row_count,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
     to_json_value,
+    transform_error_policy,
 )
 from services.value_serializer import cell_to_string, json_default
 
@@ -80,13 +82,15 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    mapped_rows, transform_errors = build_mapped_rows(
+    policy = transform_error_policy(_kwargs.get("error_policy"))
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
+        error_policy=policy,
         preserve_case=True,
     )
 
@@ -100,7 +104,10 @@ def write_mapped_rows(
             filename = f"{filename.rstrip('/')}.csv"
             cfg.path = f"{directory.rstrip('/')}/{filename}" if directory else f"/{filename}"
 
-    rejected_rows = len(data_rows) - len(mapped_rows)
+    rejected_rows = max(
+        _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+        len(data_rows) - len(mapped_rows),
+    )
 
     records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
 
@@ -150,6 +157,7 @@ def write_mapped_rows(
             chunks_completed=1,
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
+            rejected_details=rejected_details,
         )
     except Exception as exc:
         return WriteResult(
@@ -160,4 +168,5 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"SFTP write failed: {exc}",
+            rejected_details=rejected_details if "rejected_details" in locals() else [],
         )

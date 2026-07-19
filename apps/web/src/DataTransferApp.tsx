@@ -7,6 +7,7 @@ import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ToastProvider, useToast } from "./components/Toast";
+import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
@@ -77,6 +78,7 @@ function AppShell({
   onSignOut: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [screen, setScreenState] = useState<Screen>(() => {
     const fromHash = readAppHash();
     if (fromHash) return fromHash;
@@ -600,7 +602,6 @@ function AppShell({
                     connectorsLoading={!connectorsReady}
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
-                    onRefreshConnectors={() => loadConnectors(false)}
                     onFreshTransfer={openFreshTransfer}
                     onTransferComplete={() => {
                       loadJobs();
@@ -745,9 +746,13 @@ function AppShell({
 
   async function handleDeleteConnector(id: string) {
     const target = connectors.find((c) => c.id === id);
-    const confirmed = window.confirm(
-      `Delete ${target?.name ?? "this connector"}? This removes saved credentials and route references for this connection.`,
-    );
+    const confirmed = await confirm({
+      title: `Delete ${target?.name ?? "this connector"}?`,
+      message: "This removes saved credentials and route references for this connection. Pipelines that used it will need a new connection.",
+      confirmLabel: "Delete connection",
+      cancelLabel: "Keep connection",
+      tone: "danger",
+    });
     if (!confirmed) return;
 
     try {
@@ -763,7 +768,9 @@ function AppShell({
 export function DataTransferApp() {
   return (
     <ToastProvider>
-      <DataTransferAppInner />
+      <ConfirmProvider>
+        <DataTransferAppInner />
+      </ConfirmProvider>
     </ToastProvider>
   );
 }

@@ -7,6 +7,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
@@ -37,6 +38,7 @@ type AuditLog = {
 
 export function SettingsPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [tab, setTab] = useState<TabId>("general");
   const [orgName, setOrgName] = useState("DataFlow");
   const [timezone, setTimezone] = useState("UTC");
@@ -230,7 +232,14 @@ export function SettingsPage() {
 
   const revokeKey = async (keyId: string, keyName: string) => {
     if (revokingKeyId) return;
-    if (!window.confirm(`Revoke "${keyName}"? Applications using this key will stop working immediately.`)) return;
+    const ok = await confirm({
+      title: `Revoke “${keyName}”?`,
+      message: "Applications using this key will stop working immediately.",
+      confirmLabel: "Revoke key",
+      cancelLabel: "Keep key",
+      tone: "danger",
+    });
+    if (!ok) return;
     setRevokingKeyId(keyId);
     try {
       await revokeWorkspaceApiKey(keyId);

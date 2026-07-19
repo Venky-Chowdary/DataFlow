@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 from connectors.base import ReadBatch
 from connectors.schema_drift import add_missing_columns
+from connectors.sql_temporal import (
+    coerce_sql_temporal,
+    extract_column_from_sql_error,
+    is_sql_data_error,
+    logical_to_temporal_ddl,
+)
 from services.value_serializer import cell_to_string
 
 try:
@@ -618,19 +624,12 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return value.encode("utf-8")
         return value
 
-    if t == "date":
-        if isinstance(value, date):
-            return value
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, str):
-            try:
-                return date.fromisoformat(value)
-            except Exception:
-                return value
-        return value
+    # Temporal: same parse/coerce path as MySQL/Postgres writers (ISO-Z → bind).
+    ddl_type = logical_to_temporal_ddl(t) or logical_to_temporal_ddl(logical)
+    if ddl_type:
+        coerced = coerce_sql_temporal(value, ddl_type)
+        base = ddl_type.upper()
 
-    if t in ("datetime", "timestamp"):
         def _ensure_utc(dt: datetime) -> datetime:
             if dt.tzinfo is None:
                 return dt.replace(tzinfo=timezone.utc)
@@ -639,55 +638,41 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
         def _naive_utc(dt: datetime) -> datetime:
             return _ensure_utc(dt).replace(tzinfo=None)
 
-        if isinstance(value, datetime):
+        if base == "DATE":
+            if isinstance(coerced, datetime):
+                return coerced.date()
+            if isinstance(coerced, date):
+                return coerced
+            return value
+
+        if base == "TIME":
+            if _is_string_type(sa_type):
+                if isinstance(coerced, time):
+                    return coerced.isoformat()
+                if isinstance(coerced, datetime):
+                    return coerced.time().isoformat()
+                return value if isinstance(value, str) else str(value)
+            if isinstance(coerced, time):
+                if db_type == "presto" or dialect_name == "presto":
+                    return coerced.isoformat()
+                return coerced
+            if isinstance(coerced, datetime):
+                tm = coerced.time()
+                if db_type == "presto" or dialect_name == "presto":
+                    return tm.isoformat()
+                return tm
+            return value
+
+        # DATETIME / TIMESTAMP
+        if isinstance(coerced, datetime):
             if db_type == "questdb":
-                return _naive_utc(value)
-            return _ensure_utc(value)
-        if isinstance(value, date):
-            dt = datetime.combine(value, time())
+                return _naive_utc(coerced)
+            return _ensure_utc(coerced)
+        if isinstance(coerced, date) and not isinstance(coerced, datetime):
+            dt = datetime.combine(coerced, time())
             if db_type == "questdb":
                 return _naive_utc(dt)
             return _ensure_utc(dt)
-        if isinstance(value, str):
-            text = value.strip()
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            try:
-                dt = datetime.fromisoformat(text)
-                if db_type == "questdb":
-                    return _naive_utc(dt)
-                return _ensure_utc(dt)
-            except Exception:
-                return value
-        return value
-
-    if t == "time":
-        if _is_string_type(sa_type):
-            if isinstance(value, time):
-                return value.isoformat()
-            if isinstance(value, datetime):
-                return value.time().isoformat()
-            if isinstance(value, str):
-                return value
-            return str(value)
-        if isinstance(value, time):
-            # PyHive / Presto does not accept Python time objects; send an ISO string.
-            if db_type == "presto" or dialect_name == "presto":
-                return value.isoformat()
-            return value
-        if isinstance(value, datetime):
-            t = value.time()
-            if db_type == "presto" or dialect_name == "presto":
-                return t.isoformat()
-            return t
-        if isinstance(value, str):
-            try:
-                t = time.fromisoformat(value)
-                if db_type == "presto" or dialect_name == "presto":
-                    return value
-                return t
-            except Exception:
-                return value
         return value
 
     if t == "decimal":
@@ -1454,6 +1439,8 @@ def write_mapped_rows(
             {target_cols[i]: _to_sa_value(row[i], target_column_types.get(target_cols[i], "string"), sa_col_types.get(target_cols[i]), dialect_name, cfg.get("type", "")) for i in range(len(target_cols))}
         )
 
+    written = 0
+    chunks_completed = 0
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
@@ -1500,21 +1487,67 @@ def write_mapped_rows(
                 )
 
             total = len(converted_rows)
-            chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
-            written = 0
+            chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
             for chunk_idx in range(chunks):
-                batch = converted_rows[chunk_idx * CHUNK_SIZE : (chunk_idx + 1) * CHUNK_SIZE]
+                start = chunk_idx * CHUNK_SIZE
+                batch = converted_rows[start : start + CHUNK_SIZE]
                 if not batch:
                     break
 
-                if write_mode == "upsert" and conflict_columns:
-                    _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols, dialect_name)
-                else:
-                    conn.execute(table_obj.insert(), batch)
-                conn.commit()
-                written += len(batch)
+                try:
+                    if write_mode == "upsert" and conflict_columns:
+                        _upsert_batch(conn, table_obj, batch, conflict_columns, target_cols, dialect_name)
+                    else:
+                        conn.execute(table_obj.insert(), batch)
+                    conn.commit()
+                    written += len(batch)
+                except Exception as chunk_exc:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    # One bad temporal/numeric cell must not abort the whole chunk:
+                    # quarantine unfit rows (same contract as MySQL/Postgres writers).
+                    if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
+                        chunk_written = 0
+                        for row_i, row in enumerate(batch):
+                            try:
+                                if write_mode == "upsert" and conflict_columns:
+                                    _upsert_batch(
+                                        conn, table_obj, [row], conflict_columns, target_cols, dialect_name
+                                    )
+                                else:
+                                    conn.execute(table_obj.insert(), [row])
+                                conn.commit()
+                                chunk_written += 1
+                            except Exception as row_exc:
+                                try:
+                                    conn.rollback()
+                                except Exception:
+                                    pass
+                                if not is_sql_data_error(row_exc):
+                                    raise
+                                col_name = extract_column_from_sql_error(row_exc) or "*"
+                                sample_val = ""
+                                if col_name != "*" and col_name in row:
+                                    sample_val = str(row.get(col_name, ""))[:120]
+                                rejected_details.append({
+                                    "row": start + row_i,
+                                    "column": col_name,
+                                    "value": sample_val,
+                                    "reason": str(row_exc)[:300],
+                                    "policy": policy,
+                                })
+                                transform_errors.append(str(row_exc)[:200])
+                        written += chunk_written
+                    elif policy == "fail" or not is_sql_data_error(chunk_exc):
+                        raise
+                    else:
+                        # Unknown policy: fail closed — do not land partial bad batch.
+                        raise
+                chunks_completed = chunk_idx + 1
                 if on_checkpoint:
-                    on_checkpoint(chunk_idx + 1, chunks, written)
+                    on_checkpoint(chunks_completed, chunks, written)
 
         return WriteResult(
             ok=True,
@@ -1522,8 +1555,11 @@ def write_mapped_rows(
             table_name=table_name,
             target_schema=schema or database,
             checksum=row_checksum(mapped_rows, target_cols),
-            chunks_completed=chunks,
-            rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+            chunks_completed=chunks_completed or chunks,
+            rejected_rows=max(
+                _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
+                len(data_rows) - written if data_rows else 0,
+            ),
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             warnings=transform_errors,
@@ -1531,11 +1567,11 @@ def write_mapped_rows(
     except Exception as exc:
         return WriteResult(
             ok=False,
-            rows_written=0,
+            rows_written=written,
             table_name=table_name,
             target_schema=schema or database,
-            checksum="",
-            chunks_completed=0,
+            checksum=row_checksum(mapped_rows, target_cols) if mapped_rows else "",
+            chunks_completed=chunks_completed,
             error=str(exc),
             rejected_rows=_rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
             rejected_details=rejected_details,

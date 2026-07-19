@@ -38,31 +38,105 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
 
     Preserves strings/dates as text; parses structural and numeric JSON values
     into native Python types so object-store exports contain numbers/objects
-    instead of quoted Decimal strings.
+    instead of quoted Decimal strings. Temporal logical types are normalized via
+    the shared SQL temporal helpers so ISO-Z does not leak inconsistently across
+    S3/GCS/ADLS/SFTP/Kafka JSON exports.
     """
     if value is None:
         return None
+    try:
+        from services.type_system import normalize_logical_type
+    except Exception:
+        normalize_logical_type = lambda x: str(x or "").lower()  # type: ignore[assignment]
+    ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
+    if ctype in {"date", "datetime", "time"}:
+        from connectors.sql_temporal import coerce_sql_temporal, format_wire_value, logical_to_temporal_ddl
+
+        ddl = logical_to_temporal_ddl(ctype) or "DATETIME"
+        coerced = coerce_sql_temporal(value, ddl)
+        wire = format_wire_value(value, ddl)
+        if wire is not None:
+            return wire
+        if coerced is not value:
+            return coerced
+        return value
     if isinstance(value, str):
         text = value.strip()
         if not text:
             return value
-        try:
-            from services.type_system import normalize_logical_type
-        except Exception:
-            normalize_logical_type = lambda x: str(x or "").lower()
-        ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
         if ctype in {"json", "array", "object", "struct"}:
             try:
                 return json.loads(text, parse_constant=lambda v: None)
             except json.JSONDecodeError:
                 return value
-        if ctype in {"text", "string", "varchar", "uuid", "binary", "date", "datetime", "time"}:
+        if ctype in {"text", "string", "varchar", "uuid", "binary"}:
             return value
         try:
             return json.loads(text, parse_constant=lambda v: None)
         except json.JSONDecodeError:
             return value
     return value
+
+
+def normalize_temporal_cells(
+    mapped_rows: list[tuple],
+    target_types: list[str] | dict[str, str],
+    target_cols: list[str] | None = None,
+    *,
+    engine: str = "",
+) -> list[tuple]:
+    """Normalize temporal cells in mapped tuples for any destination engine.
+
+    Dispatches Snowflake/BigQuery to warehouse formatters; all other engines use
+    ``coerce_sql_temporal`` so MySQL/PG/Oracle/SQLite/Mongo share one parse path.
+    Non-temporal columns are left untouched. Empty input is a no-op.
+    """
+    if not mapped_rows:
+        return mapped_rows
+
+    eng = (engine or "").strip().lower()
+    if isinstance(target_types, dict):
+        cols = target_cols or list(target_types.keys())
+        types_list = [target_types.get(c, "string") for c in cols]
+    else:
+        types_list = list(target_types)
+        cols = target_cols or []
+
+    if eng == "snowflake":
+        from connectors.warehouse_temporal import coerce_mapped_rows_snowflake
+
+        return coerce_mapped_rows_snowflake(mapped_rows, types_list)
+    if eng == "bigquery":
+        from connectors.warehouse_temporal import format_bigquery_bind, bigquery_temporal_ddl
+
+        out: list[tuple] = []
+        for row in mapped_rows:
+            cells = list(row)
+            for i, typ in enumerate(types_list):
+                if i >= len(cells) or cells[i] is None:
+                    continue
+                if bigquery_temporal_ddl(typ):
+                    cells[i] = format_bigquery_bind(cells[i], typ)
+            out.append(tuple(cells))
+        return out
+
+    from connectors.sql_temporal import coerce_sql_temporal, is_temporal_ddl, logical_to_temporal_ddl
+
+    if not any(is_temporal_ddl(t) or logical_to_temporal_ddl(t) for t in types_list):
+        return mapped_rows
+
+    out = []
+    for row in mapped_rows:
+        cells = list(row)
+        for i, typ in enumerate(types_list):
+            if i >= len(cells) or cells[i] is None:
+                continue
+            ddl = logical_to_temporal_ddl(typ) or (typ if is_temporal_ddl(typ) else None)
+            if not ddl:
+                continue
+            cells[i] = coerce_sql_temporal(cells[i], ddl)
+        out.append(tuple(cells))
+    return out
 
 
 @dataclass

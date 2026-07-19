@@ -205,6 +205,12 @@ export function ConnectorCatalogPanel({
             {transferLive > 0 && ` · ${transferLive.toLocaleString()} certified`}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
+            {role !== "all" && (
+              <>
+                {" · "}
+                Filter is catalog browsing only — saved databases stay usable as source and destination
+              </>
+            )}
           </p>
         )}
 

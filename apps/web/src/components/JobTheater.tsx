@@ -3,10 +3,12 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
-import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
+import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
 import { cancelJob, streamJobProgress } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
+import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { useToast } from "./Toast";
 
@@ -235,6 +237,7 @@ export function JobTheaterView({
   throughput,
   log,
   startedAtFallback,
+  preflight,
   cancelling,
   onCancel,
 }: JobTheaterViewProps) {
@@ -569,6 +572,14 @@ export function JobTheaterView({
         </div>
       )}
 
+      {(isComplete || isFailed || isCancelled) && (
+        <NotificationDeliveryStrip
+          notifications={job.notifications}
+          className="df2-theater-v3-notify"
+          compact
+        />
+      )}
+
       <div className="df2-theater-v3-phases" aria-label="Pipeline phases">
         {timelinePhases.map((phase) => {
           const state = phase.state;
@@ -599,15 +610,23 @@ export function JobTheaterView({
           <strong>{droppedRows.toLocaleString()}</strong>
           <small>{droppedRows > 0 ? "Isolated in quarantine — not written" : "No rows dropped"}</small>
         </article>
-        <article className="df2-theater-v3-sla-card">
+        <article className={`df2-theater-v3-sla-card${coercedNullRows > 0 ? " is-warn" : ""}`}>
           <span>Coerced to NULL</span>
           <strong>{coercedNullRows.toLocaleString()}</strong>
-          <small>{coercedNullRows > 0 ? "Value altered to NULL — not full fidelity" : "No values coerced"}</small>
+          <small>
+            {coercedNullRows > 0
+              ? "Value altered to NULL — not full fidelity"
+              : "Normal type fits (ISO→DATETIME) are not counted here"}
+          </small>
         </article>
         <article className="df2-theater-v3-sla-card">
           <span>Writer warnings</span>
           <strong>{warningCount.toLocaleString()}</strong>
-          <small>{warningCount ? "Review in destination summary" : "No destination warnings"}</small>
+          <small>
+            {warningCount
+              ? "Sample of writer messages (capped for display)"
+              : "No destination warnings"}
+          </small>
         </article>
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
@@ -640,6 +659,19 @@ export function JobTheaterView({
         </div>
       )}
 
+      {(() => {
+        const hist =
+          job.load_history_report
+          || (destinationSummary.load_history_report as LoadHistoryReport | undefined)
+          || preflight?.load_history_report;
+        if (!hist) return null;
+        return (
+          <section className="df2-theater-v3-quarantine" aria-label="Compared to prior loads">
+            <LoadHistoryPanel report={hist} title="Compared to prior loads" />
+          </section>
+        );
+      })()}
+
       {(rejectedRows > 0 || isFailed || isQuarantine) && (
         <section className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
           <div className="df2-theater-v3-alert warn">
@@ -656,7 +688,7 @@ export function JobTheaterView({
               </strong>
               <p>
                 {isFailed
-                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads."
+                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads. Use Validate for Strip / Quarantine / Fix bad data."
                   : "Review the quarantine details below and export them for remediation."}
               </p>
             </div>
@@ -665,8 +697,9 @@ export function JobTheaterView({
             jobId={jobId}
             rejectedRows={rejectedRows}
             coercedNullRows={coercedNullRows}
+            initialDetails={job.rejected_details}
             autoLoad
-            initiallyOpen={isFailed || rejectedRows > 0}
+            initiallyOpen
           />
         </section>
       )}

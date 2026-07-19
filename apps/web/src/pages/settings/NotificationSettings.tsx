@@ -3,6 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { SectionLoader } from "../../components/LoadingState";
 import { useToast } from "../../components/Toast";
+import { useConfirm } from "../../components/ui/ConfirmDialog";
 import {
   createNotificationChannel,
   deleteNotificationChannel,
@@ -26,6 +27,7 @@ const KIND_META: Record<ChannelKind, { label: string; description: string }> = {
 
 export function NotificationSettings() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(false);
@@ -166,7 +168,14 @@ export function NotificationSettings() {
   };
 
   const remove = async (id: string) => {
-    if (!window.confirm("Delete this notification channel?")) return;
+    const ok = await confirm({
+      title: "Delete this notification channel?",
+      message: "Alerts will no longer be delivered through this channel.",
+      confirmLabel: "Delete channel",
+      cancelLabel: "Keep channel",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await deleteNotificationChannel(id);
       setChannels((prev) => prev.filter((c) => c.id !== id));

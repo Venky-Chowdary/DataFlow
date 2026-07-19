@@ -218,6 +218,24 @@ def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
     return year_first + month_first + day_first
 
 
+def _is_lossless_temporal_normalize(raw: str, out: str, transform: str) -> bool:
+    """True when coerce is only canonical ISO formatting of the same instant/date."""
+    try:
+        if transform == "datetime":
+            a = _parse_datetime(raw)
+            b = _parse_datetime(out)
+            return bool(a and b and a == b)
+        if transform == "date":
+            a = _parse_date(raw, with_time=True) or _parse_date(raw)
+            b = _parse_date(out)
+            return bool(a and b and a == b)
+        if transform == "time":
+            return raw.strip()[:8] == out.strip()[:8] or raw.strip() == out.strip()
+    except Exception:
+        return False
+    return False
+
+
 @functools.lru_cache(maxsize=4096)
 def _parse_datetime(value: str) -> str | None:
     text = value.strip()
@@ -859,17 +877,24 @@ def preview_quarantine_cells(
                     "transform": transform,
                 })
             elif out is not None and str(out) != raw_s:
-                coerce_count += 1
-                ok_count += 1
-                cells.append({
-                    "row": row_i,
-                    "source": src,
-                    "target": tgt,
-                    "raw": raw_s[:200],
-                    "coerced": str(out)[:200],
-                    "status": "coerced",
-                    "transform": transform,
-                })
+                # Lossless datetime/date normalization (ISO Z ↔ same instant) is
+                # expected for CSV→SQL — do not flood Validate/Run with coerce noise.
+                if transform in {"datetime", "date", "time"} and _is_lossless_temporal_normalize(
+                    raw_s, str(out), transform
+                ):
+                    ok_count += 1
+                else:
+                    coerce_count += 1
+                    ok_count += 1
+                    cells.append({
+                        "row": row_i,
+                        "source": src,
+                        "target": tgt,
+                        "raw": raw_s[:200],
+                        "coerced": str(out)[:200],
+                        "status": "coerced",
+                        "transform": transform,
+                    })
             else:
                 ok_count += 1
         if len(cells) >= max_cells:

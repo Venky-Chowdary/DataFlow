@@ -11,6 +11,11 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from connectors.postgresql_conn import get_connection
+from connectors.sql_temporal import (
+    coerce_sql_temporal,
+    extract_column_from_sql_error,
+    is_sql_data_error,
+)
 from connectors.write_resilience import (
     build_write_batch_key,
     close_quietly,
@@ -222,6 +227,24 @@ def write_mapped_rows(
             converted.append(tuple(row_list))
         mapped_rows = converted
 
+    # ISO-8601 / CSV timestamps → Python datetime so COPY/INSERT never send raw "…Z".
+    from connectors.sql_temporal import sql_base_type as _sql_base_type
+
+    temporal_positions = [
+        i
+        for i, t in enumerate(target_types)
+        if _sql_base_type(t)
+        in {"DATE", "TIME", "DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ"}
+    ]
+    if temporal_positions:
+        converted_temporal: list[tuple] = []
+        for row in mapped_rows:
+            row_list = list(row)
+            for idx in temporal_positions:
+                row_list[idx] = coerce_sql_temporal(row_list[idx], target_types[idx])
+            converted_temporal.append(tuple(row_list))
+        mapped_rows = converted_temporal
+
     rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
     if transform_errors and policy == "fail":
@@ -421,6 +444,7 @@ def write_mapped_rows(
 
                 attempt = 0
                 chunk_started = time.monotonic()
+                chunk_written = 0
                 while True:
                     try:
                         if use_ledger and postgres_chunk_committed(
@@ -430,6 +454,7 @@ def write_mapped_rows(
                             batch_key=write_batch_key,
                             chunk_idx=chunk_idx,
                         ):
+                            chunk_written = len(batch)
                             break
                         if use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
@@ -445,12 +470,57 @@ def write_mapped_rows(
                                 rows_written=len(batch),
                             )
                         conn.commit()
+                        chunk_written = len(batch)
                         break
                     except Exception as chunk_exc:
                         try:
                             conn.rollback()
                         except Exception:
                             pass
+                        if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
+                            if insert is None:
+                                insert = _build_insert()
+                            for row_i, row in enumerate(batch):
+                                try:
+                                    cur.execute(insert, row)
+                                    conn.commit()
+                                    chunk_written += 1
+                                except Exception as row_exc:
+                                    try:
+                                        conn.rollback()
+                                    except Exception:
+                                        pass
+                                    if is_connection_lost(row_exc):
+                                        raise
+                                    col_name = extract_column_from_sql_error(row_exc) or "*"
+                                    sample_val = ""
+                                    if col_name != "*" and col_name in target_cols:
+                                        try:
+                                            sample_val = str(row[target_cols.index(col_name)])[:120]
+                                        except Exception:
+                                            sample_val = ""
+                                    rejected_details.append({
+                                        "row": start + row_i,
+                                        "column": col_name,
+                                        "value": sample_val,
+                                        "reason": str(row_exc)[:300],
+                                        "policy": policy,
+                                    })
+                                    transform_errors.append(str(row_exc)[:200])
+                            if use_ledger and chunk_written:
+                                try:
+                                    mark_postgres_chunk_committed(
+                                        cur,
+                                        schema=schema,
+                                        job_id=job_id,
+                                        batch_key=write_batch_key,
+                                        chunk_idx=chunk_idx,
+                                        rows_written=chunk_written,
+                                    )
+                                    conn.commit()
+                                except Exception:
+                                    pass
+                            break
                         attempt += 1
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
                             attempt=attempt, started_at=chunk_started, proxy=proxy_dest
@@ -461,7 +531,7 @@ def write_mapped_rows(
                         if not use_copy:
                             insert = _build_insert()
 
-                written += len(batch)
+                written += chunk_written
                 chunks_completed = chunk_idx + 1
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)

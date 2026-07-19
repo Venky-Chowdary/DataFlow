@@ -94,12 +94,33 @@ def _suggested_actions(
         actions.append({
             "kind": "normalize_control_chars",
             "transform": "strip_controls",
-            "label": "Strip control characters on all mapped columns",
+            "label": "Strip control characters & re-run",
+        })
+        actions.append({
+            "kind": "quarantine_and_rerun",
+            "label": "Quarantine bad cells & re-run",
         })
         actions.append({
             "kind": "open_bad_data_fix",
             "label": "Open Fix bad data dialog",
         })
+    # Dry-run / integrity failures also get the strip + quarantine one-clicks so
+    # operators never have to dig through a collapsed AI panel to remediate.
+    if any(
+        gid in gate_ids or (gid or "").startswith("g5")
+        for gid in ("g5_dry_run", "g5_transform", "g9_data_integrity", "dry_run")
+    ) or "dry-run" in blocker_text or "integrity" in blocker_text:
+        if not any(a.get("kind") == "normalize_control_chars" for a in actions):
+            actions.append({
+                "kind": "normalize_control_chars",
+                "transform": "strip_controls",
+                "label": "Strip control characters & re-run",
+            })
+        if not any(a.get("kind") == "quarantine_and_rerun" for a in actions):
+            actions.append({
+                "kind": "quarantine_and_rerun",
+                "label": "Quarantine bad cells & re-run",
+            })
     if "g4_mapping_confidence" in gate_ids:
         actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
     if "schema_drift" in gate_ids:

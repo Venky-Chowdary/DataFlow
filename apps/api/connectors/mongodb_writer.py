@@ -231,42 +231,27 @@ def write_mapped_rows(
                     return False
                 return value
             if upper == "DATE":
-                if isinstance(value, _datetime):
-                    return value
-                if isinstance(value, _date):
-                    return _datetime.combine(value, _time.min)
-                text = value.strip() if isinstance(value, str) else str(value)
-                for fmt in (
-                    "%Y-%m-%d",
-                    "%Y-%m-%dT%H:%M:%S",
-                    "%Y-%m-%dT%H:%M:%S.%f",
-                    "%Y-%m-%dT%H:%M:%S.%fZ",
-                    "%Y-%m-%dT%H:%M:%S.%f%z",
-                    "%Y-%m-%d %H:%M:%S",
-                    "%Y-%m-%d %H:%M:%S.%f",
-                    "%m/%d/%Y",
-                    "%d/%m/%Y",
-                    "%Y%m%d",
-                ):
-                    try:
-                        return _datetime.strptime(text, fmt)
-                    except ValueError:
-                        continue
+                from connectors.sql_temporal import coerce_sql_temporal
+
+                coerced = coerce_sql_temporal(value, "DATE")
+                if isinstance(coerced, _datetime):
+                    return coerced
+                if isinstance(coerced, _date):
+                    return _datetime.combine(coerced, _time.min)
                 return value
-            if upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
-                if isinstance(value, _datetime):
-                    return value
-                text = value.strip() if isinstance(value, str) else str(value)
-                text = text.replace("Z", "+00:00")
-                try:
-                    return _datetime.fromisoformat(text)
-                except ValueError:
-                    pass
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S%z"):
-                    try:
-                        return _datetime.strptime(text, fmt)
-                    except ValueError:
-                        continue
+            if upper in {
+                "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
+                "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
+            }:
+                from connectors.sql_temporal import coerce_sql_temporal
+
+                coerced = coerce_sql_temporal(value, "DATETIME")
+                if isinstance(coerced, _datetime):
+                    # Mongo stores timezone-aware UTC when possible.
+                    if coerced.tzinfo is None:
+                        from datetime import timezone as _tz
+                        return coerced.replace(tzinfo=_tz.utc)
+                    return coerced
                 return value
             if upper in {"BINARY", "BYTEA", "BLOB"}:
                 if isinstance(value, bytes):

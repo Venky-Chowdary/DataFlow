@@ -90,6 +90,7 @@ class ConnectorResponse(BaseModel):
     status: str
     created_at: str
     workspace_id: str = ""
+    role: str = "both"
 
 
 class TestConnectionRequest(BaseModel):
@@ -218,7 +219,7 @@ async def test_connection(request: TestConnectionRequest):
             "type": request.type,
             "auth_mode": request.auth_mode or "",
             "auth_role": request.auth_role or "",
-            "role": request.auth_role or "",
+            "role": getattr(request, "role", None) or "both",
             "api_key": request.api_key or "",
             "service_account": request.service_account or "",
             "endpoint_url": request.endpoint_url or "",
@@ -287,6 +288,7 @@ async def create_connector(
             status="configured",
             created_at=saved.created_at,
             workspace_id=saved.workspace_id or "",
+            role=getattr(saved, "role", None) or connector_data.get("role") or "both",
         )
     except Exception:
         pass  # fall through to MongoDB
@@ -294,7 +296,8 @@ async def create_connector(
     try:
         mongo = get_mongodb_service()
 
-        mongo_data = {k: v for k, v in connector_data.items() if k != "role" and k != "ssl"}
+        # Persist topology role + ssl — dropping them made every DB look like a source.
+        mongo_data = dict(connector_data)
         connector_id = mongo.save_connector(mongo_data)
         connector = mongo.get_connector(connector_id)
 
@@ -308,6 +311,7 @@ async def create_connector(
             status=connector["status"],
             created_at=connector["created_at"].isoformat(),
             workspace_id=connector.get("workspace_id", ""),
+            role=connector.get("role") or connector_data.get("role") or "both",
         )
 
     except Exception as e:
@@ -343,6 +347,7 @@ async def list_connectors(
                         "created_at": c.created_at,
                         "last_test_ok": c.last_test_ok,
                         "workspace_id": c.workspace_id or "",
+                        "role": getattr(c, "role", None) or "both",
                     }
                     for c in items
                 ],
@@ -380,6 +385,7 @@ async def list_connectors(
                 "created_at": created.isoformat() if created and hasattr(created, "isoformat") else created,
                 "last_test_ok": c.get("last_test_ok"),
                 "workspace_id": c.get("workspace_id", ""),
+                "role": c.get("role") or "both",
             })
 
         return {"connectors": result, "count": len(result)}

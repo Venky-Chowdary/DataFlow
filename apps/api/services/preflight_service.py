@@ -452,6 +452,9 @@ def run_file_preflight(
     destination_can_create: bool | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
+    source_table: str = "",
+    destination_table: str = "",
+    source_filename: str = "",
 ) -> dict[str, Any]:
     """Run 9 preflight gates for a file-based transfer."""
     if row_count <= 0 and sample_rows:
@@ -679,6 +682,38 @@ def run_file_preflight(
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
     }
+    # Multi-load intelligence: compare sample to last N loads of this route.
+    try:
+        from services.data_quality_history import compare_route_to_history
+
+        src_table = (source_table or source_filename or "").strip()
+        dst_table = (destination_table or "").strip()
+        src_ep = {
+            "kind": source_kind,
+            "format": source_format or "",
+            "table": src_table,
+            "collection": src_table,
+        }
+        dst_ep = {
+            "kind": "database",
+            "format": destination_db_type or "",
+            "table": dst_table,
+            "collection": dst_table,
+        }
+        out["load_history_report"] = compare_route_to_history(
+            sample_rows or [],
+            src_ep,
+            dst_ep,
+            schema=column_types,
+        )
+    except Exception as hist_exc:
+        logger.warning("load history compare failed during preflight", exc_info=True)
+        out["load_history_report"] = {
+            "passed": True,
+            "anomalies": [],
+            "prior_load_count": 0,
+            "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
+        }
     return out
 
 

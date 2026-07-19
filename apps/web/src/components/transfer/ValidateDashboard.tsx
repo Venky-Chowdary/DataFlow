@@ -10,7 +10,9 @@ import type {
   ValidationExplanation,
   ValidationSuggestedAction,
 } from "../../lib/types";
+import { isLocalPreflight } from "../../lib/localPreflight";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
+import { LoadHistoryPanel } from "./LoadHistoryPanel";
 
 interface GateMeta {
   key: string;
@@ -196,12 +198,19 @@ const ACTION_ICON: Record<string, string> = {
   rerun_mapping: "transfer",
   check_connection: "server",
   normalize_control_chars: "layers",
+  quarantine_and_rerun: "shield",
   open_bad_data_fix: "shield",
 };
 
 /** Per-column value-aware coercion table with expandable offending-value rows. */
 function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [showAllConversions, setShowAllConversions] = useState(false);
+  // Clean string→typed conversions (severity ok) stay collapsed by default so
+  // Strip/Quarantine are not buried — detail is one click away.
+  const actionable = columns.filter((c) => c.severity === "block" || c.severity === "warn");
+  const clean = columns.filter((c) => c.severity === "ok");
+  const visible = showAllConversions ? columns : actionable;
   const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -210,13 +219,38 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
       return next;
     });
 
+  if (columns.length === 0) return null;
+
   return (
-    <div className="df2-vd-coerce">
+    <div className={`df2-vd-coerce${actionable.length === 0 ? " is-clean" : ""}`}>
       <div className="df2-vd-coerce-head">
-        <DtIcon name="scan" size={15} />
+        <DtIcon name={actionable.length ? "scan" : "check"} size={15} />
         <strong>Type coercion preview</strong>
-        <span>{columns.length} column{columns.length === 1 ? "" : "s"} coerced against sampled values — expand a row to see the offending values.</span>
+        <span>
+          {actionable.length > 0
+            ? `${actionable.length} column${actionable.length === 1 ? "" : "s"} need review`
+            : `${clean.length} column${clean.length === 1 ? "" : "s"} convert cleanly on the sample`}
+          {clean.length > 0 && actionable.length > 0
+            ? ` · ${clean.length} convert cleanly`
+            : ""}
+          {actionable.length > 0 ? " — expand a row for offending values / wire form." : "."}
+        </span>
+        {clean.length > 0 && (
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm df2-vd-coerce-toggle"
+            onClick={() => setShowAllConversions((v) => !v)}
+          >
+            {showAllConversions ? "Hide clean conversions" : "Show all type conversions"}
+          </button>
+        )}
       </div>
+      {visible.length === 0 ? (
+        <p className="df2-vd-coerce-empty-hint">
+          No blocking coercions. Use <strong>Show all type conversions</strong> to inspect
+          raw → destination wire forms (for example ISO timestamps → DATETIME).
+        </p>
+      ) : (
       <div className="df2-vd-coerce-table-wrap">
         <table className="df2-vd-coerce-table">
           <thead>
@@ -224,6 +258,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
               <th aria-label="Expand" />
               <th>Column</th>
               <th>Source → Target</th>
+              <th>Wire form</th>
               <th className="df2-vd-num">Sampled</th>
               <th className="df2-vd-num">OK</th>
               <th className="df2-vd-num">NULLed</th>
@@ -232,11 +267,17 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
             </tr>
           </thead>
           <tbody>
-            {columns.map((col) => {
+            {visible.map((col) => {
               const key = `${col.source}→${col.target}`;
               const nulled = (col.nulls ?? 0) + (col.sentinel_nulls ?? 0);
               const isOpen = expanded.has(key);
-              const hasDetail = col.sample_failures.length > 0 || Boolean(col.suggested_fix);
+              const hasDetail =
+                col.sample_failures.length > 0
+                || (col.wire_examples?.length ?? 0) > 0
+                || Boolean(col.suggested_fix);
+              const wireHint = col.sample_wire_form
+                || col.wire_examples?.[0]?.wire_form
+                || null;
               return (
                 <Fragment key={key}>
                   <tr
@@ -256,6 +297,9 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                       <DtIcon name="arrow-right" size={11} />
                       <code>{col.target_type}</code>
                     </td>
+                    <td className="df2-vd-coerce-wire">
+                      {wireHint ? <code title={wireHint}>{wireHint}</code> : <span className="df2-vd-muted">—</span>}
+                    </td>
                     <td className="df2-vd-num">{col.sampled.toLocaleString()}</td>
                     <td className="df2-vd-num df2-vd-ok">{col.ok.toLocaleString()}</td>
                     <td className="df2-vd-num df2-vd-nulled">{nulled.toLocaleString()}</td>
@@ -267,12 +311,14 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                           size={11}
                         />
                         {SEVERITY_LABEL[col.severity] ?? col.severity}
+                        {(col.wire_normalize ?? 0) > 0 ? " · normalize" : ""}
+                        {(col.wire_failures ?? 0) > 0 ? ` · ${col.wire_failures} wire fail` : ""}
                       </span>
                     </td>
                   </tr>
                   {isOpen && hasDetail && (
                     <tr className={`df2-vd-coerce-detail sev-${col.severity}`}>
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         {col.suggested_fix && (
                           <p className="df2-vd-coerce-fix">
                             <DtIcon name="sparkle" size={13} /> {col.suggested_fix}
@@ -286,6 +332,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                                 <tr>
                                   <th className="df2-vd-num">Row</th>
                                   <th>Value</th>
+                                  <th>Wire</th>
                                   <th>Reason</th>
                                 </tr>
                               </thead>
@@ -294,7 +341,33 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                                   <tr key={`${f.row}-${i}`}>
                                     <td className="df2-vd-num">{f.row}</td>
                                     <td><code>{f.value === "" ? "∅ empty" : f.value}</code></td>
+                                    <td>{f.wire_form ? <code>{f.wire_form}</code> : "—"}</td>
                                     <td>{f.reason}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                        {(col.wire_examples?.length ?? 0) > 0 && (
+                          <div className="df2-vd-coerce-samples">
+                            <span className="df2-vd-coerce-samples-title">
+                              Destination wire normalize (ISO → DATETIME bind)
+                            </span>
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th className="df2-vd-num">Row</th>
+                                  <th>Raw</th>
+                                  <th>Wire form</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(col.wire_examples ?? []).map((f, i) => (
+                                  <tr key={`w-${f.row}-${i}`}>
+                                    <td className="df2-vd-num">{f.row}</td>
+                                    <td><code>{f.value}</code></td>
+                                    <td><code>{f.wire_form ?? "—"}</code></td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -310,6 +383,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }
@@ -467,6 +541,14 @@ export function ValidateDashboard({
     }
   };
 
+  // When Validate fails, auto-run explain so Strip / Quarantine / widen chips
+  // appear immediately — operators should not have to click "Run analysis".
+  useEffect(() => {
+    if (running || !preflight || preflight.passed || explaining || explain) return;
+    void runExplain();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on new failed preflight
+  }, [preflight?.run_id, preflight?.passed, running]);
+
   // Honest timer: wall-clock elapsed while the API runs — never invent gate steps.
   useEffect(() => {
     if (!running) {
@@ -535,6 +617,10 @@ export function ValidateDashboard({
   const semantic = proof?.semantic_mapping_score ?? 0;
   const quality = proof?.quality_score ?? 0;
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
+  const qualityGrade = (proof?.quality_grade ?? "").toLowerCase();
+  const confidenceBand = (proof?.confidence_band ?? "").toLowerCase();
+  const localPreflight = isLocalPreflight(preflight);
+  const proofWarnings = proof?.transfer_decision?.warnings ?? [];
   const reconciliation = proof?.reconciliation;
   const sampleCompare = reconciliation?.sample_compare;
   const mismatches = sampleCompare?.mismatches ?? [];
@@ -606,11 +692,23 @@ export function ValidateDashboard({
   };
 
   const handleSuggestedAction = (action: ValidationSuggestedAction) => {
-    if (action.kind === "open_bad_data_fix" || action.kind === "normalize_control_chars") {
-      if (action.kind === "normalize_control_chars" && onStripControlChars) {
+    if (action.kind === "normalize_control_chars") {
+      if (onStripControlChars) {
         void runStrip();
         return;
       }
+      setBadDataOpen(true);
+      return;
+    }
+    if (action.kind === "quarantine_and_rerun") {
+      if (onQuarantineAndRerun) {
+        void runQuarantine();
+        return;
+      }
+      setBadDataOpen(true);
+      return;
+    }
+    if (action.kind === "open_bad_data_fix") {
       setBadDataOpen(true);
       return;
     }
@@ -682,6 +780,31 @@ export function ValidateDashboard({
             <span className="df2-vd-count total"><strong>{totalGates}</strong> total rules</span>
           </div>
 
+          {!running && preflight && (qualityGrade || confidenceBand) && (
+            <div className="df2-vd-proof-chips" aria-label="Proof grade">
+              {qualityGrade ? (
+                <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
+                  Quality grade · {qualityGrade}
+                </span>
+              ) : null}
+              {confidenceBand ? (
+                <span className={`df2-vd-proof-chip band-${confidenceBand}`} title="Mapping / evidence confidence band">
+                  Confidence · {confidenceBand}
+                </span>
+              ) : null}
+              {typeof quality === "number" && quality > 0 ? (
+                <span className="df2-vd-proof-chip is-score" title="Numeric quality score (0–1)">
+                  Score · {(quality * 100).toFixed(0)}%
+                </span>
+              ) : null}
+              {typeof semantic === "number" && semantic > 0 ? (
+                <span className="df2-vd-proof-chip is-score" title="Semantic mapping score">
+                  Semantic · {(semantic * 100).toFixed(0)}%
+                </span>
+              ) : null}
+            </div>
+          )}
+
           <p className="df2-vd-hero-summary">
             {running
               ? "Real preflight is evaluating source, destination, schema, mapping confidence, dry-run sample, DDL, capacity, and reconcile plan. Progress is wall-clock time — not a fake step animation."
@@ -703,6 +826,83 @@ export function ValidateDashboard({
           )}
         </div>
       </header>
+
+      {!running && localPreflight && (
+        <div className="df2-vd-local-banner" role="status" aria-label="Local browser validation">
+          <DtIcon name="shield" size={16} />
+          <div>
+            <strong>Local browser validation only</strong>
+            <p>
+              Destination reachability, DDL, and reconciliation were not executed against a live system.
+              Treat this as demo-grade until the API runs the same route.
+            </p>
+            {proofWarnings.length > 0 && (
+              <ul>
+                {proofWarnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Always-visible remediation — Strip / Quarantine / Fix bad data must not
+          depend on expanding the AI panel or clicking Run analysis first. */}
+      {!running && preflight && !preflight.passed && (
+        <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
+          <span className="df2-vd-assist-actions-title">Suggested fixes</span>
+          <div className="df2-vd-chip-row">
+            {onStripControlChars && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-normalize_control_chars"
+                onClick={() => void runStrip()}
+                disabled={remediating}
+              >
+                <DtIcon name="layers" size={13} />
+                Strip controls &amp; re-run
+              </button>
+            )}
+            {onQuarantineAndRerun && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-quarantine_and_rerun"
+                onClick={() => void runQuarantine()}
+                disabled={remediating}
+              >
+                <DtIcon name="shield" size={13} />
+                Quarantine &amp; re-run
+              </button>
+            )}
+            <button
+              type="button"
+              className="df2-vd-chip kind-open_bad_data_fix"
+              onClick={() => setBadDataOpen(true)}
+              disabled={remediating}
+            >
+              <DtIcon name="shield" size={13} />
+              Fix bad data…
+            </button>
+            {onReviewMappings && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-review_mappings"
+                onClick={onReviewMappings}
+                disabled={remediating}
+              >
+                <DtIcon name="layers" size={13} />
+                Review mappings
+              </button>
+            )}
+          </div>
+          <p className="df2-vd-cell-preview-hint">
+            Strip removes format-control characters from text mappings.
+            Quarantine keeps bad cells out of the destination (never silent drop).
+            More AI suggestions appear below after analysis.
+          </p>
+        </div>
+      )}
 
       {remediationLog.length > 0 && (
         <div className="df2-vd-remediation-log" aria-label="What was fixed">
@@ -801,16 +1001,26 @@ export function ValidateDashboard({
                   <DtIcon name="gate" size={14} /> Run preflight
                 </button>
               )}
-              {quarantineOnly && onQuarantineAndRerun && (
+              {onStripControlChars && (
                 <button
                   type="button"
                   className="df2-btn df2-btn-sm df2-btn-ghost"
-                  onClick={() => void onQuarantineAndRerun()}
+                  onClick={() => void runStrip()}
+                  disabled={remediating}
+                >
+                  <DtIcon name="layers" size={14} /> Strip controls &amp; re-run
+                </button>
+              )}
+              {onQuarantineAndRerun && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-ghost"
+                  onClick={() => void runQuarantine()}
+                  disabled={remediating}
                 >
                   <DtIcon name="shield" size={14} /> Quarantine &amp; re-check
                 </button>
               )}
-              {/* AI analysis lives in the Explain card below — one action, one place. */}
             </div>
           </div>
         );
@@ -897,7 +1107,7 @@ export function ValidateDashboard({
                 </div>
               )}
 
-              {hasEncodingIssue && (
+              {(hasEncodingIssue || encodingBlocks) && (
                 <div className="df2-vd-assist-actions df2-vd-assist-remediate">
                   <span className="df2-vd-assist-actions-title">Bad data remediation</span>
                   <div className="df2-vd-chip-row">
@@ -918,6 +1128,17 @@ export function ValidateDashboard({
                       >
                         <DtIcon name="layers" size={13} />
                         Strip controls &amp; re-run
+                      </button>
+                    )}
+                    {onQuarantineAndRerun && (
+                      <button
+                        type="button"
+                        className="df2-vd-chip kind-quarantine_and_rerun"
+                        onClick={() => void runQuarantine()}
+                        disabled={remediating}
+                      >
+                        <DtIcon name="shield" size={13} />
+                        Quarantine &amp; re-run
                       </button>
                     )}
                   </div>
@@ -946,6 +1167,84 @@ export function ValidateDashboard({
                       ))}
                     </div>
                   )}
+                  {(explain.issues?.length ?? 0) > 0 && (
+                    <div className="df2-vd-explain-issues" aria-label="Validation issues">
+                      <span className="df2-vd-assist-actions-title">Issues</span>
+                      <ul>
+                        {explain.issues.map((issue, i) => (
+                          <li key={`${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
+                            <strong>{issue.title}</strong>
+                            <span className="df2-vd-explain-gate">{issue.gate}</span>
+                            {issue.what && <p>{issue.what}</p>}
+                            {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
+                            {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
+                            {issue.columns?.length > 0 && (
+                              <div className="df2-vd-chip-row">
+                                {issue.columns.slice(0, 8).map((col) => (
+                                  <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                ))}
+                              </div>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {(explain.column_fixes?.length ?? 0) > 0 && (
+                    <div className="df2-vd-column-fixes" aria-label="Column fixes">
+                      <span className="df2-vd-assist-actions-title">Column fixes</span>
+                      <div className="df2-vd-column-fixes-table-wrap">
+                        <table className="df2-vd-column-fixes-table">
+                          <thead>
+                            <tr>
+                              <th>Column</th>
+                              <th>Types</th>
+                              <th>Failed</th>
+                              <th>Suggestion</th>
+                              <th />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {explain.column_fixes.map((fix) => (
+                              <tr key={`${fix.column}-${fix.target ?? ""}`} className={`sev-${fix.severity}`}>
+                                <td>
+                                  <strong>{fix.column}</strong>
+                                  {fix.target ? <small> → {fix.target}</small> : null}
+                                </td>
+                                <td>
+                                  <span>{fix.source_type || "—"}</span>
+                                  <span aria-hidden> → </span>
+                                  <span>{fix.target_type || "—"}</span>
+                                </td>
+                                <td>{fix.failed}/{fix.sampled}</td>
+                                <td>{fix.suggested_fix || "Review mapping"}</td>
+                                <td>
+                                  {(fix.suggested_target_type || fix.suggested_transform) && onApplyAction ? (
+                                    <button
+                                      type="button"
+                                      className="df2-vd-chip"
+                                      onClick={() =>
+                                        handleSuggestedAction({
+                                          kind: fix.suggested_transform ? "add_transform" : "change_target_type",
+                                          column: fix.column,
+                                          target: fix.target,
+                                          to_type: fix.suggested_target_type ?? undefined,
+                                          transform: fix.suggested_transform ?? undefined,
+                                          label: fix.suggested_fix || `Fix ${fix.column}`,
+                                        })
+                                      }
+                                    >
+                                      Apply
+                                    </button>
+                                  ) : null}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                   {explain.suggested_actions.length > 0 && (
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
@@ -956,7 +1255,12 @@ export function ValidateDashboard({
                             type="button"
                             className={`df2-vd-chip kind-${action.kind}`}
                             onClick={() => handleSuggestedAction(action)}
-                            disabled={!onApplyAction && action.kind !== "open_bad_data_fix" && action.kind !== "normalize_control_chars"}
+                            disabled={
+                              !onApplyAction
+                              && action.kind !== "open_bad_data_fix"
+                              && action.kind !== "normalize_control_chars"
+                              && action.kind !== "quarantine_and_rerun"
+                            }
                             title={action.label}
                           >
                             <DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={13} />
@@ -980,6 +1284,14 @@ export function ValidateDashboard({
 
       {!running && preflight?.coercion_report?.columns?.length ? (
         <CoercionTable columns={preflight.coercion_report.columns} />
+      ) : null}
+
+      {!running && preflight?.load_history_report ? (
+        <LoadHistoryPanel
+          report={preflight.load_history_report}
+          title="Compared to prior loads"
+          className="df2-vd-load-history"
+        />
       ) : null}
 
       <div className="df2-vd-rules">

@@ -17,6 +17,7 @@ import {
   type PipelineTab,
 } from "../components/PipelineDetailDrawer";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   createSchedule,
@@ -40,6 +41,7 @@ type ScheduleFilter = "all" | "active" | "paused";
 
 export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [intervals, setIntervals] = useState<ScheduleIntervals | null>(null);
   const [loading, setLoading] = useState(true);
@@ -182,11 +184,13 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
 
   const handleDelete = async (id: string) => {
     const target = schedules.find((s) => s.id === id);
-    const ok = window.confirm(
-      target
-        ? `Delete pipeline “${target.name}”? This cannot be undone.`
-        : "Delete this pipeline? This cannot be undone.",
-    );
+    const ok = await confirm({
+      title: target ? `Delete pipeline “${target.name}”?` : "Delete this pipeline?",
+      message: "This cannot be undone. Scheduled runs for this pipeline will stop.",
+      confirmLabel: "Delete pipeline",
+      cancelLabel: "Keep pipeline",
+      tone: "danger",
+    });
     if (!ok) return;
     try {
       await deleteSchedule(id);

@@ -209,9 +209,16 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
 
+        from connectors.warehouse_temporal import (
+            quarantine_from_bigquery_errors,
+            records_for_bigquery,
+        )
+
+        bq_types = [bq_type(t) for t in logical_types]
         total = len(mapped_rows)
-        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
+        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
         written = 0
+        chunks_completed = 0
         use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
 
         if use_merge:
@@ -231,7 +238,7 @@ def write_mapped_rows(
                     batch = mapped_rows[start : start + CHUNK_SIZE]
                     if not batch:
                         break
-                    records = [dict(zip(target_cols, row)) for row in batch]
+                    records = records_for_bigquery(batch, target_cols, bq_types)
                     load_job = client.load_table_from_json(
                         records, staging_id, job_config=load_config
                     )
@@ -245,8 +252,9 @@ def write_mapped_rows(
                     )
                     client.query(merge_sql).result()
                     written += len(batch)
+                    chunks_completed = chunk_idx + 1
                     if on_checkpoint:
-                        on_checkpoint(chunk_idx + 1, chunks, written)
+                        on_checkpoint(chunks_completed, chunks, written)
             finally:
                 client.delete_table(staging_id, not_found_ok=True)
         else:
@@ -255,21 +263,52 @@ def write_mapped_rows(
                 batch = mapped_rows[start : start + CHUNK_SIZE]
                 if not batch:
                     break
-                records = [dict(zip(target_cols, row)) for row in batch]
+                records = records_for_bigquery(batch, target_cols, bq_types)
                 errors = client.insert_rows_json(table_id, records)
                 if errors:
-                    return WriteResult(
-                        ok=False, rows_written=written, table_name=table_name, target_schema=dataset_id,
-                        checksum="", chunks_completed=chunk_idx,
-                        error=str(errors[:2]),
+                    details, bad = quarantine_from_bigquery_errors(
+                        errors, batch, target_cols, row_offset=start, policy=policy,
                     )
-                written += len(batch)
+                    if policy in {"quarantine", "coerce_null"} and bad:
+                        rejected_details.extend(details)
+                        transform_errors.extend(d["reason"] for d in details[:5])
+                        # Streaming insert commits good rows; count only those.
+                        written += len(batch) - len(bad)
+                    elif policy == "fail":
+                        return WriteResult(
+                            ok=False,
+                            rows_written=written,
+                            table_name=table_name,
+                            target_schema=dataset_id,
+                            checksum="",
+                            chunks_completed=chunk_idx,
+                            error=str(errors[:2]),
+                            rejected_rows=rejected_rows + len(bad),
+                            rejected_details=rejected_details + details,
+                            warnings=transform_errors,
+                        )
+                    else:
+                        # Unknown policy: fail closed with details, no silent drop.
+                        return WriteResult(
+                            ok=False,
+                            rows_written=written,
+                            table_name=table_name,
+                            target_schema=dataset_id,
+                            checksum="",
+                            chunks_completed=chunk_idx,
+                            error=str(errors[:2]),
+                            rejected_details=rejected_details + details,
+                            warnings=transform_errors,
+                        )
+                else:
+                    written += len(batch)
+                chunks_completed = chunk_idx + 1
                 if on_checkpoint:
-                    on_checkpoint(chunk_idx + 1, chunks, written)
+                    on_checkpoint(chunks_completed, chunks, written)
 
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,
-            checksum=row_checksum(mapped_rows, target_cols), chunks_completed=chunks,
+            checksum=row_checksum(mapped_rows, target_cols), chunks_completed=chunks_completed or chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
@@ -279,4 +318,5 @@ def write_mapped_rows(
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
             checksum="", chunks_completed=0, error=str(exc),
+            rejected_details=rejected_details if "rejected_details" in locals() else [],
         )

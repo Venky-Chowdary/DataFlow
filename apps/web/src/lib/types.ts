@@ -108,6 +108,9 @@ export interface RejectedDetail {
   value?: string;
   reason?: string;
   policy?: string;
+  values?: Record<string, string>;
+  chars?: string[];
+  suggested_transform?: string;
 }
 
 export interface CdcStreamHealth {
@@ -183,7 +186,20 @@ export interface JobProgress extends TransferJob {
   coerced_null_rows?: number;
   rejected_details?: RejectedDetail[];
   destination_summary?: Record<string, unknown>;
+  /** Last-N load intelligence for this source→destination route. */
+  load_history_report?: LoadHistoryReport;
   preflight?: PreflightResult;
+  /** Gate-8 reconcile payload persisted on the job at terminal status. */
+  reconciliation?: {
+    passed?: boolean;
+    message?: string;
+    source_rows?: number;
+    target_rows?: number;
+    rejected_rows?: number;
+    coerced_null_rows?: number;
+    source_checksum?: string;
+    target_checksum?: string;
+  };
   phases?: JobPhase[];
   notifications?: JobNotificationResult[];
   records_per_second?: number;
@@ -296,6 +312,7 @@ export interface CoercionSampleFailure {
   row: number;
   value: string;
   reason: string;
+  wire_form?: string | null;
 }
 
 /** Per-column value-aware coercion prediction (from `coercion_report.columns[]`). */
@@ -311,8 +328,12 @@ export interface CoercionColumn {
   nulls: number;
   sentinel_nulls: number;
   failed: number;
+  wire_normalize?: number;
+  wire_failures?: number;
   sample_failures: CoercionSampleFailure[];
   sentinel_examples?: { row: number; value: string }[];
+  wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
+  sample_wire_form?: string | null;
   severity: "ok" | "warn" | "block";
   suggested_fix?: string;
   suggested_target_type?: string | null;
@@ -327,6 +348,31 @@ export interface CoercionReport {
   by_source?: Record<string, CoercionColumn>;
 }
 
+/** Last-N load comparison for the same source→destination route. */
+export interface LoadHistoryReport {
+  prior_load_count?: number;
+  compare_last_k?: number;
+  passed?: boolean;
+  anomalies?: string[];
+  column_findings?: { column: string; signals?: { kind?: string; message?: string }[] }[];
+  novel_quarantine_patterns?: {
+    column: string;
+    reason?: string;
+    count?: number;
+    prior_count?: number;
+    kind?: string;
+  }[];
+  volume_note?: string | null;
+  prior_runs_summary?: {
+    captured_at?: string;
+    job_id?: string | null;
+    row_count?: number;
+    rejected_rows?: number;
+    quarantine_keys?: number;
+  }[];
+  warning?: string;
+}
+
 export interface PreflightResult {
   passed: boolean;
   passed_count: number;
@@ -338,6 +384,7 @@ export interface PreflightResult {
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
+  load_history_report?: LoadHistoryReport;
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
@@ -348,6 +395,7 @@ export type ValidationActionKind =
   | "rerun_mapping"
   | "check_connection"
   | "normalize_control_chars"
+  | "quarantine_and_rerun"
   | "open_bad_data_fix";
 
 export interface ValidationSuggestedAction {
@@ -423,6 +471,7 @@ export interface TransferResult {
     chunk_size?: number;
     batches?: number;
     records_per_second?: number;
+    load_history_report?: LoadHistoryReport;
   };
   records_per_second?: number;
   ddl_executed?: string[];
@@ -440,6 +489,8 @@ export interface TransferResult {
     target_checksum?: string;
   };
   job_id?: string;
+  /** Workspace notification dispatch results copied from the completed job. */
+  notifications?: JobNotificationResult[];
   /** Full client-captured event log from live theater (persisted for result dashboard) */
   event_log?: string[];
 }

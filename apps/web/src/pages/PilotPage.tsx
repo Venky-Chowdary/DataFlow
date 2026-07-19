@@ -18,6 +18,7 @@ import { useActiveData } from "../lib/DataContext";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -53,6 +54,7 @@ const SCREEN_LABELS: Record<string, string> = {
 
 export function PilotPage({ onNavigate }: PilotPageProps) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { activeData } = useActiveData();
   const { dispatchStudioAction } = useStudioActions();
   const boot = useRef(loadPilotWorkspace());
@@ -252,11 +254,17 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     setAsideOpen(true);
   };
 
-  const deleteSession = (id: string) => {
+  const deleteSession = async (id: string) => {
     const target = sessions.find((s) => s.id === id);
     if (!target) return;
     if (target.messages.length > 0) {
-      const ok = window.confirm(`Delete chat “${target.title}”? This cannot be undone.`);
+      const ok = await confirm({
+        title: `Delete chat “${target.title}”?`,
+        message: "This cannot be undone. Message history for this chat will be removed.",
+        confirmLabel: "Delete chat",
+        cancelLabel: "Keep chat",
+        tone: "danger",
+      });
       if (!ok) return;
     }
     setSessions((prev) => {

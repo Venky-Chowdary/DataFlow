@@ -5516,6 +5516,32 @@
   .df2-modal { animation: none; }
 }
 
+/* ── In-app confirm dialog (replaces window.confirm) ── */
+.df2-confirm-dialog.df2-modal {
+  max-width: 420px;
+}
+.df2-confirm-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.df2-confirm-icon {
+  display: inline-flex;
+  color: #b45309;
+}
+.df2-confirm-danger .df2-confirm-icon {
+  color: #b91c1c;
+}
+.df2-confirm-message {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--df-text-secondary, #475569);
+}
+.df2-confirm-message-muted {
+  color: var(--df-text-muted, #64748b);
+}
+
 /* ── Drawer / slide-over primitive (df2-drawer-*) — shares modal tokens ── */
 .df2-drawer-overlay {
   position: fixed;

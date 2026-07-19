@@ -4,7 +4,9 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { CopyIdChip } from "../ui/CopyIdChip";
 import { readJobEventLog } from "../../lib/jobEventLog";
 import { useActiveData } from "../../lib/DataContext";
-import type { TransferResult } from "../../lib/types";
+import type { LoadHistoryReport, TransferResult } from "../../lib/types";
+import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
 
 interface TransferResultDashboardProps {
@@ -16,6 +18,8 @@ interface TransferResultDashboardProps {
   onNewTransfer?: () => void;
   onViewJobs?: () => void;
   onSchedule?: () => void;
+  /** Jump back to Validate so Strip / Quarantine / Fix bad data stay reachable from Run. */
+  onOpenValidate?: () => void;
 }
 
 function fmt(value: string | number | undefined): string | null {
@@ -51,6 +55,7 @@ export function TransferResultDashboard({
   onNewTransfer,
   onViewJobs,
   onSchedule,
+  onOpenValidate,
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
   const ds = result.destination_summary;
@@ -168,9 +173,12 @@ export function TransferResultDashboard({
     || (ds?.warnings && ds.warnings.length > 0)
     || (result.ddl_executed && result.ddl_executed.length > 0);
 
+  const failedPhase = String(errDetails.phase || errDetails.failed_phase || "").trim();
+
   return (
     <div className={`df2-result-dashboard ${result.success ? (hasIntegrityLoss ? "success is-quarantine" : "success") : "error"}`}>
       <div className="df2-result-top">
+        <div className="df2-result-section-label">1 · Outcome</div>
         <div className="df2-result-hero df2-result-hero-compact">
           <span
             className={`df2-result-badge ${!result.success ? "df2-badge-error" : hasIntegrityLoss ? "df2-badge-warn" : "df2-badge-live"}`}
@@ -185,7 +193,7 @@ export function TransferResultDashboard({
             </h2>
             <p className="df2-result-subtitle">
               {!result.success
-                ? "Fix the reported issues and try again."
+                ? "Review failure details and bad-data findings below, then fix on Validate or Map."
                 : hasIntegrityLoss
                   ? `${rec.toLocaleString()} records landed, but some rows were rejected or values coerced to NULL`
                   : `${rec.toLocaleString()} records moved and reconciled`}
@@ -213,9 +221,21 @@ export function TransferResultDashboard({
           </div>
         </div>
 
+        <div className="df2-result-section-label">2 · Volume</div>
         <div className="df2-result-stats df2-result-stats-primary" aria-label="Primary transfer metrics">
           <StatCard value={rec.toLocaleString()} label="Transferred" />
           <StatCard value={targetRows.toLocaleString()} label="At destination" />
+          <StatCard
+            value={droppedRows.toLocaleString()}
+            label="Rejected / dropped"
+            tone={droppedRows > 0 ? "warn" : undefined}
+          />
+          <StatCard
+            value={coercedNull.toLocaleString()}
+            label="Coerced to NULL"
+            tone={coercedNull > 0 ? "warn" : undefined}
+            title="Real NULL coercions only — ISO→DATETIME normalize is not counted here"
+          />
           <StatCard
             value={passed ? "Passed" : "Failed"}
             label="Reconcile"
@@ -235,9 +255,38 @@ export function TransferResultDashboard({
             ))}
           </div>
         )}
+
+        <NotificationDeliveryStrip
+          notifications={result.notifications}
+          className="df2-result-notify"
+        />
       </div>
 
       <div className="df2-result-panels">
+        {!result.success && (
+          <section className="df2-result-proof-panel is-error" aria-label="What went wrong">
+            <header className="df2-result-proof-head">
+              <DtIcon name="alert" size={16} />
+              <strong>3 · What went wrong</strong>
+              {failedPhase ? <span className="df2-result-phase-chip">Phase: {failedPhase}</span> : null}
+            </header>
+            <p className="df2-result-error-detail">{result.error || "The transfer could not complete."}</p>
+            {/preflight|dry-run|integrity|lossy coercion|invalid boolean/i.test(result.error || "") && (
+              <p className="df2-result-error-hint">
+                Preflight blocked this job — <strong>0 rows were written</strong>.
+                Findings labeled quarantine here are for inspection only.
+                Fix Map types/targets, re-Validate, then Execute.
+              </p>
+            )}
+            {/incorrect datetime|invalid input syntax for type|data truncation/i.test(result.error || "") && (
+              <p className="df2-result-error-hint">
+                Destination rejected a typed value (often ISO timestamps). Open Validate to see the
+                wire-form probe, or Inspect quarantine below for the exact column and sample.
+              </p>
+            )}
+          </section>
+        )}
+
         {hasIntegrityLoss && (
           <section className="df2-result-fidelity" role="alert" aria-label="Data fidelity warning">
             <div className="df2-result-fidelity-head">
@@ -340,38 +389,46 @@ export function TransferResultDashboard({
           </section>
         )}
 
-        {!result.success && (
-          <section className="df2-result-proof-panel is-error" aria-label="Transfer failure">
-            <header className="df2-result-proof-head">
-              <DtIcon name="alert" size={16} />
-              <strong>Failure details</strong>
-            </header>
-            <p className="df2-result-error-detail">{result.error || "The transfer could not complete."}</p>
-            {/preflight|dry-run|integrity|lossy coercion|invalid boolean/i.test(result.error || "") && (
-              <p className="df2-result-error-hint">
-                Preflight blocked this job — <strong>0 rows were written</strong>.
-                Findings labeled quarantine here are for inspection only.
-                Fix Map types/targets (e.g. status enums → VARCHAR), re-Validate, then Execute.
-              </p>
-            )}
-            {(droppedRows > 0 || issueFindings > 0) && (
-              <p className="df2-result-error-hint">
-                “Problem rows” at preflight are not a partial load — the transfer did not continue past validation.
-              </p>
-            )}
-          </section>
-        )}
-
         {showMore && (
           <div className="df2-result-more-body df2-result-more-inline">
             <p className="df2-result-explain-body">
               Checksums are computed over source and destination rows and compared. If reconciliation passed, the transfer is complete and unchanged.
             </p>
+            {(result.reconciliation?.source_checksum || result.reconciliation?.target_checksum) && (
+              <dl className="df2-result-checksum-pair">
+                <div>
+                  <dt>Source checksum</dt>
+                  <dd><code>{(result.reconciliation?.source_checksum || "—").slice(0, 16)}</code></dd>
+                </div>
+                <div>
+                  <dt>Destination checksum</dt>
+                  <dd><code>{(result.reconciliation?.target_checksum || checksum || "—").slice(0, 16)}</code></dd>
+                </div>
+                <div>
+                  <dt>Match</dt>
+                  <dd>
+                    {result.reconciliation?.source_checksum
+                      && result.reconciliation?.target_checksum
+                      && result.reconciliation.source_checksum === result.reconciliation.target_checksum
+                      ? "Yes — fingerprints equal"
+                      : result.reconciliation?.passed
+                        ? "Passed (see reconcile message)"
+                        : "Not matched"}
+                  </dd>
+                </div>
+              </dl>
+            )}
             {result.reconciliation?.message && !hasIntegrityLoss && <p>{result.reconciliation.message}</p>}
             {ds?.warnings && ds.warnings.length > 0 && (
-              <ul className="df2-result-warnings">
-                {ds.warnings.map((w) => <li key={w}>{w}</li>)}
-              </ul>
+              <div className="df2-result-warnings-block">
+                <p className="df2-result-warnings-note">
+                  Showing {ds.warnings.length} sample writer message{ds.warnings.length === 1 ? "" : "s"}
+                  {" "}(display capped — not the full row count).
+                </p>
+                <ul className="df2-result-warnings">
+                  {ds.warnings.map((w) => <li key={w}>{w}</li>)}
+                </ul>
+              </div>
             )}
             {result.ddl_executed && result.ddl_executed.length > 0 && (
               <ul className="df2-result-ddl">
@@ -382,23 +439,60 @@ export function TransferResultDashboard({
         )}
       </div>
 
-      {showQuarantine && result.job_id && (
+      {(() => {
+        const hist =
+          (ds?.load_history_report as LoadHistoryReport | undefined)
+          || (errDetails.load_history_report as LoadHistoryReport | undefined);
+        if (!hist) return null;
+        return (
+          <div className="df2-result-section-wrap">
+            <div className="df2-result-section-label">3b · Compared to prior loads</div>
+            <LoadHistoryPanel report={hist} title="Compared to prior loads" />
+          </div>
+        );
+      })()}
+
+      {(showQuarantine || !result.success) && result.job_id && (
         <div className="df2-result-section-wrap">
+          <div className="df2-result-section-label">4 · Bad-data findings</div>
           <QuarantinePanel
             jobId={result.job_id}
             rejectedRows={rejected || issueFindings}
             coercedNullRows={coercedNull}
+            initialDetails={result.destination_summary?.rejected_details}
             autoLoad
-            initiallyOpen={!result.success || rejected > 0 || issueFindings > 0}
+            initiallyOpen
           />
         </div>
       )}
+
+      <div className="df2-result-section-label">5 · Fix actions</div>
+      <div className="df2-result-actions df2-result-actions-remediate">
+        {onOpenValidate && (!result.success || hasIntegrityLoss) && (
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
+            <DtIcon name="gate" size={14} /> Open Validate (Strip / Quarantine / Fix)
+          </button>
+        )}
+        <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
+          New transfer
+        </button>
+        {onViewJobs && (
+          <button type="button" className="df2-btn" onClick={onViewJobs}>
+            <DtIcon name="jobs" size={14} /> View Job Theater
+          </button>
+        )}
+        {onSchedule && (
+          <button type="button" className="df2-btn" onClick={onSchedule}>
+            <DtIcon name="activity" size={14} /> Schedule this route
+          </button>
+        )}
+      </div>
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
         <header className="df2-job-log-panel-head">
           <div className="df2-job-log-panel-title">
             <DtIcon name="activity" size={14} />
-            <strong>Job log</strong>
+            <strong>6 · Evidence · Job log</strong>
             <span className="df2-job-log-count">{eventLog.length} events</span>
             {result.job_id && <CopyIdChip id={result.job_id} label="Job" compact />}
           </div>
@@ -418,21 +512,6 @@ export function TransferResultDashboard({
         </div>
       </section>
 
-      <div className="df2-result-actions">
-        <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
-          New transfer
-        </button>
-        {onViewJobs && (
-          <button type="button" className="df2-btn" onClick={onViewJobs}>
-            <DtIcon name="jobs" size={14} /> View Job Theater
-          </button>
-        )}
-        {onSchedule && (
-          <button type="button" className="df2-btn" onClick={onSchedule}>
-            <DtIcon name="activity" size={14} /> Schedule this route
-          </button>
-        )}
-      </div>
     </div>
   );
 }

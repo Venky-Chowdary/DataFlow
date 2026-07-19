@@ -59,17 +59,22 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             except Exception:
                 return value.encode("utf-8")
         return value
-    if upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ"}:
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return value
-    if upper == "DATE":
-        if isinstance(value, date):
-            return value.isoformat()
-        return value
-    if upper == "TIME":
-        if isinstance(value, time):
-            return value.isoformat()
+    if upper in {
+        "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
+        "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "DATE", "TIME",
+    }:
+        from connectors.sql_temporal import coerce_sql_temporal, format_wire_value
+
+        coerced = coerce_sql_temporal(value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP")
+        wire = format_wire_value(value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP")
+        if wire is not None:
+            return wire
+        if isinstance(coerced, datetime):
+            return coerced.isoformat(sep=" ")
+        if isinstance(coerced, date) and not isinstance(coerced, datetime):
+            return coerced.isoformat()
+        if isinstance(coerced, time):
+            return coerced.isoformat()
         return value
     if upper == "BOOLEAN":
         return 1 if value else 0

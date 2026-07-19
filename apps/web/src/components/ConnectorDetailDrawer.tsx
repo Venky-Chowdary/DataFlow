@@ -6,6 +6,11 @@ import { EmptyState } from "./ui/EmptyState";
 import { ConnectionWorkbench, CONNECTION_TABS } from "./ConnectionWorkbench";
 import { Connector } from "../lib/types";
 import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
+import {
+  formatConnectorRoleLabel,
+  resolveConnectorUsage,
+  resolveDisplayRole,
+} from "../lib/topologyUtils";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
 interface ConnectorDetailDrawerProps {
@@ -54,6 +59,9 @@ export function ConnectorDetailDrawer({
   const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "Managed endpoint";
   const relatedJobs = workbench?.relatedJobs ?? [];
   const relatedSchedules = workbench?.relatedSchedules ?? [];
+  const displayRole = resolveDisplayRole(c, relatedJobs, relatedSchedules);
+  const roleLabel = formatConnectorRoleLabel(displayRole);
+  const usage = resolveConnectorUsage(c, relatedJobs, relatedSchedules);
 
   return (
     <Drawer
@@ -109,6 +117,13 @@ export function ConnectorDetailDrawer({
           <strong>{c.type.replace(/_/g, " ")}</strong>
         </div>
         <div className="df2-drawer-fact">
+          <span>Capability</span>
+          <strong title={usage.hint || roleLabel}>
+            {roleLabel}
+            {usage.hint ? ` · ${usage.hint}` : ""}
+          </strong>
+        </div>
+        <div className="df2-drawer-fact">
           <span>Database / bucket</span>
           <strong>{c.database || "—"}</strong>
         </div>
@@ -123,6 +138,12 @@ export function ConnectorDetailDrawer({
           </strong>
         </div>
       </div>
+      {displayRole === "both" && (
+        <p className="df2-drawer-empty-line" style={{ marginTop: 0 }}>
+          This connection can be selected as a <strong>source</strong> or a <strong>destination</strong> in Transfer Studio.
+          Using it as a destination does not make it “source-only.”
+        </p>
+      )}
 
       {/* Related jobs & pipelines */}
       <section className="df2-drawer-section" aria-label="Related jobs and pipelines">

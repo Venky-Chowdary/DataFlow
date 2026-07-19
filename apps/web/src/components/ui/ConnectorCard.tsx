@@ -1,8 +1,12 @@
 import { ConnectorIcon } from "../../app/brand-icons";
-import { Connector } from "../../lib/types";
+import { Connector, PipelineSchedule, TransferJob } from "../../lib/types";
 import { DtIcon } from "../DtIcon";
 import { formatRelativeTime } from "../../lib/connectionWorkbench";
-import { inferTopologyRole } from "../../lib/topologyUtils";
+import {
+  formatConnectorRoleLabel,
+  resolveConnectorUsage,
+  resolveDisplayRole,
+} from "../../lib/topologyUtils";
 import { Button } from "./Button";
 
 interface ConnectorCardProps {
@@ -15,6 +19,9 @@ interface ConnectorCardProps {
   compact?: boolean;
   /** ISO timestamp of the most recent transfer that touched this connection, if any. */
   lastUsedAt?: string | null;
+  /** Jobs/schedules refine the Role badge (e.g. MySQL used as destination). */
+  jobs?: TransferJob[];
+  schedules?: PipelineSchedule[];
   onSelect?: () => void;
   onTest: () => void;
   onEdit?: () => void;
@@ -22,10 +29,8 @@ interface ConnectorCardProps {
 }
 
 /**
- * Status-first connection row (Airbyte-style): health is the first thing you
- * see, then identity, then last-test and last-used signals, then actions.
- * Used for the saved-connections list. The catalog/add flow uses its own
- * tile layout in ConnectorCatalogPanel.
+ * Status-first connection row: health, identity, clear Source / Destination /
+ * Source & destination role, then last-test and last-used signals.
  */
 export function ConnectorCard({
   connector: c,
@@ -34,15 +39,25 @@ export function ConnectorCard({
   testing,
   compact,
   lastUsedAt,
+  jobs = [],
+  schedules = [],
   onSelect,
   onTest,
   onEdit,
   onDelete,
 }: ConnectorCardProps) {
-  const role = inferTopologyRole(c.type, c.name, c.role);
+  const displayRole = resolveDisplayRole(c, jobs, schedules);
+  const roleLabel = formatConnectorRoleLabel(displayRole);
+  const usage = resolveConnectorUsage(c, jobs, schedules);
   const healthy = c.status !== "error" && c.last_test_ok !== false;
   const neverTested = c.last_test_ok == null && c.status !== "error";
   const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "";
+  const roleClass =
+    displayRole === "destination"
+      ? "df2-role-dest"
+      : displayRole === "both"
+        ? "df2-role-both"
+        : "df2-role-source";
 
   if (compact) {
     return (
@@ -72,12 +87,24 @@ export function ConnectorCard({
           <span className="df2-connector-row-name" title={c.name}>{c.name}</span>
           <span
             className="df2-connector-row-meta"
-            title={[c.type.replace(/_/g, " "), c.database, endpoint].filter(Boolean).join(" · ")}
+            title={[c.type.replace(/_/g, " "), c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
           >
             {c.type.replace(/_/g, " ")}{c.database ? ` · ${c.database}` : ""}
+            {usage.hint ? ` · ${usage.hint}` : ""}
           </span>
         </div>
-        <span className="df2-badge df2-badge-muted df2-connector-row-role">{role}</span>
+        <span
+          className={`df2-badge df2-badge-muted df2-connector-row-role ${roleClass}`}
+          title={
+            displayRole === "both"
+              ? "This connection can be used as a source or a destination in transfers"
+              : displayRole === "destination"
+                ? "Destination / sink connection"
+                : "Source / extract connection"
+          }
+        >
+          {roleLabel}
+        </span>
         <span className={`df2-connector-row-signal ${healthy ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
           <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
           <span className="df2-connector-row-signal-text">{neverTested ? "Never tested" : healthy ? "Test passed" : "Test failed"}</span>
@@ -137,7 +164,9 @@ export function ConnectorCard({
             {c.database ? ` · ${c.database}` : ""}
           </p>
         </div>
-        <span className="df2-badge df2-badge-muted df2-connector-row-role">{role}</span>
+        <span className={`df2-badge df2-badge-muted df2-connector-row-role ${roleClass}`}>
+          {roleLabel}
+        </span>
       </div>
 
       <div className="df2-connector-row-signals">
@@ -148,6 +177,7 @@ export function ConnectorCard({
         <span className="df2-connector-signal">
           <DtIcon name="transfer" size={12} />
           {lastUsedAt ? `Used ${formatRelativeTime(lastUsedAt)}` : "Not used yet"}
+          {usage.hint ? ` · ${usage.hint}` : ""}
         </span>
       </div>
 

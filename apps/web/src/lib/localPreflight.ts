@@ -56,6 +56,11 @@ export interface LocalPreflightInput {
   destKind?: "database" | "file_export";
 }
 
+/** True when this preflight was produced entirely in the browser (no API gates). */
+export function isLocalPreflight(preflight: { run_id?: string } | null | undefined): boolean {
+  return Boolean(preflight?.run_id?.startsWith("pf_local_"));
+}
+
 /** Client-side preflight for file → file export when the API is unavailable. */
 export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const threshold = input.confidenceThreshold ?? 0.85;
@@ -144,6 +149,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   pass("g11_validation_posture", "Local validation posture approved for demo export.");
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
+  const skippedCount = gates.filter((g) => g.status === "skip").length;
   const totalGates = GATE_IDS.length;
   const passed = blockers.length === 0;
   const avgConfidence =
@@ -151,39 +157,74 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       ? input.mappings.reduce((sum, m) => sum + m.confidence, 0) / input.mappings.length
       : 0;
 
+  // Local export never runs remote DDL / destination probe / post-write reconcile —
+  // grade as "review" so the UI cannot be read as production-governed proof.
+  const qualityGrade: "excellent" | "good" | "review" = isFileExport
+    ? "review"
+    : passed
+      ? avgConfidence >= 0.9
+        ? "good"
+        : "review"
+      : "review";
+  const confidenceBand: "high" | "medium" | "low" =
+    avgConfidence >= 0.9 ? "high" : avgConfidence >= 0.75 ? "medium" : "low";
+  // Cap readiness — skipped production gates must not look like a full API pass.
+  const readinessCap = isFileExport ? 72 : 99;
+  const readinessScore = passed
+    ? Math.round(Math.min(readinessCap, 55 + avgConfidence * 17))
+    : Math.round(avgConfidence * 50);
+
+  const localWarnings = isFileExport
+    ? [
+        "Browser-only validation — destination reachability, DDL, and reconciliation were not executed.",
+        "No Job Theater proof or destination checksum until the API runs this route.",
+        `${skippedCount} gate(s) skipped because they require a live API-backed destination.`,
+      ]
+    : ["Database destinations require API preflight — local checks cannot approve remote writes."];
+
   return {
     passed,
     passed_count: passedCount,
     total_gates: totalGates,
-    readiness_score: passed ? Math.round(Math.min(99, 82 + avgConfidence * 18)) : Math.round(avgConfidence * 60),
+    readiness_score: readinessScore,
     run_id: `pf_local_${Math.random().toString(16).slice(2, 10)}`,
     gates,
     blockers,
     proof_bundle: {
       passed,
       semantic_mapping_score: avgConfidence,
-      semantic_notes: ["Local browser validation — start API for production gates."],
-      quality_score: 0.88,
-      confidence_band: avgConfidence >= 0.9 ? "high" : avgConfidence >= 0.75 ? "medium" : "low",
-      quality_grade: "good",
+      semantic_notes: [
+        "Local browser validation — start the API for production gates (destination probe, DDL, reconcile).",
+        ...localWarnings.slice(0, 2),
+      ],
+      // Quality score reflects sample mapping confidence only — not destination honesty.
+      quality_score: Math.min(0.72, 0.45 + avgConfidence * 0.27),
+      confidence_band: confidenceBand,
+      quality_grade: qualityGrade,
       evidence_summary: passed
-        ? "Local preflight passed — safe to export in browser for demo. Start the API for governed writes and reconciliation."
+        ? "Local preflight cleared mapping/transform checks in the browser. Destination DDL, capacity, and reconciliation still require the API."
         : "Resolve blockers before exporting.",
       compliance: {
-        risk_score: input.mappings.some((m) => m.isPii && m.transform !== "hash_pii") ? 0.45 : 0.12,
-        requires_review: input.mappings.some((m) => m.isPii),
-        tags: input.mappings.filter((m) => m.isPii).map((m) => `pii:${m.source}`),
+        risk_score: input.mappings.some((m) => m.isPii && m.transform !== "hash_pii") ? 0.55 : 0.28,
+        requires_review: true,
+        tags: [
+          "local_preflight",
+          ...(isFileExport ? ["file_export"] : []),
+          ...input.mappings.filter((m) => m.isPii).map((m) => `pii:${m.source}`),
+        ],
       },
       reconciliation: {
-        passed: true,
+        passed: false,
         preview: true,
-        message: "Preview only — full reconciliation requires API transfer.",
+        message: "Not run — full reconciliation requires an API-backed transfer.",
       },
       transfer_decision: {
-        decision: passed ? "approve" : "block",
+        decision: passed ? "review" : "block",
         blockers: blockers.map((b) => b.message),
-        reason: passed ? "Local export route cleared." : blockers[0]?.message ?? "Validation failed.",
-        warnings: isFileExport ? ["Browser-only export — no Job Theater proof until API is online."] : [],
+        reason: passed
+          ? "Local export checks passed — treat as demo-grade until API validation runs."
+          : blockers[0]?.message ?? "Validation failed.",
+        warnings: localWarnings,
       },
     },
   };

@@ -132,6 +132,96 @@ from services.checkpoint_service import (
 logger = logging.getLogger("dataflow.transfer")
 
 
+def _compare_and_publish_load_history(
+    mongo: Any,
+    job_id: str,
+    rows: list[dict],
+    request: TransferRequest,
+    schema: dict[str, str] | None,
+    *,
+    validation_mode: str,
+    row_count_hint: int | None = None,
+) -> dict[str, Any]:
+    """Compare current sample/batch to last-N route history; publish on the job.
+
+    Streaming paths pass a bounded ``rows`` sample plus ``row_count_hint`` for
+    volume drift. Never raises — history must not abort writes.
+    """
+    load_history_report: dict[str, Any] = {}
+    try:
+        from services.data_quality_history import compare_route_to_history
+
+        route = transfer_request_to_dict(request)
+        load_history_report = compare_route_to_history(
+            rows,
+            route["source"],
+            route["destination"],
+            schema=schema,
+            current_row_count=row_count_hint,
+        )
+        quality_anomalies = list(load_history_report.get("anomalies") or [])
+        if quality_anomalies:
+            mongo.update_job_status(
+                job_id, "running", phase="quality_check", progress_pct=20,
+                message="; ".join(quality_anomalies[:5]),
+                load_history_report=load_history_report,
+            )
+            if validation_mode == "strict":
+                load_history_report = {
+                    **load_history_report,
+                    "passed": False,
+                    "strict_blocked": True,
+                }
+        else:
+            mongo.update_job_status(
+                job_id, "running",
+                load_history_report=load_history_report,
+            )
+    except Exception as hist_exc:
+        load_history_report = {
+            "passed": True,
+            "anomalies": [],
+            "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
+            "prior_load_count": 0,
+        }
+        try:
+            mongo.update_job_status(
+                job_id, "running",
+                load_history_report=load_history_report,
+                message=load_history_report["warning"],
+            )
+        except Exception:
+            pass
+    return load_history_report
+
+
+def _persist_load_history_profile(
+    request: TransferRequest,
+    rows: list[dict],
+    schema: dict[str, str] | None,
+    *,
+    job_id: str,
+    dest_summary: dict[str, Any],
+    row_count: int,
+) -> None:
+    """Append this load to the route ring buffer (streaming-safe)."""
+    try:
+        from services.data_quality_history import profile_batch, save_profile
+
+        route = transfer_request_to_dict(request)
+        save_profile(
+            route["source"],
+            route["destination"],
+            profile_batch(rows, schema),
+            job_id=job_id,
+            rejected_details=dest_summary.get("rejected_details") or [],
+            rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+            row_count=row_count,
+        )
+    except Exception:
+        logger.debug("load-history save_profile skipped", exc_info=True)
+
+
 def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
     """Mark job failed at preflight and persist inspectable quarantine rows."""
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
@@ -853,6 +943,16 @@ class UniversalTransferEngine:
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
+                    source_table=(
+                        request.source.table
+                        or request.source.collection
+                        or request.source_filename
+                        or ""
+                    ),
+                    destination_table=(
+                        request.destination.table or request.destination.collection or ""
+                    ),
+                    source_filename=request.source_filename or "",
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -912,32 +1012,28 @@ class UniversalTransferEngine:
                     job_id=job_id,
                 )
 
-            # History-aware data quality gate: compare this batch's statistical
-            # profile to the stored baseline for the same source/destination route.
-            try:
-                route = transfer_request_to_dict(request)
-                quality_passed, quality_anomalies, _ = validate_batch_against_history(
-                    records,
-                    route["source"],
-                    route["destination"],
-                    schema=schema,
-                    save_baseline=False,
+            # History-aware data quality: compare this load to the last N runs
+            # for the same source→destination route (null-rate, volume, mean MAD).
+            load_history_report = _compare_and_publish_load_history(
+                mongo, job_id, records, request, schema,
+                validation_mode=request.validation_mode,
+                row_count_hint=len(records),
+            )
+            if load_history_report.get("strict_blocked"):
+                anomalies = list(load_history_report.get("anomalies") or [])
+                msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    load_history_report=load_history_report,
                 )
-                if quality_anomalies:
-                    mongo.update_job_status(
-                        job_id, "running", phase="quality_check", progress_pct=20,
-                        message="; ".join(quality_anomalies),
-                    )
-                    if request.validation_mode == "strict":
-                        return TransferResult(
-                            success=False,
-                            error="Data quality anomaly: " + "; ".join(quality_anomalies),
-                            operation=request.operation,
-                            job_id=job_id,
-                        )
-            except Exception:
-                # Never block a transfer because the quality history store is down.
-                pass
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                    destination_summary={"load_history_report": load_history_report},
+                    error_details={"load_history_report": load_history_report},
+                )
 
             ddl_log: list[str] = []
             dest_summary: dict = {}
@@ -1125,6 +1221,10 @@ class UniversalTransferEngine:
                     phase="failed",
                     progress_pct=95,
                     message=recon.get("message"),
+                    reconciliation=recon,
+                    destination_summary=dest_summary,
+                    rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 )
                 return TransferResult(
                     success=False,
@@ -1133,6 +1233,7 @@ class UniversalTransferEngine:
                     job_id=job_id,
                     records_transferred=rows_written,
                     destination_summary=dest_summary,
+                    reconciliation=recon,
                 )
 
             explanation = _build_explanation(
@@ -1143,6 +1244,8 @@ class UniversalTransferEngine:
             terminal_status = terminal_status_for(
                 dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
             )
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
             mongo.update_job_status(
                 job_id, terminal_status,
                 records_processed=rows_written,
@@ -1156,6 +1259,8 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                reconciliation=recon,
+                load_history_report=dest_summary.get("load_history_report") or {},
             )
             try:
                 from services.usage_metering import record_transfer_usage
@@ -1196,14 +1301,13 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
                 destination_summary=dest_summary,
             )
-            # Persist this successful batch as the new data-quality baseline.
-            try:
-                from services.data_quality_history import profile_batch, save_profile
-
-                route = transfer_request_to_dict(request)
-                save_profile(route["source"], route["destination"], profile_batch(records, schema))
-            except Exception:
-                pass
+            # Append this load to the route ring buffer (last-N multi-load intelligence).
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
+            _persist_load_history_profile(
+                request, records, schema,
+                job_id=job_id, dest_summary=dest_summary, row_count=len(records),
+            )
             finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
@@ -1263,6 +1367,7 @@ class UniversalTransferEngine:
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
         contract_id = ""
+        load_history_report: dict[str, Any] = {}
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -1311,6 +1416,16 @@ class UniversalTransferEngine:
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
+                    source_table=(
+                        request.source.table
+                        or request.source.collection
+                        or request.source_filename
+                        or ""
+                    ),
+                    destination_table=(
+                        request.destination.table or request.destination.collection or ""
+                    ),
+                    source_filename=request.source_filename or "",
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1368,6 +1483,28 @@ class UniversalTransferEngine:
                     error_details={"violations": cv.violations},
                     operation=request.operation,
                     job_id=job_id,
+                )
+
+            # Sample-based history compare (full table never loaded in streaming path).
+            load_history_report = _compare_and_publish_load_history(
+                mongo, job_id, sample_rows or [], request, schema,
+                validation_mode=request.validation_mode,
+                row_count_hint=total_rows,
+            )
+            if load_history_report.get("strict_blocked"):
+                anomalies = list(load_history_report.get("anomalies") or [])
+                msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    load_history_report=load_history_report,
+                )
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                    destination_summary={"load_history_report": load_history_report},
+                    error_details={"load_history_report": load_history_report},
                 )
 
             def _check_cancelled() -> None:
@@ -1487,6 +1624,10 @@ class UniversalTransferEngine:
                     phase="failed",
                     progress_pct=95,
                     message=recon.get("message"),
+                    reconciliation=recon,
+                    destination_summary=dest_summary,
+                    rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 )
                 return TransferResult(
                     success=False,
@@ -1495,6 +1636,7 @@ class UniversalTransferEngine:
                     job_id=job_id,
                     records_transferred=rows_written,
                     destination_summary=dest_summary,
+                    reconciliation=recon,
                 )
 
             explanation = _build_explanation(
@@ -1504,6 +1646,12 @@ class UniversalTransferEngine:
 
             terminal_status = terminal_status_for(
                 dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
+            _persist_load_history_profile(
+                request, sample_rows or [], schema,
+                job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
             )
             mongo.update_job_status(
                 job_id, terminal_status,
@@ -1518,6 +1666,8 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                reconciliation=recon,
+                load_history_report=load_history_report or {},
                 **_cdc_fields_from_summary(dest_summary),
             )
 
@@ -1598,6 +1748,7 @@ class UniversalTransferEngine:
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
         contract_id = ""
+        load_history_report: dict[str, Any] = {}
         try:
             filename = request.source_filename or "upload.csv"
             content = prepare_stream_content(
@@ -1651,6 +1802,16 @@ class UniversalTransferEngine:
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
+                    source_table=(
+                        request.source.table
+                        or request.source.collection
+                        or request.source_filename
+                        or ""
+                    ),
+                    destination_table=(
+                        request.destination.table or request.destination.collection or ""
+                    ),
+                    source_filename=request.source_filename or "",
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1708,6 +1869,28 @@ class UniversalTransferEngine:
                     error_details={"violations": cv.violations},
                     operation=request.operation,
                     job_id=job_id,
+                )
+
+            # Sample-based history compare (file is streamed; full table never loaded).
+            load_history_report = _compare_and_publish_load_history(
+                mongo, job_id, sample_rows or [], request, schema,
+                validation_mode=request.validation_mode,
+                row_count_hint=total_rows,
+            )
+            if load_history_report.get("strict_blocked"):
+                anomalies = list(load_history_report.get("anomalies") or [])
+                msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    load_history_report=load_history_report,
+                )
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                    destination_summary={"load_history_report": load_history_report},
+                    error_details={"load_history_report": load_history_report},
                 )
 
             def _check_cancelled() -> None:
@@ -1792,6 +1975,10 @@ class UniversalTransferEngine:
                     phase="failed",
                     progress_pct=95,
                     message=recon.get("message"),
+                    reconciliation=recon,
+                    destination_summary=dest_summary,
+                    rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 )
                 return TransferResult(
                     success=False,
@@ -1800,6 +1987,7 @@ class UniversalTransferEngine:
                     job_id=job_id,
                     records_transferred=rows_written,
                     destination_summary=dest_summary,
+                    reconciliation=recon,
                 )
 
             explanation = _build_explanation(
@@ -1809,6 +1997,12 @@ class UniversalTransferEngine:
 
             terminal_status = terminal_status_for(
                 dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
+            _persist_load_history_profile(
+                request, sample_rows or [], schema,
+                job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
             )
             mongo.update_job_status(
                 job_id, terminal_status,
@@ -1823,6 +2017,8 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                reconciliation=recon,
+                load_history_report=load_history_report or {},
             )
 
             lineage.emit_preflight_completed(

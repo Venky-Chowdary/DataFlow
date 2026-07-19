@@ -373,7 +373,12 @@ export function ConnectorModal({
     if (!validate()) return;
     setSaving(true);
     try {
-      const payload = buildPayload();
+      const payload = {
+        ...buildPayload(),
+        // Carry the in-form Test result onto the saved profile so the list
+        // shows "Test passed" immediately (list Test uses a different endpoint).
+        ...(testResult ? { last_test_ok: testResult.success } : {}),
+      };
       if (editing) {
         await updateConnector(editing.id, payload as Parameters<typeof updateConnector>[1]);
         toast({ title: "Connector updated", message: name, tone: "success" });
@@ -392,6 +397,8 @@ export function ConnectorModal({
 
   const handleFieldChange = (key: string, value: string | number | boolean) => {
     setFieldError(null);
+    // Credential edits invalidate the prior in-form Test result.
+    setTestResult(null);
     switch (key) {
       case "host":
         setHost(value as string);
@@ -570,6 +577,7 @@ export function ConnectorModal({
                       onChange={(e) => {
                         setAuthMode(e.target.value as AuthMode);
                         setFieldError(null);
+                        setTestResult(null);
                       }}
                     >
                       {formConfig.authModes.map((opt) => (

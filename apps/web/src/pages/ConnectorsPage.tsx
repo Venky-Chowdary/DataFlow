@@ -250,13 +250,13 @@ export function ConnectorsPage({
               )}
               {tab === "catalog" && (
                 <FilterTabs
-                  ariaLabel="Filter catalog by role"
+                  ariaLabel="Filter catalog by capability — dual-use systems like MySQL appear under both"
                   value={role}
                   onChange={setRole}
                   items={[
                     { id: "all", label: "All" },
-                    { id: "source", label: "Sources" },
-                    { id: "destination", label: "Destinations" },
+                    { id: "source", label: "Can be source" },
+                    { id: "destination", label: "Can be destination" },
                   ]}
                 />
               )}
@@ -344,7 +344,12 @@ export function ConnectorsPage({
                 <div className="df2-connector-rows" role="list" aria-label="Saved connections">
                   <div className="df2-connector-rows-head" aria-hidden>
                     <span className="df2-connector-rows-head-name">Connection</span>
-                    <span className="df2-connector-rows-head-role">Role</span>
+                    <span
+                      className="df2-connector-rows-head-role"
+                      title="Capability in Transfer Studio — databases like MySQL are Source & destination, not locked to the catalog tab you used when saving"
+                    >
+                      Capability
+                    </span>
                     <span className="df2-connector-rows-head-test">Last test</span>
                     <span className="df2-connector-rows-head-used">Last used</span>
                     <span className="df2-connector-rows-head-actions" />
@@ -359,6 +364,8 @@ export function ConnectorsPage({
                       highlighted={highlightConnectorId === c.id}
                       testing={testingId === c.id}
                       lastUsedAt={lastUsedAtForConnector(c, jobs)}
+                      jobs={jobs}
+                      schedules={schedules}
                       onSelect={() => openDrawer(c.id)}
                       onTest={() => void handleTest(c.id)}
                     />

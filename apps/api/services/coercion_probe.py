@@ -177,10 +177,36 @@ def analyze_coercion(
         transform = resolve_transform(m, column_types=source_types, dest_types=dest_types)
 
         ok = nulls = sentinel_nulls = failed = 0
+        wire_normalize = 0
+        wire_failures = 0
         sample_failures: list[dict[str, Any]] = []
         sentinel_examples: list[dict[str, Any]] = []
+        wire_examples: list[dict[str, Any]] = []
         raw_failure_values: list[str] = []
         observed_values: list[str] = []
+        sample_wire_form: str | None = None
+
+        use_wire = False
+        wire_check_fn = None
+        try:
+            from connectors.sql_temporal import (
+                dest_uses_sql_wire_probe,
+                is_temporal_ddl,
+                wire_check_temporal,
+            )
+
+            use_wire = dest_uses_sql_wire_probe(dest_db_type) and is_temporal_ddl(tgt_type)
+            dest_l = (dest_db_type or "").strip().lower()
+            if use_wire and dest_l in {"snowflake", "bigquery"}:
+                from connectors.warehouse_temporal import wire_check_warehouse
+
+                wire_check_fn = lambda val, typ, _d=dest_l: wire_check_warehouse(  # noqa: E731
+                    val, typ, engine=_d
+                )
+            else:
+                wire_check_fn = wire_check_temporal
+        except ImportError:
+            wire_check_fn = None
 
         for idx, row in enumerate(rows):
             cell = cell_to_string(row.get(src))
@@ -199,18 +225,50 @@ def analyze_coercion(
                     if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
                         sentinel_examples.append({"row": idx, "value": cell[:120]})
             else:
+                # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
+                if use_wire and wire_check_fn is not None:
+                    probe_val = converted if converted is not None else cell
+                    wire = wire_check_fn(probe_val, tgt_type)
+                    if not wire.get("ok"):
+                        wire_failures += 1
+                        failed += 1
+                        if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                            sample_failures.append({
+                                "row": idx,
+                                "value": cell[:120],
+                                "reason": wire.get("reason") or "Destination wire bind failed",
+                                "wire_form": wire.get("wire_value"),
+                            })
+                            raw_failure_values.append(cell[:120])
+                        continue
+                    if wire.get("wire_value") and sample_wire_form is None:
+                        sample_wire_form = str(wire["wire_value"])
+                    if wire.get("needs_normalize"):
+                        wire_normalize += 1
+                        if len(wire_examples) < SAMPLE_FAILURE_LIMIT:
+                            wire_examples.append({
+                                "row": idx,
+                                "value": cell[:120],
+                                "wire_form": wire.get("wire_value"),
+                                "reason": wire.get("reason") or "Will normalize for destination",
+                            })
                 ok += 1
 
         # Only report columns that carry real coercion risk: a typed target with
         # values that fail or get placeholder-nulled, or where source disagrees
         # with the destination logical type (genuine coercion happening).
         coercion_required = src_logical != tgt_logical
-        if failed == 0 and sentinel_nulls == 0 and not coercion_required:
+        if (
+            failed == 0
+            and sentinel_nulls == 0
+            and wire_normalize == 0
+            and not coercion_required
+        ):
             continue
 
         if failed:
             severity = "block"
-        elif sentinel_nulls:
+        elif sentinel_nulls or wire_normalize:
             severity = "warn"
         else:
             severity = "ok"
@@ -228,6 +286,14 @@ def analyze_coercion(
             dest_db_type=dest_db_type,
             structural=structural,
         )
+        if wire_normalize and not fix:
+            example = wire_examples[0] if wire_examples else {}
+            fix = (
+                f"Column '{src}' → {tgt_type}: {wire_normalize} of {len(rows)} sampled "
+                f"value(s) use ISO timestamps (e.g. {example.get('value', '…')!r}). "
+                f"DataFlow will normalize to {example.get('wire_form') or 'YYYY-MM-DD HH:MM:SS'} "
+                f"at write time for destination SQL/warehouse temporal bind."
+            )
 
         tgt_name = str(m.get("target", src) or src)
         dest_col_exists = bool(
@@ -248,8 +314,12 @@ def analyze_coercion(
             "nulls": nulls,
             "sentinel_nulls": sentinel_nulls,
             "failed": failed,
+            "wire_normalize": wire_normalize,
+            "wire_failures": wire_failures,
             "sample_failures": sample_failures,
             "sentinel_examples": sentinel_examples,
+            "wire_examples": wire_examples,
+            "sample_wire_form": sample_wire_form,
             "severity": severity,
             "suggested_fix": fix,
             "suggested_target_type": suggested_type,

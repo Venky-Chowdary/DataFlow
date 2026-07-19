@@ -152,8 +152,28 @@ export function ConnectionHub({
     const pos = new Map<string, Point>();
 
     displayNodes.forEach((n) => {
-      if (n.role === "destination") dstAll.push(n);
-      else srcAll.push(n);
+      if (n.role === "destination") {
+        dstAll.push(n);
+        return;
+      }
+      if (n.role === "both") {
+        // Dual-use: place by route participation. Idle dual-use appears on both
+        // columns so MySQL/Postgres never look "source-only" before first use.
+        const asSrc = edges.some((e) => e.sourceNodeId === n.id);
+        const asDst = edges.some((e) => e.destNodeId === n.id);
+        if (asDst && !asSrc) {
+          dstAll.push(n);
+          return;
+        }
+        if (asSrc && !asDst) {
+          srcAll.push(n);
+          return;
+        }
+        srcAll.push(n);
+        dstAll.push({ ...n, id: `${n.id}::as-dest`, label: `${n.label}` });
+        return;
+      }
+      srcAll.push(n);
     });
 
     const srcCap = capColumn(srcAll, "source", columnLimit);
@@ -193,7 +213,7 @@ export function ConnectionHub({
       rowHeight: rowH,
       viewportHeight: viewportH,
     };
-  }, [displayNodes, size.w, columnLimit, bounded, maxViewportHeight]);
+  }, [displayNodes, edges, size.w, columnLimit, bounded, maxViewportHeight]);
 
   const hub: Point = { x: size.w / 2, y: canvasHeight / 2 };
 
@@ -204,7 +224,11 @@ export function ConnectionHub({
     let edgeIndex = 0;
     for (const edge of edges) {
       const srcNodeId = remap.get(edge.sourceNodeId) ?? edge.sourceNodeId;
-      const dstNodeId = remap.get(edge.destNodeId) ?? edge.destNodeId;
+      let dstNodeId = remap.get(edge.destNodeId) ?? edge.destNodeId;
+      // Dual-use nodes may be mirrored on the destination column as `${id}::as-dest`.
+      if (!positions.has(dstNodeId) && positions.has(`${edge.destNodeId}::as-dest`)) {
+        dstNodeId = `${edge.destNodeId}::as-dest`;
+      }
       const srcPos = positions.get(srcNodeId);
       const dstPos = positions.get(dstNodeId);
       if (!srcPos || !dstPos) continue;

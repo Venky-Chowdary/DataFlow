@@ -55,6 +55,8 @@ class ConnectorSaveDTO(BaseModel):
     endpoint_url: str = ""
     path_style: bool = False
     auth_source: str = ""
+    # Optional: persist an in-form Test result so the list matches on first save.
+    last_test_ok: bool | None = None
 
 
 def _actor_email(request: Request) -> str:
@@ -125,6 +127,14 @@ def get_saved_connector(
     return mask_connector(conn)
 
 
+def _persist_form_test_status(connector_id: str, last_test_ok: bool | None) -> None:
+    """Apply in-form Test result without re-probing credentials."""
+    if last_test_ok is True:
+        mark_tested(connector_id, True)
+    elif last_test_ok is False:
+        mark_tested(connector_id, False)
+
+
 @router.post("")
 def save_connector(
     body: ConnectorSaveDTO,
@@ -133,9 +143,12 @@ def save_connector(
 ):
     workspace_id = _require_write_workspace(request, workspace_id)
     data = body.model_dump()
+    form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
     conn = create_connector(data)
-    return _to_ui(conn)
+    _persist_form_test_status(conn.id, form_test)
+    refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
+    return _to_ui(refreshed)
 
 
 @router.put("/{connector_id}")
@@ -147,6 +160,7 @@ def update_saved_connector(
 ):
     workspace_id = _require_write_workspace(request, workspace_id)
     data = body.model_dump()
+    form_test = data.pop("last_test_ok", None)
     existing = get_connector(connector_id, workspace_id=workspace_id)
     if not existing or not _can_access_connector(request, existing):
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -158,7 +172,9 @@ def update_saved_connector(
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
-    return _to_ui(updated)
+    _persist_form_test_status(connector_id, form_test)
+    refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
+    return _to_ui(refreshed)
 
 
 @router.delete("/{connector_id}")

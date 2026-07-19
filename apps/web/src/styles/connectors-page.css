@@ -123,7 +123,27 @@
 .df2-connector-row-role {
   justify-self: start;
   font-size: 10px;
-  text-transform: capitalize;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  max-width: 13.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.df2-connector-row-role.df2-role-both {
+  color: #0f766e;
+  border-color: rgba(15, 118, 110, 0.28);
+  background: rgba(15, 118, 110, 0.06);
+}
+.df2-connector-row-role.df2-role-dest {
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.28);
+  background: rgba(180, 83, 9, 0.06);
+}
+.df2-connector-row-role.df2-role-source {
+  color: #1d4ed8;
+  border-color: rgba(29, 78, 216, 0.28);
+  background: rgba(29, 78, 216, 0.06);
 }
 
 .df2-connector-row-signal {

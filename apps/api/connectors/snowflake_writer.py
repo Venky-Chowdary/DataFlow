@@ -257,7 +257,9 @@ def _write_temp_csv(path: Path, target_cols: list[str], mapped_rows: list[tuple]
         writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
         writer.writerow(target_cols)
         for row in mapped_rows:
-            writer.writerow(["" if v is None else cell_to_string(v) for v in row])
+            # Temporal cells are already warehouse-normalized strings; other
+            # types still go through cell_to_string for CSV safety.
+            writer.writerow(["" if v is None else (v if isinstance(v, str) else cell_to_string(v)) for v in row])
 
 
 def _is_json_type(sf_type: str) -> bool:
@@ -567,6 +569,12 @@ def write_mapped_rows(
     ]
     mapped_rows = _quarantine_unfit_decimals(
         mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    # Destination-native temporal normalize (ISO-Z → TIMESTAMP_NTZ wall clock).
+    from connectors.writer_common import normalize_temporal_cells
+
+    mapped_rows = normalize_temporal_cells(
+        mapped_rows, target_types, target_cols, engine="snowflake"
     )
 
     # Within a single batch, the last occurrence of an upsert key wins.

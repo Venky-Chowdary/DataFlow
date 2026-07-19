@@ -615,7 +615,10 @@ export async function fetchConnectors(): Promise<Connector[]> {
       api_key: c.api_key ? String(c.api_key) : undefined,
       service_account: c.service_account ? String(c.service_account) : undefined,
       created_at: String(c.created_at ?? new Date().toISOString()),
-      last_test_ok: c.last_test_ok === true,
+      // Preserve tri-state: true / false / undefined (never tested).
+      // Coercing null→false made brand-new saves look like "Test failed".
+      last_test_ok:
+        c.last_test_ok === true ? true : c.last_test_ok === false ? false : undefined,
     };
   };
 
@@ -766,57 +769,93 @@ export function streamJobProgress(
   let stopped = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  const normalize = (raw: Record<string, unknown>): JobProgress => ({
-    _id: String(raw._id ?? raw.job_id ?? jobId),
-    source_type: String(raw.source_type ?? ""),
-    source_name: String(raw.source_name ?? raw.source ?? ""),
-    destination_type: String(raw.destination_type ?? ""),
-    destination_database: String(raw.destination_database ?? ""),
-    destination_collection: String(raw.destination_collection ?? ""),
-    status: String(raw.status ?? "pending"),
-    records_processed: Number(raw.records_processed ?? raw.rows_processed ?? 0),
-    total_rows: Number(raw.total_rows ?? 0),
-    progress_pct: Number(raw.progress_pct ?? 0),
-    phase: raw.phase ? String(raw.phase) : undefined,
-    message: raw.message ? String(raw.message) : undefined,
-    operation: raw.operation ? String(raw.operation) : undefined,
-    error: raw.error ? String(raw.error) : undefined,
-    chunk_current: raw.chunk_current != null ? Number(raw.chunk_current) : undefined,
-    chunk_total: raw.chunk_total != null ? Number(raw.chunk_total) : undefined,
-    rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
-    coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
-    rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
-    destination_summary: raw.destination_summary && typeof raw.destination_summary === "object"
+  const normalize = (raw: Record<string, unknown>): JobProgress => {
+    const ds = raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
-      : undefined,
-    preflight: raw.preflight && typeof raw.preflight === "object"
-      ? raw.preflight as JobProgress["preflight"]
-      : undefined,
-    phases: Array.isArray(raw.phases)
-      ? raw.phases
-          .map((p) => {
-            if (!p || typeof p !== "object") return null;
-            const phase = p as Record<string, unknown>;
-            const name = String(phase.name ?? "").trim();
-            const rawStatus = String(phase.status ?? "pending").toLowerCase();
-            const status: "pending" | "active" | "done" | "failed" | "skipped" =
-              rawStatus === "active" || rawStatus === "done" || rawStatus === "failed" || rawStatus === "skipped"
-                ? rawStatus
-                : "pending";
-            if (!name) return null;
-            return {
-              name,
-              status,
-              message: phase.message ? String(phase.message) : undefined,
-            };
-          })
-          .filter((p): p is NonNullable<typeof p> => Boolean(p))
-      : undefined,
-    created_at: String(raw.created_at ?? new Date().toISOString()),
-    updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
-    started_at: raw.started_at ? String(raw.started_at) : undefined,
-    completed_at: raw.completed_at ? String(raw.completed_at) : undefined,
-  });
+      : undefined;
+    const rpsFromRoot = raw.records_per_second != null ? Number(raw.records_per_second) : undefined;
+    const rpsFromDs = ds?.records_per_second != null ? Number(ds.records_per_second) : undefined;
+    return {
+      _id: String(raw._id ?? raw.job_id ?? jobId),
+      source_type: String(raw.source_type ?? ""),
+      source_name: String(raw.source_name ?? raw.source ?? ""),
+      destination_type: String(raw.destination_type ?? ""),
+      destination_database: String(raw.destination_database ?? ""),
+      destination_collection: String(raw.destination_collection ?? ""),
+      status: String(raw.status ?? "pending"),
+      records_processed: Number(raw.records_processed ?? raw.rows_processed ?? 0),
+      total_rows: Number(raw.total_rows ?? 0),
+      progress_pct: Number(raw.progress_pct ?? 0),
+      phase: raw.phase ? String(raw.phase) : undefined,
+      message: raw.message ? String(raw.message) : undefined,
+      operation: raw.operation ? String(raw.operation) : undefined,
+      error: raw.error ? String(raw.error) : undefined,
+      chunk_current: raw.chunk_current != null ? Number(raw.chunk_current) : undefined,
+      chunk_total: raw.chunk_total != null ? Number(raw.chunk_total) : undefined,
+      chunk_size: raw.chunk_size != null
+        ? Number(raw.chunk_size)
+        : ds?.chunk_size != null
+          ? Number(ds.chunk_size)
+          : undefined,
+      rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
+      coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
+      rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
+      destination_summary: ds,
+      load_history_report: raw.load_history_report && typeof raw.load_history_report === "object"
+        ? raw.load_history_report as JobProgress["load_history_report"]
+        : (
+          ds?.load_history_report && typeof ds.load_history_report === "object"
+            ? ds.load_history_report as JobProgress["load_history_report"]
+            : undefined
+        ),
+      preflight: raw.preflight && typeof raw.preflight === "object"
+        ? raw.preflight as JobProgress["preflight"]
+        : undefined,
+      reconciliation: raw.reconciliation && typeof raw.reconciliation === "object"
+        ? raw.reconciliation as JobProgress["reconciliation"]
+        : undefined,
+      records_per_second: Number.isFinite(rpsFromRoot as number)
+        ? rpsFromRoot
+        : Number.isFinite(rpsFromDs as number)
+          ? rpsFromDs
+          : undefined,
+      cdc_lag_seconds: raw.cdc_lag_seconds != null ? Number(raw.cdc_lag_seconds) : null,
+      replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
+      cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
+      cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
+      streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
+      notifications: Array.isArray(raw.notifications)
+        ? raw.notifications as JobProgress["notifications"]
+        : undefined,
+      phases: Array.isArray(raw.phases)
+        ? raw.phases
+            .map((p) => {
+              if (!p || typeof p !== "object") return null;
+              const phase = p as Record<string, unknown>;
+              const name = String(phase.name ?? "").trim();
+              const rawStatus = String(phase.status ?? "pending").toLowerCase();
+              const status: "pending" | "active" | "done" | "failed" | "skipped" =
+                rawStatus === "active" || rawStatus === "done" || rawStatus === "failed" || rawStatus === "skipped"
+                  ? rawStatus
+                  : "pending";
+              if (!name) return null;
+              return {
+                name,
+                status,
+                message: phase.message ? String(phase.message) : undefined,
+                started_at: phase.started_at ? String(phase.started_at) : undefined,
+                ended_at: phase.ended_at ? String(phase.ended_at) : undefined,
+                elapsed_ms: phase.elapsed_ms != null ? Number(phase.elapsed_ms) : undefined,
+              };
+            })
+            .filter((p): p is NonNullable<typeof p> => Boolean(p))
+        : undefined,
+      created_at: String(raw.created_at ?? new Date().toISOString()),
+      updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
+      started_at: raw.started_at ? String(raw.started_at) : undefined,
+      completed_at: raw.completed_at ? String(raw.completed_at) : undefined,
+    };
+  };
 
   const startPolling = () => {
     if (pollTimer) return;
@@ -1014,6 +1053,8 @@ export async function saveConnector(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
+  /** Persist form Test result so the list matches (true/false). */
+  last_test_ok?: boolean;
 }): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
   const res = await apiFetch(`${API_BASE}/connectors/saved`, {
@@ -1030,9 +1071,11 @@ export async function saveConnector(payload: {
     host: String(data.host ?? payload.host),
     port: Number(data.port ?? payload.port),
     database: String(data.database ?? payload.database),
+    role: String(data.role ?? body.role ?? "both"),
     status: String(data.status ?? "configured"),
     created_at: String(data.created_at ?? new Date().toISOString()),
-    last_test_ok: data.last_test_ok === true,
+    last_test_ok:
+      data.last_test_ok === true ? true : data.last_test_ok === false ? false : undefined,
   };
 }
 
@@ -1058,6 +1101,7 @@ export async function updateConnector(
     private_key?: string;
     endpoint_url?: string;
     path_style?: boolean;
+    last_test_ok?: boolean;
   },
 ): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };

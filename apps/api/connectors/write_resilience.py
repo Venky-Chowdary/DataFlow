@@ -94,9 +94,28 @@ def proxy_stream_batch_size(
 def is_connection_lost(exc: BaseException | str) -> bool:
     text = str(exc).lower()
     name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
+    try:
+        from connectors.sql_temporal import is_sql_data_error
+    except ImportError:
+        is_sql_data_error = lambda _e: False  # noqa: E731
+    # Never treat bad cell values as a dropped socket — that burns reconnect budget
+    # and fails the whole job instead of quarantining the row.
+    if is_sql_data_error(exc):
+        return False
     if any(token in name for token in ("operational", "interface", "timeout", "connection")):
         # Exclude contract/data errors that happen to use OperationalError wrappers.
-        if any(bad in text for bad in ("syntax error", "undefined column", "does not exist", "duplicate key")):
+        if any(
+            bad in text
+            for bad in (
+                "syntax error",
+                "undefined column",
+                "does not exist",
+                "duplicate key",
+                "incorrect datetime",
+                "data truncation",
+                "out of range",
+            )
+        ):
             return "server closed" in text or "connection reset" in text or "broken pipe" in text
         return True
     return any(sig in text for sig in CONNECTION_LOST_SIGNALS)

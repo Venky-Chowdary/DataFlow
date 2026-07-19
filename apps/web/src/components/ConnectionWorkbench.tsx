@@ -7,6 +7,11 @@ import { Connector } from "../lib/types";
 import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
 import { connectorHealthLabel, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { introspectTransferEndpoints, type EndpointIntrospection } from "../lib/api";
+import {
+  formatConnectorRoleLabel,
+  resolveConnectorUsage,
+  resolveDisplayRole,
+} from "../lib/topologyUtils";
 
 export const CONNECTION_TABS = ["Status", "Streams", "Schema", "Mappings", "Sync History", "Settings"] as const;
 
@@ -37,6 +42,23 @@ export function ConnectionWorkbench({
   const [schemaObjects, setSchemaObjects] = useState<SchemaObject[]>([]);
   const [schemaError, setSchemaError] = useState("");
   const [schemaLoading, setSchemaLoading] = useState(false);
+
+  const roleLabel = selectedConnection
+    ? formatConnectorRoleLabel(
+        resolveDisplayRole(
+          selectedConnection,
+          workbench?.relatedJobs ?? [],
+          workbench?.relatedSchedules ?? [],
+        ),
+      )
+    : "";
+  const usageHint = selectedConnection
+    ? resolveConnectorUsage(
+        selectedConnection,
+        workbench?.relatedJobs ?? [],
+        workbench?.relatedSchedules ?? [],
+      ).hint
+    : null;
 
   const loadSchema = useCallback(async () => {
     if (!selectedConnection?.id) {
@@ -250,7 +272,10 @@ export function ConnectionWorkbench({
               </div>
               <div>
                 <strong>Role</strong>
-                <span>{selectedConnection.role ?? "source or destination"} · inferred from usage.</span>
+                <span>
+                  {roleLabel}
+                  {usageHint ? ` · ${usageHint}` : " · usable as source or destination"}
+                </span>
               </div>
               <div>
                 <strong>Edit mappings</strong>

@@ -3,16 +3,6 @@ import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
 
-export interface QuarantinePanelProps {
-  jobId: string;
-  rejectedRows?: number;
-  /** Distinct rows where a value was coerced to NULL (kept, but fidelity lost). */
-  coercedNullRows?: number;
-  initiallyOpen?: boolean;
-  /** When true, always attempt load (failed preflight jobs often have issue rows). */
-  autoLoad?: boolean;
-}
-
 type QuarantineRow = {
   row?: number;
   column?: string;
@@ -24,6 +14,22 @@ type QuarantineRow = {
   chars?: string[];
   suggested_transform?: string;
 };
+
+export interface QuarantinePanelProps {
+  jobId: string;
+  rejectedRows?: number;
+  /** Distinct rows where a value was coerced to NULL (kept, but fidelity lost). */
+  coercedNullRows?: number;
+  initiallyOpen?: boolean;
+  /** When true, always attempt load (failed preflight jobs often have issue rows). */
+  autoLoad?: boolean;
+  /**
+   * Inline details from the job payload (SSE / complete). Used immediately so the
+   * user sees findings even before the quarantine API round-trip, and as a fallback
+   * when the API returns empty.
+   */
+  initialDetails?: QuarantineRow[];
+}
 
 function summarizeReasons(rows: QuarantineRow[]) {
   const counts = new Map<string, number>();
@@ -61,17 +67,18 @@ export function QuarantinePanel({
   coercedNullRows,
   initiallyOpen = false,
   autoLoad = false,
+  initialDetails,
 }: QuarantinePanelProps) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(initiallyOpen || autoLoad);
+  const [open, setOpen] = useState(initiallyOpen || autoLoad || Boolean(initialDetails?.length));
   const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(Boolean(initialDetails?.length));
   const [exporting, setExporting] = useState(false);
   const [replaying, setReplaying] = useState(false);
-  const [rows, setRows] = useState<QuarantineRow[]>([]);
-  const [issueCount, setIssueCount] = useState(0);
-  const [rowCount, setRowCount] = useState(rejectedRows ?? 0);
-  const [source, setSource] = useState<string>("none");
+  const [rows, setRows] = useState<QuarantineRow[]>(() => initialDetails ?? []);
+  const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
+  const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
+  const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [replayResult, setReplayResult] = useState<{
@@ -84,13 +91,23 @@ export function QuarantinePanel({
     setLoading(true);
     try {
       const data = await fetchJobQuarantine(jobId);
-      setRows(data.quarantine || []);
-      setIssueCount(data.issue_count ?? data.quarantine?.length ?? 0);
-      setRowCount(data.rejected_rows ?? rejectedRows ?? 0);
-      setSource(data.source || "none");
+      const apiRows = data.quarantine || [];
+      // Prefer API rows when present; keep inline job details as fail-safe.
+      const next = apiRows.length ? apiRows : (initialDetails ?? []);
+      setRows(next);
+      setIssueCount(data.issue_count ?? next.length);
+      setRowCount(data.rejected_rows ?? rejectedRows ?? next.length);
+      setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
       setOpen(true);
       setLoaded(true);
     } catch (e) {
+      if (initialDetails?.length) {
+        setRows(initialDetails);
+        setIssueCount(initialDetails.length);
+        setSource("job");
+        setOpen(true);
+        setLoaded(true);
+      }
       toast({ title: "Could not load quarantine", message: (e as Error).message, tone: "error" });
     } finally {
       setLoading(false);
@@ -202,6 +219,12 @@ export function QuarantinePanel({
               </span>
             )}
           </div>
+          {source === "preflight" && (
+            <p className="df2-label-hint" style={{ margin: "6px 0 0" }}>
+              These rows were caught in Validate before write — Replay applies only to write-time
+              rejects. Fix mappings or use Strip controls / Quarantine on the Validate step, then re-run.
+            </p>
+          )}
         </div>
       </div>
 
@@ -289,9 +312,16 @@ export function QuarantinePanel({
               <div className="df2-quarantine-inspect-empty">Loading quarantined rows…</div>
             ) : rows.length === 0 ? (
               <div className="df2-quarantine-inspect-empty">
-                {displayRowCount > 0
-                  ? `${displayRowCount.toLocaleString()} row(s) were marked quarantined on this job, but row-level findings were not stored. Re-run after the latest API deploy so findings are persisted.`
-                  : "No row-level findings were stored for this job. If Validate blocked on encoding, re-run after deploying the latest API so preflight issues are saved into quarantine."}
+                <p>
+                  {displayRowCount > 0
+                    ? `${displayRowCount.toLocaleString()} row(s) were marked quarantined on this job, but row-level findings were not persisted on the control plane.`
+                    : "No row-level findings were stored for this job yet."}
+                </p>
+                <p>
+                  What to do next: open <strong>Validate</strong> for Strip controls / Quarantine / Fix bad data,
+                  confirm the API build includes write-time quarantine persistence, then re-run the transfer.
+                  Export CSV stays available once findings are saved.
+                </p>
               </div>
             ) : (
               <table className="df2-query-table df2-quarantine-table">
@@ -302,6 +332,7 @@ export function QuarantinePanel({
                     <th>Target</th>
                     <th>Value</th>
                     <th>Reason</th>
+                    <th>Suggested fix</th>
                     <th>Policy</th>
                     <th />
                   </tr>
@@ -317,6 +348,9 @@ export function QuarantinePanel({
                         {r.chars?.length ? ` (${r.chars.join(", ")})` : ""}
                       </td>
                       <td>{r.reason || "—"}</td>
+                      <td className="df2-quarantine-fix" title={r.suggested_transform || ""}>
+                        {r.suggested_transform || "—"}
+                      </td>
                       <td>{r.policy || "—"}</td>
                       <td>
                         {canReplay && (
