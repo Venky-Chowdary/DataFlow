@@ -146,7 +146,7 @@ railway up --service dataflow-web -c deploy/railway/web.toml
 | Jobs empty / transfer fails | Confirm MongoDB reference is linked to `MONGODB_URI` |
 | Connectors lost after deploy | Add **Volume** mounted at `/data` |
 | Build timeout | API image is large (~2GB RAM recommended) — upgrade Railway plan if needed |
-| 502 on API | Boot takes 60–120s (ML models) — healthcheck timeout is 300s |
+| 502 on API | `/health` is fast liveness; RAG warm-up runs in background. If deploy fails for 5m, check Deploy Logs for `[FATAL] Production config` or crash — path is still `/health`. |
 
 ---
 

@@ -150,7 +150,10 @@ def _use_mongo() -> bool:
 
 
 def connector_persistence_status() -> dict[str, Any]:
-    """Health signal for connector persistence (file and/or Mongo)."""
+    """Health signal for connector persistence (file and/or Mongo).
+
+    Uses a short socket timeout so readiness probes cannot hang the request.
+    """
     backend = _resolve_backend()
     path = _store_path()
     file_ok = path.exists()
@@ -159,7 +162,12 @@ def connector_persistence_status() -> dict[str, Any]:
     if backend == "mongo":
         try:
             coll = _mongo_collection()
-            count = int(coll.estimated_document_count())
+            # Prefer a bounded ping over an unbounded collection scan.
+            coll.database.client.admin.command("ping", maxTimeMS=2000)
+            try:
+                count = int(coll.estimated_document_count(maxTimeMS=2000))
+            except TypeError:
+                count = int(coll.estimated_document_count())
             mongo_ok = True
         except Exception as exc:
             return {

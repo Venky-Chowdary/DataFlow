@@ -1,6 +1,6 @@
 {
-  "run_id": "fdc24429",
-  "completed_at": "2026-07-19T03:27:59.857047+00:00",
+  "run_id": "eba38692",
+  "completed_at": "2026-07-19T11:51:02.172680+00:00",
   "metrics": {
     "universal_schemas": 6239,
     "upload_schemas": 4805,
@@ -12,12 +12,12 @@
       "estimated_schema_profiles": 2215,
       "description": "620+ connectors \u00d7 variants + industry templates"
     },
-    "conversation_examples": 14209,
-    "agent_action_examples": 820,
+    "conversation_examples": 14216,
+    "agent_action_examples": 827,
     "data_grounded_examples": 120,
     "catalog_docs_total": 710,
     "semantic_examples": 2142,
-    "rag_documents_ingested": 15060,
+    "rag_documents_ingested": 15067,
     "catalog_docs_ingested": 710,
     "artifact_paths": {
       "conversations": "/Users/venkychowdary/DataFlow/apps/api/src/ai/training/../../../data/training/copilot/conversations.jsonl",
@@ -25,15 +25,15 @@
       "feeder_status": "/Users/venkychowdary/DataFlow/apps/api/src/ai/training/../../../data/training/copilot/feeder_status.json",
       "openai_finetune": "/Users/venkychowdary/DataFlow/apps/api/src/ai/training/../../../data/training/openai_finetune.jsonl",
       "anthropic_finetune": "/Users/venkychowdary/DataFlow/apps/api/src/ai/training/../../../data/training/anthropic_finetune.jsonl",
-      "openai_count": 14209
+      "openai_count": 14216
     },
-    "openai_finetune_examples": 14209,
+    "openai_finetune_examples": 14216,
     "copilot_evaluation": {
-      "total_examples": 14209,
+      "total_examples": 14216,
       "intent_coverage": 1.0,
       "intents": {
         "greeting": 1,
-        "transfer_help": 7063,
+        "transfer_help": 7070,
         "mapping_help": 6307,
         "pii_compliance": 834,
         "connector_help": 1,
