@@ -161,13 +161,24 @@ export function DashboardPage({
               tone: "muted",
               title: "Most recent transfer job",
             },
-            {
-              label: "Usage (30d)",
-              value: usageRows != null ? usageRows.toLocaleString() : "—",
-              icon: "trend",
-              tone: usageRows && usageRows > 0 ? "ok" : "muted",
-              title: "Metered rows written in the last 30 days",
-            },
+            ...(usageRows != null && usageRows > 0
+              ? [{
+                  label: "Usage (30d)",
+                  value: usageRows.toLocaleString(),
+                  icon: "trend",
+                  tone: "ok" as const,
+                  title: "Metered rows written in the last 30 days",
+                }]
+              : []),
+            ...(cdcLagSeconds != null
+              ? [{
+                  label: "CDC lag",
+                  value: `${cdcLagSeconds.toFixed(1)}s`,
+                  icon: "activity",
+                  tone: cdcLagSeconds > 60 ? ("warn" as const) : ("muted" as const),
+                  title: "Worst heartbeat lag on recent CDC jobs",
+                }]
+              : []),
           ]}
           actions={
             onOpenJobs && jobs.length > 0 ? (
@@ -193,6 +204,7 @@ export function DashboardPage({
             sub={jobs.length ? `${completed.length} of ${jobs.length} jobs` : "No jobs yet"}
             icon="check"
             tone="green"
+            ring={successRate}
           />
           <MetricGlassTile
             label="Connections"
@@ -200,6 +212,7 @@ export function DashboardPage({
             sub={`${healthyConnectors} healthy`}
             icon="connectors"
             tone={healthyConnectors < connectors.length ? "amber" : "default"}
+            ring={connectors.length ? Math.round((healthyConnectors / connectors.length) * 100) : null}
           />
           <MetricGlassTile
             label="Catalog live"
@@ -213,17 +226,6 @@ export function DashboardPage({
             }
             icon="activity"
             tone="teal"
-          />
-          <MetricGlassTile
-            label="CDC lag"
-            value={cdcLagSeconds != null ? `${cdcLagSeconds.toFixed(1)}s` : "—"}
-            sub={
-              cdcLagSeconds != null
-                ? "Worst heartbeat lag on recent CDC jobs"
-                : "No CDC lag reported yet"
-            }
-            icon="activity"
-            tone={cdcLagSeconds != null && cdcLagSeconds > 60 ? "amber" : "default"}
           />
         </section>
 

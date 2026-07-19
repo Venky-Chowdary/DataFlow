@@ -246,7 +246,11 @@ function AppShell({
   }, [searchFocus]);
 
   const userInitial = userEmail ? userEmail.charAt(0).toUpperCase() : "U";
-  const userShort = userEmail ? userEmail.split("@")[0] : "User";
+  const userShort = (() => {
+    const raw = userEmail ? userEmail.split("@")[0] : "User";
+    if (!raw) return "User";
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  })();
 
   const openModal = (type?: string) => {
     setEditingConnector(null);

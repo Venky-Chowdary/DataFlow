@@ -276,21 +276,20 @@
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px 20px;
-  padding: 12px 16px;
-  margin: 0 0 16px;
+  gap: 12px 16px;
+  padding: 14px 16px;
+  margin: 0 0 14px;
   border: 1px solid var(--df-border, #e6e9ee);
-  border-radius: var(--df-radius-xl, 14px);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.72));
-  backdrop-filter: saturate(1.15) blur(6px);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface, #fff);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 
 .df2-app .df2-context-bar-stats {
   display: flex;
   align-items: stretch;
   flex-wrap: wrap;
-  gap: 8px 6px;
+  gap: 0;
   min-width: 0;
 }
 
@@ -298,21 +297,28 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 16px 4px 12px;
+  padding: 6px 18px 6px 14px;
   border-right: 1px solid var(--df-border, #e6e9ee);
+  min-height: 48px;
+  box-sizing: border-box;
+}
+
+.df2-app .df2-context-stat:first-child {
+  padding-left: 4px;
 }
 
 .df2-app .df2-context-stat:last-child {
   border-right: none;
+  padding-right: 4px;
 }
 
 .df2-app .df2-context-stat-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--df-radius-md, 8px);
   color: var(--df-brand-hover, #0f766e);
   background: var(--df-brand-muted, #f0fdfa);
   flex: 0 0 auto;
@@ -321,24 +327,28 @@
 .df2-app .df2-context-stat-body {
   display: flex;
   flex-direction: column;
-  line-height: 1.1;
+  justify-content: center;
+  gap: 3px;
+  line-height: 1.25;
   min-width: 0;
 }
 
 .df2-app .df2-context-stat-value {
-  font-size: 18px;
-  font-weight: 720;
+  font-size: 17px;
+  font-weight: 750;
   letter-spacing: -0.02em;
+  line-height: 1.2;
   color: var(--df-text-primary, #0f172a);
   font-variant-numeric: tabular-nums;
 }
 
 .df2-app .df2-context-stat-label {
-  margin-top: 2px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
+  margin-top: 0;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+  line-height: 1.2;
   color: var(--df-text-tertiary, #94a3b8);
   white-space: nowrap;
 }
@@ -371,13 +381,14 @@
 
 @media (max-width: 720px) {
   .df2-app .df2-context-bar {
-    padding: 10px 12px;
+    padding: 12px;
   }
   .df2-app .df2-context-stat {
-    padding: 4px 12px 4px 8px;
+    padding: 6px 12px;
+    min-height: 44px;
   }
   .df2-app .df2-context-stat-value {
-    font-size: 16px;
+    font-size: 15px;
   }
   .df2-app .df2-context-bar-actions {
     width: 100%;
@@ -389,31 +400,34 @@
   gap: 16px;
 }
 
-/* Uniform KPI tiles — equal height, equal padding, no ragged row */
+/* KPI strip — four equal panel tiles, one row */
 .df2-app .df2-overview-v3-kpis {
-  gap: 14px;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .df2-app .df2-overview-v3 .df2-metric-glass {
-  min-height: 104px;
-  padding: 16px 18px;
-  border-radius: 14px;
+  min-height: 112px;
+  height: auto;
+  padding: 16px 18px 18px;
+  border-radius: var(--df-radius-panel, 12px);
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-start;
 }
 
 /* Cards share one radius + one head rhythm so the grid reads uniform */
 .df2-app .df2-overview-v3-card {
-  border-radius: 14px;
+  border-radius: var(--df-radius-panel, 12px);
   display: flex;
   flex-direction: column;
 }
 
 .df2-app .df2-overview-v3-card-head {
   padding: 14px 18px;
-  align-items: center;
-  min-height: 56px;
+  align-items: flex-start;
+  min-height: 0;
 }
 
 .df2-app .df2-overview-v3-card-body {
@@ -452,10 +466,10 @@
   }
 }
 
-/* Tablet: KPIs to 2-up, stacks single column (kept from base, reinforced) */
+/* Keep four KPIs on one row until narrow tablets */
 @media (max-width: 1100px) {
   .df2-app .df2-overview-v3-kpis {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .df2-app .df2-overview-v3-analytics,
   .df2-app .df2-overview-v3-workspace {
@@ -463,6 +477,12 @@
   }
   .df2-app .df2-overview-v3-analytics > .df2-overview-v3-card {
     min-height: 240px;
+  }
+}
+
+@media (max-width: 820px) {
+  .df2-app .df2-overview-v3-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

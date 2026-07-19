@@ -4420,97 +4420,97 @@ textarea.df2-pilot-composer textarea {
 
 .df2-metric-glass {
   position: relative;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-rows: auto auto;
-  gap: 2px 12px;
-  padding: 16px 16px 14px;
-  border-radius: 14px;
-  background: linear-gradient(160deg, #ffffff 0%, #f8fafc 55%, #f1f5f9 100%);
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.95) inset,
-    0 8px 24px rgba(15, 23, 42, 0.06),
-    0 2px 4px rgba(15, 23, 42, 0.03);
-  overflow: visible;
-  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-border, #e2e8f0);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+  overflow: hidden;
+  min-height: 108px;
 }
 
 .df2-metric-glass::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.9), transparent);
-  pointer-events: none;
+  display: none;
 }
 
 .df2-metric-glass-teal {
-  border-color: rgba(153, 246, 228, 0.6);
-  background: linear-gradient(160deg, #f0fdfa 0%, #ffffff 50%, #f8fafc 100%);
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 18%, var(--df-border, #e2e8f0));
+  background: linear-gradient(180deg, var(--df-brand-muted, #f0fdfa) 0%, #fff 72%);
 }
 
 .df2-metric-glass-green .df2-metric-glass-value {
-  color: #059669;
+  color: var(--df-success, #059669);
 }
 
 .df2-metric-glass-amber {
-  border-color: rgba(253, 230, 138, 0.7);
+  border-color: color-mix(in srgb, var(--df-warning, #d97706) 18%, var(--df-border, #e2e8f0));
+}
+
+.df2-metric-glass-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
 }
 
 .df2-metric-glass-icon {
-  grid-row: 1 / span 2;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 11px;
-  background: linear-gradient(145deg, #f0fdfa, #ccfbf1);
-  color: var(--df-brand, #0f766e);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.8) inset,
-    0 2px 6px rgba(15, 118, 110, 0.12);
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-hover, #0f766e);
 }
 
 .df2-metric-glass-body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 
 .df2-metric-glass-label {
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--df-text-muted, #94a3b8);
+  letter-spacing: 0.04em;
+  color: var(--df-text-tertiary, #94a3b8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .df2-metric-glass-value {
-  font-size: 1.5rem;
+  font-size: 1.45rem;
   font-weight: 800;
   line-height: 1.1;
+  letter-spacing: -0.03em;
   color: var(--df-text-primary, #0f172a);
   font-variant-numeric: tabular-nums;
 }
 
 .df2-metric-glass-sub {
-  grid-column: 2;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--df-text-secondary, #64748b);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .df2-metric-spark {
   position: absolute;
-  right: 12px;
-  bottom: 10px;
-  width: 72px;
-  height: 24px;
-  opacity: 0.45;
+  right: 14px;
+  bottom: 16px;
+  width: 64px;
+  height: 22px;
+  opacity: 0.5;
   color: var(--df-brand, #0f766e);
   pointer-events: none;
 }

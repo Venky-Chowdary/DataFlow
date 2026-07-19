@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { FilterBar } from "../components/ui/FilterBar";
+import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageContextBar } from "../components/ui/PageContextBar";
@@ -25,6 +27,8 @@ import {
 
 const CONTRACTS_CHANGED = "df2:contracts-changed";
 const LAST_CONTRACT_KEY = "df2.last-saved-contract";
+
+type StatusFilter = "all" | "signed" | "draft" | "broken" | "deprecated";
 
 function statusBadge(status: string) {
   const s = (status || "").toLowerCase();
@@ -66,6 +70,8 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [contractTab, setContractTab] = useState<ContractTab>(CONTRACT_TABS[0]);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const pendingReload = useRef(false);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -94,7 +100,6 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
     } catch (e) {
       const message = (e as Error).message || "Could not load contracts";
       setLoadError(message);
-      // Keep any optimistic/local rows so a save still appears if list fetch fails.
       setContracts((prev) => {
         const optimistic = readOptimisticContract();
         if (optimistic) return upsertContract(prev, optimistic);
@@ -141,7 +146,20 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
   const signed = contracts.filter((c) => c.status === "signed").length;
   const drafts = contracts.filter((c) => c.status === "draft").length;
   const broken = contracts.filter((c) => c.status === "broken").length;
+  const deprecated = contracts.filter((c) => c.status === "deprecated").length;
   const selectedContract = contracts.find((c) => c.id === selectedId) ?? null;
+
+  const filteredContracts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return contracts.filter((c) => {
+      const status = (c.status || "draft").toLowerCase();
+      if (statusFilter !== "all" && status !== statusFilter) return false;
+      if (!q) return true;
+      return [c.name, c.id, String(c.version), status]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(q));
+    });
+  }, [contracts, query, statusFilter]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -192,11 +210,6 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       title="Contracts"
       kicker="Platform"
       description="Signed schema agreements that gate transfers and detect drift."
-      actions={
-        <Button size="sm" onClick={() => void load()} leadingIcon={<DtIcon name="activity" size={14} />}>
-          Refresh
-        </Button>
-      }
     >
       <PageFrame className="df2-contracts-workspace">
         {loadError && contracts.length === 0 ? (
@@ -233,68 +246,93 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
               ]}
             />
             <PageToolbar
-              actions={
-                <Button size="sm" onClick={() => void load()} leadingIcon={<DtIcon name="activity" size={14} />}>
-                  Refresh
-                </Button>
+              searchValue={query}
+              onSearchChange={setQuery}
+              searchPlaceholder="Search contracts by name, version, or status…"
+              filters={
+                <FilterBar variant="inline" ariaLabel="Filter contracts">
+                  <FilterTabs
+                    ariaLabel="Filter contract status"
+                    value={statusFilter}
+                    onChange={setStatusFilter}
+                    items={[
+                      { id: "all", label: "All", count: contracts.length },
+                      { id: "signed", label: "Signed", count: signed },
+                      { id: "draft", label: "Draft", count: drafts },
+                      { id: "broken", label: "Broken", count: broken },
+                      ...(deprecated > 0
+                        ? [{ id: "deprecated" as const, label: "Deprecated", count: deprecated }]
+                        : []),
+                    ]}
+                  />
+                </FilterBar>
               }
             />
-            <div className="df2-contract-rows" role="list" aria-label="Data contracts">
-              <div className="df2-contract-rows-head" aria-hidden>
-                <span className="df2-contract-rows-head-name">Contract</span>
-                <span>Version</span>
-                <span>Schema</span>
-                <span>Status</span>
-                <span />
-              </div>
-              {contracts.map((c) => {
-                const badge = statusBadge(c.status);
-                const breaker = breakers[c.id];
-                const selected = drawerOpen && selectedId === c.id;
-                return (
-                  <div
-                    key={c.id}
-                    className={`df2-contract-row df2-card-interactive${selected ? " selected" : ""}`}
-                    onClick={() => openDrawer(c.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        openDrawer(c.id);
-                      }
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    aria-current={selected || undefined}
-                  >
-                    <span
-                      className={`df2-health-dot ${c.status === "signed" ? "ok" : c.status === "broken" ? "err" : ""}`}
-                      aria-hidden
-                    />
-                    <div className="df2-contract-row-identity">
-                      <span className="df2-contract-row-name" title={c.name}>{c.name}</span>
-                      <span className="df2-contract-row-meta">
-                        {breaker ? `Breaker ${breaker}` : "Schema agreement"}
+            {filteredContracts.length === 0 ? (
+              <EmptyState
+                compact
+                icon="search"
+                title="No matches"
+                description="No contracts match the current search or filters."
+              />
+            ) : (
+              <div className="df2-contract-rows" role="list" aria-label="Data contracts">
+                <div className="df2-contract-rows-head" aria-hidden>
+                  <span className="df2-contract-rows-head-name">Contract</span>
+                  <span>Version</span>
+                  <span>Schema</span>
+                  <span>Status</span>
+                  <span />
+                </div>
+                {filteredContracts.map((c) => {
+                  const badge = statusBadge(c.status);
+                  const breaker = breakers[c.id];
+                  const selected = drawerOpen && selectedId === c.id;
+                  return (
+                    <div
+                      key={c.id}
+                      className={`df2-contract-row df2-card-interactive${selected ? " selected" : ""}`}
+                      onClick={() => openDrawer(c.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openDrawer(c.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-current={selected || undefined}
+                    >
+                      <span
+                        className={`df2-health-dot ${c.status === "signed" ? "ok" : c.status === "broken" ? "err" : ""}`}
+                        aria-hidden
+                      />
+                      <div className="df2-contract-row-identity">
+                        <span className="df2-contract-row-name" title={c.name}>{c.name}</span>
+                        <span className="df2-contract-row-meta">
+                          {breaker ? `Breaker ${breaker}` : "Schema agreement"}
+                        </span>
+                      </div>
+                      <span className="df2-contract-row-version">v{c.version}</span>
+                      <span className="df2-contract-row-schema">
+                        {c.columns?.length || 0} cols · {c.mappings?.length || 0} maps
                       </span>
+                      <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
+                      <div className="df2-contract-row-quick" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="df2-contract-row-open"
+                          onClick={() => openDrawer(c.id)}
+                          aria-label={`Open ${c.name} details`}
+                        >
+                          <DtIcon name="chevron-right" size={16} />
+                        </button>
+                      </div>
                     </div>
-                    <span className="df2-contract-row-version">v{c.version}</span>
-                    <span className="df2-contract-row-schema">
-                      {c.columns?.length || 0} cols · {c.mappings?.length || 0} maps
-                    </span>
-                    <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
-                    <div className="df2-contract-row-quick" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        type="button"
-                        className="df2-contract-row-open"
-                        onClick={() => openDrawer(c.id)}
-                        aria-label={`Open ${c.name} details`}
-                      >
-                        <DtIcon name="chevron-right" size={16} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
 
             <ContractDetailDrawer
               open={drawerOpen && Boolean(selectedContract)}
