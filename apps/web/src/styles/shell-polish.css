@@ -3029,9 +3029,22 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-structure-empty-rows {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
   margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px dashed #f59e0b;
+  background: #fffbeb;
   font-size: 12px;
-  color: #64748b;
+  color: #92400e;
+}
+
+.df2-structure-empty-rows p {
+  margin: 0;
+  line-height: 1.45;
 }
 
 .df2-structure-pagination {

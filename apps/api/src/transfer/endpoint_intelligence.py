@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from connectors.mongodb_common import _mongo_client
 
 from .adapters import (
@@ -369,11 +371,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.redis_reader import read_keys_batch
 
             pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
-            batch = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
+            result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
+            batch = result[0] if isinstance(result, tuple) else result
             out["columns"] = batch.headers
             out["schema"] = {c: "string" for c in batch.headers}
             out["row_estimate"] = (batch.total_rows or 0)
             out["table_exists"] = (batch.total_rows or 0) > 0
+            _attach_batch_sample_rows(out, batch)
             return
 
         if fmt == "s3":
@@ -387,6 +391,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 out["schema"] = {c: "string" for c in batch.headers}
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
+                _attach_batch_sample_rows(out, batch)
             return
 
         if fmt == "gcs":
@@ -400,12 +405,14 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 out["schema"] = {c: "string" for c in batch.headers}
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
+                _attach_batch_sample_rows(out, batch)
             return
 
         if fmt == "dynamodb":
             from connectors.dynamodb_reader import (
                 describe_table_schema,
                 estimate_item_count,
+                read_all_paginated,
             )
 
             table = endpoint.database or endpoint.table
@@ -417,13 +424,26 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     out["row_estimate"] = estimate_item_count(cfg, table)
                     out["table_exists"] = True
                 except Exception:
-                    from connectors.dynamodb_reader import read_all_paginated
-
+                    out["columns"] = []
+                    out["schema"] = {}
+                    out["table_exists"] = False
+                # Always load a bounded item sample for Validate dry-run
+                # (describe_table alone previously left sample_data empty).
+                try:
                     batch = read_all_paginated(cfg, table, limit=sample_limit)
-                    out["columns"] = batch.headers
-                    out["schema"] = {c: "string" for c in batch.headers}
-                    out["row_estimate"] = (batch.total_rows or 0)
-                    out["table_exists"] = (batch.total_rows or 0) > 0
+                    if batch.headers:
+                        out["columns"] = out.get("columns") or batch.headers
+                        if not out.get("schema"):
+                            out["schema"] = {c: "string" for c in batch.headers}
+                        out["table_exists"] = True
+                        if not out.get("row_estimate"):
+                            out["row_estimate"] = batch.total_rows or len(batch.rows)
+                        _attach_batch_sample_rows(out, batch)
+                except Exception as sample_exc:
+                    out["sample_error"] = str(sample_exc)
+                    out["message"] = (
+                        f"{out.get('message', '')} · DynamoDB sample failed: {sample_exc}"
+                    ).strip(" ·")
             return
 
         if fmt == "elasticsearch":
@@ -431,11 +451,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
 
             index = endpoint.database or endpoint.table
             if index:
-                batch = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
+                result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
+                batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
                 out["schema"] = {c: "string" for c in batch.headers}
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = (batch.total_rows or 0) > 0
+                _attach_batch_sample_rows(out, batch)
             return
 
         table = endpoint.table or endpoint.collection
@@ -448,6 +470,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             out["schema"] = schema_map
             out["table_exists"] = True
             out["message"] = out.get("message") or f"Found existing table `{table}`"
+            # Schema-only is not enough for Validate dry-run — fetch a bounded
+            # sample so Transfer Studio can run transform integrity checks.
+            _attach_sql_sample_rows(out, endpoint, cfg, fmt, table, sample_limit)
         else:
             # Missing table is a valid destination — writers CREATE TABLE IF NOT EXISTS.
             out["columns"] = []
@@ -465,6 +490,107 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["message"] = f"{out.get('message', '')} · schema probe: {e}".strip(" ·")
+
+
+def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 10) -> None:
+    """Attach JSON-safe sample rows from a ReadBatch for Validate dry-run."""
+    headers = list(batch.headers or [])
+    rows = list(batch.rows or [])
+    safe: list[dict] = []
+    for row in rows[:preview]:
+        if isinstance(row, dict):
+            safe.append({h: cell_to_string(row.get(h, "")) for h in headers})
+        else:
+            safe.append({
+                h: cell_to_string(row[i] if i < len(row) else "")
+                for i, h in enumerate(headers)
+            })
+    out["sample_data"] = safe
+    out["data"] = safe
+    if safe:
+        out["message"] = (
+            f"{out.get('message', '')} · {len(safe)} sample row(s) loaded"
+        ).strip(" ·")
+    elif headers:
+        out["message"] = (
+            f"{out.get('message', '')} · source returned 0 sample rows (empty)"
+        ).strip(" ·")
+
+
+def _attach_sql_sample_rows(
+    out: dict,
+    endpoint: EndpointConfig,
+    cfg: dict,
+    fmt: str,
+    table: str,
+    sample_limit: int,
+) -> None:
+    """Read up to ``sample_limit`` rows for SQL/warehouse sources (Snowflake, PG, …).
+
+    Introspection historically returned columns only; dry-run then blocked with
+    \"No sample rows available\". This attaches ``data`` / ``sample_data`` for
+    the Validate step without scanning the full table.
+    """
+    try:
+        from .adapters import read_source_database
+
+        sample_ep = EndpointConfig(
+            kind="database",
+            format=fmt,
+            connector_id=endpoint.connector_id,
+            host=endpoint.host or cfg.get("host", ""),
+            port=int(endpoint.port or cfg.get("port") or 0),
+            database=endpoint.database or cfg.get("database", ""),
+            schema=endpoint.schema or cfg.get("schema", ""),
+            table=table,
+            collection=endpoint.collection,
+            username=endpoint.username or cfg.get("username", ""),
+            password=endpoint.password or cfg.get("password", ""),
+            connection_string=endpoint.connection_string or cfg.get("connection_string", ""),
+            warehouse=endpoint.warehouse or cfg.get("warehouse", ""),
+            ssl=bool(endpoint.ssl if endpoint.ssl is not None else cfg.get("ssl", False)),
+            api_key=endpoint.api_key or cfg.get("api_key", ""),
+            service_account=endpoint.service_account or cfg.get("service_account", ""),
+            auth_source=endpoint.auth_source or cfg.get("auth_source", ""),
+            auth_role=endpoint.auth_role or cfg.get("role", "") or cfg.get("auth_role", ""),
+            extra=dict(endpoint.extra or {}),
+        )
+        # Cap preview reads — Validate only needs a small transform sample.
+        limit = max(1, min(int(sample_limit or 100), 100))
+        records, headers, inferred = read_source_database(
+            sample_ep, limit=limit, raise_on_truncate=False
+        )
+        if headers and not out.get("columns"):
+            out["columns"] = list(headers)
+        if inferred:
+            # Prefer live samples for type hints when information_schema was sparse.
+            merged = dict(out.get("schema") or {})
+            for col, typ in inferred.items():
+                merged.setdefault(col, typ)
+            out["schema"] = merged
+        safe_records: list[dict] = []
+        for row in records[:10]:
+            safe_records.append({k: cell_to_string(row.get(k, "")) for k in (headers or out.get("columns") or [])})
+        out["sample_data"] = safe_records
+        out["data"] = safe_records
+        if out.get("row_estimate") in (None, 0) and records:
+            # Best-effort; full COUNT can be expensive on warehouses.
+            out["row_estimate"] = max(int(out.get("row_estimate") or 0), len(records))
+        if not records:
+            out["message"] = (
+                f"{out.get('message', '')} · table `{table}` is empty "
+                f"(0 sample rows) — dry-run will treat this as an empty source"
+            ).strip(" ·")
+        else:
+            out["message"] = (
+                f"{out.get('message', '')} · {len(safe_records)} sample row(s) loaded"
+            ).strip(" ·")
+    except Exception as exc:
+        # Keep schema; surface sample failure so UI can explain dry-run blocks.
+        out["sample_error"] = str(exc)
+        out["message"] = (
+            f"{out.get('message', '')} · sample read failed: {exc}"
+        ).strip(" ·")
 
 
 def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, source_info: dict) -> dict:

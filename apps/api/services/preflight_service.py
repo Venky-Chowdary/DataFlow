@@ -44,7 +44,11 @@ class FilePreflightContext(PreflightContext):
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
-            return False, ["No sample rows available for dry-run validation"]
+            return False, [
+                "No sample rows available for dry-run validation. "
+                "Re-run Source introspect so DataFlow can load a preview sample "
+                "from the source table (column metadata alone is not enough)."
+            ]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
         # Use cell_to_string so nested lists/dicts from schemaless sources become

@@ -1274,8 +1274,20 @@ export function TransferPage({
         error: intro.message || `“${streamName}” was not found or could not be read on this connector.`,
       };
     }
+    const sampleRows = intro.data ?? intro.sample_data ?? [];
+    if (!sampleRows.length) {
+      // Schema-only introspect is incomplete for Validate — surface loudly.
+      const detail = (intro as { sample_error?: string }).sample_error
+        || intro.message
+        || "Columns loaded but no sample rows. Check warehouse/role and reload.";
+      toast({
+        title: "Preview has columns but no sample rows",
+        message: detail,
+        tone: "warning",
+      });
+    }
     return { ok: true as const, intro };
-  }, [sourceConnector, sourceConnectorId]);
+  }, [sourceConnector, sourceConnectorId, toast]);
 
   const introspectConnectorSource = useCallback(async () => {
     if (!sourceConnector) return null;

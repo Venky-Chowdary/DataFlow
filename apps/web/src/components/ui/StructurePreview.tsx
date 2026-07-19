@@ -18,6 +18,9 @@ interface StructurePreviewProps {
   fill?: boolean;
   /** Offer a Table / JSON toggle — ideal for document sources (e.g. MongoDB) */
   allowJson?: boolean;
+  /** Shown when columns exist but sample rows failed or were not returned */
+  sampleWarning?: string | null;
+  onRetrySample?: () => void;
 }
 
 export function StructurePreview({
@@ -34,6 +37,8 @@ export function StructurePreview({
   className = "",
   fill = false,
   allowJson = false,
+  sampleWarning = null,
+  onRetrySample,
 }: StructurePreviewProps) {
   const rowsPerPage = maxRows ?? (fill ? 40 : 10);
   const [page, setPage] = useState(0);
@@ -167,9 +172,17 @@ export function StructurePreview({
           </table>
         </div>
       ) : (
-        <p className="df2-structure-empty-rows">
-          Schema detected. Sample rows appear after profiling completes.
-        </p>
+        <div className="df2-structure-empty-rows" role="status">
+          <p>
+            {sampleWarning
+              || "Columns detected, but no sample rows were loaded. Preview data and Validate dry-run need a row sample — re-read the source table."}
+          </p>
+          {onRetrySample && (
+            <button type="button" className="df2-btn df2-btn-sm" onClick={onRetrySample}>
+              <DtIcon name="scan" size={14} /> Reload sample preview
+            </button>
+          )}
+        </div>
       )}
 
       {rows.length > rowsPerPage && (

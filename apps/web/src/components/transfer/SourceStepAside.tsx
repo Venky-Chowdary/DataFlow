@@ -278,6 +278,7 @@ export function SourceStepAside({
   }
 
   if (sourceColumns.length > 0 && !sourceIntrospecting) {
+    const missingSamples = samplePreviewRows.length === 0;
     return (
       <StructurePreview
         columns={sourceColumns}
@@ -287,7 +288,7 @@ export function SourceStepAside({
         title="Source schema"
         subtitle={
           sourceConnector
-            ? `${sourceColumns.length} fields${samplePreviewRows.length ? ` · ${samplePreviewRows.length} sample rows` : ""} from ${sourceConnector.name}${
+            ? `${sourceColumns.length} fields${samplePreviewRows.length ? ` · ${samplePreviewRows.length} sample rows` : " · no sample rows yet"} from ${sourceConnector.name}${
               sourceObjectLabel ? ` · ${sourceObjectLabel}` : ""
             }`
             : "Fields discovered from the selected connector"
@@ -295,6 +296,13 @@ export function SourceStepAside({
         fill
         showBadge
         allowJson
+        sampleWarning={
+          missingSamples
+            ? (sourceIntrospectError
+              || "No preview rows returned for this table. Reload sample so Validate dry-run can run.")
+            : null
+        }
+        onRetrySample={missingSamples ? onRetrySourceIntrospect : undefined}
       />
     );
   }
