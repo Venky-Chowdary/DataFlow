@@ -1437,6 +1437,7 @@ export function TransferPage({
       return;
     }
 
+    // Wait for typing to settle — 400ms fired on half-names (e.g. "csv" of "csvtestfile").
     const gen = ++sourceIntrospectGenRef.current;
     sourceIntrospectGateRef.current = { key, status: "running" };
     let started = false;
@@ -1468,7 +1469,7 @@ export function TransferPage({
           setSourceIntrospecting(false);
           setAnalyzing(false);
         });
-    }, 400);
+    }, 1200);
     return () => {
       window.clearTimeout(t);
       // Only release the gate if the timer never fired — never interrupt an

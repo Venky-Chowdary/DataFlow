@@ -63,3 +63,9 @@ For each source below: select connector → enter table/collection → wait for 
 1. Note connector name, table, screenshot of Source preview + Validate gate.  
 2. Railway API log lines around `POST /api/v1/transfer/introspect` and `preflight`.  
 3. Confirm warehouse/schema/role for Snowflake; collection name for Mongo.
+
+## Known false alarms (do not treat as API down)
+
+- **“Control plane offline”** while `/health` is 200: usually an early `401` on `/connectors/saved` before login. Redeploy web with the health-probe fix; hard-refresh.  
+- **`storage.stores.connectors: false`** on `/health`: production stores connectors in **Mongo**, not `connectors.json`. After the health fix, this flag reflects the active backend.  
+- **`DATAFLOW_AUTH_USERS` invalid JSON**: login still works via `DATAFLOW_ADMIN_*`. Clear the bad env var or set a real JSON array — `/auth/bootstrap` reports `auth_users_json_valid`.

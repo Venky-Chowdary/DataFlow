@@ -4,6 +4,18 @@ import { clearSession, getAuthToken } from "./session";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 120000;
 
+/** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
+export async function probeApiHealth(): Promise<boolean> {
+  try {
+    const origin = API_BASE.replace(/\/api\/v1\/?$/i, "") || "";
+    const url = origin ? `${origin}/health` : "/health";
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 type TimedRequestInit = RequestInit & { timeoutMs?: number };
 
 /** Fired when the API rejects a request with 401 — AppShell should return to login. */

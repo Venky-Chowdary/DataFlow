@@ -12,7 +12,7 @@ import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/Work
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
-import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
+import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, probeApiHealth } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -154,10 +154,28 @@ function AppShell({
     try {
       setConnectors(await fetchConnectors());
       setApiOnline(true);
-    } catch {
-      setApiOnline(false);
-      if (notifyOnError) {
-        toast({ title: "Could not load connectors", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in.", tone: "error" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      const authOnly = /authentication required|sign in/i.test(msg);
+      // 401/session is not an outage — Railway /health can still be green.
+      if (authOnly) {
+        const up = await probeApiHealth();
+        setApiOnline(up);
+        if (notifyOnError && !up) {
+          toast({ title: "Could not load connectors", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in.", tone: "error" });
+        }
+      } else {
+        const up = await probeApiHealth();
+        setApiOnline(up);
+        if (notifyOnError) {
+          toast({
+            title: up ? "Could not load connectors" : "Control plane offline",
+            message: up
+              ? "Sign in again or check connector permissions."
+              : "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) and deployment health.",
+            tone: "error",
+          });
+        }
       }
     } finally {
       setConnectorsReady(true);

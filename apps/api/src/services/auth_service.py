@@ -161,6 +161,14 @@ def auth_bootstrap_status() -> dict[str, Any]:
     """Safe diagnostics for operators (no secrets)."""
     admin_email = _normalize_secret(os.getenv("DATAFLOW_ADMIN_EMAIL", ""))
     admin_password = _normalize_secret(os.getenv("DATAFLOW_ADMIN_PASSWORD", ""))
+    raw_users = os.getenv("DATAFLOW_AUTH_USERS", "").strip()
+    auth_users_json_valid: bool | None = None
+    if raw_users:
+        try:
+            parsed = json.loads(raw_users)
+            auth_users_json_valid = isinstance(parsed, list)
+        except json.JSONDecodeError:
+            auth_users_json_valid = False
     users = _load_users()
     return {
         "auth_required": auth_required(),
@@ -168,7 +176,9 @@ def auth_bootstrap_status() -> dict[str, Any]:
         "admin_email_configured": bool(admin_email),
         "admin_password_configured": bool(admin_password),
         "admin_password_length": len(admin_password) if admin_password else 0,
-        "auth_users_configured": bool(os.getenv("DATAFLOW_AUTH_USERS", "").strip()),
+        # True only when the env var is set AND parses as a JSON array.
+        "auth_users_configured": bool(raw_users) and auth_users_json_valid is True,
+        "auth_users_json_valid": auth_users_json_valid,
         "emails": [u.get("email") for u in users],
     }
 

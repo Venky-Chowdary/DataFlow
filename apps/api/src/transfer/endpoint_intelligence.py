@@ -474,16 +474,26 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             # sample so Transfer Studio can run transform integrity checks.
             _attach_sql_sample_rows(out, endpoint, cfg, fmt, table, sample_limit)
         else:
-            # Missing table is a valid destination — writers CREATE TABLE IF NOT EXISTS.
+            # Missing object: wording depends on whether this endpoint is a source
+            # (Transfer Studio introspect) or a destination (create-on-write is OK).
             out["columns"] = []
             out["schema"] = {}
             out["table_exists"] = False
-            out["auto_create"] = list(out.get("auto_create") or []) + [
-                f'CREATE TABLE IF NOT EXISTS "{table}" (from source schema on first write)'
-            ]
-            out["message"] = (
-                f"Table `{table}` not found — it will be created automatically on first write"
-            )
+            purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+            if purpose == "source":
+                # Never imply the source will be written / auto-created.
+                out["message"] = (
+                    f"Table `{table}` was not found on this source. "
+                    f"Check the name (and schema/database)."
+                )
+            else:
+                # Destination (or legacy callers): CREATE IF NOT EXISTS on first write.
+                out["auto_create"] = list(out.get("auto_create") or []) + [
+                    f'CREATE TABLE IF NOT EXISTS "{table}" (from source schema on first write)'
+                ]
+                out["message"] = (
+                    f"Table `{table}` not found — it will be created automatically on first write"
+                )
     except Exception as e:
         # Soft-fail: still allow the wizard to continue with auto-create.
         out["table_exists"] = False

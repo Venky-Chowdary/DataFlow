@@ -149,6 +149,36 @@ def _use_mongo() -> bool:
     return _resolve_backend() == "mongo"
 
 
+def connector_persistence_status() -> dict[str, Any]:
+    """Health signal for connector persistence (file and/or Mongo)."""
+    backend = _resolve_backend()
+    path = _store_path()
+    file_ok = path.exists()
+    mongo_ok = False
+    count: int | None = None
+    if backend == "mongo":
+        try:
+            coll = _mongo_collection()
+            count = int(coll.estimated_document_count())
+            mongo_ok = True
+        except Exception as exc:
+            return {
+                "backend": backend,
+                "ok": False,
+                "file_present": file_ok,
+                "mongo_reachable": False,
+                "detail": str(exc)[:200],
+            }
+    ok = mongo_ok if backend == "mongo" else file_ok
+    return {
+        "backend": backend,
+        "ok": ok,
+        "file_present": file_ok,
+        "mongo_reachable": mongo_ok,
+        "count": count,
+    }
+
+
 def _mongo_collection() -> Any:
     from src.services.mongodb_service import get_mongodb_service
 

@@ -40,3 +40,38 @@ def test_missing_sql_table_sets_table_exists_false_and_auto_create():
     assert out["columns"] == []
     assert any("CREATE TABLE" in item for item in out["auto_create"])
     assert "created automatically" in out["message"].lower() or "not found" in out["message"].lower()
+
+
+def test_missing_sql_table_source_purpose_does_not_promise_create():
+    out: dict = {
+        "kind": "database",
+        "format": "snowflake",
+        "connected": True,
+        "objects": [],
+        "columns": [],
+        "schema": {},
+        "row_estimate": 0,
+        "auto_create": [],
+        "message": "ok",
+    }
+    endpoint = EndpointConfig(
+        kind="database",
+        format="snowflake",
+        database="DATAFLOW",
+        schema="PUBLIC",
+        table="csv",
+        extra={"introspect_purpose": "source"},
+    )
+    with patch(
+        "src.transfer.endpoint_intelligence.resolve_connector_config",
+        return_value={"type": "snowflake", "database": "DATAFLOW", "schema": "PUBLIC"},
+    ), patch(
+        "src.transfer.endpoint_intelligence._introspect_table_schema",
+        return_value={},
+    ):
+        _attach_db_sample(out, endpoint)
+
+    assert out["table_exists"] is False
+    assert out["auto_create"] == []
+    assert "first write" not in out["message"].lower()
+    assert "not found on this source" in out["message"].lower()
