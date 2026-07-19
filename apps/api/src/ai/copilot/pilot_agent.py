@@ -300,7 +300,7 @@ class DataPilotAgent:
             if err and (
                 err.startswith("Which ")
                 or "did you mean" in err.lower()
-                or tr.name in ("run_schedule_now", "get_schedule", "open_schedule")
+                or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
             ):
                 turn.needs_clarification = err
             return
@@ -358,6 +358,22 @@ class DataPilotAgent:
                 "screen": "transfer",
                 "risk": "safe",
                 "label": "Open Transfer Studio",
+            })
+            return
+
+        if tr.name == "create_connector":
+            turn.pending_actions.append({
+                "id": f"create_connector:{(out.get('connector') or {}).get('name') or len(turn.pending_actions)}",
+                "type": "create_connector",
+                "label": out.get("label") or "Save connector",
+                "risk": "mutate",
+                "payload": out.get("connector") or out,
+            })
+            turn.actions.append({
+                "type": "navigate",
+                "screen": "connectors",
+                "risk": "safe",
+                "label": "Open Connectors",
             })
             return
 
@@ -940,6 +956,15 @@ Respond as Data Pilot — grounded in tool results."""
                 if o.get("type_risks"):
                     lines.append(f"• Type risks: {len(o['type_risks'])}")
                 parts.append("\n".join(lines))
+            elif tr.name == "create_connector" and tr.success:
+                prev = tr.output.get("preview") or {}
+                parts.append(
+                    f"Ready to save connector **{prev.get('name') or 'connector'}** "
+                    f"({prev.get('type')}) → `{prev.get('host')}:{prev.get('port')}` "
+                    f"/ `{prev.get('database') or '—'}`.\n"
+                    f"Connection test: {prev.get('test') or 'ok'}.\n\n"
+                    "Confirm below to save it to **Connectors**."
+                )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
                 if conns:

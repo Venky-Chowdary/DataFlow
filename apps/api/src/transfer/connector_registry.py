@@ -233,6 +233,14 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     text = str(raw).lower()
     driver = (driver or "").lower()
 
+    # Private cloud hostnames (Railway etc.) — tell users to use the public proxy.
+    if ".railway.internal" in text:
+        return (
+            "Cannot reach this Railway private hostname from here. "
+            "Use the public proxy host (*.proxy.rlwy.net) and public port from Railway, "
+            "unless DataFlow is running inside the same Railway project."
+        )
+
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
         if driver in ("salesforce", "hubspot", "stripe", "rest_api"):
@@ -254,6 +262,11 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
 
     # DNS / host unknown
     if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known", text):
+        if "internal" in text:
+            return (
+                "Host not found — this looks like a private/internal address. "
+                "Use the provider public proxy host and port (for Railway: *.proxy.rlwy.net)."
+            )
         return "Host not found. Check the host/address and that it is reachable from the network."
 
     # Connection refused / unreachable
@@ -262,6 +275,11 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
 
     # Timeouts
     if re.search(r"timed out|timeout|sockettimeout|connecttimeout|operation timed out", text):
+        if "internal" in text or "railway" in text:
+            return (
+                "Connection timed out. If you used a *.railway.internal host, switch to the "
+                "public proxy host and port from Railway. Otherwise check network/firewall."
+            )
         return "Connection timed out. Check the host/port, network, and that the service is running."
 
     # SSL / TLS

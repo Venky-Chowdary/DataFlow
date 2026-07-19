@@ -11,6 +11,7 @@ import {
   formatPilotReachError,
   ModelCapabilities,
   runScheduleNow,
+  saveConnector,
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
@@ -134,6 +135,31 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         toast({
           title: "Pipeline started",
           message: `Job ${res.job_id || "queued"}`,
+          tone: "success",
+        });
+      } else if (action.type === "create_connector") {
+        const p = action.payload || {};
+        const name = String(p.name || "Connector");
+        const type = String(p.type || "");
+        if (!type) throw new Error("Missing connector type");
+        await saveConnector({
+          name,
+          type,
+          host: String(p.host || ""),
+          port: Number(p.port || 0),
+          database: String(p.database || ""),
+          username: String(p.username || ""),
+          password: String(p.password || ""),
+          connection_string: String(p.connection_string || ""),
+          schema: String(p.schema || ""),
+          ssl: Boolean(p.ssl),
+          auth_mode: String(p.auth_mode || ""),
+        });
+        window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
+        onNavigate("connectors");
+        toast({
+          title: "Connector saved",
+          message: `“${name}” (${type}) is ready in Connectors.`,
           tone: "success",
         });
       } else {

@@ -12,7 +12,7 @@ import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/Work
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
-import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, probeApiHealth } from "./lib/api";
+import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -153,30 +153,42 @@ function AppShell({
   const loadConnectors = useCallback(async (notifyOnError = true) => {
     try {
       setConnectors(await fetchConnectors());
+      noteApiSuccess();
       setApiOnline(true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
-      const authOnly = /authentication required|sign in/i.test(msg);
+      const authOnly = /authentication required|sign in|401/i.test(msg);
+      const timedOut = /timed out|abort/i.test(msg);
       // 401/session is not an outage — Railway /health can still be green.
-      if (authOnly) {
-        const up = await probeApiHealth();
-        setApiOnline(up);
-        if (notifyOnError && !up) {
-          toast({ title: "Could not load connectors", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in.", tone: "error" });
+      const up = await probeApiHealth();
+      if (up || authOnly) {
+        noteApiSuccess();
+        setApiOnline(true);
+        if (notifyOnError && authOnly) {
+          toast({
+            title: "Could not load connectors",
+            message: "Sign in again or check connector permissions.",
+            tone: "warning",
+          });
+        } else if (notifyOnError && timedOut && up) {
+          // Slow control-plane response, not offline — don't scare the user.
+          toast({
+            title: "Connectors took longer than usual",
+            message: "The API is healthy; retrying in the background.",
+            tone: "warning",
+          });
         }
-      } else {
-        const up = await probeApiHealth();
-        setApiOnline(up);
+      } else if (shouldMarkApiOffline(false)) {
+        setApiOnline(false);
         if (notifyOnError) {
           toast({
-            title: up ? "Could not load connectors" : "Control plane offline",
-            message: up
-              ? "Sign in again or check connector permissions."
-              : "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) and deployment health.",
+            title: "Control plane offline",
+            message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) and deployment health.",
             tone: "error",
           });
         }
       }
+      // Below threshold: keep previous online state (no flicker).
     } finally {
       setConnectorsReady(true);
     }
@@ -185,6 +197,8 @@ function AppShell({
   const loadJobs = useCallback(async (notifyOnError = true) => {
     try {
       setJobs(await fetchJobs());
+      noteApiSuccess();
+      setApiOnline(true);
     } catch {
       if (notifyOnError) {
         toast({ title: "Could not load jobs", message: "Job history may be unavailable.", tone: "warning" });
@@ -195,6 +209,8 @@ function AppShell({
   const loadSchedules = useCallback(async () => {
     try {
       setSchedules(await fetchSchedules());
+      noteApiSuccess();
+      setApiOnline(true);
     } catch {
       setSchedules([]);
     }
@@ -234,6 +250,29 @@ function AppShell({
       void loadConnectors(false);
     }, 30000);
     return () => window.clearInterval(poll);
+  }, [loadConnectors]);
+
+  // Dedicated health pulse — recovers the banner when Railway is green again,
+  // and only flips offline after repeated health failures (not one slow request).
+  useEffect(() => {
+    const pulse = window.setInterval(async () => {
+      const up = await probeApiHealth();
+      if (up) {
+        noteApiSuccess();
+        setApiOnline(true);
+      } else if (shouldMarkApiOffline(false)) {
+        setApiOnline(false);
+      }
+    }, 20000);
+    return () => window.clearInterval(pulse);
+  }, []);
+
+  useEffect(() => {
+    const onConnectorsChanged = () => {
+      void loadConnectors(false);
+    };
+    window.addEventListener("df2:connectors-changed", onConnectorsChanged);
+    return () => window.removeEventListener("df2:connectors-changed", onConnectorsChanged);
   }, [loadConnectors]);
 
   useEffect(() => {

@@ -66,6 +66,38 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "create_connector",
+        "description": (
+            "Create a saved connector from credentials the user provided "
+            "(MySQL, PostgreSQL, MongoDB, etc.). Always confirm before saving. "
+            "Accepts a connection URL and/or host, port, database, username, password."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "type": {
+                    "type": "string",
+                    "description": "Driver type: mysql, postgresql, mongodb, snowflake, …",
+                },
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "database": {"type": "string"},
+                "username": {"type": "string"},
+                "password": {"type": "string"},
+                "connection_string": {"type": "string"},
+                "ssl": {"type": "boolean"},
+                "schema": {"type": "string"},
+                "message": {
+                    "type": "string",
+                    "description": "Original user message (for credential extraction)",
+                },
+                "test_first": {"type": "boolean", "default": True},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "list_jobs",
         "description": "List recent transfer jobs with status, IDs, and record counts.",
         "input_schema": {
@@ -495,6 +527,7 @@ class DataPilotTools:
             "analyze_dataset": self._analyze_dataset,
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
+            "create_connector": self._create_connector,
             "list_jobs": self._list_jobs,
             "get_job": self._get_job,
             "get_transfer_capabilities": self._get_capabilities,
@@ -612,6 +645,104 @@ class DataPilotTools:
             name="list_connectors",
             success=True,
             output={"connectors": summary, "count": len(summary)},
+        )
+
+    def _create_connector(
+        self,
+        name: str = "",
+        type: str = "",
+        host: str = "",
+        port: int = 0,
+        database: str = "",
+        username: str = "",
+        password: str = "",
+        connection_string: str = "",
+        ssl: bool = False,
+        schema: str = "",
+        message: str = "",
+        test_first: bool = True,
+    ) -> ToolResult:
+        from .connector_create import build_connector_draft, draft_is_complete
+
+        draft = build_connector_draft(
+            message or "",
+            {
+                "name": name,
+                "type": type,
+                "host": host,
+                "port": port,
+                "database": database,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "ssl": ssl,
+                "schema": schema,
+            },
+        )
+        ok, missing = draft_is_complete(draft)
+        if not ok:
+            return ToolResult(name="create_connector", success=False, output=draft, error=missing)
+
+        probe_msg = ""
+        if test_first:
+            try:
+                from src.transfer.connector_registry import run_probe
+
+                probe_ok, probe_msg = run_probe(
+                    draft["type"],
+                    {
+                        "host": draft.get("host") or "",
+                        "port": int(draft.get("port") or 0),
+                        "database": draft.get("database") or "",
+                        "username": draft.get("username") or "",
+                        "password": draft.get("password") or "",
+                        "schema": draft.get("schema") or "",
+                        "connection_string": draft.get("connection_string") or "",
+                        "ssl": bool(draft.get("ssl")),
+                        "type": draft["type"],
+                        "auth_mode": draft.get("auth_mode") or "",
+                    },
+                )
+                if not probe_ok:
+                    return ToolResult(
+                        name="create_connector",
+                        success=False,
+                        output=draft,
+                        error=(
+                            f"Could not connect with those credentials: {probe_msg}. "
+                            "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
+                        ),
+                    )
+            except Exception as exc:
+                return ToolResult(
+                    name="create_connector",
+                    success=False,
+                    output=draft,
+                    error=f"Connection test failed: {exc}",
+                )
+
+        safe_preview = {
+            "name": draft["name"],
+            "type": draft["type"],
+            "host": draft.get("host") or "(from URL)",
+            "port": draft.get("port"),
+            "database": draft.get("database") or "",
+            "username": draft.get("username") or "",
+            "ssl": bool(draft.get("ssl")),
+            "has_password": bool(draft.get("password") or draft.get("connection_string")),
+            "test": probe_msg or "skipped",
+        }
+        return ToolResult(
+            name="create_connector",
+            success=True,
+            output={
+                "action": "create_connector",
+                "label": f"Save connector “{draft['name']}” ({draft['type']})",
+                "risk": "mutate",
+                "requires_confirm": True,
+                "connector": draft,
+                "preview": safe_preview,
+            },
         )
 
     def _list_jobs(self, limit: int = 10) -> ToolResult:
@@ -881,6 +1012,7 @@ class DataPilotTools:
                     "Triage jobs by ID (validation runs or job IDs)",
                     "Search your uploaded datasets for columns, PII, and quality",
                     "Look up live tables and columns on saved connectors",
+                    "Create a saved connector from a URL or host/user/password (with Confirm)",
                     "Compare source vs destination schemas",
                     "List and run pipeline schedules (with confirmation)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
@@ -1412,6 +1544,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "diff_schemas": 95,
     "introspect_connector_schema": 90,
     "list_connector_objects": 85,
+    "create_connector": 82,
     "remediate_validation": 80,
     "run_schedule_now": 78,
     "get_job": 75,
@@ -1463,10 +1596,10 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
     # Explicit run / remediate shouldn't also dump unrelated lists
-    if "run_schedule_now" in names or "remediate_validation" in names:
+    if "run_schedule_now" in names or "remediate_validation" in names or "create_connector" in names:
         planned = [
             (n, a) for n, a in planned
-            if n not in ("list_schedules", "list_jobs", "search_knowledge", "analyze_dataset")
+            if n not in ("list_schedules", "list_jobs", "search_knowledge", "analyze_dataset", "list_connectors", "search_connectors")
         ]
     # Cap to top-priority tools (navigate may accompany primary)
     ranked = sorted(
@@ -1544,6 +1677,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("search_connectors", {"query": q[:40], "role": role}))
         else:
             planned.append(("list_connectors", {}))
+
+    # Create / save connector from credentials pasted in chat
+    from .connector_create import wants_create_connector
+
+    if wants_create_connector(message):
+        planned = [(n, a) for n, a in planned if n not in ("search_connectors", "list_connectors", "search_knowledge")]
+        planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
     if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules")):

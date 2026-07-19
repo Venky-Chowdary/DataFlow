@@ -209,7 +209,12 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
           }
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
         />
         <button type="button" className="df2-btn df2-btn-primary" onClick={() => send()} disabled={loading}>
           <DtIcon name="transfer" size={16} />

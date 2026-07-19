@@ -5,15 +5,49 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 120000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
+let _healthFailStreak = 0;
+const HEALTH_OFFLINE_THRESHOLD = 2;
+
+export function noteApiSuccess(): void {
+  _healthFailStreak = 0;
+}
+
 export async function probeApiHealth(): Promise<boolean> {
-  try {
-    const origin = API_BASE.replace(/\/api\/v1\/?$/i, "") || "";
-    const url = origin ? `${origin}/health` : "/health";
-    const res = await fetch(url, { method: "GET", cache: "no-store" });
-    return res.ok;
-  } catch {
+  const origin = API_BASE.replace(/\/api\/v1\/?$/i, "") || "";
+  const candidates = [
+    origin ? `${origin}/health` : "/health",
+    `${API_BASE.replace(/\/$/, "")}/health`,
+    origin ? `${origin}/api/v1/health` : "/api/v1/health",
+  ].filter((v, i, a) => a.indexOf(v) === i);
+
+  for (const url of candidates) {
+    try {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 5000);
+      try {
+        const res = await fetch(url, { method: "GET", cache: "no-store", signal: controller.signal });
+        if (res.ok) {
+          _healthFailStreak = 0;
+          return true;
+        }
+      } finally {
+        window.clearTimeout(timer);
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  _healthFailStreak += 1;
+  return false;
+}
+
+/** True only after repeated health failures — avoids flicker when one request times out. */
+export function shouldMarkApiOffline(healthOk: boolean): boolean {
+  if (healthOk) {
+    _healthFailStreak = 0;
     return false;
   }
+  return _healthFailStreak >= HEALTH_OFFLINE_THRESHOLD;
 }
 
 type TimedRequestInit = RequestInit & { timeoutMs?: number };
