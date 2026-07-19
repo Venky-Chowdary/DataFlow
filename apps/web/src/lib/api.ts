@@ -145,6 +145,8 @@ export async function runPreflight(payload: {
   dest_schema?: string;
   dest_warehouse?: string;
   dest_kind?: string;
+  dest_table?: string;
+  dest_collection?: string;
   destination_column_types?: Record<string, string>;
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
@@ -990,6 +992,10 @@ export interface EndpointIntrospection {
   connected: boolean;
   columns: string[];
   schema: Record<string, string>;
+  schema_intelligence?: Record<
+    string,
+    { logical_type?: string; semantic_role?: string; confidence?: number; notes?: string[] }
+  >;
   objects?: { name: string; type: string }[];
   row_estimate?: number;
   table_exists?: boolean;

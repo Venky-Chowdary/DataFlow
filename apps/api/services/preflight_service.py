@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 # Add preflight package to path
-_PREFLIGHT_ROOT = Path(__file__).resolve().parents[4] / "packages" / "preflight" / "src"
+# apps/api/services → repo root is parents[3]
+_PREFLIGHT_ROOT = Path(__file__).resolve().parents[3] / "packages" / "preflight" / "src"
 if str(_PREFLIGHT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PREFLIGHT_ROOT))
 
@@ -107,8 +111,10 @@ class FilePreflightContext(PreflightContext):
                 source_types=source_types,
                 dest_types=dest_types,
                 dest_db_type=self.plan.destination.db_type,
+                table_exists=bool(getattr(self.plan.destination, "table_exists", False)),
             )
         except Exception:
+            logger.warning("coercion probe failed during preflight", exc_info=True)
             report = {}
         self._coercion_report_cache = report
         return report

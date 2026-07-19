@@ -112,6 +112,12 @@
 
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
+  --df-table-cell-pad-y: 11px;
+  --df-table-cell-pad-x: 14px;
+  --df-table-head-bg: var(--df-surface-muted);
+  --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
+  --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 55%, #fff);
+  --df-table-border: var(--df-border);
   --df-nav-item-height: 36px;
 
   --df-card-pad: 16px;
@@ -121,6 +127,17 @@
   --df-grid-gap-lg: 16px;
   --df-page-section-gap: 16px;
   --df-rail-column: minmax(260px, 320px);
+
+  /* Scrollbars — thin enterprise chrome, same on every surface */
+  --df-scrollbar-size: 10px;
+  --df-scrollbar-thumb: color-mix(in srgb, var(--df-navy-700) 28%, transparent);
+  --df-scrollbar-thumb-hover: color-mix(in srgb, var(--df-navy-700) 46%, transparent);
+  --df-scrollbar-track: transparent;
+
+  /* Toast durations — keep CSS timer + JS dismiss in lockstep */
+  --df-toast-duration: 4500ms;
+  --df-toast-duration-error: 8000ms;
+  --df-toast-width: min(400px, calc(100vw - 32px));
 
   --df-space-1: 4px;
   --df-space-2: 8px;

@@ -355,6 +355,8 @@ export interface ValidationSuggestedAction {
   to_type?: string;
   transform?: string;
   label: string;
+  /** True when mapping-only type change cannot ALTER existing destination DDL. */
+  requires_ddl?: boolean;
 }
 
 export interface ValidationIssue {

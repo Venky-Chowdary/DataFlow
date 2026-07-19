@@ -416,13 +416,21 @@ def _parse_integer(value: str) -> int | None:
     return int(dec)
 
 
+# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
+# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
+# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
+# hard-fail on values like "invalidated".
+_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
+_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
+
+
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
     if text in NULL_SENTINELS:
         return None
-    if text in {"true", "t", "yes", "y", "1", "on", "enabled", "active", "ok", "aye", "positive"}:
+    if text in _STRICT_BOOL_TRUE:
         return True
-    if text in {"false", "f", "no", "n", "0", "off", "disabled", "inactive", "nope", "negative"}:
+    if text in _STRICT_BOOL_FALSE:
         return False
     return None
 

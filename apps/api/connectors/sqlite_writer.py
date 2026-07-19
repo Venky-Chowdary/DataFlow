@@ -137,7 +137,16 @@ def write_mapped_rows(
             checksum="", chunks_completed=0, error="SQLite path is required (database or connection_string).",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    from connectors.writer_common import sample_values_by_source_from_batch
+
+    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        sample_values_by_source=batch_samples,
+        table_exists=False if create_table else None,
+    )
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",

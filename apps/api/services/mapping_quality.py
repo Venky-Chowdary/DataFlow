@@ -51,6 +51,7 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         "non_empty_count": len(vals),
         "null_rate": round(_null_rate(samples), 3),
         "unique_ratio": round(_unique_ratio(vals), 3),
+        "samples": vals[:12],
         "likely_identifier": False,
         "likely_email": False,
         "likely_phone": False,
@@ -85,7 +86,10 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         profile["likely_uuid"] = uuid_ratio >= 0.5 or _contains_term(name, {"uuid", "guid", "identifier"})
         profile["likely_numeric"] = numeric_ratio >= 0.75 or _contains_term(name, {"amount", "qty", "total", "balance", "price"})
         profile["likely_date"] = date_ratio >= 0.5 or _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
-        profile["likely_boolean"] = bool_ratio >= 0.7 or _contains_term(name, {"flag", "is_", "has_", "active", "status"})
+        # Name alone is not enough for "status" — that is usually a string enum.
+        profile["likely_boolean"] = bool_ratio >= 0.7 or (
+            bool_ratio >= 0.5 and _contains_term(name, {"flag", "is_", "has_", "active", "enabled", "verified"})
+        )
 
     return profile
 
@@ -141,7 +145,7 @@ def score_mapping_pair(
         delta -= 0.03
         notes.append("date-like source mapped to non-temporal target")
 
-    if profile.get("likely_boolean") and any(k in tgt for k in ("flag", "is_", "active", "status")):
+    if profile.get("likely_boolean") and any(k in tgt for k in ("flag", "is_", "active", "enabled", "verified")):
         delta += 0.03
         notes.append("boolean pattern aligned")
 
@@ -153,13 +157,36 @@ def score_mapping_pair(
         delta += min(0.03 * len(overlap), 0.06)
 
     # Strong exact / normalized-name match boost. If the source and target names
-    # are the same (or obvious variants), the mapping is highly reliable.
+    # are the same (or obvious variants), the mapping is highly reliable —
+    # unless samples prove a type mismatch (handled below).
     if src_lower == tgt:
         delta += 0.75
     elif src_lower in tgt or tgt in src_lower:
         delta += 0.45
     elif overlap and float(mapping.get("confidence", 0)) < 0.7:
         delta += 0.25
+
+    # String enum → BOOLEAN is a common false positive (status=active/invalidated).
+    # Apply AFTER name boost so exact-name matches cannot hide the type conflict.
+    tgt_type = str(mapping.get("target_type") or mapping.get("dest_type") or "").upper()
+    src_type = str(mapping.get("source_type") or mapping.get("inferred_type") or "").upper()
+    samples = [str(x).strip() for x in (profile.get("samples") or []) if str(x).strip()]
+    if not samples and profile.get("sample_values"):
+        samples = [str(x).strip() for x in profile["sample_values"] if str(x).strip()]
+    distinct = {s.lower() for s in samples}
+    looks_enum = len(distinct) > 2 or any(
+        s not in {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
+        for s in distinct
+    )
+    if looks_enum and ("BOOL" in tgt_type or tgt_type == "BOOLEAN" or "bool" in tgt):
+        delta -= 0.85
+        notes.append(
+            "string enum cannot map cleanly to BOOLEAN — use VARCHAR on new tables; "
+            "for existing BOOLEAN columns remap or ALTER (mapping Widen is not DDL)"
+        )
+    elif looks_enum and "BOOL" in src_type:
+        delta -= 0.5
+        notes.append("source typed BOOLEAN but samples look like a string enum — widen to VARCHAR")
 
     return delta, notes
 
@@ -244,5 +271,28 @@ def detect_cross_field_issues(
     emails = [m for m in mappings if "email" in m["target"].lower()]
     if len(emails) > 1:
         issues.append(f"Multiple sources mapped to email fields: {', '.join(m['source'] for m in emails)}")
+
+    for m in mappings:
+        src_name = m.get("source") or ""
+        if src_name not in profile_cache:
+            src = src_by_name.get(src_name, {})
+            profile_cache[src_name] = analyze_column_profile(
+                src_name,
+                [str(x) for x in (src.get("samples") or [])],
+            )
+        prof = profile_cache[src_name]
+        samples = [str(x).strip().lower() for x in (prof.get("samples") or []) if str(x).strip()]
+        tgt_type = str(m.get("target_type") or "").upper()
+        if not samples:
+            continue
+        strict_bool = {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
+        if any(s not in strict_bool for s in samples) and (
+            "BOOL" in tgt_type or "bool" in (m.get("target") or "").lower()
+        ):
+            issues.append(
+                f"'{src_name}' looks like a string enum (e.g. {', '.join(sorted(set(samples))[:4])}) "
+                f"but target '{m.get('target')}' is BOOLEAN — for a new table use VARCHAR; "
+                f"for an existing table remap or widen the column."
+            )
 
     return issues

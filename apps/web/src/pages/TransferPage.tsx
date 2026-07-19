@@ -56,6 +56,8 @@ import {
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
+  isEnumToBooleanConflict,
+  widenMappingToVarchar,
   mappingsFromAnalysis,
   type EditableMapping,
   type MappingTransform,
@@ -709,6 +711,7 @@ export function TransferPage({
             rows,
             targetCols,
             threshold,
+            targetSchema,
           ),
         );
         setLlmMappingUsed(Boolean(result.llm?.llm_used));
@@ -962,7 +965,13 @@ export function TransferPage({
         });
         const pipelineAnalysis = analysisFromPipeline(data.columns, data.schema ?? {}, pipeline.mappings);
         setAnalysis(pipelineAnalysis);
-        setColumnMappings(editableFromPipelineMappings(pipeline.mappings, rows, destColumns.length ? destColumns : undefined));
+        setColumnMappings(editableFromPipelineMappings(
+          pipeline.mappings,
+          rows,
+          destColumns.length ? destColumns : undefined,
+          confidenceThresholdForMode(validationMode),
+          destSchemaMap,
+        ));
         setLlmMappingUsed(Boolean(pipeline.llm?.llm_used));
       } catch (pipeErr) {
         console.error("Mapping pipeline failed:", pipeErr);
@@ -1161,6 +1170,7 @@ export function TransferPage({
     intro: {
       columns: string[];
       schema?: Record<string, string>;
+      schema_intelligence?: Record<string, { semantic_role?: string; logical_type?: string; notes?: string[] }>;
       row_estimate?: number;
       data?: Record<string, unknown>[];
       sample_data?: Record<string, unknown>[];
@@ -1212,6 +1222,27 @@ export function TransferPage({
       })),
     );
     setAnalysis(fallbackAnalysis);
+    const intel = intro.schema_intelligence || {};
+    const seeded = editableFromPipelineMappings(
+      intro.columns.map((col) => {
+        const role = intel[col]?.semantic_role;
+        const logical = intel[col]?.logical_type || intro.schema?.[col] || "VARCHAR";
+        return {
+          source: col,
+          target: col,
+          confidence: role === "string_enum" ? 0.7 : 0.9,
+          reasoning: role === "string_enum"
+            ? "String enum (status/lifecycle) — VARCHAR, not BOOLEAN"
+            : "Inferred from live connector schema",
+          requires_review: role === "string_enum",
+          source_type: logical,
+          target_type: logical,
+          semantic_role: role,
+        };
+      }),
+      sampleRows,
+    );
+    setColumnMappings(seeded);
     void analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 })
       .then((dbAnalysis) => setAnalysis(dbAnalysis))
       .catch((aiErr) => {
@@ -1588,12 +1619,22 @@ export function TransferPage({
 
   const approveAllMappings = () => {
     setColumnMappings((prev) =>
-      prev.map((m) => ({ ...m, approved: true })),
+      prev.map((m) => {
+        if (isEnumToBooleanConflict(m)) {
+          return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
+        }
+        return { ...m, approved: true };
+      }),
     );
   };
 
   const approveAllAndPreflight = async () => {
-    const approved = columnMappings.map((m) => ({ ...m, approved: true }));
+    const approved = columnMappings.map((m) => {
+      if (isEnumToBooleanConflict(m)) {
+        return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
+      }
+      return { ...m, approved: true };
+    });
     setColumnMappings(approved);
     setStep(STEP_VALIDATE);
     await executePreflight(approved);
@@ -1659,8 +1700,8 @@ export function TransferPage({
       toast({
         title: "Remap columns — quarantine cannot fix this",
         message:
-          "Dry-run is blocked by wrong or lossy mappings (for example status → posted_date_estimated). "
-          + "Open Map, fix those targets, Approve, then re-run Validate. Quarantine only helps encoding/control-character rows.",
+          "Preflight blocked the transfer (0 rows written). Findings are inspect-only until Map types/targets are fixed "
+          + "(for example status enums → VARCHAR, not BOOLEAN). Quarantine-and-continue only helps encoding/control-character rows after Validate passes.",
         tone: "warning",
       });
       setStep(STEP_MAP);
@@ -1685,14 +1726,40 @@ export function TransferPage({
       case "change_target_type": {
         if (!action.to_type) return;
         let hit = false;
+        let existingConflict = false;
         const next = columnMappings.map((m) => {
           if (matches(m)) {
             hit = true;
+            if (m.existsInDestination) {
+              existingConflict = true;
+              // Keep live dest type — mapping Widen is not ALTER TABLE.
+              return {
+                ...m,
+                approved: false,
+                requiresReview: true,
+                reason: [
+                  m.reason,
+                  `Destination already typed — remap or ALTER before targeting ${action.to_type}`,
+                ]
+                  .filter(Boolean)
+                  .join(" · "),
+              };
+            }
             return { ...m, destType: action.to_type, approved: true };
           }
           return m;
         });
         setColumnMappings(next);
+        if (existingConflict) {
+          toast({
+            title: "Remap or ALTER required",
+            message:
+              "The destination column already exists with a typed DDL. Changing the mapping type alone will not widen BOOLEAN → VARCHAR on the warehouse.",
+            tone: "warning",
+          });
+          setStep(STEP_MAP);
+          return;
+        }
         toast({
           title: hit ? "Target type updated — re-validating" : "Column not found",
           message: hit
@@ -1967,6 +2034,17 @@ export function TransferPage({
           dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
           dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
           dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          // Live dest schema — required so existing BOOLEAN columns are not invisible to DDL gates.
+          dest_table: destKindMode === "database" && destDriverType !== "mongodb" && destDriverType !== "dynamodb"
+            ? (targetCollection || undefined)
+            : undefined,
+          dest_collection: destKindMode === "database" && (destDriverType === "mongodb" || destDriverType === "dynamodb")
+            ? (targetCollection || undefined)
+            : undefined,
+          destination_column_types:
+            destKindMode === "database" && Object.keys(destSchemaMap).length
+              ? destSchemaMap
+              : undefined,
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,
@@ -2430,6 +2508,10 @@ export function TransferPage({
       const name =
         `${sourceLabel || "source"} → ${mapDestRouteLabel || "destination"}`.slice(0, 180)
         || `contract-${Date.now()}`;
+      const columnTypes: Record<string, string> = {};
+      for (const [key, value] of Object.entries(currentSourceSchema || {})) {
+        if (key) columnTypes[key] = String(value || "VARCHAR");
+      }
       const contract = await createContractFromTransfer({
         name,
         source: buildSourceEndpoint() as Record<string, unknown>,
@@ -2437,7 +2519,7 @@ export function TransferPage({
           ? { kind: "file_export", format: exportFormat, database: targetDb, output_path: destOutputPath }
           : buildDestinationEndpoint()) as Record<string, unknown>,
         mappings,
-        column_types: currentSourceSchema,
+        column_types: columnTypes,
         preflight_gates: (preflight.gates || []) as unknown as Record<string, unknown>[],
         quality_rules: (preflight.blockers || []).map((b) => ({
           name: b.id,
@@ -2454,6 +2536,19 @@ export function TransferPage({
           preflight_passed: Boolean(preflight.passed),
         },
       });
+      try {
+        sessionStorage.setItem("df2.last-saved-contract", JSON.stringify(contract));
+      } catch {
+        /* ignore */
+      }
+      try {
+        // Broadcast before navigate so keep-alive Contracts can upsert immediately.
+        window.dispatchEvent(
+          new CustomEvent("df2:contracts-changed", { detail: { id: contract.id, contract } }),
+        );
+      } catch {
+        /* ignore */
+      }
       toast({
         title: "Contract saved as draft",
         message: `${contract.name} is now under Contracts. `
@@ -2462,13 +2557,7 @@ export function TransferPage({
             : "Saved while Validate is still blocked — fix mappings, then Sign after gates pass."),
         tone: "success",
       });
-      // Navigate first so ContractsPage is active, then notify it to reload.
       onOpenContracts?.();
-      try {
-        window.dispatchEvent(new CustomEvent("df2:contracts-changed", { detail: { id: contract.id } }));
-      } catch {
-        /* ignore */
-      }
     } catch (e) {
       toast({ title: "Could not save contract", message: (e as Error).message, tone: "error" });
     } finally {

@@ -213,6 +213,25 @@ export function detectTypeRisks(
       }
     }
 
+    const mappingDest = (m.destType || destType || "").toLowerCase();
+    const enumLike =
+      m.semanticRole === "string_enum"
+      || /active|inactive|pending|invalidated|approved|draft/i.test(m.sample || "");
+    if (
+      enumLike
+      && (mappingDest.includes("bool") || m.transform === "cast_boolean")
+    ) {
+      risks.push({
+        id: `enum-bool-${m.source}`,
+        column: m.source,
+        severity: "block",
+        title: "String enum cannot map to BOOLEAN",
+        detail: m.existsInDestination
+          ? `Sample "${(m.sample || "").slice(0, 40)}" is a status label but destination column already exists as BOOLEAN — remap to a VARCHAR column or ALTER the destination. Mapping Widen alone will not change DDL.`
+          : `Sample "${(m.sample || "").slice(0, 40)}" looks like a status label — use VARCHAR (Widen → VARCHAR), not Cast boolean.`,
+      });
+    }
+
     if (m.sample && JSON_LIKE.test(m.sample.trim()) && m.transform !== "parse_json") {
       risks.push({
         id: `json-${m.source}`,

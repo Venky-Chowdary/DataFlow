@@ -11,7 +11,6 @@ from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from services.schema_inference import infer_type
 from services.value_serializer import json_default
 from services.transform_engine import (
     _parse_boolean,
@@ -168,11 +167,14 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
     distinct_ratio = distinct / max(len(non_empty), 1)
 
     scores = _type_scores(non_empty)
-    best_type = infer_type(non_empty, field_name=name)
+    from services.schema_inference import infer_column
+
+    intel = infer_column(non_empty, field_name=name)
+    best_type = str(intel["logical_type"])
     if best_type in scores:
         best_score = max(0.5, scores[best_type])
     else:
-        best_score = max(0.75, 1.0 - null_rate)
+        best_score = max(0.75, float(intel.get("confidence") or 0.75), 1.0 - null_rate)
 
     # Top-K value frequencies (cardinality analysis)
     freq = Counter(non_empty).most_common(10)
@@ -202,6 +204,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
     return {
         "name": name,
         "inferred_type": best_type,
+        "semantic_role": intel.get("semantic_role"),
         "confidence": round(min(0.99, best_score), 3),
         "null_rate": round(null_rate, 3),
         "distinct_count": distinct,
@@ -215,6 +218,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         "statistics": stats,
         "histogram": histogram,
         "top_values": top_values,
+        "notes": intel.get("notes") or [],
     }
 
 

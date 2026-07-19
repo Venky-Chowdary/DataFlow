@@ -297,25 +297,40 @@
   min-height: 0;
   max-height: 100%;
   overflow: auto;
+  border: 1px solid var(--df-table-border, var(--df-border));
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface);
+  scrollbar-gutter: stable;
 }
 
 .df2-column-review-data-preview .df2-structure-table {
   table-layout: auto;
   min-width: 100%;
   width: auto;
+  border-collapse: separate;
+  border-spacing: 0;
 }
 
 .df2-column-review-data-preview .df2-structure-table th,
 .df2-column-review-data-preview .df2-structure-table td {
-  padding: 5px 7px;
-  font-size: 11px;
+  padding: 7px 10px;
+  font-size: 12px;
   max-width: none;
   min-width: 120px;
   white-space: nowrap;
+  border-bottom: 1px solid color-mix(in srgb, var(--df-border) 75%, transparent);
 }
 
 .df2-column-review-data-preview .df2-structure-table th {
-  font-size: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
+  background: var(--df-table-head-bg, var(--df-surface-muted));
 }
 
 .df2-column-review-data-preview .df2-structure-table th small {

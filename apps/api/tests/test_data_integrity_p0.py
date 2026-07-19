@@ -278,9 +278,14 @@ def test_shared_builder_detail_shape_and_counts():
     assert _coerced_null_row_count(details_q, "quarantine") == 1
     assert _rejected_row_count(data_rows, mapped_q, details_q, "quarantine") == 1
     d = next(x for x in details_q if x["value"] == "nope")
-    assert d == {"row": 2, "column": "age", "target": "age", "value": "nope",
-                 "reason": d["reason"], "policy": "quarantine"}
+    assert d["row"] == 2
+    assert d["column"] == "age"
+    assert d["target"] == "age"
+    assert d["value"] == "nope"
+    assert d["policy"] == "quarantine"
     assert "integer" in d["reason"].lower()
+    # Full source row context for quarantine review UI
+    assert d.get("values", {}).get("age") == "nope"
 
     # Fail: row dropped, not coerced.
     mapped_f, _errs_f, details_f = build_mapped_rows_with_details(error_policy="fail", **kwargs)

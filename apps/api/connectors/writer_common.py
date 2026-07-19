@@ -374,26 +374,70 @@ def build_mapped_rows_with_details(
     return mapped, errors, rejected_details
 
 
+def sample_values_by_source_from_batch(
+    headers: list[str],
+    data_rows: list[list[str]],
+    mappings: list[dict],
+    *,
+    limit: int = 200,
+) -> dict[str, list[str]]:
+    """Collect per-source sample strings from a write batch for DDL safety."""
+    index = {h: i for i, h in enumerate(headers)}
+    out: dict[str, list[str]] = {}
+    for m in mappings:
+        src = str(m.get("source") or "")
+        if not src or src not in index:
+            continue
+        col_i = index[src]
+        vals: list[str] = []
+        for row in data_rows[:limit]:
+            if col_i < len(row) and row[col_i] not in (None, ""):
+                vals.append(str(row[col_i]))
+        if vals:
+            out[src] = vals
+    return out
+
+
 def resolve_target_columns(
     mappings: list[dict],
     column_types: dict[str, str],
     preserve_case: bool = False,
     dest_types: dict[str, str] | None = None,
+    *,
+    sample_values_by_source: dict[str, list[str]] | None = None,
+    table_exists: bool | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
 
     Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
     then the source logical type, and finally ``VARCHAR``.
+
+    For **new tables** (``table_exists is False``), proposed typed DDL is
+    widened via ``safe_ddl_logical_type`` when samples cannot all coerce —
+    e.g. status enums never CREATE as BOOLEAN.
     """
+    from services.schema_inference import safe_ddl_logical_type
+
     target_cols: list[str] = []
     target_types: list[str] = []
+    samples = sample_values_by_source or {}
     for m in mappings:
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
-            target_types.append(
+            proposed = (
                 m.get("target_type")
                 or (dest_types or {}).get(tgt)
                 or column_types.get(m["source"], "VARCHAR")
             )
+            src = str(m.get("source") or "")
+            src_type = column_types.get(src) or m.get("source_type")
+            if table_exists is False:
+                proposed = safe_ddl_logical_type(
+                    str(proposed),
+                    samples.get(src),
+                    field_name=src,
+                    source_type=str(src_type) if src_type else None,
+                )
+            target_types.append(str(proposed))
     return target_cols, target_types

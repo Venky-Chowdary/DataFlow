@@ -13,10 +13,13 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from connectors.base import ReadBatch
 from connectors.schema_drift import add_missing_columns
@@ -866,7 +869,7 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
     are still recovered safely.
     """
     try:
-        from services.schema_inference import infer_type
+        from services.schema_inference import infer_column
 
         mapped = {
             "JSON": "json",
@@ -880,7 +883,7 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
             "TEXT": "string",
         }
         samples = [cell_to_string(v) if v is not None else "" for v in values]
-        return mapped.get(infer_type(samples, field_name=field_name))
+        return mapped.get(str(infer_column(samples, field_name=field_name)["logical_type"]))
     except Exception:
         return None
 
@@ -949,7 +952,10 @@ def introspect_table_schema(
                                         col["inferred_type"] = inferred
                         return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
             except Exception:
-                pass
+                logger.warning(
+                    "generic_sql inspector path failed for %s.%s; falling back to sample",
+                    schema, table, exc_info=True,
+                )
 
             with engine.connect() as conn:
                 headers, sample_rows = _sample_raw_table(conn, table, schema)
@@ -991,11 +997,19 @@ def introspect_table_schema(
                             if inferred and inferred != "string":
                                 col["inferred_type"] = inferred
         except Exception:
-            pass
+            logger.warning(
+                "generic_sql sample refine failed for %s.%s", schema, table, exc_info=True,
+            )
 
         return {"ok": True, "columns": result, "tables": [table], "schema": schema or ""}
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+        logger.warning("generic_sql introspect failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: SQL schema introspection failed",
+            "columns": [],
+            "tables": [],
+        }
     finally:
         engine.dispose()
 
@@ -1330,6 +1344,7 @@ def _upsert_batch(
             # Native upsert can fail if the table lacks the required unique
             # index/constraint.  Roll back the aborted transaction so the
             # delete+insert fallback can run cleanly.
+            logger.debug("native upsert unavailable; using delete+insert fallback", exc_info=True)
             try:
                 conn.rollback()
             except Exception:

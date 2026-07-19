@@ -18,6 +18,9 @@ import {
   signContract,
 } from "../lib/api";
 
+const CONTRACTS_CHANGED = "df2:contracts-changed";
+const LAST_CONTRACT_KEY = "df2.last-saved-contract";
+
 function statusBadge(status: string) {
   const s = (status || "").toLowerCase();
   if (s === "signed") return { cls: "df2-badge-live", label: "Signed" };
@@ -26,23 +29,51 @@ function statusBadge(status: string) {
   return { cls: "df2-badge-warn", label: "Draft" };
 }
 
+function readOptimisticContract(): DataContractSummary | null {
+  try {
+    const raw = sessionStorage.getItem(LAST_CONTRACT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DataContractSummary;
+    return parsed?.id ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function upsertContract(list: DataContractSummary[], next: DataContractSummary): DataContractSummary[] {
+  const rest = list.filter((c) => c.id !== next.id);
+  return [next, ...rest];
+}
+
 export function ContractsPage({ active = true }: { active?: boolean }) {
   const { toast } = useToast();
-  const [contracts, setContracts] = useState<DataContractSummary[]>([]);
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+
+  const [contracts, setContracts] = useState<DataContractSummary[]>(() => {
+    const optimistic = readOptimisticContract();
+    return optimistic ? [optimistic] : [];
+  });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [breakers, setBreakers] = useState<Record<string, string>>({});
   const pendingReload = useRef(false);
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   const load = useCallback(async () => {
     setLoading(true);
     pendingReload.current = false;
     try {
       const rows = await fetchContracts();
-      setContracts(rows);
+      const optimistic = readOptimisticContract();
+      const merged = optimistic ? upsertContract(rows, optimistic) : rows;
+      setContracts(merged);
+      setLoadError("");
       const map: Record<string, string> = {};
       await Promise.all(
-        rows.slice(0, 40).map(async (c) => {
+        merged.slice(0, 40).map(async (c) => {
           try {
             const b = await fetchContractBreaker(c.id);
             map[c.id] = b.state;
@@ -53,32 +84,47 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       );
       setBreakers(map);
     } catch (e) {
-      toast({ title: "Contracts", message: (e as Error).message, tone: "error" });
-      setContracts([]);
+      const message = (e as Error).message || "Could not load contracts";
+      setLoadError(message);
+      // Keep any optimistic/local rows so a save still appears if list fetch fails.
+      setContracts((prev) => {
+        const optimistic = readOptimisticContract();
+        if (optimistic) return upsertContract(prev, optimistic);
+        return prev;
+      });
+      toastRef.current({ title: "Contracts", message, tone: "error" });
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, []);
 
-  // Keep-alive screens do not remount — reload whenever Contracts becomes visible
-  // and whenever Transfer Studio saves a new draft (even if the save event
-  // arrives a tick before `active` flips true).
   useEffect(() => {
     if (!active) return;
     void load();
   }, [active, load]);
 
   useEffect(() => {
-    const onChanged = () => {
-      if (active) {
+    const onChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ contract?: DataContractSummary; id?: string }>).detail;
+      const contract = detail?.contract;
+      if (contract?.id) {
+        try {
+          sessionStorage.setItem(LAST_CONTRACT_KEY, JSON.stringify(contract));
+        } catch {
+          /* ignore */
+        }
+        setContracts((prev) => upsertContract(prev, contract));
+        setLoadError("");
+      }
+      if (activeRef.current) {
         void load();
       } else {
         pendingReload.current = true;
       }
     };
-    window.addEventListener("df2:contracts-changed", onChanged);
-    return () => window.removeEventListener("df2:contracts-changed", onChanged);
-  }, [active, load]);
+    window.addEventListener(CONTRACTS_CHANGED, onChanged);
+    return () => window.removeEventListener(CONTRACTS_CHANGED, onChanged);
+  }, [load]);
 
   useEffect(() => {
     if (active && pendingReload.current) void load();
@@ -103,14 +149,31 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
 
   return (
     <PageShell
-      fit
       className="df2-page-contracts"
       title="Contracts"
       kicker="Platform"
       description="Signed schema agreements that gate transfers and detect drift."
+      actions={
+        <Button size="sm" onClick={() => void load()} leadingIcon={<DtIcon name="activity" size={14} />}>
+          Refresh
+        </Button>
+      }
     >
       <PageFrame className="df2-contracts-workspace">
-        {loading ? (
+        {loadError && contracts.length === 0 ? (
+          <div className="df2-alert df2-alert-error" role="alert">
+            <DtIcon name="alert" size={18} />
+            <div>
+              <strong>Could not load contracts</strong>
+              <p>{loadError}</p>
+            </div>
+            <Button size="sm" onClick={() => void load()}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
+
+        {loading && contracts.length === 0 ? (
           <SectionLoader title="Loading contracts…" />
         ) : contracts.length === 0 ? (
           <EmptyState

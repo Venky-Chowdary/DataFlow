@@ -119,7 +119,16 @@ def write_mapped_rows(
 
     from psycopg2 import sql
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    from connectors.writer_common import sample_values_by_source_from_batch
+
+    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        sample_values_by_source=batch_samples,
+        table_exists=False if create_table else None,
+    )
     if not target_cols:
         return WriteResult(
             ok=False,

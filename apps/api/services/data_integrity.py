@@ -137,11 +137,20 @@ def _check_transform_dry_run(
             "blocks_transfer": False,
             "issues": errors[:20],
         }
+    issues = list(errors[:20])
+    if not ok and issues:
+        # Preflight quarantine rows are inspect-only — the job does not continue.
+        issues.insert(
+            0,
+            "Preflight blocked the transfer (0 rows written). "
+            "Findings below are for inspection — fix Map types/targets, then re-Validate. "
+            "Write-time quarantine only applies after preflight passes.",
+        )
     return {
         "check": "transform_dry_run",
         "passed": ok,
         "blocks_transfer": not ok,
-        "issues": errors[:20],
+        "issues": issues,
     }
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import re
 import tempfile
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, Overflow
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.snowflake_conn import get_connection, normalize_account
@@ -25,6 +28,7 @@ from connectors.writer_common import (
     dedupe_rows_by_pk_and_lsn,
     resolve_target_columns,
     row_checksum,
+    sample_values_by_source_from_batch,
     sanitize_identifier,
     snowflake_lsn_match_predicate,
     transform_error_policy,
@@ -518,7 +522,13 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub", load_method="stub",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types)
+    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        sample_values_by_source=batch_samples,
+        table_exists=False if create_table else None,
+    )
     if not target_cols:
         return WriteResult(
             ok=False,
@@ -631,7 +641,10 @@ def write_mapped_rows(
                         cur.execute(f'USE WAREHOUSE "{warehouse}"')
                     except Exception:
                         # fakesnow and some local mocks do not support USE WAREHOUSE.
-                        pass
+                        logger.debug(
+                            "USE WAREHOUSE skipped (driver/mock limitation)",
+                            exc_info=True,
+                        )
                 if database:
                     # The built-in SNOWFLAKE database is read-only and cannot be written.
                     if database.upper() == "SNOWFLAKE":

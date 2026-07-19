@@ -82,20 +82,6 @@ function AppShell({
     if (fromHash) return fromHash;
     return initialScreen === "landing" ? "dashboard" : initialScreen;
   });
-
-  const setScreen = useCallback((next: Screen) => {
-    setScreenState(next);
-    writeAppHash(next);
-  }, []);
-
-  useEffect(() => {
-    const onHash = () => {
-      const fromHash = readAppHash();
-      if (fromHash) setScreenState(fromHash);
-    };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [jobs, setJobs] = useState<TransferJob[]>([]);
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
@@ -117,14 +103,27 @@ function AppShell({
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
 
-  useEffect(() => {
+  const setScreen = useCallback((next: Screen) => {
+    // Mount keep-alive screens synchronously so the first paint after navigate
+    // is not an empty content hole (useEffect mount races Save → Contracts).
     setMountedScreens((prev) => {
-      if (prev.has(screen)) return prev;
-      const next = new Set(prev);
-      next.add(screen);
-      return next;
+      if (prev.has(next)) return prev;
+      const nextSet = new Set(prev);
+      nextSet.add(next);
+      return nextSet;
     });
-  }, [screen]);
+    setScreenState(next);
+    writeAppHash(next);
+  }, []);
+
+  useEffect(() => {
+    const onHash = () => {
+      const fromHash = readAppHash();
+      if (fromHash) setScreen(fromHash);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [setScreen]);
 
   const showScreen = (id: Screen) => (mountedScreens.has(id) ? (screen === id ? "is-active" : "is-kept") : "");
 

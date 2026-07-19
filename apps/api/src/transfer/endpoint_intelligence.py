@@ -312,7 +312,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
 
             from pymongo import MongoClient
 
-            from services.schema_inference import infer_type
+            from services.schema_inference import infer_schema_map
 
             coll_name = endpoint.collection
             if not coll_name:
@@ -336,16 +336,26 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             for r in records:
                 safe_records.append(json.loads(json.dumps(r, default=json_default)))
             columns = list(safe_records[0].keys()) if safe_records else []
-            # Infer logical types from the raw sampled values (not just "string").
-            # cell_to_string normalizes ObjectId, datetime, Decimal128, and nested
-            # documents into canonical strings so the statistical inferrer can detect
-            # INTEGER, DECIMAL, BOOLEAN, TIMESTAMP, JSON, etc.
-            schema = {}
+            # Canonical schema intelligence choke point (type + semantic_role).
+            samples_by_field = {
+                col: [cell_to_string(r.get(col)) for r in records[:100] if r.get(col) is not None]
+                for col in columns
+            }
+            schema, intel = infer_schema_map(samples_by_field)
             for col in columns:
-                samples = [cell_to_string(r.get(col)) for r in records[:100] if r.get(col) is not None]
-                schema[col] = infer_type(samples, field_name=col) if samples else "VARCHAR"
+                if col not in schema:
+                    schema[col] = "VARCHAR"
             out["columns"] = columns
             out["schema"] = schema
+            out["schema_intelligence"] = {
+                k: {
+                    "logical_type": v.get("logical_type"),
+                    "semantic_role": v.get("semantic_role"),
+                    "confidence": v.get("confidence"),
+                    "notes": v.get("notes") or [],
+                }
+                for k, v in intel.items()
+            }
             out["sample_data"] = safe_records[:10]
             out["data"] = safe_records[:10]
             try:

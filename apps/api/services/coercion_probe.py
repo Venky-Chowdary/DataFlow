@@ -112,10 +112,12 @@ def _build_suggestion(
         safe_type = _safe_target_type(dest_db_type, prefer_structural=structural)
         fix = (
             f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
-            f"value(s) cannot be cast to {target_logical} (e.g. {examples}). Widen the "
-            f"destination column to {safe_type or 'VARCHAR'} to preserve every value, "
-            f"or keep the type and quarantine non-castable rows (they are surfaced, "
-            f"never silently dropped)."
+            f"value(s) cannot be cast to {target_logical} (e.g. {examples}). "
+            f"For a new table, create as {safe_type or 'VARCHAR'}. "
+            f"For an existing typed column, remap to a text column or ALTER the "
+            f"destination (mapping Widen alone does not change DDL). "
+            f"Quarantine only applies after Validate passes for write-time rejects "
+            f"— it never silently drops rows."
         )
         return fix, safe_type, None
     if sentinel_nulls:
@@ -137,6 +139,7 @@ def analyze_coercion(
     dest_types: dict[str, str] | None = None,
     dest_db_type: str = "",
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
+    table_exists: bool = False,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -226,9 +229,16 @@ def analyze_coercion(
             structural=structural,
         )
 
+        tgt_name = str(m.get("target", src) or src)
+        dest_col_exists = bool(
+            table_exists and (
+                tgt_name in dest_types
+                or tgt_name.lower() in {k.lower() for k in dest_types}
+            )
+        )
         entry = {
             "source": src,
-            "target": m.get("target", src),
+            "target": tgt_name,
             "source_type": src_type,
             "target_type": tgt_type,
             "target_logical": tgt_logical,
@@ -244,6 +254,8 @@ def analyze_coercion(
             "suggested_fix": fix,
             "suggested_target_type": suggested_type,
             "suggested_transform": suggested_transform,
+            "destination_exists": dest_col_exists,
+            "table_exists": bool(table_exists),
         }
         columns.append(entry)
         by_source[src] = entry

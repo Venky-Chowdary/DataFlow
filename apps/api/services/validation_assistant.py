@@ -38,6 +38,8 @@ def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
             "suggested_fix": col.get("suggested_fix", ""),
             "suggested_target_type": col.get("suggested_target_type"),
             "suggested_transform": col.get("suggested_transform"),
+            "destination_exists": bool(col.get("destination_exists")),
+            "table_exists": bool(col.get("table_exists")),
         })
     return out
 
@@ -55,12 +57,21 @@ def _suggested_actions(
             key = ("change_target_type", cf["column"], cf["suggested_target_type"])
             if key not in seen:
                 seen.add(key)
+                to_type = cf["suggested_target_type"]
+                existing = bool(cf.get("destination_exists") or cf.get("table_exists"))
+                label = (
+                    f"Remap '{cf['column']}' — destination is typed; "
+                    f"mapping Widen to {to_type} does not ALTER DDL"
+                    if existing
+                    else f"Widen '{cf['column']}' to {to_type}"
+                )
                 actions.append({
                     "kind": "change_target_type",
                     "column": cf["column"],
                     "target": cf.get("target"),
-                    "to_type": cf["suggested_target_type"],
-                    "label": f"Widen '{cf['column']}' to {cf['suggested_target_type']}",
+                    "to_type": to_type,
+                    "label": label,
+                    "requires_ddl": existing,
                 })
         if cf.get("suggested_transform"):
             key = ("add_transform", cf["column"], cf["suggested_transform"])
