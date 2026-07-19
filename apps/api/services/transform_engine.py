@@ -615,7 +615,19 @@ def infer_transform_for_mapping(
     }:
         return "decimal"
     src_lower = source_col.lower()
-    if (
+    # Only apply date transforms when the SOURCE looks temporal — never because
+    # the target name alone contains "date" (status → posted_date_estimated).
+    source_looks_temporal = (
+        semantic == "timestamp"
+        or src in {"date", "datetime", "time"}
+        or "date" in src_lower
+        or "time" in src_lower
+        or src_lower.endswith("_at")
+        or src_lower.endswith("_dt")
+        or src_col.endswith("_DT")
+        or src_col in {"TXN_DT", "PAY_DT", "PAYMENT_DT", "TRANS_DT"}
+    )
+    if source_looks_temporal and (
         "date" in tgt_name
         or tgt_name.endswith("_dt")
         or src_col.endswith("_DT")
@@ -768,6 +780,12 @@ def dry_run_sample(
 
     from services.transform_resolver import resolve_transform
 
+    dest_types = {
+        str(m.get("target")): str(m.get("target_type"))
+        for m in mappings
+        if m.get("target") and m.get("target_type")
+    }
+
     for m in mappings:
         idx = source_idx.get(m["source"])
         if idx is None:
@@ -775,7 +793,7 @@ def dry_run_sample(
             continue
         # Resolve UI aliases (cast_number → decimal) before dry-run — never leave
         # Unknown transform: 'cast_number' as a false quarantine signal.
-        transform = resolve_transform(m, column_types=column_types)
+        transform = resolve_transform(m, column_types=column_types, dest_types=dest_types)
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)

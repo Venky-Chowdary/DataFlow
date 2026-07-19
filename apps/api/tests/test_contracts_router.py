@@ -19,9 +19,11 @@ from src.services.data_contract import ColumnRule, DataContract
 
 
 @pytest.fixture(autouse=True)
-def _reset_store():
+def _reset_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json"))
     reset_contract_store()
     yield
+    reset_contract_store()
 
 
 def test_get_contract_404():

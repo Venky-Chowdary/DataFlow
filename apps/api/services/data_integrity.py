@@ -57,17 +57,20 @@ def _check_coercion_safety(
     *,
     dest_kind: str = "",
     schema_policy: str = "manual_review",
+    validation_mode: str = "strict",
 ) -> dict[str, Any]:
     from services.type_coercion_validator import (
         coerce_blocks_transfer,
         validate_mapping_coercions,
     )
 
+    floor = float(_mode_config(validation_mode)["confidence"])
     issues = validate_mapping_coercions(
         mappings,
         source_types=source_types,
         target_types=target_types,
         schema_policy=schema_policy,
+        confidence_floor=floor,
     )
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
@@ -98,6 +101,7 @@ def _check_transform_dry_run(
     rows: list[dict[str, Any]],
     *,
     dest_kind: str = "",
+    target_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -106,10 +110,20 @@ def _check_transform_dry_run(
     sample_rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in rows[:200]]
     from services.transform_engine import dry_run_sample
 
+    # Ensure each mapping carries target_type so name heuristics (e.g. "date" in
+    # posted_date_estimated) cannot override an explicit BOOLEAN/DECIMAL target.
+    enriched = []
+    for m in mappings:
+        item = dict(m)
+        tgt = item.get("target")
+        if not item.get("target_type") and tgt and target_types:
+            item["target_type"] = target_types.get(str(tgt))
+        enriched.append(item)
+
     ok, errors = dry_run_sample(
         headers=headers,
         sample_rows=sample_rows,
-        mappings=mappings,
+        mappings=enriched,
         column_types=source_types,
     )
     missing_col_errors = [e for e in errors if "Source column missing" in e]
@@ -518,8 +532,26 @@ def run_integrity_audit(
     checks: list[dict[str, Any]] = []
 
     if mappings:
-        checks.append(_check_coercion_safety(mappings, source_types, target_types, dest_kind=dest_kind, schema_policy=schema_policy))
-        checks.append(_check_transform_dry_run(mappings, source_columns, source_types, rows, dest_kind=dest_kind))
+        checks.append(
+            _check_coercion_safety(
+                mappings,
+                source_types,
+                target_types,
+                dest_kind=dest_kind,
+                schema_policy=schema_policy,
+                validation_mode=validation_mode,
+            )
+        )
+        checks.append(
+            _check_transform_dry_run(
+                mappings,
+                source_columns,
+                source_types,
+                rows,
+                dest_kind=dest_kind,
+                target_types=target_types,
+            )
+        )
         checks.append(_check_financial_precision(mappings, source_types, rows))
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk, validation_mode=validation_mode))
         checks.append(_check_duplicate_keys(mappings, rows, validation_mode, dest_kind=dest_kind, primary_key=pk))

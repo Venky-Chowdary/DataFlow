@@ -4124,52 +4124,7 @@
   min-width: 0;
 }
 
-/* Pilot FAB — reopen after closing the rail (including Transfer) */
-.df2-copilot-fab {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: var(--df-z-toast, 1100);
-  min-width: 52px;
-  height: 52px;
-  padding: 0 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border: none;
-  border-radius: 999px;
-  background: var(--df-brand, #0d9488);
-  color: #fff;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
-  cursor: pointer;
-}
-
-.df2-copilot-fab-label {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-@media (max-width: 720px) {
-  .df2-copilot-fab {
-    width: 52px;
-    padding: 0;
-  }
-
-  .df2-copilot-fab-label {
-    display: none;
-  }
-}
-
-.df2-copilot-fab:hover {
-  filter: brightness(1.05);
-}
-
-.df2-copilot-fab:focus-visible {
-  outline: 2px solid var(--df-brand, #0d9488);
-  outline-offset: 3px;
-}
+/* Bottom-corner Pilot FAB removed — use mid-right .df2-copilot-edge-open only. */
 
 /* Schedules / Query / MCP / Docs — ensure no leftover overflow traps */
 .df2-page-pipelines .df2-pipelines-workspace,
@@ -6862,6 +6817,13 @@
   border: 1px solid var(--df2-border, #e2e8f0);
   border-radius: 12px;
   background: var(--df2-surface, #fff);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.df2-contract-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
 }
 
 .df2-contract-card-head {

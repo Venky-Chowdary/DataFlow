@@ -387,22 +387,39 @@ export function ValidateDashboard({
     setAssistExpanded(true);
   }, [preflight?.run_id]);
 
-  // After a remediation re-run, record whether dry-run cleared — once per run_id.
+  // After a remediation re-run, close out "waiting for re-validation" entries.
   useEffect(() => {
-    if (!preflight?.run_id || running || !pendingVerifyRef.current) return;
-    if (verifiedRunRef.current === preflight.run_id) return;
-    verifiedRunRef.current = preflight.run_id;
+    if (!preflight || running || !pendingVerifyRef.current) return;
+    const runKey = preflight.run_id || `${preflight.passed_count}-${preflight.total_gates}-${preflight.readiness_score}`;
+    if (verifiedRunRef.current === runKey) return;
+    verifiedRunRef.current = runKey;
     pendingVerifyRef.current = false;
     const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
     const cleared = Boolean(preflight.passed || dry?.status === "pass");
-    pushRemediation(
-      "Re-validation result",
-      cleared
-        ? "Dry-run / integrity now passes — Execute unlocks when all gates pass."
-        : `Dry-run still blocked: ${dry?.message || "see Validation rules"}`,
-      cleared ? "Verified OK" : "Still blocked — review rules below",
-    );
-  }, [preflight?.run_id, preflight?.passed, preflight?.gates, running]);
+    const outcome = cleared ? "Verified OK" : "Still blocked — remap columns on Map";
+    const detail = cleared
+      ? "Dry-run / integrity now passes — Execute unlocks when all gates pass."
+      : `Dry-run still blocked: ${dry?.message || "see Validation rules"}. Quarantine cannot fix wrong type mappings.`;
+    setRemediationLog((prev) => {
+      const next = prev.map((row, idx) =>
+        idx === 0 && /waiting for re-validation/i.test(row.outcome)
+          ? { ...row, detail, outcome }
+          : row,
+      );
+      if (next[0]?.outcome === outcome && /waiting for re-validation/i.test(prev[0]?.outcome || "")) {
+        return next;
+      }
+      return [
+        {
+          at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          action: "Re-validation result",
+          detail,
+          outcome,
+        },
+        ...next,
+      ].slice(0, 8);
+    });
+  }, [preflight?.run_id, preflight?.passed, preflight?.passed_count, preflight?.gates, running]);
 
   const copyRunId = async () => {
     if (!runId) return;
@@ -735,18 +752,7 @@ export function ValidateDashboard({
                   <DtIcon name="shield" size={14} /> Quarantine &amp; re-check
                 </button>
               )}
-              {preflight && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-ghost"
-                  onClick={() => {
-                    setAssistExpanded(true);
-                    void runExplain();
-                  }}
-                >
-                  <DtIcon name="sparkle" size={14} /> Explain &amp; fix with AI
-                </button>
-              )}
+              {/* AI analysis lives in the Explain card below — one action, one place. */}
             </div>
           </div>
         );
@@ -766,62 +772,62 @@ export function ValidateDashboard({
           <div className="df2-vd-assist-head">
             <button
               type="button"
-              className="df2-vd-assist-title df2-vd-assist-toggle"
+              className="df2-vd-assist-toggle"
               onClick={() => setAssistExpanded((v) => !v)}
               aria-expanded={assistExpanded}
+              aria-controls="df2-vd-assist-panel"
+              id="df2-vd-assist-trigger"
             >
-              <span className="df2-vd-assist-icon"><DtIcon name="sparkle" size={16} /></span>
-              <div>
+              <span className="df2-vd-assist-icon" aria-hidden>
+                <DtIcon name="sparkle" size={16} />
+              </span>
+              <span className="df2-vd-assist-copy">
                 <strong>Explain &amp; fix with AI</strong>
                 <span>
                   {assistExpanded
-                    ? "Turn the validation result into a plain-language explanation with one-click fixes."
+                    ? "Plain-language explanation with one-click fixes."
                     : explain
-                      ? "Analysis ready — expand to review fixes."
-                      : "Collapsed — expand to analyze or remediate."}
+                      ? "Analysis ready — open to review suggested fixes."
+                      : "Open to analyze this validation result."}
                 </span>
-              </div>
+              </span>
               <span className={`df2-vd-assist-chevron${assistExpanded ? " is-open" : ""}`} aria-hidden>
-                <DtIcon name="chevron-down" size={14} />
+                <DtIcon name="chevron-down" size={16} />
               </span>
             </button>
             <div className="df2-vd-assist-head-actions">
-              {assistExpanded && (
-                <Button
-                  variant={explain ? "ghost" : "primary"}
-                  onClick={() => void runExplain()}
-                  loading={explaining}
-                  loadingLabel="Analyzing…"
-                  leadingIcon={<DtIcon name="sparkle" size={14} />}
-                >
-                  {explain ? "Re-analyze" : "Explain & fix with AI"}
-                </Button>
-              )}
-              <button
-                type="button"
-                className="df2-btn df2-btn-ghost df2-btn-sm"
-                onClick={() => {
-                  setAssistExpanded(false);
-                  setExplain(null);
-                  setExplainError(null);
+              <Button
+                size="sm"
+                variant={explain ? "secondary" : "primary"}
+                disabled={!preflight || explaining}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setAssistExpanded(true);
+                  void runExplain();
                 }}
-                aria-label="Close AI analysis"
-                title="Close"
+                loading={explaining}
+                loadingLabel="Analyzing…"
+                leadingIcon={<DtIcon name="sparkle" size={14} />}
               >
-                <DtIcon name="x" size={14} />
-              </button>
+                {explain ? "Re-analyze" : "Run analysis"}
+              </Button>
             </div>
           </div>
 
           {assistExpanded && (
-            <>
+            <div
+              className="df2-vd-assist-panel"
+              id="df2-vd-assist-panel"
+              role="region"
+              aria-labelledby="df2-vd-assist-trigger"
+            >
               {runId && (
                 <div className="df2-vd-run-id">
                   <DtIcon name="activity" size={13} />
                   <span>Validation run</span>
                   <code>{runId}</code>
                   <button type="button" className="df2-vd-run-id-copy" onClick={() => void copyRunId()}>
-                    {copiedRunId ? "Copied" : "Copy for Pilot"}
+                    {copiedRunId ? "Copied" : "Copy run ID"}
                   </button>
                 </div>
               )}
@@ -909,7 +915,7 @@ export function ValidateDashboard({
                   )}
                 </div>
               )}
-            </>
+            </div>
           )}
         </div>
       )}

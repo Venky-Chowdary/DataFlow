@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -26,15 +26,17 @@ function statusBadge(status: string) {
   return { cls: "df2-badge-warn", label: "Draft" };
 }
 
-export function ContractsPage() {
+export function ContractsPage({ active = true }: { active?: boolean }) {
   const { toast } = useToast();
   const [contracts, setContracts] = useState<DataContractSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [breakers, setBreakers] = useState<Record<string, string>>({});
+  const pendingReload = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
+    pendingReload.current = false;
     try {
       const rows = await fetchContracts();
       setContracts(rows);
@@ -58,9 +60,29 @@ export function ContractsPage() {
     }
   }, [toast]);
 
+  // Keep-alive screens do not remount — reload whenever Contracts becomes visible
+  // and whenever Transfer Studio saves a new draft (even if the save event
+  // arrives a tick before `active` flips true).
   useEffect(() => {
+    if (!active) return;
     void load();
-  }, [load]);
+  }, [active, load]);
+
+  useEffect(() => {
+    const onChanged = () => {
+      if (active) {
+        void load();
+      } else {
+        pendingReload.current = true;
+      }
+    };
+    window.addEventListener("df2:contracts-changed", onChanged);
+    return () => window.removeEventListener("df2:contracts-changed", onChanged);
+  }, [active, load]);
+
+  useEffect(() => {
+    if (active && pendingReload.current) void load();
+  }, [active, load]);
 
   const signed = contracts.filter((c) => c.status === "signed").length;
   const drafts = contracts.filter((c) => c.status === "draft").length;
@@ -95,7 +117,7 @@ export function ContractsPage() {
             page
             icon="shield"
             title="No data contracts yet"
-            description="In Transfer Studio, run Validate and choose Save as contract to capture mappings and quality gates."
+            description="A contract is a saved schema agreement (source → destination mappings + quality gates). In Transfer Studio → Validate, click Save as contract — drafts appear here even if Validate is still blocked. Sign when gates pass."
           />
         ) : (
           <>

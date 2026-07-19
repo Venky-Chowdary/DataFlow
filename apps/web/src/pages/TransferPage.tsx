@@ -81,6 +81,8 @@ interface TransferPageProps {
   connectorsLoading?: boolean;
   onTransferComplete: () => void;
   onOpenSchedules?: () => void;
+  /** Jump to Contracts after Save as contract so the draft is visible immediately. */
+  onOpenContracts?: () => void;
 }
 
 /** File formats are never listed as database sources. */
@@ -209,7 +211,13 @@ function analysisFromPipeline(
   };
 }
 
-export function TransferPage({ connectors, connectorsLoading = false, onTransferComplete, onOpenSchedules }: TransferPageProps) {
+export function TransferPage({
+  connectors,
+  connectorsLoading = false,
+  onTransferComplete,
+  onOpenSchedules,
+  onOpenContracts,
+}: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
@@ -609,9 +617,16 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     targetCollection,
   ]);
 
-  const ensurePersistedPlan = useCallback(async (): Promise<string | null> => {
+  const ensurePersistedPlan = useCallback(async (
+    validationOverride?: ValidationMode,
+  ): Promise<string | null> => {
     if (!currentSourceColumns.length) return null;
     const payload = buildPlanPayload();
+    // setState for validationMode is async — honor explicit override so plan
+    // preflight never runs as stale "strict" after Quarantine → balanced.
+    if (validationOverride) {
+      payload.policies = { ...payload.policies, validation_mode: validationOverride };
+    }
     try {
       if (persistedPlanId) {
         await updateTransferPlan(persistedPlanId, payload);
@@ -1628,8 +1643,30 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   };
 
   const quarantineAndRerun = async () => {
-    // Balanced alone is not enough: Run used to re-preflight as strict. Always
-    // apply strip_controls so U+200B/etc are sanitized before Snowflake write.
+    // Wrong column maps (status → boolean date flag) cannot be fixed by
+    // quarantine/strip — send the operator back to Map with a clear reason.
+    const dry = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
+    const dryMsg = `${dry?.message || ""} ${JSON.stringify(dry?.details || {})}`;
+    const encodingOnly = /format-control|replacement character|encoding|strip_controls/i.test(dryMsg)
+      && !/\([A-Z_]+\)\s*→\s*\w+\s*\([A-Z_]+\)/i.test(dryMsg)
+      && !/confidence\s+\d+%\s*</i.test(dryMsg);
+    const looksLikeBadMapping =
+      /\([A-Z_]+\)\s*→\s*\w+\s*\([A-Z_]+\)/i.test(dryMsg)
+      || /confidence\s+\d+%\s*</i.test(dryMsg)
+      || /remap|posted_date_estimated|Invalid (date|boolean|decimal)/i.test(dryMsg);
+
+    if (looksLikeBadMapping && !encodingOnly) {
+      toast({
+        title: "Remap columns — quarantine cannot fix this",
+        message:
+          "Dry-run is blocked by wrong or lossy mappings (for example status → posted_date_estimated). "
+          + "Open Map, fix those targets, Approve, then re-run Validate. Quarantine only helps encoding/control-character rows.",
+        tone: "warning",
+      });
+      setStep(STEP_MAP);
+      return;
+    }
+
     setValidationMode("balanced");
     toast({
       title: "Quarantine + strip controls",
@@ -1880,7 +1917,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         }
       }
 
-      const planId = await ensurePersistedPlan();
+      const planId = await ensurePersistedPlan(activeValidation);
       if (planId) {
         try {
           await syncTransferPlanMappings(planId, mappings);
@@ -2407,19 +2444,31 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
           expectation: b.message,
           severity: "block",
         })),
-        strict: true,
+        // Draft contracts capture the intended schema even when Validate is still blocked.
+        strict: Boolean(preflight.passed),
         metadata: {
           sync_mode: syncMode,
           validation_mode: validationMode,
           schema_policy: schemaPolicy,
           readiness_score: preflight.readiness_score,
+          preflight_passed: Boolean(preflight.passed),
         },
       });
       toast({
-        title: "Contract saved",
-        message: `${contract.name} (${contract.status}) — open Contracts to sign or export.`,
+        title: "Contract saved as draft",
+        message: `${contract.name} is now under Contracts. `
+          + (preflight.passed
+            ? "Preflight passed — you can Sign it there."
+            : "Saved while Validate is still blocked — fix mappings, then Sign after gates pass."),
         tone: "success",
       });
+      // Navigate first so ContractsPage is active, then notify it to reload.
+      onOpenContracts?.();
+      try {
+        window.dispatchEvent(new CustomEvent("df2:contracts-changed", { detail: { id: contract.id } }));
+      } catch {
+        /* ignore */
+      }
     } catch (e) {
       toast({ title: "Could not save contract", message: (e as Error).message, tone: "error" });
     } finally {

@@ -66,11 +66,13 @@ class InMemoryContractStore(ContractStore):
 
 
 class MongoContractStore(ContractStore):
-    """MongoDB-backed contract store."""
+    """MongoDB-backed contract store with durable file fallback."""
 
     def __init__(self, mongo_service: Any | None = None):
         self.mongo = mongo_service
-        self._fallback = InMemoryContractStore()
+        from services.contract_file_store import FileContractStore
+
+        self._fallback = FileContractStore()
 
     def _get_db(self):
         try:
@@ -79,7 +81,7 @@ class MongoContractStore(ContractStore):
 
                 self.mongo = get_mongodb_service()
             # The in-memory fallback returns an empty dict, not a real MongoDB
-            # database, so fall back to the in-memory contract store instead.
+            # database, so fall back to the durable file store instead.
             if type(self.mongo).__name__ == "MemoryMongoDBService":
                 return None
             return self.mongo.get_database()
@@ -88,56 +90,79 @@ class MongoContractStore(ContractStore):
 
     def save_contract(self, contract: DataContract) -> DataContract:
         db = self._get_db()
+        # Always mirror to file so Contracts page survives process restarts /
+        # MemoryMongoDBService / ephemeral Mongo.
+        self._fallback.save_contract(contract)
         if db is None:
-            return self._fallback.save_contract(contract)
-        db["contracts"].update_one(
-            {"id": contract.id},
-            {"$set": contract.to_dict()},
-            upsert=True,
-        )
+            return contract
+        try:
+            db["contracts"].update_one(
+                {"id": contract.id},
+                {"$set": contract.to_dict()},
+                upsert=True,
+            )
+        except Exception:
+            pass
         return contract
 
     def get_contract(self, contract_id: str) -> DataContract | None:
         db = self._get_db()
-        if db is None:
-            return self._fallback.get_contract(contract_id)
-        doc = db["contracts"].find_one({"id": contract_id})
-        if not doc:
-            return None
-        doc.pop("_id", None)
-        return DataContract.from_dict(doc)
+        if db is not None:
+            try:
+                doc = db["contracts"].find_one({"id": contract_id})
+                if doc:
+                    doc.pop("_id", None)
+                    return DataContract.from_dict(doc)
+            except Exception:
+                pass
+        return self._fallback.get_contract(contract_id)
 
     def list_contracts(self, limit: int = 200) -> list[DataContract]:
+        by_id: dict[str, DataContract] = {}
+        for c in self._fallback.list_contracts(limit=limit):
+            by_id[c.id] = c
         db = self._get_db()
-        if db is None:
-            return self._fallback.list_contracts(limit=limit)
-        docs = list(db["contracts"].find().sort("updated_at", -1).limit(limit))
-        contracts: list[DataContract] = []
-        for doc in docs:
-            doc.pop("_id", None)
-            contracts.append(DataContract.from_dict(doc))
-        return contracts
+        if db is not None:
+            try:
+                docs = list(db["contracts"].find().sort("updated_at", -1).limit(limit))
+                for doc in docs:
+                    doc.pop("_id", None)
+                    c = DataContract.from_dict(doc)
+                    by_id[c.id] = c
+            except Exception:
+                pass
+        items = sorted(
+            by_id.values(),
+            key=lambda c: c.updated_at or c.created_at or "",
+            reverse=True,
+        )
+        return items[:limit]
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
+        self._fallback.save_breaker(breaker)
         db = self._get_db()
         if db is None:
-            self._fallback.save_breaker(breaker)
             return
-        db["contract_breakers"].update_one(
-            {"contract_id": breaker.contract_id},
-            {"$set": breaker.to_dict()},
-            upsert=True,
-        )
+        try:
+            db["contract_breakers"].update_one(
+                {"contract_id": breaker.contract_id},
+                {"$set": breaker.to_dict()},
+                upsert=True,
+            )
+        except Exception:
+            pass
 
     def get_breaker(self, contract_id: str) -> CircuitBreaker:
         db = self._get_db()
-        if db is None:
-            return self._fallback.get_breaker(contract_id)
-        doc = db["contract_breakers"].find_one({"contract_id": contract_id})
-        if doc:
-            doc.pop("_id", None)
-            return CircuitBreaker.from_dict(doc)
-        return CircuitBreaker(contract_id)
+        if db is not None:
+            try:
+                doc = db["contract_breakers"].find_one({"contract_id": contract_id})
+                if doc:
+                    doc.pop("_id", None)
+                    return CircuitBreaker.from_dict(doc)
+            except Exception:
+                pass
+        return self._fallback.get_breaker(contract_id)
 
 
 _store_instance: ContractStore | None = None

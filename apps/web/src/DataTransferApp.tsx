@@ -527,6 +527,7 @@ function AppShell({
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
                     onOpenSchedules={() => setScreen("schedules")}
+                    onOpenContracts={() => setScreen("contracts")}
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
@@ -595,7 +596,7 @@ function AppShell({
               {mountedScreens.has("contracts") && (
                 <div className={`df2-screen-keep ${showScreen("contracts")}`} hidden={screen !== "contracts"} aria-hidden={screen !== "contracts"}>
                 <PageErrorBoundary label="Contracts">
-                  <ContractsPage />
+                  <ContractsPage active={screen === "contracts"} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -652,21 +653,7 @@ function AppShell({
         />
       )}
 
-      {/* Always offer a reopen control when the rail is closed (including Transfer). */}
-      {screen !== "pilot" && !copilotOpen && (
-        <button
-          type="button"
-          className="df2-copilot-fab"
-          onClick={() => setCopilotOpen(true)}
-          aria-label="Open Data Pilot"
-          title="Open Data Pilot"
-        >
-          <DtIcon name="sparkle" size={22} />
-          <span className="df2-copilot-fab-label">Pilot</span>
-        </button>
-      )}
-
-      {/* Extra expand tab when rail closed — visible even if FAB is obscured */}
+      {/* Mid-right edge tab only — no bottom-corner FAB (duplicates the rail Pilot). */}
       {screen !== "pilot" && !copilotOpen && (
         <button
           type="button"

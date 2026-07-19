@@ -208,15 +208,21 @@ export function ValidateActionsRail({
         )}
 
         {preflight && onSaveAsContract && (
-          <Button
-            onClick={onSaveAsContract}
-            loading={savingContract}
-            loadingLabel="Saving…"
-            disabled={savingContract || preflighting}
-            leadingIcon={<DtIcon name="shield" size={16} />}
-          >
-            Save as contract
-          </Button>
+          <>
+            <Button
+              onClick={onSaveAsContract}
+              loading={savingContract}
+              loadingLabel="Saving…"
+              disabled={savingContract || preflighting}
+              leadingIcon={<DtIcon name="shield" size={16} />}
+              title="Save mappings + gates as a draft data contract under Contracts"
+            >
+              Save as contract
+            </Button>
+            <p className="df2-validate-rail-contract-hint">
+              Saves a draft schema agreement to <strong>Contracts</strong> (sidebar). Works even while Validate is blocked.
+            </p>
+          </>
         )}
 
         {blocked && firstBlockerMessage && (
