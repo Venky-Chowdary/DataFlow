@@ -85,6 +85,10 @@ interface TransferPageProps {
   onOpenSchedules?: () => void;
   /** Jump to Contracts after Save as contract so the draft is visible immediately. */
   onOpenContracts?: () => void;
+  /** Reload saved connectors from the control plane. */
+  onRefreshConnectors?: () => void | Promise<void>;
+  /** Remount studio and clear prior transfer cache (source, map, result). */
+  onFreshTransfer?: () => void;
 }
 
 /** File formats are never listed as database sources. */
@@ -219,6 +223,8 @@ export function TransferPage({
   onTransferComplete,
   onOpenSchedules,
   onOpenContracts,
+  onRefreshConnectors,
+  onFreshTransfer,
 }: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -302,6 +308,7 @@ export function TransferPage({
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
   const [runStartupProgress, setRunStartupProgress] = useState(0);
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
+  const [refreshingStudio, setRefreshingStudio] = useState(false);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
   const mappingReviewCount = columnMappings.filter(
@@ -2586,6 +2593,107 @@ export function TransferPage({
     }
   }, [step, transferring, activeJobId, result]);
 
+  const resetTransferStudio = useCallback(() => {
+    if (onFreshTransfer) {
+      onFreshTransfer();
+      return;
+    }
+    setStep(STEP_SOURCE);
+    setSourceKind("file");
+    setSourceConnectorId("");
+    setSourceTable("");
+    setSourceCollection("");
+    setCloudPath("");
+    setAdvancedOpen(false);
+    setFile(null);
+    setParsed(null);
+    setSourceRowEstimate(null);
+    setAnalysis(null);
+    setPreflight(null);
+    setCellPreview(null);
+    setAnalyzing(false);
+    setMappingProgress(0);
+    setMappingPhase("Preparing schema context…");
+    setSourceIntrospecting(false);
+    setSourceIntrospectError(null);
+    setStreamPreviews([]);
+    setActiveStreamTab("");
+    sourceIntrospectGateRef.current = { key: "", status: "idle" };
+    setPreflighting(false);
+    setSavingContract(false);
+    setDragOver(false);
+    setUploadError(null);
+    setUploading(false);
+    setConnectorId("");
+    setDestType("mongodb");
+    setDestKindMode("database");
+    setExportFormat("json");
+    setTransferPlan(null);
+    setPersistedPlanId(null);
+    setPlanLoading(false);
+    setTargetDb("dataflow_test");
+    setTargetCollection("");
+    setDestHost("localhost");
+    setDestPort(27017);
+    setDestSchema("public");
+    setDestUsername("");
+    setDestPassword("");
+    setDestConnectionString("");
+    setDestOutputPath("");
+    setDestWarehouse("");
+    setTransferring(false);
+    setActiveJobId(null);
+    setResult(null);
+    setSyncMode("full_refresh_append");
+    setSchemaPolicy("manual_review");
+    setValidationMode("balanced");
+    setBackfillNewFields(false);
+    setCursorField("");
+    setPrimaryKeyField("");
+    setColumnMappings([]);
+    setDestColumns([]);
+    setDestSchemaMap({});
+    setDestSchemaLoading(false);
+    setDestTableExists(null);
+    setTransferLaunch(null);
+    setLlmMappingUsed(false);
+    setRunStartupProgress(0);
+    setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
+    autoSelectedConnector.current = false;
+    autoSelectedSourceConnector.current = false;
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setActiveData(null);
+  }, [onFreshTransfer, setActiveData]);
+
+  const refreshTransferStudio = useCallback(async () => {
+    if (refreshingStudio) return;
+    setRefreshingStudio(true);
+    try {
+      await onRefreshConnectors?.();
+      // Drop cached destination schema so the next Map/Validate pass re-introspects.
+      setDestColumns([]);
+      setDestSchemaMap({});
+      setDestTableExists(null);
+      setDestSchemaLoading(false);
+      setPreflight(null);
+      setCellPreview(null);
+      setTransferLaunch(null);
+      toast({
+        title: "Studio refreshed",
+        message: "Connectors reloaded. Destination schema will re-introspect on the next step.",
+        tone: "success",
+      });
+    } catch (e) {
+      toast({
+        title: "Refresh failed",
+        message: e instanceof Error ? e.message : "Could not reload connectors.",
+        tone: "error",
+      });
+    } finally {
+      setRefreshingStudio(false);
+    }
+  }, [onRefreshConnectors, refreshingStudio, toast]);
+
   return (
     <PageShell
       wide
@@ -2619,6 +2727,28 @@ export function TransferPage({
           rowCount={parsed?.row_count}
           live={Boolean(activeJobId) || transferring}
         />
+        <div className="df2-transfer-studio-chrome-actions">
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm"
+            onClick={() => void refreshTransferStudio()}
+            disabled={refreshingStudio || transferring || Boolean(activeJobId)}
+            title="Reload connectors and clear cached destination schema"
+          >
+            <DtIcon name="refresh" size={14} />
+            <span>{refreshingStudio ? "Refreshing…" : "Refresh"}</span>
+          </button>
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm"
+            onClick={resetTransferStudio}
+            disabled={transferring || Boolean(activeJobId)}
+            title="Clear this studio and start a new transfer"
+          >
+            <DtIcon name="transfer" size={14} />
+            <span>New</span>
+          </button>
+        </div>
         </div>
       </header>
 
@@ -3561,7 +3691,7 @@ export function TransferPage({
             destLabel={mapDestRouteLabel}
             sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
             destType={destKindMode === "file_export" ? exportFormat : destType}
-            onNewTransfer={() => setStep(STEP_SOURCE)}
+            onNewTransfer={resetTransferStudio}
             onSchedule={() => void handleScheduleRoute()}
           />
         </div>

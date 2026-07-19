@@ -1011,6 +1011,7 @@ class UniversalTransferEngine:
                         backfill_new_fields=request.backfill_new_fields,
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
+                        job_id=job_id,
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:

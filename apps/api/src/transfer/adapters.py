@@ -757,8 +757,11 @@ def write_destination_database(
     backfill_new_fields: bool = False,
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
+    job_id: str | None = None,
 ) -> tuple[int, list[str], dict]:
     from .connector_capabilities import resolve_driver_type
+    from connectors.write_resilience import build_write_batch_key
+
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
@@ -807,6 +810,9 @@ def write_destination_database(
         "on_checkpoint": on_checkpoint,
         "error_policy": error_policy,
         "backfill_new_fields": backfill_new_fields,
+        "job_id": job_id,
+        "write_batch_key": build_write_batch_key(table_name=table_name, file_batch_idx=0),
+        "file_batch_idx": 0,
     }
 
     if db_type == "snowflake":

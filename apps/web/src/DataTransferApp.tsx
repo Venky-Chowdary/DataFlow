@@ -99,6 +99,8 @@ function AppShell({
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
+  /** Bump to remount Transfer Studio and clear prior job/source/map cache. */
+  const [transferStudioKey, setTransferStudioKey] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
@@ -115,6 +117,11 @@ function AppShell({
     setScreenState(next);
     writeAppHash(next);
   }, []);
+
+  const openFreshTransfer = useCallback(() => {
+    setTransferStudioKey((k) => k + 1);
+    setScreen("transfer");
+  }, [setScreen]);
 
   useEffect(() => {
     const onHash = () => {
@@ -443,7 +450,7 @@ function AppShell({
         </nav>
 
         <div className="df2-sidebar-foot">
-          <button type="button" className="df2-sidebar-cta" onClick={() => setScreen("transfer")}>
+          <button type="button" className="df2-sidebar-cta" onClick={openFreshTransfer}>
             <DtIcon name="transfer" size={16} />
             <span className="df2-sidebar-collapse-label">New transfer</span>
           </button>
@@ -533,10 +540,10 @@ function AppShell({
                 <span className="df2-topbar-btn-text">Pilot</span>
               </Button>
             )}
-            {screen !== "transfer" && (
+            {screen !== "pilot" && (
               <Button
                 variant="primary"
-                onClick={() => setScreen("transfer")}
+                onClick={openFreshTransfer}
               >
                 <span className="df2-topbar-btn-text">New transfer</span>
               </Button>
@@ -588,10 +595,13 @@ function AppShell({
                 <div className={`df2-screen-keep ${showScreen("transfer")}`} hidden={screen !== "transfer"} aria-hidden={screen !== "transfer"}>
                 <PageErrorBoundary label="Transfer Studio">
                   <TransferPage
+                    key={transferStudioKey}
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
+                    onRefreshConnectors={() => loadConnectors(false)}
+                    onFreshTransfer={openFreshTransfer}
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();

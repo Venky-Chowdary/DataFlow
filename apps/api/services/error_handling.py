@@ -59,6 +59,17 @@ RETRIABLE_EXCEPTIONS: set[str] = {
     "network",
     "unreachable",
     "refused",
+    # Public proxy / TLS drops wrapped as RuntimeError by writers
+    "server closed the connection",
+    "connection reset",
+    "broken pipe",
+    "ssl syscall error",
+    "ssl connection has been closed",
+    "eof detected",
+    "connection already closed",
+    "lost connection",
+    "server has gone away",
+    "terminating connection",
 }
 
 # Non-retriable errors indicate a data or contract problem that will not fix itself.
@@ -95,6 +106,7 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "malformed",
     "serialization",
     "schema",
+    "partial write",
 }
 
 

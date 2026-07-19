@@ -404,6 +404,24 @@ def _unwrap_read(result):
     return result, None
 
 
+def _raise_write_failure(result: Any, label: str) -> None:
+    """Fail a batch write; connection drops are retriable when the writer ledger can skip commits."""
+    err = result.error or label
+    written = int(getattr(result, "rows_written", 0) or 0)
+    try:
+        from connectors.write_resilience import is_connection_lost
+    except ImportError:
+        is_connection_lost = lambda _e: False  # noqa: E731
+    # Writers stamp committed chunks in `_dataflow_write_ledger` when job_id is set,
+    # so re-invoking the same batch after a proxy drop is safe (already-written
+    # chunks are skipped). Prefer ConnectionError so with_retry can finish the job.
+    if is_connection_lost(err):
+        raise ConnectionError(err)
+    if written > 0:
+        raise RuntimeError(f"partial write ({written} rows committed before failure): {err}")
+    raise RuntimeError(err)
+
+
 def _write_batch(
     dest_type: str,
     dest: EndpointConfig,
@@ -426,9 +444,11 @@ def _write_batch(
     connection: Any | None = None,
     close_connection: bool | None = None,
     skip_session_setup: bool = False,
+    job_id: str | None = None,
 ) -> tuple[int, str, dict]:
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
+        from connectors.write_resilience import build_write_batch_key
 
         pg_port = int(cfg.get("port") or (5439 if dest_type == "redshift" else 5432))
         result = write_mapped_rows(
@@ -451,10 +471,15 @@ def _write_batch(
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+            _raise_write_failure(result, f"{dest_type} batch write failed")
         summary = {
             "type": dest_type,
             "schema": result.target_schema,
@@ -467,6 +492,7 @@ def _write_batch(
 
     if dest_type == "mysql":
         from connectors.mysql_writer import write_mapped_rows
+        from connectors.write_resilience import build_write_batch_key
 
         result = write_mapped_rows(
             host=cfg["host"],
@@ -488,10 +514,15 @@ def _write_batch(
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or "MySQL batch write failed")
+            _raise_write_failure(result, "MySQL batch write failed")
         summary = {
             "type": "mysql",
             "database": cfg["database"],
@@ -930,6 +961,17 @@ def stream_database_transfer(
     _warehouse_dests = {"mongodb", "snowflake", "bigquery", "redshift"}
     target_memory_bytes = 64 * 1024 * 1024 if dest_type in _warehouse_dests else 8 * 1024 * 1024
     chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    # Cap stream batches on public TCP proxies so one socket never holds a 20k-row window.
+    try:
+        from connectors.write_resilience import proxy_stream_batch_size
+    except ImportError:
+        proxy_stream_batch_size = None  # type: ignore
+    if proxy_stream_batch_size is not None:
+        chunk_size = proxy_stream_batch_size(
+            dest_cfg.get("host"),
+            connection_string=dest_cfg.get("connection_string") or dest_cfg.get("uri") or "",
+            default=chunk_size,
+        )
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Chunked writes would overwrite the same key and silently lose data.
     # Force a single chunk so all rows are written once.
@@ -1178,8 +1220,23 @@ def stream_database_transfer(
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake reuses one connection for the job — must stay serial.
+    # Public TCP proxies drop under concurrent bulk writers — force one connection.
     if dest_type in ("sqlite", "snowflake"):
         max_workers = 1
+    else:
+        try:
+            from connectors.write_resilience import is_public_proxy_host
+        except ImportError:
+            is_public_proxy_host = lambda _h: False  # noqa: E731
+        proxy_host = str(dest_cfg.get("host") or "")
+        proxy_cs = str(
+            dest_cfg.get("connection_string")
+            or dest_cfg.get("uri")
+            or dest_cfg.get("url")
+            or ""
+        )
+        if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
+            max_workers = 1
 
     # Shared Snowflake connection for the life of this stream job (open once).
     sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
@@ -1263,6 +1320,7 @@ def stream_database_transfer(
             conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
             error_policy=stream_error_policy,
+            job_id=job_id,
             **write_kwargs,
         )
         batch_written, last_checksum, dest_summary = with_retry(

@@ -608,6 +608,19 @@
   min-width: 0;
 }
 
+.df2-transfer-studio-chrome-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.df2-transfer-studio-chrome-actions .df2-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .df2-transfer-studio-chrome .df2-wizard-studio {
   flex: 1;
   min-width: 0;

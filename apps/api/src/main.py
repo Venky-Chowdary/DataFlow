@@ -327,6 +327,12 @@ async def health_check():
         "status": "healthy",
         "liveness": True,
         "ready": bool(getattr(app.state, "ready", False)),
+        # Present only after proxy-write hardening is deployed. Use this to
+        # confirm Railway is not still running a pre-fix API image.
+        "features": {
+            "proxy_write_ledger": True,
+            "proxy_write_reconnect": True,
+        },
     }
 
 

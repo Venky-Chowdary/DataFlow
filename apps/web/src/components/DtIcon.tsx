@@ -251,6 +251,12 @@ const paths: Record<string, React.ReactNode> = {
       <path d="M9 6V3M15 6V3M9 18v3M15 18v3M6 9H3M6 15H3M18 9h3M18 15h3" />
     </>
   ),
+  refresh: (
+    <>
+      <path d="M21 12a9 9 0 11-2.6-6.4" />
+      <polyline points="21,3 21,9 15,9" />
+    </>
+  ),
   spinner: (
     <>
       <path d="M21 12a9 9 0 11-6.5-8.6" />

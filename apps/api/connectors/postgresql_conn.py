@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from connectors.sql_dsn import private_cloud_host_hint, resolve_sql_endpoint
+from connectors.write_resilience import is_public_proxy_host
 
 
 def _parse_postgres_url(url: str) -> dict[str, Any]:
@@ -44,7 +45,8 @@ def get_connection(
     # Prefer discrete fields (merged from URL + form). For public cloud proxies
     # (Railway *.proxy.rlwy.net, etc.) try SSL require if prefer fails — many
     # managed proxies expect TLS on the public port.
-    sslmode = "require" if ssl else "prefer"
+    public_proxy = is_public_proxy_host(ep["host"])
+    sslmode = "require" if (ssl or public_proxy) else "prefer"
     kwargs: dict[str, Any] = {
         "host": ep["host"],
         "port": ep["port"],
@@ -53,26 +55,32 @@ def get_connection(
         "password": ep["password"],
         "connect_timeout": 15,
         "sslmode": sslmode,
+        # Keep the socket alive during long COPY/INSERT batches and mapping pauses
+        # so public TCP proxies do not silently drop the session mid-transfer.
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
     }
 
     try:
-        return psycopg2.connect(**kwargs)
+        conn = psycopg2.connect(**kwargs)
     except Exception as first_exc:
-        host_l = (ep["host"] or "").lower()
-        looks_public_proxy = (
-            "proxy.rlwy.net" in host_l
-            or host_l.endswith(".rlwy.net")
-            or "amazonaws.com" in host_l
-            or "azure.com" in host_l
-            or "neon.tech" in host_l
-            or "supabase.co" in host_l
-        )
-        if not ssl and looks_public_proxy and sslmode != "require":
+        if not ssl and public_proxy and sslmode != "require":
             try:
-                return psycopg2.connect(**{**kwargs, "sslmode": "require"})
+                conn = psycopg2.connect(**{**kwargs, "sslmode": "require"})
             except Exception:
-                pass
-        hint = private_cloud_host_hint(ep["host"], connection_string)
-        if hint:
-            raise RuntimeError(f"{first_exc}{hint}") from first_exc
-        raise
+                hint = private_cloud_host_hint(ep["host"], connection_string)
+                if hint:
+                    raise RuntimeError(f"{first_exc}{hint}") from first_exc
+                raise first_exc
+        else:
+            hint = private_cloud_host_hint(ep["host"], connection_string)
+            if hint:
+                raise RuntimeError(f"{first_exc}{hint}") from first_exc
+            raise
+
+    from connectors.write_resilience import apply_postgres_session_guards
+
+    apply_postgres_session_guards(conn)
+    return conn

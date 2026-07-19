@@ -577,6 +577,21 @@ def stream_file_to_database(
     # to avoid payload limits (e.g. BigQuery streaming insert ~10 MB).
     target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
     batch_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    # Align file batches to the proxy writer commit size so a dropped socket never
+    # straddles tens of thousands of already-committed rows inside one call.
+    try:
+        from connectors.write_resilience import proxy_stream_batch_size
+    except ImportError:
+        proxy_stream_batch_size = None  # type: ignore
+    if proxy_stream_batch_size is not None:
+        batch_size = proxy_stream_batch_size(
+            dest_cfg.get("host"),
+            connection_string=dest_cfg.get("connection_string")
+            or dest_cfg.get("uri")
+            or dest_cfg.get("url")
+            or "",
+            default=batch_size,
+        )
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Writing multiple batches would overwrite the same key and silently lose data,
     # so force a single batch for those destinations.
@@ -661,8 +676,24 @@ def stream_file_to_database(
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake COPY INTO uses a named temporary stage per table; concurrent batches
     # overwrite each other's stage files, so it must also be sequential.
+    # Public TCP proxies (Railway, Neon, etc.) drop when multiple bulk writers share
+    # the same host — force a single writer connection for those destinations.
     if dest_type in ("sqlite", "snowflake"):
         max_workers = 1
+    else:
+        try:
+            from connectors.write_resilience import is_public_proxy_host
+        except ImportError:  # pragma: no cover
+            from write_resilience import is_public_proxy_host  # type: ignore
+        proxy_host = str(dest_cfg.get("host") or "")
+        proxy_cs = str(
+            dest_cfg.get("connection_string")
+            or dest_cfg.get("uri")
+            or dest_cfg.get("url")
+            or ""
+        )
+        if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
+            max_workers = 1
 
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         if not batch:
@@ -735,6 +766,7 @@ def stream_file_to_database(
             conflict_columns=pk_target_cols,
             backfill_new_fields=backfill_new_fields,
             error_policy=stream_error_policy,
+            job_id=job_id,
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
@@ -831,4 +863,13 @@ def stream_file_to_database(
     dest_summary["rejected_details"] = rejected_details[:200]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
+
+    if dest_type in ("postgresql", "mysql", "redshift") and job_id:
+        try:
+            from connectors.write_resilience import cleanup_write_ledger
+        except ImportError:
+            cleanup_write_ledger = None  # type: ignore
+        if cleanup_write_ledger is not None:
+            cleanup_write_ledger(dest_type=dest_type, cfg=dest_cfg, job_id=job_id)
+
     return written, ddl_log, dest_summary, columns

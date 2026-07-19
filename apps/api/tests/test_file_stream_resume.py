@@ -32,6 +32,7 @@ def test_stream_file_resume_skips_committed_chunks(monkeypatch):
         create_table=False, on_checkpoint=None, chunk_idx=0, total_chunks=0,
         rows_so_far=0, write_mode="insert", conflict_columns=None, backfill_new_fields=False,
         error_policy=None,
+        **_kwargs,
     ):
         calls.append({
             "chunk_idx": chunk_idx,
