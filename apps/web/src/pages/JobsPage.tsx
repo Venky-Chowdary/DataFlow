@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
 import { JobTheater } from "../components/JobTheater";
+import { JobNameEditor } from "../components/jobs/JobNameEditor";
 import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
@@ -14,7 +15,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { cancelJob, fetchJob, retryJob, resumeJob } from "../lib/api";
+import { cancelJob, fetchJob, renameJob, retryJob, resumeJob } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -65,6 +66,45 @@ function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   return "detail";
 }
 
+function jobRouteLabel(job: Pick<TransferJob, "source_name" | "destination_database" | "destination_collection" | "destination_type">) {
+  const dest =
+    [job.destination_database, job.destination_collection].filter(Boolean).join(".")
+    || job.destination_type
+    || "destination";
+  return `${job.source_name} → ${dest}`;
+}
+
+function jobDisplayName(
+  job: Pick<TransferJob, "name" | "source_name" | "destination_database" | "destination_collection" | "destination_type">,
+  override?: string | null,
+) {
+  const named = (override ?? job.name)?.trim();
+  return named || jobRouteLabel(job);
+}
+
+function normalizeJobName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+/** Returns a conflict message when another job already uses this display name. */
+function duplicateJobNameError(
+  draft: string,
+  jobId: string,
+  jobs: TransferJob[],
+  overrides: Record<string, string>,
+): string | null {
+  const needle = normalizeJobName(draft);
+  if (!needle) return "Job name cannot be empty";
+  for (const other of jobs) {
+    if (other._id === jobId) continue;
+    const otherName = normalizeJobName(jobDisplayName(other, overrides[other._id]));
+    if (otherName === needle) {
+      return "This name already exists";
+    }
+  }
+  return null;
+}
+
 export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: JobsPageProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
@@ -77,6 +117,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
   const [detailTab, setDetailTab] = useState<JobDetailTab>("detail");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
 
   const counts = useMemo(() => ({
     all: jobs.length,
@@ -103,11 +148,22 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     const q = jobSearch.trim().toLowerCase();
     if (!q) return list;
     return list.filter((j) =>
-      [j.source_name, j.source_type, j.destination_type, j.destination_database, j.destination_collection, j._id, j.status, j.error]
+      [
+        j.name,
+        nameOverrides[j._id],
+        j.source_name,
+        j.source_type,
+        j.destination_type,
+        j.destination_database,
+        j.destination_collection,
+        j._id,
+        j.status,
+        j.error,
+      ]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q)),
     );
-  }, [jobs, filter, jobSearch]);
+  }, [jobs, filter, jobSearch, nameOverrides]);
 
   useEffect(() => {
     if (!initialJobId) return;
@@ -247,6 +303,81 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
       setCancelling(false);
     }
   }, [selectedId, onRefresh, toast]);
+
+  const beginRename = useCallback((job: TransferJob) => {
+    setRenamingId(job._id);
+    setRenameDraft(jobDisplayName(job, nameOverrides[job._id]));
+    setRenameError(null);
+  }, [nameOverrides]);
+
+  const cancelRename = useCallback(() => {
+    setRenamingId(null);
+    setRenameDraft("");
+    setRenameError(null);
+  }, []);
+
+  const onRenameDraftChange = useCallback((value: string, jobId: string) => {
+    setRenameDraft(value);
+    const current = jobs.find((j) => j._id === jobId);
+    if (!current) {
+      setRenameError(null);
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setRenameError("Job name cannot be empty");
+      return;
+    }
+    const currentName = jobDisplayName(current, nameOverrides[jobId]);
+    if (normalizeJobName(trimmed) === normalizeJobName(currentName)) {
+      setRenameError(null);
+      return;
+    }
+    setRenameError(duplicateJobNameError(trimmed, jobId, jobs, nameOverrides));
+  }, [jobs, nameOverrides]);
+
+  const commitRename = useCallback(async (jobId: string) => {
+    const next = renameDraft.trim();
+    if (!next) {
+      setRenameError("Job name cannot be empty");
+      return;
+    }
+    const conflict = duplicateJobNameError(next, jobId, jobs, nameOverrides);
+    if (conflict) {
+      setRenameError(conflict);
+      return;
+    }
+    setRenameSaving(true);
+    setRenameError(null);
+    try {
+      const updated = await renameJob(jobId, next);
+      setNameOverrides((prev) => ({ ...prev, [jobId]: updated.name || next }));
+      setLiveJob((prev) => (prev && prev._id === jobId ? { ...prev, name: updated.name || next } : prev));
+      setRenamingId(null);
+      setRenameDraft("");
+      toast({ title: "Job renamed", message: `Saved as “${updated.name || next}”.`, tone: "success" });
+      onRefresh?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not save name";
+      if (/already exists/i.test(msg)) {
+        setRenameError("This name already exists");
+      } else {
+        toast({ title: "Rename failed", message: msg, tone: "error" });
+      }
+    } finally {
+      setRenameSaving(false);
+    }
+  }, [renameDraft, jobs, nameOverrides, onRefresh, toast]);
+
+  // Reset rename when switching jobs (do not clear while editing the same job).
+  const prevSelectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevSelectedRef.current === selectedId) return;
+    prevSelectedRef.current = selectedId;
+    setRenamingId(null);
+    setRenameDraft("");
+    setRenameError(null);
+  }, [selectedId]);
 
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
@@ -394,8 +525,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                   />
                 ) : (
                   filtered.map((job) => {
-                    const destLabel = job.destination_collection || job.destination_database || "destination";
-                    const isLive = job.status === "running" || job.status === "pending";
+                    const route = jobRouteLabel(job);
+                    const displayName = jobDisplayName(job, nameOverrides[job._id]);
+                    const isLiveRow = job.status === "running" || job.status === "pending";
                     return (
                       <button
                         key={job._id}
@@ -406,7 +538,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                           "df2-job-row",
                           selectedId === job._id ? "is-active" : "",
                           job.status === "failed" ? "is-failed" : "",
-                          isLive ? "is-live" : "",
+                          isLiveRow ? "is-live" : "",
                         ].filter(Boolean).join(" ")}
                         onClick={() => setSelectedId(job._id)}
                       >
@@ -415,14 +547,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                         </span>
                         <div className="df2-job-row-main">
                           <div className="df2-job-row-title">
-                            <span className="df2-job-row-route" title={`${job.source_name} → ${destLabel}`}>
-                              {job.source_name} → {destLabel}
-                            </span>
+                            <span className="df2-job-row-name" title={displayName}>{displayName}</span>
                             <span className={`${jobStatusBadgeClass(job.status)} df2-job-row-badge`}>
                               {jobStatusLabel(job.status)}
                             </span>
                           </div>
                           <div className="df2-job-row-meta">
+                            <span className="df2-job-row-route-meta" title={route}>{route}</span>
                             <span>{(job.records_processed ?? 0).toLocaleString()} rows</span>
                             <span>
                               {new Date(job.created_at).toLocaleString(undefined, {
@@ -434,7 +565,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                             </span>
                             <code className="df2-job-row-id" title={job._id}>{job._id.slice(0, 8)}…</code>
                           </div>
-                          {isLive && job.progress_pct != null && (
+                          {isLiveRow && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
                               <i style={{ width: `${job.progress_pct}%` }} />
                             </div>
@@ -451,15 +582,34 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                   <LoadingBlock title="Loading job details" size="md" variant="glass" />
                 ) : isLive && selected ? (
                   <div className="df2-jobs-v3-live">
-                    <div className="df2-jobs-v3-live-actions">
-                      <button
-                        type="button"
-                        className="df2-btn df2-btn-sm df2-btn-ghost"
-                        onClick={() => void handleCancel()}
-                        disabled={cancelling}
-                      >
-                        {cancelling ? <ButtonLoader label="Cancelling…" /> : <><DtIcon name="x" size={14} /> Cancel job</>}
-                      </button>
+                    <div className="df2-jobs-v3-detail-identity">
+                      <JobNameEditor
+                        displayName={jobDisplayName(
+                          { ...selected, name: liveJob?.name || selected.name },
+                          nameOverrides[selected._id],
+                        )}
+                        editing={renamingId === selected._id}
+                        draft={renameDraft}
+                        error={renameError}
+                        saving={renameSaving}
+                        onBegin={() => beginRename({ ...selected, name: liveJob?.name || selected.name })}
+                        onDraftChange={(v) => onRenameDraftChange(v, selected._id)}
+                        onSave={() => void commitRename(selected._id)}
+                        onCancel={cancelRename}
+                      />
+                      <div className="df2-jobs-v3-live-actions">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => void handleCancel()}
+                          disabled={cancelling}
+                          loading={cancelling}
+                          loadingLabel="Cancelling…"
+                          leadingIcon={<DtIcon name="x" size={14} />}
+                        >
+                          Cancel job
+                        </Button>
+                      </div>
                     </div>
                     <JobTheater
                       jobId={selectedId!}
@@ -475,17 +625,33 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                 ) : liveJob && selected ? (
                   <div className={`df2-jobs-v3-summary ${selected.status === "failed" ? "is-failed" : "is-done"}`}>
                     <header className="df2-jobs-v3-summary-head">
-                      <div className="df2-jobs-v3-summary-route">
-                        <ConnectorIcon id={selected.source_type} size={22} />
-                        <div>
-                          <span>Source</span>
-                          <strong>{liveJob.source_name || selected.source_name}</strong>
-                        </div>
-                        <DtIcon name="transfer" size={14} />
-                        <ConnectorIcon id={selected.destination_type} size={22} />
-                        <div>
-                          <span>Destination</span>
-                          <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
+                      <div className="df2-jobs-v3-summary-identity">
+                        <JobNameEditor
+                          displayName={jobDisplayName(
+                            { ...selected, name: liveJob.name || selected.name },
+                            nameOverrides[selected._id],
+                          )}
+                          editing={renamingId === selected._id}
+                          draft={renameDraft}
+                          error={renameError}
+                          saving={renameSaving}
+                          onBegin={() => beginRename({ ...selected, name: liveJob.name || selected.name })}
+                          onDraftChange={(v) => onRenameDraftChange(v, selected._id)}
+                          onSave={() => void commitRename(selected._id)}
+                          onCancel={cancelRename}
+                        />
+                        <div className="df2-jobs-v3-summary-route">
+                          <ConnectorIcon id={selected.source_type} size={22} />
+                          <div>
+                            <span>Source</span>
+                            <strong>{liveJob.source_name || selected.source_name}</strong>
+                          </div>
+                          <DtIcon name="transfer" size={14} />
+                          <ConnectorIcon id={selected.destination_type} size={22} />
+                          <div>
+                            <span>Destination</span>
+                            <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
+                          </div>
                         </div>
                       </div>
                       <div className="df2-jobs-v3-summary-ids">
@@ -494,25 +660,67 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       </div>
                     </header>
 
-                    <div className="df2-jobs-v3-summary-metrics">
-                      <article><strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong><span>Rows processed</span></article>
-                      <article><strong>{liveJob.progress_pct ?? 100}%</strong><span>Progress</span></article>
-                      <article><strong>{mappingCount || "—"}</strong><span>Columns</span></article>
-                      <article><strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong><span>Mode</span></article>
+                    <div className="df2-jobs-v3-summary-metrics" role="group" aria-label="Job metrics">
+                      <article className="is-metric-rows">
+                        <strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong>
+                        <span>Rows</span>
+                      </article>
+                      <article className="is-metric-progress">
+                        <strong>{liveJob.progress_pct ?? 100}%</strong>
+                        <span>Progress</span>
+                      </article>
+                      <article className="is-metric-columns">
+                        <strong>{mappingCount || "—"}</strong>
+                        <span>Columns</span>
+                      </article>
+                      <article className="is-metric-mode">
+                        <strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong>
+                        <span>Mode</span>
+                      </article>
+                      <article className={`is-metric-quarantine${rejectedCount > 0 ? " is-warn" : ""}`}>
+                        <strong>{rejectedCount.toLocaleString()}</strong>
+                        <span>Quarantined</span>
+                      </article>
+                      <article className={`is-metric-coerced${Number(liveJob.coerced_null_rows ?? 0) > 0 ? " is-warn" : ""}`}>
+                        <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                        <span>Coerced</span>
+                      </article>
+                      <article
+                        className={`is-metric-reconcile${
+                          typeof liveJob.message === "string" && /fidelity|checksum|reconcil/i.test(liveJob.message)
+                            ? " is-ok"
+                            : isJobSuccess(liveJob.status)
+                              ? " is-ok"
+                              : selected.status === "failed"
+                                ? " is-bad"
+                                : ""
+                        }`}
+                      >
+                        <strong>
+                          {typeof liveJob.message === "string" && /fidelity|checksum|reconcil/i.test(liveJob.message)
+                            ? "Passed"
+                            : isJobSuccess(liveJob.status)
+                              ? "OK"
+                              : selected.status === "failed"
+                                ? "Failed"
+                                : "—"}
+                        </strong>
+                        <span>Reconcile</span>
+                      </article>
                       {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
-                        <article>
+                        <article className="is-metric-cdc">
                           <strong>{`${Number(liveJob.cdc_lag_seconds).toFixed(1)}s`}</strong>
                           <span>CDC lag</span>
                         </article>
                       )}
                       {liveJob.replication_lag_bytes != null && Number.isFinite(Number(liveJob.replication_lag_bytes)) && (
-                        <article>
+                        <article className="is-metric-wal">
                           <strong>
                             {Number(liveJob.replication_lag_bytes) >= 1_048_576
                               ? `${(Number(liveJob.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
                               : `${Number(liveJob.replication_lag_bytes).toLocaleString()} B`}
                           </strong>
-                          <span>WAL / binlog</span>
+                          <span>WAL</span>
                         </article>
                       )}
                     </div>

@@ -122,6 +122,8 @@ export interface CdcStreamHealth {
 
 export interface TransferJob {
   _id: string;
+  /** User-editable display name (defaults to source → dest on create). */
+  name?: string;
   source_type: string;
   source_name: string;
   destination_type: string;
@@ -518,6 +520,9 @@ export interface PipelineSchedule {
   run_count: number;
   running: boolean;
   created_at: string;
+  /** Present on GET /schedules/{id}; omitted from list summaries. */
+  mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
+  mapping_count?: number;
 }
 
 /** A single persisted run attempt from GET /schedules/{id}/history. */

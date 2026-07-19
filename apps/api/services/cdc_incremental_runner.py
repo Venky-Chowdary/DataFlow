@@ -8,7 +8,7 @@ CDC events continue to flow between chunks (at-least-once; destination upserts).
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 from services.cdc_engine import ChangeBatch
 from services.cdc_incremental_snapshot import (
@@ -21,7 +21,7 @@ from services.cdc_incremental_snapshot import (
 
 logger = logging.getLogger(__name__)
 
-RowFetcher = Callable[[SnapshotSignal], tuple[list[dict[str, Any]], str | None, bool]]
+RowFetcher = Callable[[SnapshotSignal], tuple[list[dict[str, Any]], Optional[str], bool]]
 
 
 def interleave_incremental_snapshot(

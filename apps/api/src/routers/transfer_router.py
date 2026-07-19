@@ -102,6 +102,30 @@ class AnalyzeRequest(BaseModel):
     source_schema: dict[str, str] = Field(default_factory=dict)
 
 
+class ExecuteTransferRequest(BaseModel):
+    """JSON body for SDK / GitOps transfers (db→db, no multipart file)."""
+    source: EndpointDTO
+    destination: EndpointDTO
+    mappings: list[dict] = Field(default_factory=list)
+    column_types: dict[str, str] = Field(default_factory=dict)
+    sync_mode: str = "full_refresh_overwrite"
+    schema_policy: str = "manual_review"
+    validation_mode: str = "strict"
+    skip_preflight: bool = False
+    async_mode: bool = True
+    backfill_new_fields: bool = False
+    source_filter: dict = Field(default_factory=dict)
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    limit: int = 0
+    plan_id: Optional[str] = None
+    stream_contracts: list[dict] = Field(default_factory=list)
+    data_region: str = ""
+    contract_id: str = ""
+    enforce_contract: bool = True
+    require_signed_contract: bool = False
+
+
 class MapColumnsRequest(BaseModel):
     source_columns: list[str]
     source_schema: dict[str, str] = Field(default_factory=dict)
@@ -468,6 +492,121 @@ async def analyze_file_transfer(
     )
     plan["row_count_estimate"] = row_count
     return plan
+
+
+@router.post("/execute")
+async def execute_transfer_json(
+    body: ExecuteTransferRequest,
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
+    from ..transfer.background import run_transfer_async
+    from ..transfer.engine import get_transfer_engine
+    from ..transfer.models import EndpointConfig, TransferRequest
+
+    workspace_id = _resolve_write_workspace(request, workspace_id)
+    src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
+    dst = EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True))
+    region = (
+        (body.data_region or "").strip()
+        or getattr(request.state, "data_region", "")
+        or "us-east-1"
+    )
+    request_obj = TransferRequest(
+        source=src,
+        destination=dst,
+        mappings=list(body.mappings or []),
+        column_types=dict(body.column_types or {}),
+        skip_preflight=bool(body.skip_preflight),
+        sync_mode=body.sync_mode or "full_refresh_overwrite",
+        schema_policy=body.schema_policy or "manual_review",
+        validation_mode=body.validation_mode or "strict",
+        source_filter=dict(body.source_filter or {}),
+        priority_column=body.priority_column or "",
+        priority_direction=body.priority_direction or "desc",
+        limit=int(body.limit or 0),
+        workspace_id=workspace_id,
+        data_region=region,
+        backfill_new_fields=bool(body.backfill_new_fields),
+        stream_contracts=list(body.stream_contracts or []),
+        contract_id=body.contract_id or "",
+        enforce_contract=bool(body.enforce_contract),
+        require_signed_contract=bool(body.require_signed_contract),
+    )
+    if body.plan_id and str(body.plan_id).strip():
+        from services.transfer_plan_service import build_run_payload
+        try:
+            payload = build_run_payload(str(body.plan_id).strip())
+            if not request_obj.mappings:
+                request_obj.mappings = payload.get("mappings") or []
+                request_obj.column_types = payload.get("column_types") or {}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    _residency_check(request, dst, region)
+    engine = get_transfer_engine()
+    try:
+        job_id = engine._create_pending_job(request_obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
+
+    try:
+        from services.audit_log import actor_from_request, append_audit_event
+        append_audit_event(
+            action="transfer.execute",
+            resource=f"/transfer/{job_id}",
+            actor=actor_from_request(request),
+            level="info",
+            details={
+                "source_format": src.format,
+                "dest_format": dst.format,
+                "sync_mode": request_obj.sync_mode,
+                "workspace_id": workspace_id,
+                "async": bool(body.async_mode),
+            },
+        )
+    except Exception:
+        pass
+
+    if body.plan_id and str(body.plan_id).strip():
+        from services.transfer_plan_store import attach_job
+        attach_job(str(body.plan_id).strip(), job_id, status="running")
+
+    if body.async_mode:
+        background_tasks.add_task(run_transfer_async, job_id, request_obj)
+        return {
+            "success": True,
+            "async": True,
+            "job_id": job_id,
+            "status": "running",
+            "operation": request_obj.operation,
+            "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
+        }
+
+    result = engine.execute_tracked(request_obj, job_id)
+    if not result.success:
+        raise HTTPException(status_code=422, detail={
+            "error": result.error,
+            "operation": result.operation,
+            "job_id": result.job_id,
+            "error_details": result.error_details,
+        })
+    return {
+        "success": True,
+        "async": False,
+        "job_id": result.job_id,
+        "operation": result.operation,
+        "records_transferred": result.records_transferred,
+        "elapsed_seconds": result.elapsed_seconds,
+        "records_per_second": result.records_per_second,
+        "source": result.source_summary,
+        "destination": result.destination_summary,
+        "reconciliation": result.reconciliation,
+    }
 
 
 @router.post("/run")

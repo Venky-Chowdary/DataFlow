@@ -23,6 +23,7 @@ import {
   paginateMappings,
   totalPages,
 } from "../lib/columnWorkbench";
+import { destTypeSelectOptions, normalizeDestTypeValue, typeBadgeClass } from "../lib/typeDisplay";
 
 interface ColumnReviewPanelProps {
   mappings: EditableMapping[];
@@ -472,7 +473,9 @@ export function ColumnReviewPanel({
                   <td className="df2-column-sample" title={m.sample}>
                     {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
                   </td>
-                  <td className="df2-column-type">{m.inferredType ?? "string"}</td>
+                  <td className={`df2-column-type ${typeBadgeClass(m.inferredType)}`}>
+                    <span className="df2-type-badge">{m.inferredType ?? "string"}</span>
+                  </td>
                   <td className="df2-column-arrow" aria-hidden>→</td>
                   <td className="df2-column-destination-cell">
                     <div className="df2-column-cell-content">
@@ -482,9 +485,21 @@ export function ColumnReviewPanel({
                         onChange={(e) => updateMapping(index, { target: e.target.value, approved: false })}
                         aria-label={`Destination name for ${m.source}`}
                       />
-                      <span className="df2-column-dest-type" title="Destination type">
-                        {(m.destType || m.inferredType || "VARCHAR").toString()}
-                      </span>
+                      <select
+                        className="df2-input df2-select df2-column-dest-type-select"
+                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR")}
+                        onChange={(e) =>
+                          updateMapping(index, { destType: e.target.value, approved: false })
+                        }
+                        aria-label={`Destination type for ${m.source}`}
+                        title="Destination logical type"
+                      >
+                        {destTypeSelectOptions(m.destType || m.inferredType).map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
                       {m.existsInDestination && (
                         <span className="df2-col-badge-exists df2-col-badge-new">exists</span>
                       )}

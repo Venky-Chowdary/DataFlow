@@ -6,10 +6,16 @@ Handles all MongoDB operations for persistence and data transfer
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pymongo import MongoClient
+
+
+def _job_name_key(name: str) -> str:
+    """Canonical uniqueness key for job display names (case-insensitive)."""
+    return (name or "").strip().casefold()
 
 
 def _as_object_id(job_id: str):
@@ -278,6 +284,8 @@ class MongoDBService:
         job_data["completed_at"] = None
         job_data["records_processed"] = 0
         job_data["errors"] = []
+        if job_data.get("name") and not job_data.get("name_key"):
+            job_data["name_key"] = _job_name_key(str(job_data["name"]))
         try:
             from services.job_phases import initial_phases
             job_data["phases"] = initial_phases()
@@ -386,6 +394,69 @@ class MongoDBService:
             except Exception:
                 pass
         return ok
+
+    def update_job_fields(self, job_id: str, fields: dict) -> bool:
+        """Patch job metadata without changing status (e.g. rename)."""
+        if not fields:
+            return False
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        collection = db["transfer_jobs"]
+        oid = _as_object_id(job_id)
+        if not oid:
+            return False
+        updates = {**fields, "updated_at": datetime.now(timezone.utc)}
+        result = collection.update_one({"_id": oid}, {"$set": updates})
+        return result.matched_count > 0
+
+    def is_job_name_taken(
+        self,
+        name: str,
+        *,
+        workspace_id: str | None = None,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        """Case-insensitive name collision check within a workspace."""
+        needle = _job_name_key(name)
+        if not needle:
+            return False
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return False
+        collection = db["transfer_jobs"]
+        query: dict[str, Any] = {"name_key": needle}
+        ws = (workspace_id or "").strip()
+        if ws:
+            query["workspace_id"] = ws
+        else:
+            query["$or"] = [
+                {"workspace_id": ""},
+                {"workspace_id": None},
+                {"workspace_id": {"$exists": False}},
+            ]
+        doc = collection.find_one(query, {"_id": 1})
+        if doc is None:
+            # Legacy rows may lack name_key — fall back to casefold match on name.
+            legacy: dict[str, Any] = {
+                "name": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"},
+            }
+            if ws:
+                legacy["workspace_id"] = ws
+            else:
+                legacy["$or"] = [
+                    {"workspace_id": ""},
+                    {"workspace_id": None},
+                    {"workspace_id": {"$exists": False}},
+                ]
+            doc = collection.find_one(legacy, {"_id": 1})
+        if not doc:
+            return False
+        if exclude_job_id and str(doc.get("_id")) == str(exclude_job_id):
+            return False
+        return True
 
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
@@ -543,6 +614,8 @@ class MemoryMongoDBService:
         job.setdefault("records_processed", 0)
         job.setdefault("errors", [])
         job.setdefault("phases", [])
+        if job.get("name") and not job.get("name_key"):
+            job["name_key"] = _job_name_key(str(job["name"]))
         self._jobs[oid] = job
         return oid
 
@@ -618,6 +691,41 @@ class MemoryMongoDBService:
         except Exception:
             pass
         return True
+
+    def update_job_fields(self, job_id: str, fields: dict) -> bool:
+        """Patch job metadata without changing status (e.g. rename)."""
+        if not fields:
+            return False
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        rec.update(fields)
+        rec["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def is_job_name_taken(
+        self,
+        name: str,
+        *,
+        workspace_id: str | None = None,
+        exclude_job_id: str | None = None,
+    ) -> bool:
+        needle = _job_name_key(name)
+        if not needle:
+            return False
+        ws = (workspace_id or "").strip()
+        for jid, rec in self._jobs.items():
+            if exclude_job_id and str(jid) == str(exclude_job_id):
+                continue
+            rec_ws = (rec.get("workspace_id") or "").strip()
+            if ws and rec_ws not in (ws, ""):
+                continue
+            if not ws and rec_ws:
+                continue
+            key = _job_name_key(str(rec.get("name_key") or rec.get("name") or ""))
+            if key == needle:
+                return True
+        return False
 
     def get_job(self, job_id: str) -> Optional[dict]:
         rec = self._jobs.get(job_id)

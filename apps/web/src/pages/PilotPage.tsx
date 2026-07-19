@@ -255,100 +255,107 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           </div>
         </div>
       <div className="df2-pilot-body">
-      {asideOpen ? (
-      <aside className="df2-pilot-aside" aria-label="Pilot sessions">
-        <div className="df2-pilot-aside-toolbar">
-          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={startNewChat}>
-            <DtIcon name="plus" size={14} /> New chat
-          </button>
-          <button
-            type="button"
-            className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-close"
-            onClick={() => setAsideOpen(false)}
-            aria-label="Close sessions panel"
-            title="Close sessions panel"
-          >
-            <DtIcon name="x" size={14} />
-          </button>
-        </div>
-
-        <div className="df2-pilot-aside-scroll">
-          <div className="df2-pilot-section-label">Categories</div>
-          <FilterTabs
-            ariaLabel="Automation ideas by category"
-            className="df2-pilot-categories"
-            value={category}
-            onChange={setCategory}
-            items={[
-              { id: "all", label: "All" },
-              ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
-            ]}
-          />
-
-          <div className="df2-pilot-section-label">
-            Sessions
-            <span className="df2-pilot-session-count">{sessions.filter((s) => s.messages.length).length || sessions.length}</span>
-          </div>
-          {sessions.map((s) => (
-            <div key={s.id} className={`df2-pilot-session-row ${s.id === activeId ? "active" : ""}`}>
+      <aside
+        className={`df2-pilot-aside${asideOpen ? "" : " is-collapsed"}`}
+        aria-label="Pilot sessions"
+        aria-hidden={!asideOpen}
+      >
+        {asideOpen ? (
+          <>
+            <div className="df2-pilot-aside-toolbar">
+              <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={startNewChat}>
+                <DtIcon name="plus" size={14} /> New chat
+              </button>
               <button
                 type="button"
-                className="df2-pilot-session"
-                onClick={() => setActiveId(s.id)}
-                title={s.title}
+                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-close"
+                onClick={() => setAsideOpen(false)}
+                aria-label="Close sessions panel"
+                title="Close sessions panel"
               >
-                {s.title}
+                <DtIcon name="x" size={14} />
               </button>
-              {s.messages.length > 0 && (
-                <button
-                  type="button"
-                  className="df2-pilot-session-delete"
-                  aria-label={`Delete ${s.title}`}
-                  title="Delete chat"
-                  onClick={() => deleteSession(s.id)}
-                >
-                  <DtIcon name="x" size={12} />
-                </button>
+            </div>
+
+            <div className="df2-pilot-aside-scroll">
+              <div className="df2-pilot-section-label">Categories</div>
+              <FilterTabs
+                ariaLabel="Automation ideas by category"
+                className="df2-pilot-categories"
+                value={category}
+                onChange={setCategory}
+                items={[
+                  { id: "all", label: "All" },
+                  ...AUTOMATION_CATEGORIES.filter((c) => c.id !== "all").map((c) => ({ id: c.id, label: c.label })),
+                ]}
+              />
+
+              <div className="df2-pilot-section-label">
+                Sessions
+                <span className="df2-pilot-session-count">{sessions.filter((s) => s.messages.length).length || sessions.length}</span>
+              </div>
+              <div className="df2-pilot-session-list">
+                {sessions.map((s) => (
+                  <div key={s.id} className={`df2-pilot-session-row ${s.id === activeId ? "active" : ""}`}>
+                    <button
+                      type="button"
+                      className="df2-pilot-session"
+                      onClick={() => setActiveId(s.id)}
+                      title={s.title}
+                    >
+                      {s.title}
+                    </button>
+                    {s.messages.length > 0 && (
+                      <button
+                        type="button"
+                        className="df2-pilot-session-delete"
+                        aria-label={`Delete ${s.title}`}
+                        title="Delete chat"
+                        onClick={() => deleteSession(s.id)}
+                      >
+                        <DtIcon name="x" size={12} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {session.toolLog.length > 0 && (
+                <>
+                  <div className="df2-pilot-section-label">Recent tools</div>
+                  {session.toolLog.slice(0, 8).map((t, i) => (
+                    <div key={i} className={`df2-pilot-tool-log ${t.success ? "ok" : "err"}`}>
+                      <code>{t.name}</code>
+                      <span>{t.summary}</span>
+                    </div>
+                  ))}
+                </>
               )}
             </div>
-          ))}
-
-          {session.toolLog.length > 0 && (
-            <>
-              <div className="df2-pilot-section-label">Recent tools</div>
-              {session.toolLog.slice(0, 8).map((t, i) => (
-                <div key={i} className={`df2-pilot-tool-log ${t.success ? "ok" : "err"}`}>
-                  <code>{t.name}</code>
-                  <span>{t.summary}</span>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
+          </>
+        ) : (
+          <div className="df2-pilot-aside-rail" aria-label="Collapsed sessions">
+            <button
+              type="button"
+              className="df2-pilot-aside-icon-btn"
+              onClick={() => setAsideOpen(true)}
+              aria-label="Expand sessions panel"
+              title="Open sessions"
+            >
+              <DtIcon name="menu" size={16} />
+            </button>
+            <button
+              type="button"
+              className="df2-pilot-aside-icon-btn"
+              onClick={startNewChat}
+              aria-label="New chat"
+              title="New chat"
+            >
+              <DtIcon name="plus" size={16} />
+            </button>
+          </div>
+        )}
       </aside>
-      ) : (
-        <div className="df2-pilot-aside-rail" aria-label="Collapsed sessions">
-          <button
-            type="button"
-            className="df2-pilot-aside-expand"
-            onClick={() => setAsideOpen(true)}
-            aria-label="Expand sessions panel"
-            title="Expand sessions"
-          >
-            <DtIcon name="chevron-right" size={16} />
-            <span>Sessions</span>
-          </button>
-          <button
-            type="button"
-            className="df2-pilot-aside-expand is-secondary"
-            onClick={startNewChat}
-            aria-label="New chat"
-            title="New chat"
-          >
-            <DtIcon name="plus" size={16} />
-          </button>
-        </div>
-      )}
 
       <div className="df2-pilot-main">
         <div className="df2-pilot-main-scroll">

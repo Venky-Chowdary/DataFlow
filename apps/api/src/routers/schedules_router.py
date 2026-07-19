@@ -125,14 +125,62 @@ class ScheduleResponse(BaseModel):
     run_count: int = 0
     running: bool = False
     created_at: str
+    # Pipeline Detail needs schema map without a second Transfer Studio hop.
+    mappings: list[dict[str, Any]] = Field(default_factory=list)
+    mapping_count: int = 0
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
         data = s.to_dict()
-        # run_history/running_instance/mappings are exposed via the dedicated
-        # history endpoint, not the summary response.
+        mappings = list(data.get("mappings") or [])
+        data["mappings"] = mappings
+        data["mapping_count"] = len(mappings)
+        # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
         return cls(**{k: v for k, v in data.items() if k in allowed})
+
+
+class ScheduleSummaryResponse(BaseModel):
+    """List-row payload — omits bulky mappings for table views."""
+    id: str
+    name: str
+    source_connector_id: str
+    source_table: str
+    dest_connector_id: str
+    dest_table: str
+    interval: str
+    cron: str = ""
+    timezone: str = "UTC"
+    sync_mode: str = "full_refresh_overwrite"
+    validation_mode: str = "strict"
+    schema_policy: str = "manual_review"
+    backfill_new_fields: bool = False
+    cursor_column: str = ""
+    primary_key: str = ""
+    cursor_value: str = ""
+    workspace_id: str = ""
+    contract_id: str = ""
+    require_signed_contract: bool = False
+    max_retries: int = 0
+    retry_backoff_seconds: int = 60
+    notify_on_failure: bool = True
+    notify_on_success: bool = False
+    enabled: bool
+    last_run_at: Optional[str] = None
+    next_run_at: Optional[str] = None
+    last_job_id: Optional[str] = None
+    last_status: Optional[str] = None
+    run_count: int = 0
+    running: bool = False
+    created_at: str
+    mapping_count: int = 0
+
+    @classmethod
+    def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
+        full = ScheduleResponse.from_schedule(s)
+        payload = full.model_dump()
+        payload.pop("mappings", None)
+        return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
 
 
 @router.get("/intervals")
@@ -163,9 +211,9 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
     return artifact
 
 
-@router.get("/", response_model=list[ScheduleResponse])
+@router.get("/", response_model=list[ScheduleSummaryResponse])
 async def list_pipeline_schedules():
-    return [ScheduleResponse.from_schedule(s) for s in list_schedules()]
+    return [ScheduleSummaryResponse.from_schedule(s) for s in list_schedules()]
 
 
 @router.get("/{schedule_id}", response_model=ScheduleResponse)

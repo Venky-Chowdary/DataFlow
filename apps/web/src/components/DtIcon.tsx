@@ -173,6 +173,20 @@ const paths: Record<string, React.ReactNode> = {
   "chevron-right": <polyline points="9,18 15,12 9,6" />,
   "chevron-down": <polyline points="6,9 12,15 18,9" />,
   "arrow-up-right": <path d="M7 17L17 7M7 7h10v10" />,
+  edit: (
+    <>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" />
+    </>
+  ),
+  expand: (
+    <>
+      <polyline points="15,3 21,3 21,9" />
+      <polyline points="9,21 3,21 3,15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </>
+  ),
   calendar: (
     <>
       <rect x="3" y="4" width="18" height="18" rx="2" />

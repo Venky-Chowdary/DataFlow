@@ -1890,9 +1890,24 @@ class UniversalTransferEngine:
     def _create_pending_job(self, request: TransferRequest) -> str:
         self._resolve_saved_connectors(request)
         mongo = get_mongodb_service()
+        source_name = (
+            request.source_filename
+            or request.source.table
+            or request.source.collection
+            or "database"
+        )
+        dest_label = (
+            request.destination.collection
+            or request.destination.table
+            or request.destination.database
+            or request.destination.format
+            or "destination"
+        )
         return mongo.create_transfer_job({
             "source_type": request.source.kind,
-            "source_name": request.source_filename or request.source.table or request.source.collection or "database",
+            "source_name": source_name,
+            "name": f"{source_name} → {dest_label}",
+            "name_key": f"{source_name} → {dest_label}".strip().casefold(),
             "source_format": request.source.format,
             "destination_type": request.destination.format,
             "destination_kind": request.destination.kind,

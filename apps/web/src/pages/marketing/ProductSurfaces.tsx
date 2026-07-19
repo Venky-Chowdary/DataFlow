@@ -1,9 +1,16 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { DtIcon } from "../../components/DtIcon";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import {
+  AlgoBlock,
+  GateTable,
+  LiveProductReel,
+  PRODUCT_FRAMES,
+  ProofCallout,
+  REAL_PREFLIGHT_GATES,
+} from "./productPageShared";
 
 type Nav = (r: PublicRoute) => void;
 
@@ -79,6 +86,8 @@ function SurfaceShell({
   onSecondary,
   heroVisual,
   stats,
+  liveFrames,
+  liveTitle,
   children,
   next,
   nextLabel,
@@ -93,6 +102,8 @@ function SurfaceShell({
   onSecondary: () => void;
   heroVisual: ReactNode;
   stats: { value: string; label: string }[];
+  liveFrames?: readonly { src: string; alt: string; caption?: string }[];
+  liveTitle?: string;
   children: ReactNode;
   next: PublicRoute;
   nextLabel: string;
@@ -120,6 +131,13 @@ function SurfaceShell({
       <MarketingReveal>
         <StatsStrip items={stats} />
       </MarketingReveal>
+      {liveFrames && liveFrames.length > 0 ? (
+        <MarketingReveal>
+          <section className="lp-mkt-body">
+            <LiveProductReel frames={liveFrames} title={liveTitle ?? "Inside the live workspace"} />
+          </section>
+        </MarketingReveal>
+      ) : null}
       {children}
       <MarketingReveal>
         <section className="lp-mkt-body">
@@ -128,7 +146,7 @@ function SurfaceShell({
               Next: {nextLabel} →
             </button>
             <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
-              Knowledge hub
+              Read the docs
             </button>
           </MarketingSectionFooter>
         </section>
@@ -163,20 +181,11 @@ function Chapter({
 
 function TransferStudioMock() {
   const [gate, setGate] = useState(0);
-  const gates = [
-    "Schema contract",
-    "Type coercion",
-    "Nullability",
-    "Destination probe",
-    "Capacity",
-    "Write plan",
-    "Quarantine policy",
-    "Reconcile plan",
-  ];
+  const gates = REAL_PREFLIGHT_GATES.map((g) => `${g.id} ${g.title}`);
   useEffect(() => {
-    const id = window.setInterval(() => setGate((g) => (g + 1) % gates.length), 900);
+    const id = window.setInterval(() => setGate((g) => (g + 1) % REAL_PREFLIGHT_GATES.length), 900);
     return () => window.clearInterval(id);
-  }, [gates.length]);
+  }, []);
 
   return (
     <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through eight fail-fast gates before write.">
@@ -372,17 +381,19 @@ export function TransferStudioPage({
     <SurfaceShell
       kicker="Product · Transfer Studio"
       title="The wizard that refuses silent data loss"
-      lead="Connect any source to any destination, review semantic maps with confidence scores, pass eight preflight gates, then write with quarantine and checksum proof — all in one governed path."
+      lead="Connect any source to any destination, review semantic maps with confidence scores, pass eight preflight gates (G1–G8), then write with quarantine and checksum proof — all in one governed path."
       ctaPrimary="Open Transfer Studio"
       ctaSecondary="See Job Theater"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-jobs")}
       heroVisual={<TransferStudioMock />}
+      liveFrames={PRODUCT_FRAMES.transfer}
+      liveTitle="Transfer Studio in the live workspace"
       stats={[
-        { value: "8", label: "Preflight gates" },
+        { value: "G1–G8", label: "Real preflight gates" },
         { value: "Any→any", label: "Route coverage" },
-        { value: "Review", label: "Ambiguous maps" },
-        { value: "Proof", label: "After every write" },
+        { value: "≥0.85", label: "Default confidence floor" },
+        { value: "Proof", label: "Checksum after write" },
       ]}
       next="product-jobs"
       nextLabel="Job Theater"
@@ -405,29 +416,91 @@ export function TransferStudioPage({
             { label: "Connect", sub: "Drivers · files" },
             { label: "Profile", sub: "Types · keys" },
             { label: "Map", sub: "Semantics · confidence", accent: true },
-            { label: "Preflight", sub: "8 gates", accent: true },
+            { label: "Preflight", sub: "G1–G8", accent: true },
             { label: "Write", sub: "Quarantine" },
             { label: "Prove", sub: "Checksums" },
           ]}
         />
       </Chapter>
 
-      <Chapter id="ts-map" kicker="Core engine" title="How semantic mapping works">
+      <Chapter id="ts-algo-map" kicker="Algorithm" title="How semantic mapping actually scores columns">
+        <AlgoBlock
+          title="Mapping pipeline"
+          lead="The mapper does not string-match names. It classifies format/domain, enriches each column with a semantic role, then scores every source→target edge. Ambiguous edges stay pinned for human review."
+          steps={[
+            {
+              name: "Format + domain classify",
+              detail:
+                "FormatClassifierAgent inspects column names and samples (payment tokens, domain profiles) and returns a format confidence (e.g. payment_feed vs generic_tabular).",
+            },
+            {
+              name: "Column enrichment",
+              detail:
+                "Each column is analyzed for semantic role — amount, email, identifier, timestamp, currency — using name + inferred type + sample values.",
+            },
+            {
+              name: "Edge scoring",
+              detail:
+                "Candidates ranked by exact name → synonym dictionary → role match → type compatibility. Confidence is continuous (0–1), not a binary guess.",
+            },
+            {
+              name: "Threshold gate",
+              detail:
+                "Workspace validation mode sets the floor (strict ≈ 0.85; engine floor 0.72). Below-threshold edges block G4 until you pin, reject, or remap.",
+            },
+            {
+              name: "Transform attach",
+              detail:
+                "Safe coerce / date / decimal transforms are attached only when reversible or explicitly approved — never silent lossy casts.",
+            },
+          ]}
+        />
+        <ProofCallout>
+          <strong>Why this beats name matching.</strong>
+          <p>
+            Source <code>order_amt</code> (NUMERIC) → destination <code>payment_amount</code> scores high on role + type
+            even when names never matched. A STRING with currency symbols trying to land in NUMERIC fails G4/G5 instead of writing garbage.
+          </p>
+        </ProofCallout>
+      </Chapter>
+
+      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="Eight gates from the real engine — fail-fast before write">
         <div className="lp-mkt-prose">
           <p>
-            Columns are matched by <strong>meaning and type</strong>, not just identical names. The mapper scores
-            synonym overlap, role detection (amount, email, identifier, timestamp), and compatible type coercion paths.
-            High-confidence edges auto-accept; ambiguous edges stay pinned for human review before write.
-          </p>
-          <p>
-            Example: source <code>order_amt</code> (NUMERIC) maps to destination <code>payment_amount</code> at 96% —
-            even though the names never matched. If a STRING column tries to land in NUMERIC without a safe coerce rule,
-            preflight blocks the plan instead of guessing.
+            These are not marketing labels. They map to <code>GateId</code> in DataFlow&apos;s preflight package.
+            A single <em>block</em> stops write — there is no “best effort” mode that drops rows quietly.
           </p>
         </div>
+        <GateTable />
+      </Chapter>
+
+      <Chapter id="ts-write" kicker="Execute" title="Write path: quarantine, then prove">
+        <AlgoBlock
+          title="Load + reconcile"
+          lead="After G1–G8 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates bad rows. Success is not “job finished” — it is checksum-matched proof."
+          steps={[
+            {
+              name: "Chunk + transform",
+              detail: "Rows are batched; each field follows its mapped coerce path. Failures go to quarantine with column, value, and reason.",
+            },
+            {
+              name: "Destination write",
+              detail: "Append, overwrite, upsert, or watermark incremental — validated earlier by the write plan / DDL gates.",
+            },
+            {
+              name: "Quarantine isolate",
+              detail: "Rejected rows never land in the clean set and never disappear. Operators inspect them in Job Theater.",
+            },
+            {
+              name: "Checksum reconcile",
+              detail:
+                "Post-load: compare source-mapped checksum vs destination sample/counts (G8 plan). Matched or failed is recorded on the job — never assumed.",
+            },
+          ]}
+        />
         <div className="lp-mkt-capability-grid">
           {[
-            { t: "Role detection", d: "Amounts, emails, IDs, and timestamps are classified so synonyms align across schemas." },
+            { t: "Role detection", d: "Amounts, emails, IDs, and timestamps classified so synonyms align across schemas." },
             { t: "Confidence scores", d: "Every edge shows a score. You pin, reject, or override before production write." },
             { t: "Type-aware coerce", d: "Only fail-fast-safe coercions are offered. Unsafe casts never silently apply." },
             { t: "Synonym dictionary", d: "Workspace synonyms improve over time — Pilot can propose additions from failed jobs." },
@@ -440,42 +513,13 @@ export function TransferStudioPage({
         </div>
       </Chapter>
 
-      <Chapter id="ts-gates" kicker="Preflight" title="Eight gates that block dangerous writes">
-        <div className="lp-mkt-prose">
-          <p>
-            Preflight is fail-fast by design. Every gate records pass/fail evidence on the job. A single failed gate
-            stops write — there is no “best effort” mode that drops rows quietly.
-          </p>
-        </div>
-        <ol className="lp-mkt-gate-list">
-          {[
-            ["Schema contract", "Required columns, keys, and nullability match the destination contract."],
-            ["Type coercion", "Every mapped field has a safe coerce path; unsafe casts fail the plan."],
-            ["Nullability", "NOT NULL destinations are not fed nullable sources without defaults."],
-            ["Destination probe", "Credentials, permissions, and reachability are verified live."],
-            ["Capacity", "Estimated volume vs destination limits and warehouse slots."],
-            ["Write plan", "Upsert / append / overwrite / watermark mode is valid for the driver."],
-            ["Quarantine policy", "Bad-row isolation path is configured before execution."],
-            ["Reconcile plan", "Row-count and checksum strategy is selected for post-load proof."],
-          ].map(([t, d], i) => (
-            <li key={t}>
-              <span className="lp-mkt-gate-num">{String(i + 1).padStart(2, "0")}</span>
-              <div>
-                <strong>{t}</strong>
-                <p>{d}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
-      </Chapter>
-
-      <Chapter id="ts-scenario" kicker="Example" title="Retail orders CSV → PostgreSQL">
+      <Chapter id="ts-scenario" kicker="Worked example" title="Retail orders CSV → PostgreSQL">
         <div className="lp-mkt-scenario">
           <ol>
-            <li>Upload <code>orders_week.csv</code> and select PostgreSQL <code>public.orders</code>.</li>
-            <li>Review map: <code>order_amt → payment_amount</code> (96%), <code>cust_email → email</code> (99%).</li>
-            <li>Preflight fails Type coercion on 9 currency-symbol rows — quarantine policy captures them.</li>
-            <li>Write 12,471 clean rows; Job Theater shows checksum match on written set + 9 quarantined with reasons.</li>
+            <li>Upload <code>sample-orders.csv</code> and select PostgreSQL <code>public.orders</code> (or Load sample in Studio).</li>
+            <li>Review map: <code>order_amt → payment_amount</code> (high confidence), <code>cust_email → email</code>.</li>
+            <li>Preflight: G1–G3 pass; G5 flags currency-symbol rows — quarantine policy captures them.</li>
+            <li>Write clean rows; Job Theater shows checksum match on written set + quarantined rows with reasons.</li>
           </ol>
         </div>
       </Chapter>
@@ -500,6 +544,8 @@ export function JobTheaterPage({
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
       heroVisual={<JobTheaterMock />}
+      liveFrames={PRODUCT_FRAMES.jobs}
+      liveTitle="Job Theater with real reconcile evidence"
       stats={[
         { value: "Live", label: "Batch progress" },
         { value: "Phases", label: "Queue → reconcile" },
@@ -514,7 +560,7 @@ export function JobTheaterPage({
         <div className="lp-mkt-prose">
           <p>
             Transfer Studio plans the load. Job Theater watches it. Every job transitions through explicit phases —
-            Queued, Profiling, Writing, Reconciling, Complete (or Failed) — with counters that never invent success.
+            Queued, Preflight, Extract/Write, Reconciling, Complete (or Failed) — with counters that never invent success.
             Quarantined rows appear with column, value, and reason so operators can fix the map or the source.
           </p>
           <p>
@@ -525,13 +571,49 @@ export function JobTheaterPage({
         <PacketFlow
           nodes={[
             { label: "Queue", sub: "Accepted plan" },
-            { label: "Profile", sub: "Sample · stats" },
+            { label: "Preflight", sub: "G1–G8", accent: true },
             { label: "Write", sub: "Batches", accent: true },
-            { label: "Quarantine", sub: "Bad rows", accent: true },
+            { label: "Quarantine", sub: "Bad rows" },
             { label: "Reconcile", sub: "Checksums" },
             { label: "Complete", sub: "Proof report" },
           ]}
         />
+      </Chapter>
+
+      <Chapter id="jt-algo" kicker="Algorithm" title="How reconciliation proves a load">
+        <AlgoBlock
+          title="Post-load proof"
+          lead="Success is not “status=complete”. After write, the engine recomputes a content checksum over mapped source rows and compares it to what landed in the destination — plus row counts."
+          steps={[
+            {
+              name: "Map source sample",
+              detail: "Apply the same mappings/transforms used at write time to produce the expected target matrix.",
+            },
+            {
+              name: "Checksum source view",
+              detail: "Hash ordered mapped rows (writer checksum when available, else recompute from mapped records).",
+            },
+            {
+              name: "Read target sample",
+              detail: "Probe destination with the reconcile plan (counts + content sample aligned on a stable key when present).",
+            },
+            {
+              name: "Compare",
+              detail: "Row-count delta and checksum equality → matched / mismatched. Mismatch fails the job proof — never silent OK.",
+            },
+            {
+              name: "Surface in Theater",
+              detail: "Timeline, counters, quarantine samples, and proof report become the operator’s single source of truth.",
+            },
+          ]}
+        />
+        <ProofCallout>
+          <strong>Zero silent data loss.</strong>
+          <p>
+            Quarantined rows are part of the proof story: written set can checksum-match while N rows remain isolated
+            with reasons. Operators fix and retry without guessing what disappeared.
+          </p>
+        </ProofCallout>
       </Chapter>
 
       <Chapter id="jt-caps" kicker="Capabilities" title="What operators get on every run">
@@ -552,11 +634,11 @@ export function JobTheaterPage({
         </div>
       </Chapter>
 
-      <Chapter id="jt-scenario" kicker="Example" title="Watching a warehouse load fail safely">
+      <Chapter id="jt-scenario" kicker="Worked example" title="Watching a warehouse load fail safely">
         <div className="lp-mkt-scenario">
           <ol>
             <li>Pipeline kicks off Snowflake upsert at 02:00 UTC — job appears in Theater as Queued.</li>
-            <li>Destination probe passes; Capacity warns on warehouse slot contention but continues under policy.</li>
+            <li>G2 Destination + G7 Capacity probe warehouse slots; policy continues with a warning.</li>
             <li>During Write, 42 rows quarantine on null PK; written set reconciles checksum OK.</li>
             <li>Operator opens quarantine sample, fixes source nulls, retries — Complete with 0 quarantined.</li>
           </ol>
@@ -583,6 +665,8 @@ export function PipelinesPage({
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("solution-sync")}
       heroVisual={<PipelinesMock />}
+      liveFrames={PRODUCT_FRAMES.pipelines}
+      liveTitle="Pipelines in the live workspace"
       stats={[
         { value: "Hourly+", label: "Cadences" },
         { value: "4", label: "Write modes" },
@@ -610,9 +694,38 @@ export function PipelinesPage({
             { label: "Plan", sub: "Studio map" },
             { label: "Schedule", sub: "Cron · cadence", accent: true },
             { label: "Tick", sub: "Enqueue job" },
-            { label: "Preflight", sub: "8 gates", accent: true },
+            { label: "Preflight", sub: "G1–G8", accent: true },
             { label: "Sync", sub: "Mode · watermark" },
             { label: "Proof", sub: "Theater" },
+          ]}
+        />
+      </Chapter>
+
+      <Chapter id="pl-algo" kicker="Algorithm" title="How a pipeline tick executes">
+        <AlgoBlock
+          title="Tick lifecycle"
+          lead="A schedule is just a clock. The work is still a governed transfer — identical to clicking Run in Studio."
+          steps={[
+            {
+              name: "Wake on cadence",
+              detail: "Cron / interval fires; runner loads the saved plan (map, mode, connectors, quarantine policy).",
+            },
+            {
+              name: "Resolve watermark",
+              detail: "For incremental mode, read the last high-water mark; select only new/changed rows.",
+            },
+            {
+              name: "Run G1–G8",
+              detail: "Full preflight every tick. Schema drift or confidence regressions block instead of writing wrong shapes.",
+            },
+            {
+              name: "Write + quarantine",
+              detail: "Same chunked write path as Studio; bad rows isolate with reasons.",
+            },
+            {
+              name: "Prove in Theater",
+              detail: "Job record gets checksum + counts. Operators and agents see the same artifact.",
+            },
           ]}
         />
       </Chapter>
@@ -633,7 +746,7 @@ export function PipelinesPage({
         </div>
       </Chapter>
 
-      <Chapter id="pl-scenario" kicker="Example" title="Hourly orders into BigQuery">
+      <Chapter id="pl-scenario" kicker="Worked example" title="Hourly orders into BigQuery">
         <div className="lp-mkt-scenario">
           <ol>
             <li>Promote Studio plan Orders PG → BigQuery with watermark on <code>updated_at</code>.</li>
@@ -664,6 +777,8 @@ export function QueryPlaygroundPage({
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("integrations")}
       heroVisual={<QueryMock />}
+      liveFrames={PRODUCT_FRAMES.query}
+      liveTitle="Query Playground in the live workspace"
       stats={[
         { value: "SQL", label: "Relational drivers" },
         { value: "Docs", label: "Mongo-style queries" },
@@ -694,6 +809,35 @@ export function QueryPlaygroundPage({
             { label: "Validate", sub: "Types · nulls" },
             { label: "Handoff", sub: "Transfer Studio" },
             { label: "Prove", sub: "After load" },
+          ]}
+        />
+      </Chapter>
+
+      <Chapter id="qy-algo" kicker="Algorithm" title="Safe preview → Studio handoff">
+        <AlgoBlock
+          title="Query path"
+          lead="Playground never writes destinations. It reads under connector RBAC, caps result size, and only then can promote a selection into a transfer plan."
+          steps={[
+            {
+              name: "Bind connector",
+              detail: "Use the saved connector’s driver + encrypted secret — same vault as Transfer Studio.",
+            },
+            {
+              name: "Compile dialect",
+              detail: "SQL highlighting and execution path adapt to PostgreSQL, MySQL, Snowflake, BigQuery, etc.",
+            },
+            {
+              name: "Preview limit",
+              detail: "Enforce row/time caps so exploratory queries stay safe in shared workspaces.",
+            },
+            {
+              name: "Shape check",
+              detail: "Surface column types and null ratios so you know what Studio will map.",
+            },
+            {
+              name: "Promote",
+              detail: "Handoff creates/updates a Studio plan — mapping + G1–G8 still required before write.",
+            },
           ]}
         />
       </Chapter>
@@ -736,6 +880,8 @@ export function DataPilotPage({
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-mcp")}
       heroVisual={<PilotMock />}
+      liveFrames={PRODUCT_FRAMES.pilot}
+      liveTitle="Data Pilot in the live workspace"
       stats={[
         { value: "NL", label: "Triage chat" },
         { value: "Gates", label: "Explain failures" },
@@ -754,9 +900,35 @@ export function DataPilotPage({
             stays trustworthy for production teams.
           </p>
         </div>
+        <AlgoBlock
+          title="Triage loop"
+          lead="Pilot answers from job evidence — gate messages, quarantine samples, map scores — then hands you into Studio or Theater with context preserved."
+          steps={[
+            {
+              name: "Ground on artifacts",
+              detail: "Load the job’s gate results, mapping edges, and quarantine samples — not invented narratives.",
+            },
+            {
+              name: "Explain failure",
+              detail: "Translate G1–G8 blockers into plain language (e.g. G4 confidence, G5 dry-run cast failures).",
+            },
+            {
+              name: "Propose fix",
+              detail: "Suggest synonym pins, coerce rules, or quarantine policy — still requiring human/agent confirmation.",
+            },
+            {
+              name: "Handoff",
+              detail: "Deep-link into Transfer Studio or Job Theater with the same job ID and map context.",
+            },
+            {
+              name: "Re-run gates",
+              detail: "Any accepted change re-enters preflight. Pilot never marks a load proven on its own.",
+            },
+          ]}
+        />
         <div className="lp-mkt-capability-grid">
           {[
-            { t: "Gate explainers", d: "Plain-language reasons for Schema, Type, Nullability, Capacity, and more." },
+            { t: "Gate explainers", d: "Plain-language reasons for G1–G8 failures with the underlying evidence." },
             { t: "Mapping proposals", d: "Suggest synonym pins and coerce rules from failed samples." },
             { t: "Job inspection", d: "Summarize Theater phases, quarantine counts, and proof status." },
             { t: "Safe handoff", d: "Deep-link into Studio or Theater with the job and map context preserved." },
@@ -789,6 +961,8 @@ export function McpServerPage({
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("security")}
       heroVisual={<McpMock />}
+      liveFrames={PRODUCT_FRAMES.mcp}
+      liveTitle="Agent runs still land in the real workspace"
       stats={[
         { value: "MCP", label: "Tool surface" },
         { value: "RBAC", label: "On every call" },
@@ -812,11 +986,47 @@ export function McpServerPage({
             { label: "Agent", sub: "Cursor · Claude" },
             { label: "MCP", sub: "Tools · auth", accent: true },
             { label: "RBAC", sub: "Workspace roles" },
-            { label: "Engine", sub: "Map · gates", accent: true },
+            { label: "Engine", sub: "Map · G1–G8", accent: true },
             { label: "Job", sub: "Theater" },
             { label: "Audit", sub: "Immutable log" },
           ]}
         />
+      </Chapter>
+
+      <Chapter id="mcp-algo" kicker="Algorithm" title="How an agent-initiated transfer stays safe">
+        <AlgoBlock
+          title="MCP run path"
+          lead="Tools are thin wrappers over the same engine. Auth → RBAC → plan → preflight → enqueue — never raw SQL write to destination."
+          steps={[
+            {
+              name: "Authenticate",
+              detail: "Workspace token / SSO-backed service account. No anonymous tool calls.",
+            },
+            {
+              name: "Authorize",
+              detail: "RBAC checks transfer:execute, connector scope, and environment (prod vs sandbox).",
+            },
+            {
+              name: "Resolve plan",
+              detail: "Agent supplies connector IDs + mode; ambiguous maps still require review flags.",
+            },
+            {
+              name: "Preflight G1–G8",
+              detail: "Identical gates as Studio. Blockers return structured evidence to the agent.",
+            },
+            {
+              name: "Enqueue + audit",
+              detail: "Job appears in Theater tagged as agent-initiated; secrets never appear in tool payloads.",
+            },
+          ]}
+        />
+        <ProofCallout>
+          <strong>Never raw passwords.</strong>
+          <p>
+            MCP responses include job IDs, gate results, and quarantine summaries — not connector secrets or full
+            row dumps unless an explicit, audited policy allows sample inspection.
+          </p>
+        </ProofCallout>
       </Chapter>
 
       <Chapter id="mcp-tools" kicker="Tooling" title="Representative tool groups">

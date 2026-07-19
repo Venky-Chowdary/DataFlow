@@ -252,6 +252,9 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     passed, errors = ctx.run_dry_run()
     details: dict[str, Any] = {"errors": list(errors[:20])}
+    dry_meta = getattr(ctx, "_last_dry_run_meta", None)
+    if isinstance(dry_meta, dict):
+        details.update(dry_meta)
 
     # Layer the data integrity audit into G5 so it runs without creating a 9th gate.
     integrity = gate_g9_data_integrity(ctx)
@@ -285,7 +288,14 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
         )
     return _pass(
         GateId.G5_DRY_RUN,
-        "Sample transform dry-run and integrity checks passed",
+        (
+            f"Sample transform dry-run and integrity checks passed"
+            + (
+                f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
+                if details.get("sample_rows_scanned")
+                else ""
+            )
+        ),
         start,
         details,
     )

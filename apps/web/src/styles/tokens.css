@@ -79,7 +79,8 @@
   --df-page-gutter: 24px;
   --df-page-gutter-sm: 16px;
 
-  --df-font-sans: "Plus Jakarta Sans", "IBM Plex Sans", Inter, system-ui, -apple-system, sans-serif;
+  --df-font-sans: "IBM Plex Sans", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
 
   --df-header-height: 56px;

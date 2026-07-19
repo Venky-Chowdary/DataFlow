@@ -299,6 +299,29 @@
   overflow-wrap: anywhere;
 }
 
+.df2-drawer-map-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.df2-drawer-map-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.df2-drawer-map-list code {
+  font-family: var(--df-font-mono, ui-monospace, monospace);
+  background: color-mix(in srgb, var(--df-border, #e2e8f0) 35%, transparent);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 .df2-drawer-route-node {
   display: inline-flex;
   align-items: center;

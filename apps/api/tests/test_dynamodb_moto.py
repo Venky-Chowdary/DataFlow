@@ -11,7 +11,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-moto = pytest.importorskip("moto")  # noqa: E402
+try:
+    import moto  # noqa: E402
+except ImportError as exc:
+    pytest.skip(f"requires a working optional moto dependency: {exc}", allow_module_level=True)
 
 from connectors.dynamodb_writer import write_mapped_rows  # noqa: E402
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { typeBadgeClass } from "../../lib/typeDisplay";
+import { Dialog } from "./Dialog";
 
 interface StructurePreviewProps {
   columns: string[];
@@ -21,9 +22,11 @@ interface StructurePreviewProps {
   /** Shown when columns exist but sample rows failed or were not returned */
   sampleWarning?: string | null;
   onRetrySample?: () => void;
+  /** Open a wider dialog for full table when the inline preview is cramped */
+  expandable?: boolean;
 }
 
-export function StructurePreview({
+function PreviewBody({
   columns,
   schema = {},
   rows = [],
@@ -39,7 +42,10 @@ export function StructurePreview({
   allowJson = false,
   sampleWarning = null,
   onRetrySample,
-}: StructurePreviewProps) {
+  expandable,
+  onExpand,
+  hideExpand,
+}: StructurePreviewProps & { onExpand?: () => void; hideExpand?: boolean }) {
   const rowsPerPage = maxRows ?? (fill ? 40 : 10);
   const [page, setPage] = useState(0);
   const [showAllFields, setShowAllFields] = useState(false);
@@ -94,6 +100,16 @@ export function StructurePreview({
               </button>
             </div>
           )}
+          {expandable && !hideExpand && onExpand && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-ghost"
+              onClick={onExpand}
+              title="Open full preview"
+            >
+              <DtIcon name="expand" size={13} /> Expand
+            </button>
+          )}
           {showBadge && (
             <span className="df2-badge df2-badge-live">
               <DtIcon name="check" size={12} /> Detected
@@ -106,7 +122,11 @@ export function StructurePreview({
         <div className="df2-structure-field-block">
           <div className="df2-structure-field-strip" aria-label="Detected fields">
             {stripCols.map((col) => (
-              <span key={col} className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`} title={`${col} · ${schema[col] || "string"}`}>
+              <span
+                key={col}
+                className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}
+                title={`${col} · ${schema[col] || "string"}`}
+              >
                 <strong>{col}</strong>
                 <small className="df2-type-badge">{schema[col] || "string"}</small>
               </span>
@@ -147,9 +167,9 @@ export function StructurePreview({
             <thead>
               <tr>
                 {previewCols.map((col) => (
-                  <th key={col}>
+                  <th key={col} className={typeBadgeClass(schema[col])}>
                     <span>{col}</span>
-                    <small>{schema[col] || "string"}</small>
+                    <small className="df2-type-badge">{schema[col] || "string"}</small>
                   </th>
                 ))}
               </tr>
@@ -161,7 +181,7 @@ export function StructurePreview({
                     const raw = row[col];
                     const text = raw == null ? "—" : String(raw);
                     return (
-                      <td key={col} title={text}>
+                      <td key={col} title={text} className={typeBadgeClass(schema[col])}>
                         {text.length > 48 ? `${text.slice(0, 48)}…` : text}
                       </td>
                     );
@@ -211,5 +231,43 @@ export function StructurePreview({
         </div>
       )}
     </div>
+  );
+}
+
+export function StructurePreview(props: StructurePreviewProps) {
+  const [expanded, setExpanded] = useState(false);
+  const expandable = props.expandable !== false && (props.columns?.length ?? 0) > 0;
+
+  return (
+    <>
+      <PreviewBody
+        {...props}
+        expandable={expandable}
+        onExpand={() => setExpanded(true)}
+      />
+      <Dialog
+        open={expanded}
+        onClose={() => setExpanded(false)}
+        size="xl"
+        title={props.title || "Structure preview"}
+        subtitle={
+          props.subtitle
+            ?? `${props.columns.length} fields${props.rowCount != null ? ` · ${props.rowCount.toLocaleString()} rows` : ""}`
+        }
+        ariaLabel="Expanded structure preview"
+        className="df2-structure-preview-dialog"
+      >
+        <PreviewBody
+          {...props}
+          fill
+          maxRows={props.maxRows ?? 40}
+          maxCols={props.columns.length}
+          showFieldStrip={props.showFieldStrip !== false}
+          expandable={false}
+          hideExpand
+          className={`${props.className || ""} df2-structure-preview--dialog`.trim()}
+        />
+      </Dialog>
+    </>
   );
 }

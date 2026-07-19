@@ -53,7 +53,13 @@ class FilePreflightContext(PreflightContext):
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
         # Use cell_to_string so nested lists/dicts from schemaless sources become
         # valid JSON strings instead of Python repr() artifacts.
-        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
+        scanned = self.sample_rows[:sample_size]
+        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in scanned]
+        self._last_dry_run_meta = {
+            "sample_rows_scanned": len(scanned),
+            "sample_rows_available": len(self.sample_rows),
+            "sample_cap": sample_size,
+        }
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
         dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
         mapping_dicts = [

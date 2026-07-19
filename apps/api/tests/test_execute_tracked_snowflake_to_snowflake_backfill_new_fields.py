@@ -7,8 +7,9 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 
-import fakesnow
 import pytest
+
+fakesnow = pytest.importorskip("fakesnow", reason="requires the optional Snowflake test dependency")
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { DocsShotReel } from "../components/docs/DocsShotReel";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -14,6 +15,8 @@ interface CatalogStats {
   planned: number;
   categories: number;
   transfer_live?: number;
+  unique_drivers?: number;
+  catalog_tiles?: number;
   connect_only?: number;
   roadmap?: number;
 }
@@ -40,6 +43,7 @@ function RevealSection({
 }
 
 const DOC_SECTIONS = [
+  { id: "walkthrough", label: "Workspace walkthrough", icon: "book" },
   { id: "architecture", label: "Architecture", icon: "layers" },
   { id: "coverage", label: "Connector coverage", icon: "connectors" },
   { id: "pipeline", label: "How it works", icon: "transfer" },
@@ -48,6 +52,39 @@ const DOC_SECTIONS = [
   { id: "use-cases", label: "Use cases", icon: "database" },
   { id: "security", label: "Security & compliance", icon: "lock" },
   { id: "troubleshooting", label: "Troubleshooting", icon: "alert" },
+] as const;
+
+const WORKSPACE_SHOTS = [
+  {
+    src: "/docs/screenshots/app-overview.png",
+    title: "Overview",
+    caption: "Live rows moved, success rate, data plane, and connection health.",
+  },
+  {
+    src: "/docs/screenshots/app-transfer-source.png",
+    title: "Transfer Studio",
+    caption: "Source step with sample-orders.csv — typed columns and real sample rows.",
+  },
+  {
+    src: "/docs/screenshots/app-connectors.png",
+    title: "Connectors",
+    caption: "Local Postgres, MySQL, MongoDB with Test passed / failed status.",
+  },
+  {
+    src: "/docs/screenshots/app-jobs.png",
+    title: "Job Theater",
+    caption: "Completed e2e_customers run with reconcile timeline and row fidelity.",
+  },
+  {
+    src: "/docs/screenshots/app-query.png",
+    title: "Query Playground",
+    caption: "Read-only SQL against saved connectors before you transfer.",
+  },
+  {
+    src: "/docs/screenshots/app-pilot.png",
+    title: "Data Pilot",
+    caption: "Natural-language triage on the same governed engine.",
+  },
 ] as const;
 
 function DocsHero({
@@ -419,30 +456,12 @@ export function DocsPage() {
       .catch(() => setStatsError(true));
   }, []);
 
-  useEffect(() => {
-    const els = DOC_SECTIONS
-      .map((s) => document.getElementById(s.id))
-      .filter((el): el is HTMLElement => Boolean(el));
-    if (els.length === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-        if (visible[0]) setActiveSection(visible[0].target.id);
-      },
-      { rootMargin: "-18% 0px -68% 0px", threshold: [0, 0.25, 0.5] },
-    );
-    els.forEach((el) => observer.observe(el));
-    return () => observer.disconnect();
-  }, []);
-
   const jumpTo = (id: string) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
     setActiveSection(id);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const transferLive = stats?.transfer_live ?? stats?.live ?? 130;
+  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live ?? 130;
   const total = stats?.total ?? 734;
 
   return (
@@ -484,6 +503,53 @@ export function DocsPage() {
         </aside>
 
         <div className="df2-docs dt-stagger">
+        {activeSection === "walkthrough" && (
+        <RevealSection id="walkthrough">
+          <PageSection
+            title="Workspace walkthrough"
+            subtitle="Real screenshots from inside the signed-in application — not marketing mocks"
+            asCard
+          >
+            <ol className="df2-docs-walkthrough-steps">
+              <li>
+                <strong>Overview</strong> — confirm workspace health, throughput, and recent jobs.
+              </li>
+              <li>
+                <strong>Connectors</strong> — add or test sources/destinations; watch Test passed vs failed.
+              </li>
+              <li>
+                <strong>Transfer Studio</strong> — Source → Destination → Map → Validate → Run.
+              </li>
+              <li>
+                <strong>Job Theater</strong> — open the job and verify reconcile / row fidelity.
+              </li>
+              <li>
+                <strong>Query / Pilot</strong> — inspect data or triage failures in plain language.
+              </li>
+            </ol>
+            <DocsShotReel
+              frames={WORKSPACE_SHOTS.map((shot) => ({
+                src: shot.src,
+                alt: shot.title,
+                caption: `${shot.title} — ${shot.caption}`,
+              }))}
+            />
+            <div className="df2-docs-shot-grid">
+              {WORKSPACE_SHOTS.map((shot) => (
+                <figure key={shot.src} className="df2-docs-shot">
+                  <img src={shot.src} alt={shot.title} loading="lazy" />
+                  <figcaption>
+                    <strong>{shot.title}</strong>
+                    <span>{shot.caption}</span>
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
+          </PageSection>
+        </RevealSection>
+        )}
+
+        {activeSection === "architecture" && (
         <RevealSection id="architecture">
           <PageSection title="Architecture" subtitle="One canonical pipeline for every source and destination" asCard>
             <ArchitectureDiagram />
@@ -495,13 +561,17 @@ export function DocsPage() {
             />
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "coverage" && (
         <RevealSection id="coverage">
           <PageSection title="Connector coverage" subtitle="A single platform for the systems you already use">
             <ConnectorOrbit />
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "pipeline" && (
         <RevealSection id="pipeline">
           <PageSection title="How it works" subtitle="From raw source to verified target">
             <div className="df2-docs-steps">
@@ -531,21 +601,49 @@ export function DocsPage() {
                 <p>Rows are chunked, transformed, written, and reconciled. Rejected rows are quarantined and reported.</p>
               </div>
             </div>
+            <figure className="df2-docs-shot df2-docs-shot--wide">
+              <img
+                src="/docs/screenshots/app-transfer-source.png"
+                alt="Transfer Studio source profiling with sample orders rows"
+                loading="lazy"
+              />
+              <figcaption>
+                <strong>Transfer Studio · Source</strong>
+                <span>Profiled sample-orders.csv with INTEGER / VARCHAR / DECIMAL / DATE columns before destination.</span>
+              </figcaption>
+            </figure>
+            <figure className="df2-docs-shot df2-docs-shot--wide">
+              <img
+                src="/docs/screenshots/app-jobs.png"
+                alt="Job Theater reconcile timeline for completed transfer"
+                loading="lazy"
+              />
+              <figcaption>
+                <strong>Job Theater · Proof</strong>
+                <span>Queue → preflight → extract → load → reconcile with 100% row fidelity on a live job.</span>
+              </figcaption>
+            </figure>
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "preflight" && (
         <RevealSection id="preflight">
           <PageSection title="Preflight gates" subtitle="Why transfers are blocked or approved before any write">
             <PreflightRules />
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "trust" && (
         <RevealSection id="trust">
           <PageSection title="Trust & fidelity" subtitle="Built for data governance and compliance">
             <TrustPillars />
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "use-cases" && (
         <RevealSection id="use-cases">
           <PageSection title="Real-world use cases" subtitle="From logistics to warehouses">
             <div className="df2-docs-use-cases">
@@ -568,7 +666,9 @@ export function DocsPage() {
             </div>
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "security" && (
         <RevealSection id="security">
           <PageSection title="Security & compliance" subtitle="Defense in depth for sensitive data">
             <ul className="df2-docs-list">
@@ -580,7 +680,9 @@ export function DocsPage() {
             </ul>
           </PageSection>
         </RevealSection>
+        )}
 
+        {activeSection === "troubleshooting" && (
         <RevealSection id="troubleshooting">
           <PageSection title="Troubleshooting a blocked transfer" subtitle="Reading the preflight result">
             <div className="df2-docs-faq">
@@ -591,6 +693,7 @@ export function DocsPage() {
             </div>
           </PageSection>
         </RevealSection>
+        )}
         </div>
       </div>
       </PageFrame>

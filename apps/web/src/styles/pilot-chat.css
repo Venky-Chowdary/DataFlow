@@ -38,10 +38,17 @@
 
 .df2-pilot-v2 .df2-pilot-aside {
   width: auto;
-  border-right: 1px solid #e2e8f0;
-  background: #fff;
-  padding: 12px;
+  border: none !important;
+  border-right: 1px solid #eef2f6 !important;
+  border-radius: 0 !important;
+  background: #fafbfc;
+  padding: 10px 8px;
   overflow: hidden;
+}
+
+.df2-pilot-v2 .df2-pilot-aside.is-collapsed {
+  padding: 8px 0;
+  background: #fff;
 }
 
 .df2-pilot-v2 .df2-pilot-aside-scroll {
@@ -53,6 +60,8 @@
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  border: none !important;
+  border-radius: 0 !important;
 }
 
 .df2-pilot-v2 .df2-pilot-main-inner {
@@ -201,16 +210,16 @@
 
 .df2-pilot-v2 .df2-pilot-msg.assistant {
   align-self: flex-start;
-  background: #fff;
-  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border: none;
   color: #0f172a;
   border-bottom-left-radius: 4px;
 }
 
 .df2-pilot-v2 .df2-pilot-thinking {
   align-self: flex-start;
-  background: #fff;
-  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border: none;
   border-radius: 12px;
   padding: 12px 16px;
 }
@@ -274,10 +283,6 @@
 @media (max-width: 900px) {
   .df2-pilot-v2 .df2-pilot-body {
     grid-template-columns: 1fr;
-  }
-
-  .df2-pilot-v2 .df2-pilot-aside {
-    display: none;
   }
 
   .df2-pilot-v2 .df2-pilot-capability-grid {

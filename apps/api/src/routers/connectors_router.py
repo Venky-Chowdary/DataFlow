@@ -452,6 +452,50 @@ async def get_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch("/jobs/{job_id}")
+async def patch_transfer_job(job_id: str, request: Request):
+    """Update job metadata (display name). Route/source/dest stay immutable."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    raw_name = body.get("name") if isinstance(body, dict) else None
+    if raw_name is None:
+        raise HTTPException(status_code=400, detail="Provide name to update")
+    name = str(raw_name).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Job name cannot be empty")
+    if len(name) > 120:
+        raise HTTPException(status_code=400, detail="Job name must be 120 characters or fewer")
+
+    try:
+        from services.mongodb_service import _job_name_key
+
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job or not _can_access_job(request, job):
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        current = (job.get("name") or "").strip()
+        if name.casefold() != current.casefold():
+            workspace_id = (job.get("workspace_id") or "").strip()
+            if mongo.is_job_name_taken(name, workspace_id=workspace_id, exclude_job_id=job_id):
+                raise HTTPException(status_code=409, detail="This name already exists")
+
+        if not mongo.update_job_fields(job_id, {"name": name, "name_key": _job_name_key(name)}):
+            raise HTTPException(status_code=500, detail="Failed to update job")
+        updated = mongo.get_job(job_id) or {**job, "name": name}
+        for key in ("created_at", "updated_at", "started_at", "completed_at"):
+            if updated.get(key) and hasattr(updated[key], "isoformat"):
+                updated[key] = updated[key].isoformat()
+        return updated
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Re-run a failed database migration using stored job configuration."""

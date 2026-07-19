@@ -531,6 +531,9 @@ export async function fetchCatalogStats(): Promise<{
   planned: number;
   categories: number;
   transfer_live?: number;
+  unique_drivers?: number;
+  catalog_tiles?: number;
+  transfer_live_tiles?: number;
   connect_only?: number;
   roadmap?: number;
 }> {
@@ -608,6 +611,38 @@ export async function fetchJob(jobId: string): Promise<JobProgress> {
     [`${API_BASE}/connectors/jobs/${jobId}`, `${API_BASE}/jobs/${jobId}`],
     "Job not found"
   );
+}
+
+export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
+  const urls = [
+    `${API_BASE}/connectors/jobs/${jobId}`,
+    `${API_BASE}/jobs/${jobId}`,
+  ];
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      const res = await apiFetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data?.detail;
+        const message =
+          typeof detail === "string"
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((d: { msg?: string }) => d?.msg).filter(Boolean).join("; ") || "Rename failed"
+              : "Rename failed";
+        throw new Error(message);
+      }
+      return data as JobProgress;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Rename failed");
 }
 
 export async function retryJob(jobId: string): Promise<{ job_id: string; retry_of: string }> {
@@ -1334,6 +1369,45 @@ export async function runUniversalTransfer(options: {
   }
   if (options.planId) formData.append("plan_id", options.planId);
   const res = await apiFetch(`${API_BASE}/transfer/run`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data.detail;
+    const errMsg = typeof detail === "string"
+      ? detail
+      : detail?.error || detail?.message || JSON.stringify(detail) || "Transfer failed";
+    return { success: false, error: errMsg };
+  }
+  return { success: true, async: data.async === true, ...data };
+}
+
+/** JSON transfer execute (SDK / GitOps) — Form upload remains on runUniversalTransfer. */
+export async function executeTransferJson(payload: {
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+  mappings?: { source: string; target: string; confidence?: number }[];
+  syncMode?: string;
+  validationMode?: string;
+  schemaPolicy?: string;
+  skipPreflight?: boolean;
+  asyncMode?: boolean;
+  planId?: string;
+}) {
+  const res = await apiFetch(`${API_BASE}/transfer/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: payload.source,
+      destination: payload.destination,
+      mappings: payload.mappings || [],
+      sync_mode: payload.syncMode || "full_refresh_overwrite",
+      validation_mode: payload.validationMode || "strict",
+      schema_policy: payload.schemaPolicy || "manual_review",
+      skip_preflight: payload.skipPreflight === true,
+      async_mode: payload.asyncMode !== false,
+      plan_id: payload.planId || undefined,
+    }),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
   const data = await res.json();
   if (!res.ok) {
     const detail = data.detail;

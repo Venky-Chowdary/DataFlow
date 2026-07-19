@@ -5,6 +5,8 @@ import { ConnectorIcon } from "../app/brand-icons";
 import { ComparisonSection } from "../components/landing/ComparisonSection";
 import { TrustSection } from "../components/landing/TrustSection";
 import { TestimonialSection } from "../components/landing/TestimonialSection";
+import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
+import { LandingInfraRibbon } from "../components/landing/LandingInfraRibbon";
 import { fetchCatalogStats } from "../lib/api";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { MarketingSectionFooter } from "../components/marketing/MarketingSectionFooter";
@@ -177,7 +179,19 @@ function CountUpStat({
   );
 }
 
-function OutcomesBand() {
+function OutcomesBand({
+  uniqueDrivers,
+  catalogTiles,
+}: {
+  uniqueDrivers: number | null;
+  catalogTiles: number | null;
+}) {
+  const driverTarget = uniqueDrivers ?? 0;
+  const driverDetail =
+    catalogTiles != null && catalogTiles > 0
+      ? `${catalogTiles} catalog tiles · unique drivers primary`
+      : "Package-available unique drivers — not alias inflation";
+
   return (
     <section className="lp-section lp-outcomes" id="outcomes" aria-label="Outcomes">
       <Reveal>
@@ -189,7 +203,13 @@ function OutcomesBand() {
       </Reveal>
       <Reveal className="lp-outcomes-grid">
         <CountUpStat index={0} target={8} label="Preflight gates" detail="Block bad writes before production" />
-        <CountUpStat index={1} target={600} suffix="+" label="Transfer drivers" detail="Any source to any destination" />
+        <CountUpStat
+          index={1}
+          target={driverTarget || 24}
+          suffix={uniqueDrivers != null ? "" : "+"}
+          label="Unique drivers"
+          detail={driverDetail}
+        />
         <CountUpStat index={2} target={100} suffix="%" label="Row & checksum proof" detail="Reconciled end-to-end after write" />
         <CountUpStat index={3} target={0} label="Silently dropped rows" detail="Bad rows are quarantined, never lost" />
       </Reveal>
@@ -315,12 +335,20 @@ function HeroStudioMock({ gateStep }: { gateStep: number }) {
 
 export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
+  const [catalogTiles, setCatalogTiles] = useState<number | null>(null);
   const [gateStep, setGateStep] = useState(0);
+  const heroRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     fetchCatalogStats()
-      .then((s) => setLiveDrivers(s.transfer_live ?? s.live))
-      .catch(() => setLiveDrivers(null));
+      .then((s) => {
+        setLiveDrivers(s.unique_drivers ?? s.transfer_live ?? s.live);
+        setCatalogTiles(s.catalog_tiles ?? s.transfer_live_tiles ?? null);
+      })
+      .catch(() => {
+        setLiveDrivers(null);
+        setCatalogTiles(null);
+      });
   }, []);
 
   useEffect(() => {
@@ -333,94 +361,107 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
     return () => window.clearInterval(id);
   }, []);
 
+  // Parallax the immersive 3D stage
+  useEffect(() => {
+    const hero = heroRef.current;
+    if (!hero) return;
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced) return;
+
+    const stage = hero.querySelector<HTMLElement>(".lp-d3");
+    if (!stage) return;
+
+    const onScroll = () => {
+      const rect = hero.getBoundingClientRect();
+      const progress = Math.min(1, Math.max(0, -rect.top / Math.max(rect.height, 1)));
+      stage.style.setProperty("--lp-parallax", `${progress * 48}px`);
+      stage.style.setProperty("--lp-parallax-op", String(1 - progress * 0.18));
+      stage.style.setProperty("--lp-tilt", `${progress * 4}deg`);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
   return (
     <>
-      <section className="lp-hero">
-        <span className="lp-hero-eyebrow">
-          <span className="lp-hero-eyebrow-dot" aria-hidden />
-          Universal data movement, proven end-to-end
-        </span>
-        <h1>Move any schema anywhere</h1>
-        <p className="lp-hero-sub">
-          Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
-          {liveDrivers != null ? ` ${liveDrivers} transfer-ready drivers today.` : ""}
-        </p>
+      <section className="lp-hero lp-hero--immersive lp-hero--bleed" ref={heroRef}>
+        <div className="lp-hero-immersive-grid">
+          <div className="lp-hero-copy">
+            <span className="lp-hero-eyebrow">
+              <span className="lp-hero-eyebrow-dot" aria-hidden />
+              Universal data movement, proven end-to-end
+            </span>
+            <h1 className="lp-hero-title">
+              Move any schema <span className="lp-hero-title-b">anywhere</span>
+            </h1>
+            <p className="lp-hero-sub">
+              Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
+              {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
+            </p>
 
-        <div className="lp-hero-cta">
-          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-            Try DataFlow
-          </button>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("product-transfer")}>
-            See Transfer Studio
-          </button>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Try DataFlow
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
+                Read the docs
+              </button>
+            </div>
+
+            <ul className="lp-hero-proof-line" aria-label="Platform highlights">
+              <li>8 preflight gates</li>
+              <li>Checksum proof</li>
+              <li>{liveDrivers != null ? `${liveDrivers} unique drivers` : "Transfer-ready drivers"}</li>
+            </ul>
+          </div>
+
+          <div className="lp-hero-visual lp-hero-visual--stage">
+            <LandingHeroFlow />
+          </div>
         </div>
-
-        <div className="lp-hero-value-strip" aria-label="Platform highlights">
-          <article>
-            <span className="lp-hero-value-icon" aria-hidden><DtIcon name="gate" size={22} /></span>
-            <div>
-              <strong>8 preflight gates</strong>
-              <span>Block bad writes before production</span>
-            </div>
-          </article>
-          <article>
-            <span className="lp-hero-value-icon" aria-hidden><DtIcon name="check" size={22} /></span>
-            <div>
-              <strong>Checksum proof</strong>
-              <span>Reconcile every load end-to-end</span>
-            </div>
-          </article>
-          <article>
-            <span className="lp-hero-value-icon" aria-hidden><DtIcon name="connectors" size={22} /></span>
-            <div>
-              <strong>{liveDrivers != null ? `${liveDrivers} transfer-ready` : "Transfer-ready"} drivers</strong>
-              <span>Honest labels — catalog stubs stay planned</span>
-            </div>
-          </article>
-        </div>
-
-        <HeroStudioMock gateStep={gateStep} />
       </section>
 
-      <section className="lp-logos" aria-label="Trusted stacks">
+      <section className="lp-studio-band lp-band--full" aria-label="Transfer Studio preview">
+        <div className="lp-studio-band-inner">
+          <div className="lp-studio-band-copy lp-band-copy--center">
+            <p className="lp-section-kicker">Product</p>
+            <h2>Transfer Studio in motion</h2>
+            <p>Map → preflight → write → reconcile on one governed path. The same engine under Pipelines, Pilot, and MCP.</p>
+          </div>
+          <HeroStudioMock gateStep={gateStep} />
+          <div className="lp-studio-band-docs">
+            <p>Prefer a step-by-step runbook? Open the public documentation with product screenshots.</p>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
+              Browse documentation
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="lp-logos lp-logos--float lp-band--center" aria-label="Trusted stacks">
         <h5>Industry leaders move data with</h5>
-        <div className="lp-logos-row">
-          {["postgresql", "snowflake", "bigquery", "mongodb", "sqlserver", "s3"].map((id) => (
-            <span key={id} className="lp-logo-item">
-              <ConnectorIcon id={id} size={22} />
-              {id}
+        <div className="lp-logos-float-row">
+          {["postgresql", "snowflake", "bigquery", "mongodb", "sqlserver", "s3"].map((id, i) => (
+            <span key={id} className="lp-logo-float" style={{ "--i": i } as CSSProperties} title={id}>
+              <ConnectorIcon id={id} size={48} />
+              <em>{id}</em>
             </span>
           ))}
         </div>
       </section>
 
-      <OutcomesBand />
+      <OutcomesBand uniqueDrivers={liveDrivers} catalogTiles={catalogTiles} />
 
-      <section className="lp-section lp-section-platform" id="platform">
+      <section className="lp-section lp-section-platform lp-band--full" id="platform">
         <Reveal>
-          <div className="lp-section-head">
+          <div className="lp-section-head lp-band-copy--center">
             <p className="lp-section-kicker">Platform</p>
             <h2>From source to proof in four steps</h2>
             <p>The same governed path in Transfer Studio, Data Pilot, MCP, and scheduled pipelines.</p>
           </div>
         </Reveal>
-        <Reveal className="lp-platform-steps">
-          {[
-            { step: "01", title: "Connect", body: "Pick a transfer-ready driver or upload CSV, JSONL, and Parquet. Honest capability labels — no inflated marketplace counts.", icon: "connectors" as const },
-            { step: "02", title: "Map", body: "Semantic column mapping with confidence scores and human review for ambiguous fields.", icon: "sparkle" as const },
-            { step: "03", title: "Preflight", body: "Eight fail-fast gates — schema, types, capacity, and destination probes before write.", icon: "gate" as const },
-            { step: "04", title: "Proof", body: "Job Theater shows batch progress, reconciliation, checksums, and quarantine for bad rows.", icon: "check" as const },
-          ].map((item, i) => (
-            <article key={item.step} className="lp-platform-step" style={{ "--reveal-i": i } as CSSProperties}>
-              <span className="lp-platform-step-num">{item.step}</span>
-              <span className="lp-platform-step-icon" aria-hidden>
-                <DtIcon name={item.icon} size={22} />
-              </span>
-              <h3>{item.title}</h3>
-              <p>{item.body}</p>
-            </article>
-          ))}
-        </Reveal>
+        <LandingInfraRibbon />
       </section>
 
       <section className="lp-section lp-section-band" id="product">

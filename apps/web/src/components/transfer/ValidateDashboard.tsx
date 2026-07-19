@@ -58,6 +58,21 @@ function metaForGate(id: string): GateMeta {
   };
 }
 
+/** Core engine gates (G1–G8). Extra policy gates may appear after the run. */
+const CORE_GATE_META = GATE_META.filter((g) => /^g[1-8]_/.test(g.key));
+
+function formatDuration(ms: number | undefined): string {
+  if (ms == null || Number.isNaN(ms)) return "";
+  if (ms < 10) return "<10 ms";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function formatElapsed(ms: number): string {
+  const s = ms / 1000;
+  return s < 10 ? `${s.toFixed(1)} s` : `${Math.round(s)} s`;
+}
+
 function issueTextsFromDetails(details?: Record<string, unknown> | null): string[] {
   if (!details) return [];
   const typed = details.issue_texts;
@@ -340,7 +355,8 @@ export function ValidateDashboard({
   onReviewMappings,
   onRunPreflight,
 }: ValidateDashboardProps) {
-  const [progress, setProgress] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
   const [explaining, setExplaining] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
@@ -451,17 +467,40 @@ export function ValidateDashboard({
     }
   };
 
+  // Honest timer: wall-clock elapsed while the API runs — never invent gate steps.
   useEffect(() => {
     if (!running) {
-      setProgress(0);
+      setElapsedMs(0);
       return;
     }
-    setProgress(12);
+    const t0 = performance.now();
+    setElapsedMs(0);
     const timer = window.setInterval(() => {
-      setProgress((prev) => (prev >= 96 ? prev : Math.min(96, prev + Math.max(2, Math.round(Math.random() * 7)))));
-    }, 220);
+      setElapsedMs(performance.now() - t0);
+    }, 100);
     return () => window.clearInterval(timer);
   }, [running]);
+
+  // After results return, reveal gates in engine order paced by real duration_ms.
+  useEffect(() => {
+    if (running || !preflight?.gates?.length) {
+      setRevealCount(0);
+      return;
+    }
+    setRevealCount(0);
+    let i = 0;
+    let timer = 0;
+    const advance = () => {
+      i += 1;
+      setRevealCount(i);
+      if (i >= (preflight.gates?.length ?? 0)) return;
+      const justShown = preflight.gates[i - 1];
+      const pace = Math.min(900, Math.max(140, Number(justShown?.duration_ms) || 180));
+      timer = window.setTimeout(advance, pace);
+    };
+    timer = window.setTimeout(advance, 60);
+    return () => window.clearTimeout(timer);
+  }, [running, preflight?.run_id, preflight?.gates]);
 
   const proof = preflight?.proof_bundle;
   const decision = proof?.transfer_decision?.decision
@@ -478,9 +517,11 @@ export function ValidateDashboard({
   const blockedCount = (preflight?.gates ?? []).filter((g) => g.status === "block").length;
   const skippedCount = (preflight?.gates ?? []).filter((g) => g.status === "skip").length;
   /** Prefer live engine gates so PENDING cards aren't shown for rules that never ran. */
-  const displayGates: GateMeta[] = (preflight?.gates?.length && !running)
-    ? preflight.gates.map((g) => metaForGate(g.id))
-    : GATE_META;
+  const displayGates: GateMeta[] = running
+    ? CORE_GATE_META
+    : (preflight?.gates?.length
+      ? preflight.gates.map((g) => metaForGate(g.id))
+      : CORE_GATE_META);
 
   const decisionTone = decision === "block"
     ? "block"
@@ -497,26 +538,35 @@ export function ValidateDashboard({
   const reconciliation = proof?.reconciliation;
   const sampleCompare = reconciliation?.sample_compare;
   const mismatches = sampleCompare?.mismatches ?? [];
+  const dryGate = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
+  const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
+  const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
 
-  // While validating, never fake a "pass" — that caused the flip-flop UX where
-  // cards looked green for minutes then Dry-run suddenly blocked.
-  const activeRuleIndex = Math.floor((progress / 100) * GATE_META.length);
-
+  // While validating: all gates pending/queued — never fake a green "pass" mid-flight.
+  // After results: reveal in order using real duration_ms.
   const statusForGate = (
     meta: GateMeta,
     index: number,
-  ): { status: string; message: string; issues: string[] } => {
-    const gate = gateByKey.get(meta.key);
-    if (gate && !running) {
+  ): { status: string; message: string; issues: string[]; durationMs?: number } => {
+    const gate = gateByKey.get(meta.key) ?? gateByKey.get(meta.key.replace(/^g\d+_/, ""));
+    if (running) {
+      return {
+        status: "pending",
+        message: "Queued — engine returns all gate results when the pass finishes",
+        issues: [],
+      };
+    }
+    if (gate) {
+      const revealed = index < revealCount;
+      if (!revealed && revealCount < (preflight?.gates?.length ?? 0)) {
+        return { status: "pending", message: "Result ready — revealing…", issues: [] };
+      }
       return {
         status: gate.status,
         message: gate.message,
         issues: gate.status === "block" ? issueTextsFromDetails(gate.details) : [],
+        durationMs: gate.duration_ms,
       };
-    }
-    if (running) {
-      if (index === activeRuleIndex) return { status: "running", message: "Evaluating rule…", issues: [] };
-      return { status: "pending", message: "Waiting for engine result…", issues: [] };
     }
     return { status: "pending", message: "Awaiting validation run.", issues: [] };
   };
@@ -589,13 +639,13 @@ export function ValidateDashboard({
               cy="60"
               r="52"
               className="df2-vd-hero-fill"
-              strokeDasharray={`${((running ? progress : readiness) / 100) * 326.7} 326.7`}
+              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : readiness) / 100) * 326.7} 326.7`}
               transform="rotate(-90 60 60)"
             />
           </svg>
           <div className="df2-vd-hero-ring-label">
-            <strong>{running ? progress : readiness}<small>%</small></strong>
-            <span>ready</span>
+            <strong>{running ? formatElapsed(elapsedMs) : readiness}<small>{running ? "" : "%"}</small></strong>
+            <span>{running ? "elapsed" : "ready"}</span>
           </div>
         </div>
 
@@ -616,7 +666,7 @@ export function ValidateDashboard({
             </span>
             <h3>
               {running
-                ? "Running validation gates…"
+                ? "Engine running G1–G8…"
                 : preflight
                   ? preflight.passed
                     ? "Ready to transfer"
@@ -634,14 +684,22 @@ export function ValidateDashboard({
 
           <p className="df2-vd-hero-summary">
             {running
-              ? "Enforcing schema, mapping, transform, integrity, and policy rules against your source and destination."
+              ? "Real preflight is evaluating source, destination, schema, mapping confidence, dry-run sample, DDL, capacity, and reconcile plan. Progress is wall-clock time — not a fake step animation."
               : proof?.evidence_summary ?? "Every rule below runs before a single row is written. Nothing transfers until the gates you require pass."}
           </p>
 
           {running && (
-            <div className="df2-vd-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
-              <span className="df2-vd-progress-fill" style={{ width: `${progress}%` }} />
+            <div className="df2-vd-progress is-indeterminate" role="status" aria-live="polite">
+              <span className="df2-vd-progress-fill" style={{ width: "40%" }} />
             </div>
+          )}
+          {!running && preflight && engineMsTotal > 0 && (
+            <p className="df2-vd-hero-engine-meta">
+              Engine reported {formatDuration(engineMsTotal)} across {preflight.gates.length} gates
+              {sampleScanned != null && sampleScanned > 0
+                ? ` · dry-run sampled ${sampleScanned.toLocaleString()} preview rows (full table proven after write in Job Theater)`
+                : " · dry-run uses the Transfer Studio preview sample, not the full table"}
+            </p>
           )}
         </div>
       </header>
@@ -932,7 +990,7 @@ export function ValidateDashboard({
         </div>
         <div className="df2-vd-rules-grid">
           {displayGates.map((meta, index) => {
-            const { status, message, issues } = statusForGate(meta, index);
+            const { status, message, issues, durationMs } = statusForGate(meta, index);
             return (
               <article key={`${meta.key}-${index}`} className={`df2-vd-rule status-${status}`}>
                 <div className="df2-vd-rule-top">
@@ -947,6 +1005,9 @@ export function ValidateDashboard({
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
                 <p className="df2-vd-rule-desc">{meta.rule}</p>
                 {status !== "pending" && message && <p className="df2-vd-rule-msg">{message}</p>}
+                {status !== "pending" && durationMs != null && durationMs > 0 && (
+                  <p className="df2-vd-rule-dur">Engine time {formatDuration(durationMs)}</p>
+                )}
                 {issues.length > 0 && (
                   <ul className="df2-vd-rule-issues">
                     {issues.slice(0, 4).map((issue) => (

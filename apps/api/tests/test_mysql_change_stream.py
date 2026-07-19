@@ -5,11 +5,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pymysqlreplication.row_event import (
-    DeleteRowsEvent,
-    UpdateRowsEvent,
-    WriteRowsEvent,
+_row_event = pytest.importorskip(
+    "pymysqlreplication.row_event",
+    reason="requires the optional MySQL replication test dependency",
 )
+DeleteRowsEvent = _row_event.DeleteRowsEvent
+UpdateRowsEvent = _row_event.UpdateRowsEvent
+WriteRowsEvent = _row_event.WriteRowsEvent
 
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from services.cdc_engine import ChangeBatch

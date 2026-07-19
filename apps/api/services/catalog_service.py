@@ -159,21 +159,34 @@ def catalog_summary() -> dict:
         st = c.get("status", "planned")
         by_status[st] = by_status.get(st, 0) + 1
 
-    transfer_live = sum(1 for c in enriched if c.get("transfer_ready"))
+    catalog_tiles = sum(1 for c in enriched if c.get("transfer_ready"))
     connect_only = sum(1 for c in enriched if c.get("connect_only"))
     certified = sum(1 for c in enriched if c.get("certification_tier") == "certified" or c.get("transfer_ready"))
     source_only = sum(1 for c in enriched if c.get("certification_tier") == "source_only")
     planned_tier = sum(1 for c in enriched if c.get("certification_tier") == "planned")
 
+    try:
+        from src.transfer.connector_capabilities import transfer_live_driver_types
+
+        unique_types = transfer_live_driver_types()
+    except Exception:
+        unique_types = []
+
     return {
         "total": data.get("total", len(data.get("connectors", []))),
-        "live": transfer_live,
+        # Primary honesty metric: unique package-available drivers (not alias tiles).
+        "live": len(unique_types),
         "beta": by_status.get("beta", 0),
         "planned": by_status.get("planned", 0),
         "categories": len({c.get("category", "other") for c in data.get("connectors", [])}),
-        "transfer_live": transfer_live,
+        "unique_drivers": len(unique_types),
+        "unique_driver_types": unique_types,
+        "catalog_tiles": catalog_tiles,
+        # Backward-compatible alias — prefer unique_drivers in UI.
+        "transfer_live": len(unique_types),
+        "transfer_live_tiles": catalog_tiles,
         "connect_only": connect_only,
-        "roadmap": len(enriched) - transfer_live - connect_only,
+        "roadmap": len(enriched) - catalog_tiles - connect_only,
         "certified": certified,
         "source_only": source_only,
         "planned_count": planned_tier,

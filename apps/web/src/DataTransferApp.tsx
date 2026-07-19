@@ -39,7 +39,7 @@ import {
   publicRouteFromHash,
   type PublicRoute,
   writePublicHash,
-} from "./lib/publicNavigation";
+} from "./lib/publicNavigation"; // help article routes
 import { apiOfflineMessage } from "./lib/runtimeEnv";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";

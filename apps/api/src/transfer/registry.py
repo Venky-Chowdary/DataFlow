@@ -192,6 +192,17 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "postgresql", "database", "s3"),
     ("file", "csv", "database", "s3"),
     ("file", "parquet", "database", "snowflake"),
+    # Unlocked enterprise / object / vector destinations
+    ("database", "postgresql", "database", "sftp"),
+    ("database", "mysql", "database", "adls"),
+    ("file", "csv", "database", "adls"),
+    ("file", "csv", "database", "sftp"),
+    ("database", "sqlserver", "database", "postgresql"),
+    ("database", "oracle", "database", "postgresql"),
+    ("database", "postgresql", "database", "pgvector"),
+    ("database", "postgresql", "database", "qdrant"),
+    ("database", "rest_api", "database", "postgresql"),
+    ("database", "rest_api", "database", "mongodb"),
 ]
 
 

@@ -78,6 +78,66 @@ def _exec(sql: str) -> None:
         conn.commit()
 
 
+def test_postgres_logical_snapshot_handoff_lsn_continuity():
+    """Real PG: final snapshot token LSN must equal streaming handoff LSN."""
+    from connectors.postgresql_change_stream import decode_pg_resume_token
+
+    table = "cdc_handoff_" + uuid.uuid4().hex[:8]
+    _exec(f"DROP TABLE IF EXISTS {table}")
+    _exec(f"CREATE TABLE {table} (id INT PRIMARY KEY, amount NUMERIC(10,2))")
+    _exec(f"INSERT INTO {table} (id, amount) VALUES (1, 10.00), (2, 20.00)")
+
+    cursor_key = f"cdc-handoff-{table}"
+    cdc = PostgreSqlChangeStreamCdc(
+        CFG,
+        table=table,
+        primary_key="id",
+        cursor_key=cursor_key,
+        schema="public",
+    )
+    slot = cdc.slot_name
+    try:
+        assert cdc.is_available() is True
+        batches = list(cdc.snapshot())
+        assert batches, "snapshot must emit batches"
+        handoff = str(batches[-1].resume_token)
+        _slot, lsn, phase = decode_pg_resume_token(
+            handoff,
+            database=CFG["database"],
+            table=table,
+            cursor_key=cursor_key,
+        )
+        assert phase == "streaming", handoff
+        assert lsn, f"handoff missing LSN: {handoff}"
+        assert "phase=streaming" in handoff
+        assert f"lsn={lsn}" in handoff
+        # Mid-dump tokens share the same LSN once captured.
+        if len(batches) > 1:
+            mid = str(batches[0].resume_token)
+            assert f"lsn={lsn}" in mid or "phase=snapshot" in mid
+
+        # Streaming must continue from the same slot without recreating it.
+        _exec(f"INSERT INTO {table} (id, amount) VALUES (3, 30.00)")
+        changes = list(cdc.poll())
+        inserts = [r for b in changes for r in b.inserts]
+        assert any(str(r.get("id")) == "3" for r in inserts), inserts
+        for batch in changes:
+            cdc.ack(batch.resume_token)
+    finally:
+        try:
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_drop_replication_slot(%s) "
+                        "WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = %s)",
+                        (slot, slot),
+                    )
+                conn.commit()
+        except Exception:
+            pass
+        _exec(f"DROP TABLE IF EXISTS {table}")
+
+
 def test_postgres_logical_snapshot_then_poll_captures_real_cdc():
     table = "cdc_orders_" + uuid.uuid4().hex[:8]
     _exec(f"DROP TABLE IF EXISTS {table}")

@@ -16,8 +16,12 @@ function scrollRootFor(el: HTMLElement): Element | null {
   return null;
 }
 
-/** Fade/slide sections in when they enter the viewport (Devin-style scroll reveals). */
-export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(threshold = 0.08) {
+/**
+ * Fade/slide sections in when they enter the viewport.
+ * Marketing (`.lp`) never auto-reveals via a short timeout — that made the
+ * landing feel static. Below-fold blocks wait for IntersectionObserver.
+ */
+export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(threshold = 0.12) {
   const ref = useRef<T>(null);
   const [visible, setVisible] = useState(false);
 
@@ -39,21 +43,19 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
     const bind = () => {
       if (!el.isConnected) return;
 
-      // Marketing pages: window scroll
-      if (el.closest(".lp")) {
-        const rect = el.getBoundingClientRect();
-        if (rect.top < window.innerHeight * 0.98) {
-          reveal();
-          return undefined;
-        }
-      }
-
+      const isMarketing = Boolean(el.closest(".lp"));
       const root = scrollRootFor(el);
       const rootHeight = root instanceof Element ? root.clientHeight : window.innerHeight;
-      const rect = el.getBoundingClientRect();
       const rootRect = root instanceof Element ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      const rect = el.getBoundingClientRect();
 
-      if (rect.top < rootRect.bottom - rootHeight * 0.08 && rect.bottom > rootRect.top) {
+      // Only auto-reveal if already meaningfully in view on first paint
+      // (hero / first band). Below-fold content waits for scroll.
+      const alreadyInView = isMarketing
+        ? rect.top < window.innerHeight * 0.82 && rect.bottom > 48
+        : rect.top < rootRect.bottom - rootHeight * 0.08 && rect.bottom > rootRect.top;
+
+      if (alreadyInView) {
         reveal();
         return undefined;
       }
@@ -65,27 +67,37 @@ export function useRevealOnScroll<T extends HTMLElement = HTMLDivElement>(thresh
             observer.disconnect();
           }
         },
-        { threshold, root: root ?? undefined, rootMargin: "0px 0px -4% 0px" },
+        {
+          threshold,
+          root: root ?? undefined,
+          // Reveal a bit before fully centered — modern product-site feel
+          rootMargin: isMarketing ? "0px 0px -12% 0px" : "0px 0px -4% 0px",
+        },
       );
       observer.observe(el);
 
-      const failsafe = window.setTimeout(reveal, 800);
+      // Long failsafe only for non-marketing app shell (lazy panes / overflow bugs).
+      // Marketing must stay scroll-driven.
+      const failsafe = isMarketing
+        ? undefined
+        : window.setTimeout(reveal, 12_000);
+
       const scrollHost = root ?? window;
       const onScroll = () => {
         const r = el.getBoundingClientRect();
         const hostRect = root instanceof Element ? root.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
-        if (r.top < hostRect.bottom - 24 && r.bottom > hostRect.top + 24) reveal();
+        const trigger = isMarketing ? hostRect.bottom - hostRect.top * 0.18 : hostRect.bottom - 24;
+        if (r.top < trigger && r.bottom > hostRect.top + 24) reveal();
       };
       scrollHost.addEventListener("scroll", onScroll, { passive: true });
 
       return () => {
         observer.disconnect();
         scrollHost.removeEventListener("scroll", onScroll);
-        window.clearTimeout(failsafe);
+        if (failsafe != null) window.clearTimeout(failsafe);
       };
     };
 
-    // Defer until layout + scroll host are stable (fixes scroll-before-refresh)
     let cleanup: (() => void) | undefined;
     const raf = window.requestAnimationFrame(() => {
       cleanup = bind();

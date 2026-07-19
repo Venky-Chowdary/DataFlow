@@ -66,14 +66,26 @@ export function DashboardPage({
   onOpenConnectors,
   onOpenJobs,
 }: DashboardPageProps) {
-  const [catalogStats, setCatalogStats] = useState<{ live: number; total: number; transfer_live?: number } | null>(null);
+  const [catalogStats, setCatalogStats] = useState<{
+    live: number;
+    total: number;
+    transfer_live?: number;
+    unique_drivers?: number;
+    catalog_tiles?: number;
+  } | null>(null);
   const [usageRows, setUsageRows] = useState<number | null>(null);
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
 
   useEffect(() => {
     fetchCatalogStats()
-      .then((s) => setCatalogStats({ live: s.live, total: s.total, transfer_live: s.transfer_live }))
+      .then((s) => setCatalogStats({
+        live: s.live,
+        total: s.total,
+        transfer_live: s.transfer_live,
+        unique_drivers: s.unique_drivers ?? s.transfer_live ?? s.live,
+        catalog_tiles: s.catalog_tiles ?? s.transfer_live_tiles,
+      }))
       .catch(() => setCatalogStats(null));
     fetchUsageSummary(30)
       .then((u) => setUsageRows(u.totals?.rows_written ?? u.rows_written ?? 0))
@@ -135,6 +147,13 @@ export function DashboardPage({
 
   const hasThroughput = throughputSeries.some((d) => d.rows > 0);
   const hasJobs = jobs.length > 0;
+  const pausedPipelines = schedules.filter((s) => !s.enabled).length;
+  const attentionItems = [
+    failed.length > 0 ? `${failed.length} failed job${failed.length === 1 ? "" : "s"}` : null,
+    dlqCount != null && dlqCount > 0 ? `${dlqCount} DLQ event${dlqCount === 1 ? "" : "s"}` : null,
+    cdcLagSeconds != null && cdcLagSeconds > 60 ? `CDC lag ${cdcLagSeconds.toFixed(0)}s` : null,
+    pausedPipelines > 0 ? `${pausedPipelines} paused pipeline${pausedPipelines === 1 ? "" : "s"}` : null,
+  ].filter(Boolean) as string[];
 
   return (
     <PageShell
@@ -145,6 +164,20 @@ export function DashboardPage({
       description="Live health, throughput, and recent migrations for this workspace."
     >
       <PageFrame className="df2-overview-v3">
+        {attentionItems.length > 0 && (
+          <div className="df2-overview-attention" role="status">
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Needs attention</strong>
+              <p>{attentionItems.join(" · ")}</p>
+            </div>
+            {failed.length > 0 && onOpenJobs && (
+              <button type="button" className="df2-overview-attention-action" onClick={onOpenJobs}>
+                Open jobs
+              </button>
+            )}
+          </div>
+        )}
         <PageContextBar
           ariaLabel="Live workspace status"
           stats={[
@@ -234,14 +267,16 @@ export function DashboardPage({
             ring={connectors.length ? Math.round((healthyConnectors / connectors.length) * 100) : null}
           />
           <MetricGlassTile
-            label="Catalog live"
-            value={catalogStats?.transfer_live ?? catalogStats?.live ?? "—"}
+            label="Unique drivers"
+            value={catalogStats?.unique_drivers ?? catalogStats?.transfer_live ?? catalogStats?.live ?? "—"}
             sub={
-              catalogStats?.total
-                ? `${catalogStats.total} drivers · ${enabledPipelines} pipelines`
-                : enabledPipelines
-                  ? `${enabledPipelines} pipelines enabled`
-                  : "Loading…"
+              catalogStats?.catalog_tiles
+                ? `${catalogStats.catalog_tiles} catalog tiles · ${catalogStats.total} total`
+                : catalogStats?.total
+                  ? `${catalogStats.total} catalog entries · ${enabledPipelines} pipelines`
+                  : enabledPipelines
+                    ? `${enabledPipelines} pipelines enabled`
+                    : "Loading…"
             }
             icon="activity"
             tone="teal"

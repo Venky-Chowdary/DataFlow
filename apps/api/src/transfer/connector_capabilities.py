@@ -362,6 +362,8 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "email": None,
     "iceberg": None,  # filesystem writer; pyarrow optional for parquet data files
     "kafka": None,  # kafka-python checked at produce time with clear error
+    "pgvector": "psycopg2",
+    "qdrant": "requests",
     "salesforce": "requests",
     "hubspot": "requests",
     "stripe": "requests",
@@ -369,6 +371,7 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "influxdb": "requests",
     "neo4j": "requests",
     "couchbase": "requests",
+    "singer_tap": None,  # optional singer SDK; module probes at read time
     "csv": None,
     "tsv": None,
     "json": None,
@@ -758,24 +761,35 @@ def assert_transfer_endpoint_honesty(
 
 
 def transfer_live_driver_types() -> list[str]:
+    """Unique driver types that can run transfers *and* are package-available.
+
+    Includes duplex read+write, dest-only writers, file sources, and first-class
+    source-only drivers (e.g. rest_api) — not SaaS brand aliases.
+    """
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
-        if transfer_ready(caps):
+    keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
+    for k in keys:
+        caps = get_capabilities(k)
+        if transfer_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))
 
 
 def source_live_driver_types() -> list[str]:
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
-        if source_ready(caps):
+    keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
+    for k in keys:
+        caps = get_capabilities(k)
+        if source_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))
 
 
 def dest_live_driver_types() -> list[str]:
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
+    keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
+    for k in keys:
+        caps = get_capabilities(k)
         if dest_ready(caps):
             live.append(k)
     return sorted(set(live))

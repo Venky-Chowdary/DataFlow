@@ -118,34 +118,53 @@
   flex: 1 1 0 !important;
   min-height: 0 !important;
   display: grid !important;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 248px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden !important;
+  transition: grid-template-columns 180ms ease;
 }
 
 .df2-pilot-v2.is-aside-collapsed .df2-pilot-body {
-  grid-template-columns: 52px minmax(0, 1fr) !important;
+  grid-template-columns: 48px minmax(0, 1fr) !important;
+}
+
+.df2-pilot-v2 .df2-pilot-aside,
+.df2-pilot-v2 .df2-pilot-main {
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: #fff;
 }
 
 .df2-pilot-v2 .df2-pilot-aside {
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border-right: 1px solid var(--df-border, #e5e7eb);
+  gap: 8px;
+  padding: 10px 8px;
+  border-right: 1px solid #eef2f6 !important;
+  background: #fafbfc;
+}
+
+.df2-pilot-v2 .df2-pilot-aside.is-collapsed {
+  padding: 8px 0;
+  align-items: center;
   background: #fff;
 }
 
 .df2-pilot-aside-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .df2-pilot-aside-toolbar .df2-btn-primary {
   flex: 1 1 auto;
+  min-width: 0;
 }
 
 .df2-pilot-aside-close {
@@ -155,56 +174,94 @@
 .df2-pilot-aside-rail {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  padding: 10px 6px;
-  border-right: 1px solid var(--df-border, #e5e7eb);
-  background: #f8fafc;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+.df2-pilot-aside-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.df2-pilot-aside-icon-btn:hover {
+  background: #f1f5f9;
+  color: #0f766e;
 }
 
 .df2-pilot-aside-expand {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 72px;
-  padding: 10px 4px;
-  border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: 10px;
-  background: #fff;
-  color: #0f766e;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-.df2-pilot-aside-expand.is-secondary {
-  min-height: 40px;
-  color: #475569;
-}
-
-.df2-pilot-aside-expand:hover {
-  border-color: #99f6e4;
-  background: #f0fdfa;
+  display: none;
 }
 
 .df2-pilot-aside-reopen {
   margin-right: 4px;
 }
 
+.df2-pilot-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
 .df2-pilot-session-row {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
+  min-width: 0;
+  border-radius: 8px;
+}
+
+.df2-pilot-session-row.active {
+  background: #f0fdfa;
 }
 
 .df2-pilot-session-row .df2-pilot-session {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.df2-pilot-v2 .df2-pilot-session {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: none !important;
+  border-radius: 8px;
+  background: transparent !important;
+  color: #334155;
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  box-shadow: none !important;
+}
+
+.df2-pilot-v2 .df2-pilot-session:hover {
+  background: #f1f5f9 !important;
+}
+
+.df2-pilot-v2 .df2-pilot-session-row.active .df2-pilot-session {
+  color: #0f766e;
+  font-weight: 600;
+  background: transparent !important;
 }
 
 .df2-pilot-session-delete {
@@ -214,6 +271,7 @@
   justify-content: center;
   width: 24px;
   height: 24px;
+  margin-right: 4px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -245,7 +303,38 @@
 .df2-pilot-v2 .df2-pilot-aside-scroll {
   flex: 1 1 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.df2-pilot-v2 .df2-pilot-section-label {
+  margin: 12px 8px 6px;
+  padding: 0;
+  border: none;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  background: transparent;
+}
+
+.df2-pilot-v2 .df2-pilot-tool-log {
+  margin: 0 4px 4px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 11px;
+}
+
+.df2-pilot-v2 .df2-pilot-tool-log.ok {
+  border-left: 2px solid #22c55e;
+}
+
+.df2-pilot-v2 .df2-pilot-tool-log.err {
+  border-left: 2px solid #ef4444;
 }
 
 .df2-pilot-v2 .df2-pilot-main {
@@ -280,7 +369,7 @@
 .df2-pilot-v2 .df2-pilot-ideas {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
   margin: 0 0 16px;
 }
 
@@ -288,20 +377,29 @@
   text-align: left;
   padding: 12px 14px;
   border-radius: 10px;
-  border: 1px solid var(--df-border, #e5e7eb);
-  background: #fff;
+  border: 1px solid #eef2f6;
+  background: #fafbfc;
+  box-shadow: none;
 }
 
 .df2-pilot-v2 .df2-pilot-idea:hover {
-  border-color: rgba(15, 118, 110, 0.4);
+  border-color: #ccfbf1;
+  background: #f0fdfa;
   box-shadow: none;
 }
 
 .df2-pilot-v2 .df2-pilot-composer-bar {
   border-radius: 14px;
-  border: 1px solid var(--df-border, #e5e7eb);
+  border: 1px solid #e2e8f0;
   background: #fff;
-  box-shadow: var(--df-shadow-sm);
+  box-shadow: none;
+}
+
+.df2-pilot-v2 .df2-pilot-msg.assistant,
+.df2-pilot-v2 .df2-pilot-thinking {
+  border: none;
+  background: #f8fafc;
+  box-shadow: none;
 }
 
 .df2-pilot-thinking {
@@ -347,16 +445,18 @@
     position: absolute;
     z-index: 20;
     inset: 0 auto 0 0;
-    width: min(300px, 88vw);
+    width: min(280px, 88vw);
     display: flex;
-    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+    background: #fff;
+    border-right: 1px solid #eef2f6 !important;
+    box-shadow: 4px 0 24px rgba(15, 23, 42, 0.08);
   }
 
   .df2-pilot-v2.is-aside-collapsed .df2-pilot-body {
     grid-template-columns: 1fr !important;
   }
 
-  .df2-pilot-v2.is-aside-collapsed .df2-pilot-aside-rail {
+  .df2-pilot-v2.is-aside-collapsed .df2-pilot-aside {
     display: none;
   }
 
@@ -441,6 +541,189 @@
   transform: none !important;
   float: none !important;
   transition: border-color 140ms ease, background-color 140ms ease;
+  color: inherit;
+  font: inherit;
+}
+
+.df2-job-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--df-text-primary, #111827);
+  line-height: 1.3;
+}
+
+.df2-job-row-route-meta {
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--df-text-muted, #64748b);
+}
+
+/* Detail-pane job rename — single control surface */
+.df2-job-name-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.df2-job-name-editor.is-view {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.df2-job-name-editor-title {
+  margin: 0;
+  min-width: 0;
+  flex: 0 1 auto;
+  max-width: min(100%, 42ch);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary, #0f172a);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-job-name-rename-btn {
+  flex: 0 0 auto;
+  height: 26px !important;
+  min-height: 26px !important;
+  padding: 0 8px !important;
+  font-size: 11px !important;
+  gap: 4px;
+  margin-left: 0;
+}
+
+.df2-job-name-rename-btn.is-compact {
+  width: 28px;
+  padding: 0 !important;
+}
+
+.df2-job-name-editor-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--df-border, #e5e7eb);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.df2-job-name-editor.has-error .df2-job-name-editor-form {
+  border-color: #fca5a5;
+  background: #fff7f7;
+}
+
+.df2-job-name-editor-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-job-name-editor-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-job-name-editor-input {
+  flex: 1 1 220px;
+  min-width: 0;
+  height: 32px !important;
+  font-size: 14px !important;
+  font-weight: 600;
+  padding: 0 10px !important;
+}
+
+.df2-job-name-editor.has-error .df2-job-name-editor-input {
+  border-color: #f87171 !important;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
+}
+
+.df2-job-name-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.df2-job-name-editor-actions .df2-btn {
+  height: 32px !important;
+  min-height: 32px !important;
+  padding: 0 12px !important;
+  font-size: 12px !important;
+}
+
+.df2-job-name-editor-error {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #b91c1c;
+}
+
+.df2-job-name-editor-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-jobs-v3-summary-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-jobs-v3-detail-identity {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--df-border, #e5e7eb);
+  margin-bottom: 10px;
+}
+
+.df2-jobs-v3-detail-identity .df2-job-name-editor {
+  flex: 1 1 240px;
+}
+
+.df2-jobs-v3-live-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.df2-jobs-v3-live-actions .df2-btn {
+  height: 28px !important;
+  min-height: 28px !important;
+  padding: 0 10px !important;
+  font-size: 12px !important;
 }
 
 .df2-job-row:hover,
@@ -741,11 +1024,11 @@
 
 .df2-jobs-v3-summary-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
-  padding-bottom: 12px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--df-border, #e5e7eb);
 }
 
@@ -776,43 +1059,77 @@
 }
 
 .df2-jobs-v3-summary-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 4px;
   flex: 0 0 auto;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0;
+  scrollbar-width: thin;
 }
 
 .df2-jobs-v3-summary-metrics article {
   display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--df-border, #e5e7eb);
-  border-radius: 8px;
-  background: var(--df-bg-canvas, #f6f7f8);
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  flex: 1 1 0;
   min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--df-border, #e5e7eb);
+  border-radius: 7px;
+  background: #f8fafc;
+  border-left-width: 3px;
+  border-left-color: #94a3b8;
 }
+
+.df2-jobs-v3-summary-metrics article.is-metric-rows { border-left-color: #0f766e; background: #f0fdfa; }
+.df2-jobs-v3-summary-metrics article.is-metric-progress { border-left-color: #2563eb; background: #eff6ff; }
+.df2-jobs-v3-summary-metrics article.is-metric-columns { border-left-color: #475569; background: #f8fafc; }
+.df2-jobs-v3-summary-metrics article.is-metric-mode { border-left-color: #7c3aed; background: #f5f3ff; }
+.df2-jobs-v3-summary-metrics article.is-metric-quarantine { border-left-color: #94a3b8; background: #f8fafc; }
+.df2-jobs-v3-summary-metrics article.is-metric-quarantine.is-warn { border-left-color: #d97706; background: #fffbeb; }
+.df2-jobs-v3-summary-metrics article.is-metric-coerced { border-left-color: #94a3b8; background: #f8fafc; }
+.df2-jobs-v3-summary-metrics article.is-metric-coerced.is-warn { border-left-color: #ea580c; background: #fff7ed; }
+.df2-jobs-v3-summary-metrics article.is-metric-reconcile.is-ok { border-left-color: #059669; background: #ecfdf5; }
+.df2-jobs-v3-summary-metrics article.is-metric-reconcile.is-bad { border-left-color: #dc2626; background: #fef2f2; }
+.df2-jobs-v3-summary-metrics article.is-metric-cdc,
+.df2-jobs-v3-summary-metrics article.is-metric-wal { border-left-color: #0891b2; background: #ecfeff; }
 
 .df2-jobs-v3-summary-metrics article strong {
   display: block;
-  font-size: 14px;
+  width: 100%;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  line-height: 1.2;
+  line-height: 1.15;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--df-text-primary, #0f172a);
 }
 
 .df2-jobs-v3-summary-metrics article span {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: var(--df-text-muted, #64748b);
   white-space: nowrap;
+}
+
+.df2-drawer-trust {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--df-border, #e2e8f0);
+}
+
+.df2-text-warn {
+  color: var(--df-warn, #b45309);
 }
 
 .df2-jobs-v3-timeline-block h3 {
@@ -1611,7 +1928,6 @@
 @media (max-width: 640px) {
   .lp-value-strip { margin-bottom: 32px; padding: 0 16px; }
   .df2-pipe-card-actions .df2-btn { flex: 1 1 100%; }
-  .df2-jobs-v3-summary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1781,12 +2097,22 @@
 .df2-pilot-v2 .df2-pilot-categories button {
   width: 100%;
   height: auto !important;
-  min-height: 32px;
+  min-height: 30px;
   justify-content: flex-start;
-  padding: 8px 10px !important;
-  border-radius: 8px;
+  padding: 6px 8px !important;
+  border: none !important;
+  border-radius: 6px;
   font-size: 12.5px;
   box-sizing: border-box;
+  background: transparent;
+  box-shadow: none !important;
+}
+
+.df2-pilot-v2 .df2-pilot-categories .df2-tab.is-active,
+.df2-pilot-v2 .df2-pilot-categories button[aria-selected="true"],
+.df2-pilot-v2 .df2-pilot-categories button.is-active {
+  background: #f0fdfa !important;
+  color: #0f766e;
 }
 
 .df2-pilot-v2 .df2-pilot-main-inner {
@@ -5392,45 +5718,6 @@
   font-weight: 650;
 }
 
-.df2-jobs-v3-summary-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.df2-jobs-v3-summary-metrics article {
-  display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--df-border, #e6e9ee);
-  border-radius: 8px;
-  background: #fff;
-  min-width: 0;
-}
-
-.df2-jobs-v3-summary-metrics strong {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.df2-jobs-v3-summary-metrics span {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--df-text-secondary, #475569);
-  white-space: nowrap;
-}
-
 .df2-jobs-v3-summary-phases {
   display: flex;
   flex-wrap: wrap;
@@ -5580,8 +5867,9 @@
 }
 
 @media (max-width: 900px) {
-  .df2-jobs-v3-summary-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .df2-jobs-v3-summary-metrics article {
+    flex: 1 0 auto;
+    min-width: 64px;
   }
 }
 
@@ -6026,6 +6314,39 @@
 
 .df2-page-overview-v3 {
   background: transparent;
+}
+
+.df2-overview-attention {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+}
+
+.df2-overview-attention strong {
+  display: block;
+  font-size: 0.9rem;
+}
+
+.df2-overview-attention p {
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-overview-attention-action {
+  margin-left: auto;
+  align-self: center;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .df2-overview-v3 {
@@ -7646,11 +7967,6 @@
   gap: 8px;
   min-height: 0;
   flex: 1;
-}
-
-.df2-jobs-v3-live-actions {
-  display: flex;
-  justify-content: flex-end;
 }
 
 .df2-quarantine-replay-result {
