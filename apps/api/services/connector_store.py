@@ -24,6 +24,34 @@ STORE_PATH = data_dir() / "connectors.json"
 
 logger = logging.getLogger(__name__)
 
+# Databases / warehouses / object stores that are valid as source *and* destination.
+# Catalog UI may pass role=source|destination from the filter tab — that must not
+# lock the saved profile into a one-sided capability.
+_BIDIRECTIONAL_TYPES = frozenset({
+    "mysql", "mariadb", "singlestore",
+    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
+    "sqlserver", "mssql", "synapse", "oracle", "db2", "generic_sql",
+    "sqlite", "duckdb", "h2",
+    "mongodb", "dynamodb", "cassandra", "couchbase", "elasticsearch", "redis",
+    "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
+    "s3", "amazon_s3", "gcs", "google_cloud_storage", "adls", "azure_blob", "azure_blob_storage",
+    "kafka", "apache_kafka", "iceberg", "apache_iceberg",
+    "salesforce", "hubspot",
+})
+
+
+def normalize_connector_role(connector_type: str, role: str | None) -> str:
+    """Return a persisted topology role. Dual-use types always store ``both``."""
+    t = (connector_type or "").strip().lower()
+    if t in _BIDIRECTIONAL_TYPES:
+        return "both"
+    r = (role or "both").strip().lower()
+    if r in ("destination", "dest"):
+        return "destination"
+    if r == "source":
+        return "source"
+    return "both"
+
 
 def _store_path() -> Path:
     """Return the effective file store path.
@@ -76,11 +104,12 @@ class SavedConnector:
     def from_dict(cls, data: dict[str, Any]) -> SavedConnector:
         password = decrypt_secret(data.get("password", "") or "")
         conn_str = decrypt_secret(data.get("connection_string", "") or "")
+        conn_type = data["type"]
         return cls(
             id=data["id"],
             name=data["name"],
-            type=data["type"],
-            role=data.get("role", "both"),
+            type=conn_type,
+            role=normalize_connector_role(conn_type, data.get("role")),
             host=data.get("host", ""),
             port=int(data.get("port", 5432)),
             database=data.get("database", ""),
@@ -147,6 +176,44 @@ def _resolve_backend() -> str:
 
 def _use_mongo() -> bool:
     return _resolve_backend() == "mongo"
+
+
+def connector_persistence_status() -> dict[str, Any]:
+    """Health signal for connector persistence (file and/or Mongo).
+
+    Uses a short socket timeout so readiness probes cannot hang the request.
+    """
+    backend = _resolve_backend()
+    path = _store_path()
+    file_ok = path.exists()
+    mongo_ok = False
+    count: int | None = None
+    if backend == "mongo":
+        try:
+            coll = _mongo_collection()
+            # Prefer a bounded ping over an unbounded collection scan.
+            coll.database.client.admin.command("ping", maxTimeMS=2000)
+            try:
+                count = int(coll.estimated_document_count(maxTimeMS=2000))
+            except TypeError:
+                count = int(coll.estimated_document_count())
+            mongo_ok = True
+        except Exception as exc:
+            return {
+                "backend": backend,
+                "ok": False,
+                "file_present": file_ok,
+                "mongo_reachable": False,
+                "detail": str(exc)[:200],
+            }
+    ok = mongo_ok if backend == "mongo" else file_ok
+    return {
+        "backend": backend,
+        "ok": ok,
+        "file_present": file_ok,
+        "mongo_reachable": mongo_ok,
+        "count": count,
+    }
 
 
 def _mongo_collection() -> Any:
@@ -308,11 +375,12 @@ def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedCo
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
+    conn_type = data["type"]
     conn = SavedConnector(
         id=str(uuid.uuid4()),
         name=data["name"],
-        type=data["type"],
-        role=data.get("role", "both"),
+        type=conn_type,
+        role=normalize_connector_role(conn_type, data.get("role")),
         host=data.get("host", ""),
         port=int(data.get("port", 5432)),
         database=data.get("database", ""),
@@ -348,12 +416,20 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
 
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
+    def _merge(existing: SavedConnector) -> SavedConnector:
+        merged = {**existing.to_dict(), **data, "id": connector_id}
+        merged["role"] = normalize_connector_role(
+            str(merged.get("type") or existing.type),
+            merged.get("role"),
+        )
+        return SavedConnector.from_dict(merged)
+
     if _use_mongo():
         try:
             existing = _get_mongo(connector_id, workspace_id)
             if not existing:
                 return None
-            updated = SavedConnector.from_dict({**existing.to_dict(), **data, "id": connector_id})
+            updated = _merge(existing)
             coll = _mongo_collection()
             coll.replace_one({"_id": connector_id}, _connector_to_doc(updated))
             return updated
@@ -366,7 +442,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             continue
         if workspace_id is not None and c.workspace_id not in (workspace_id, ""):
             continue
-        updated = SavedConnector.from_dict({**c.to_dict(), **data, "id": connector_id})
+        updated = _merge(c)
         connectors[i] = updated
         _save_all(connectors)
         return updated

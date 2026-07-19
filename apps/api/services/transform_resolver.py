@@ -18,6 +18,9 @@ UI_TO_ENGINE: dict[str, str] = {
     "mask_pii": "mask_pii",
     "cast_number": "decimal",
     "cast_boolean": "boolean",
+    "strip_controls": "strip_controls",
+    "normalize_unicode": "normalize_unicode",
+    "parse_json": "json",
 }
 
 ENGINE_TO_UI: dict[str, str] = {

@@ -132,6 +132,156 @@ from services.checkpoint_service import (
 logger = logging.getLogger("dataflow.transfer")
 
 
+def _compare_and_publish_load_history(
+    mongo: Any,
+    job_id: str,
+    rows: list[dict],
+    request: TransferRequest,
+    schema: dict[str, str] | None,
+    *,
+    validation_mode: str,
+    row_count_hint: int | None = None,
+) -> dict[str, Any]:
+    """Compare current sample/batch to last-N route history; publish on the job.
+
+    Streaming paths pass a bounded ``rows`` sample plus ``row_count_hint`` for
+    volume drift. Never raises — history must not abort writes.
+    """
+    load_history_report: dict[str, Any] = {}
+    try:
+        from services.data_quality_history import compare_route_to_history
+
+        route = transfer_request_to_dict(request)
+        load_history_report = compare_route_to_history(
+            rows,
+            route["source"],
+            route["destination"],
+            schema=schema,
+            current_row_count=row_count_hint,
+        )
+        quality_anomalies = list(load_history_report.get("anomalies") or [])
+        if quality_anomalies:
+            mongo.update_job_status(
+                job_id, "running", phase="quality_check", progress_pct=20,
+                message="; ".join(quality_anomalies[:5]),
+                load_history_report=load_history_report,
+            )
+            if validation_mode == "strict":
+                load_history_report = {
+                    **load_history_report,
+                    "passed": False,
+                    "strict_blocked": True,
+                }
+        else:
+            mongo.update_job_status(
+                job_id, "running",
+                load_history_report=load_history_report,
+            )
+    except Exception as hist_exc:
+        load_history_report = {
+            "passed": True,
+            "anomalies": [],
+            "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
+            "prior_load_count": 0,
+        }
+        try:
+            mongo.update_job_status(
+                job_id, "running",
+                load_history_report=load_history_report,
+                message=load_history_report["warning"],
+            )
+        except Exception:
+            pass
+    return load_history_report
+
+
+def _persist_load_history_profile(
+    request: TransferRequest,
+    rows: list[dict],
+    schema: dict[str, str] | None,
+    *,
+    job_id: str,
+    dest_summary: dict[str, Any],
+    row_count: int,
+) -> None:
+    """Append this load to the route ring buffer (streaming-safe)."""
+    try:
+        from services.data_quality_history import profile_batch, save_profile
+
+        route = transfer_request_to_dict(request)
+        save_profile(
+            route["source"],
+            route["destination"],
+            profile_batch(rows, schema),
+            job_id=job_id,
+            rejected_details=dest_summary.get("rejected_details") or [],
+            rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+            row_count=row_count,
+        )
+    except Exception:
+        logger.debug("load-history save_profile skipped", exc_info=True)
+
+
+def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
+    """Mark job failed at preflight and persist inspectable quarantine rows."""
+    from services.quarantine_from_preflight import quarantine_rows_from_preflight
+
+    decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
+    blocker_reasons = [b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)]
+    qrows = quarantine_rows_from_preflight(pf)
+    row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
+    rejected_rows = len(row_ids) if row_ids else len(qrows)
+    error_details = {
+        "reason": "Preflight blocked transfer",
+        "blockers": blocker_reasons,
+        "guidance": [
+            {
+                "gate": b.get("id"),
+                "message": b.get("message"),
+                "why": (b.get("guidance") or {}).get("why", ""),
+                "fix": (b.get("guidance") or {}).get("fix", ""),
+            }
+            for b in pf.get("blockers", [])
+            if isinstance(b, dict) and b.get("guidance")
+        ],
+        "proof_bundle": {
+            "decision": decision.get("decision"),
+            "reason": decision.get("reason"),
+            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
+            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
+            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
+            "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get("risk_score"),
+        },
+        "readiness_score": pf.get("readiness_score"),
+        "validation_plan": pf.get("validation_plan"),
+        "payload_shape": pf.get("payload_shape"),
+        "quarantine_issue_count": len(qrows),
+        "quarantine_row_count": rejected_rows,
+    }
+    error_message = decision.get("reason") or "; ".join(str(x) for x in blocker_reasons if x) or "Preflight blocked transfer"
+    lineage.emit_preflight_completed(
+        run_id=job_id, passed=False,
+        readiness_score=pf.get("readiness_score", 0),
+        blockers=pf.get("blockers", []),
+        validation_plan=pf.get("validation_plan"),
+    )
+    lineage.emit_run_failed(
+        run_id=job_id, job_id=job_id, error=error_message,
+        error_details=error_details,
+    )
+    mongo.update_job_status(
+        job_id, "failed",
+        error=error_message,
+        phase="failed",
+        progress_pct=0,
+        error_details=error_details,
+        preflight=pf,
+        rejected_details=qrows,
+        rejected_rows=rejected_rows,
+    )
+    return error_message, error_details
+
+
 def _coalesce_sort_value(value: Any) -> Any:
     """Return a tuple that sorts None/empty values last regardless of direction."""
     if value is None or value == "":
@@ -258,6 +408,53 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
         or getattr(checkpoint, "offset", 0)
         or getattr(checkpoint, "rows_processed", 0)
     )
+
+
+_CDC_JOB_FIELDS = (
+    "cdc_lag_seconds",
+    "replication_lag_bytes",
+    "cdc_heartbeat_at",
+    "cdc_last_ddl_at",
+)
+
+
+def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) -> None:
+    """Copy CDC lag/health fields onto the job document for SSE + UI tiles."""
+    if not isinstance(checkpoint, dict):
+        return
+    for key in _CDC_JOB_FIELDS:
+        if key in checkpoint and key not in update:
+            update[key] = checkpoint.get(key)
+    cdc_meta = checkpoint.get("cdc") or {}
+    if isinstance(cdc_meta, dict):
+        for key in _CDC_JOB_FIELDS:
+            if key in cdc_meta and key not in update:
+                update[key] = cdc_meta.get(key)
+    streams = checkpoint.get("streams")
+    if isinstance(streams, list) and streams:
+        update["streams"] = streams
+    summary_streams = (checkpoint.get("destination_summary") or {}).get("streams")
+    if isinstance(summary_streams, list) and summary_streams and "streams" not in update:
+        update["streams"] = summary_streams
+
+
+def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Top-level job fields from a CDC destination summary."""
+    if not isinstance(dest_summary, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _CDC_JOB_FIELDS:
+        if key in dest_summary:
+            out[key] = dest_summary.get(key)
+    cdc_meta = dest_summary.get("cdc") or {}
+    if isinstance(cdc_meta, dict):
+        for key in _CDC_JOB_FIELDS:
+            if key in cdc_meta and key not in out:
+                out[key] = cdc_meta.get(key)
+    streams = dest_summary.get("streams")
+    if isinstance(streams, list) and streams:
+        out["streams"] = streams
+    return out
 
 
 def _drop_destination_table(destination: EndpointConfig) -> bool:
@@ -531,7 +728,8 @@ class UniversalTransferEngine:
     def _notify_job_status(self, request: TransferRequest, result: TransferResult) -> None:
         """Fire workspace notifications for failed or partially-quarantined jobs."""
         rejected = result.destination_summary.get("rejected_rows", 0) or 0
-        if result.success and not rejected:
+        coerced = result.destination_summary.get("coerced_null_rows", 0) or 0
+        if result.success and not rejected and not coerced:
             return
         try:
             from services.notification_service import (
@@ -542,8 +740,10 @@ class UniversalTransferEngine:
             from services.platform_config import public_url, web_url
 
             status = "failed"
-            if result.success and rejected:
-                status = "failed_with_quarantine"
+            if result.success and (rejected or coerced):
+                # Successful terminal run that altered/dropped data — consistent
+                # with the persisted job status.
+                status = "completed_with_quarantine"
             elif result.success:
                 status = "completed"
             payload = build_job_payload(
@@ -678,13 +878,47 @@ class UniversalTransferEngine:
             write_mode = "insert"
             conflict_columns: list[str] = []
             if contract and contract.primary_key:
-                conflict_columns = [map_source_to_target(contract.primary_key, mappings)]
+                conflict_columns = [
+                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                ]
             if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror", "scd2"):
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
             if requires_upsert(effective_sync) and conflict_columns:
                 write_mode = "upsert"
+
+            activation_notes: list[str] = []
+            if effective_sync_lower == "reverse_etl":
+                from services.reverse_etl import plan_activation
+
+                plan = plan_activation(
+                    destination_kind=request.destination.format or "",
+                    object_name=request.destination.table
+                    or request.destination.collection
+                    or "",
+                    primary_key=conflict_columns or ["id"],
+                    field_map={
+                        str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+                        for m in (mappings or [])
+                        if m.get("source")
+                    },
+                    mode="upsert",
+                )
+                write_mode = plan.mode or "upsert"
+                activation_notes = list(plan.notes or [])
+                if not conflict_columns:
+                    conflict_columns = list(plan.primary_key)
+                # Apply planner object name so SaaS writers hit the intended CRM object.
+                if plan.object_name:
+                    request.destination.table = plan.object_name
+                if plan.batch_size:
+                    request.destination.extra = dict(request.destination.extra or {})
+                    request.destination.extra["activation_batch_size"] = plan.batch_size
+                activation_notes.append(
+                    f"Activation apply: mode={write_mode} pk={','.join(conflict_columns)} "
+                    f"object={plan.object_name} batch={plan.batch_size}"
+                )
 
             mongo.update_job_status(
                 job_id, "running", phase="preflight", progress_pct=15,
@@ -708,6 +942,17 @@ class UniversalTransferEngine:
                     destination_table_exists=bool(dest_schema_types),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
+                    validation_mode=request.validation_mode,
+                    source_table=(
+                        request.source.table
+                        or request.source.collection
+                        or request.source_filename
+                        or ""
+                    ),
+                    destination_table=(
+                        request.destination.table or request.destination.collection or ""
+                    ),
+                    source_filename=request.source_filename or "",
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -739,50 +984,7 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
-                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
-                    error_details = {
-                        "reason": "Preflight blocked transfer",
-                        "blockers": blocker_reasons,
-                        "guidance": [
-                            {
-                                "gate": b.get("id"),
-                                "message": b.get("message"),
-                                "why": (b.get("guidance") or {}).get("why", ""),
-                                "fix": (b.get("guidance") or {}).get("fix", ""),
-                            }
-                            for b in pf.get("blockers", [])
-                            if b.get("guidance")
-                        ],
-                        "proof_bundle": {
-                            "decision": decision.get("decision"),
-                            "reason": decision.get("reason"),
-                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
-                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
-                        },
-                        "readiness_score": pf.get("readiness_score"),
-                        "validation_plan": pf.get("validation_plan"),
-                        "payload_shape": pf.get("payload_shape"),
-                    }
-                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
-                    lineage.emit_preflight_completed(
-                        run_id=job_id, passed=False,
-                        readiness_score=pf.get("readiness_score", 0),
-                        blockers=pf.get("blockers", []),
-                        validation_plan=pf.get("validation_plan"),
-                    )
-                    lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=error_message,
-                        error_details=error_details,
-                    )
-                    mongo.update_job_status(
-                        job_id, "failed", error=error_message,
-                        phase="failed", progress_pct=0,
-                        error_details=error_details,
-                        preflight=pf,
-                    )
+                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -810,32 +1012,28 @@ class UniversalTransferEngine:
                     job_id=job_id,
                 )
 
-            # History-aware data quality gate: compare this batch's statistical
-            # profile to the stored baseline for the same source/destination route.
-            try:
-                route = transfer_request_to_dict(request)
-                quality_passed, quality_anomalies, _ = validate_batch_against_history(
-                    records,
-                    route["source"],
-                    route["destination"],
-                    schema=schema,
-                    save_baseline=False,
+            # History-aware data quality: compare this load to the last N runs
+            # for the same source→destination route (null-rate, volume, mean MAD).
+            load_history_report = _compare_and_publish_load_history(
+                mongo, job_id, records, request, schema,
+                validation_mode=request.validation_mode,
+                row_count_hint=len(records),
+            )
+            if load_history_report.get("strict_blocked"):
+                anomalies = list(load_history_report.get("anomalies") or [])
+                msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    load_history_report=load_history_report,
                 )
-                if quality_anomalies:
-                    mongo.update_job_status(
-                        job_id, "running", phase="quality_check", progress_pct=20,
-                        message="; ".join(quality_anomalies),
-                    )
-                    if request.validation_mode == "strict":
-                        return TransferResult(
-                            success=False,
-                            error="Data quality anomaly: " + "; ".join(quality_anomalies),
-                            operation=request.operation,
-                            job_id=job_id,
-                        )
-            except Exception:
-                # Never block a transfer because the quality history store is down.
-                pass
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                    destination_summary={"load_history_report": load_history_report},
+                    error_details={"load_history_report": load_history_report},
+                )
 
             ddl_log: list[str] = []
             dest_summary: dict = {}
@@ -873,16 +1071,29 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
+                    _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
 
             if request.destination.kind == "database":
-                is_streaming = False
+                # Buffered path still reloads all rows; only skip the destructive
+                # full-refresh DROP when resuming with a durable checkpoint that
+                # already wrote progress (avoids wiping destination on resume).
+                checkpoint_has_progress = _checkpoint_has_progress(checkpoint)
                 should_drop_full_refresh = (
                     request.sync_mode.lower() in ("full_refresh_overwrite", "overwrite")
-                    and (not resume or not is_streaming or not _checkpoint_has_progress(checkpoint))
+                    and not (resume and checkpoint_has_progress)
                 )
+                if resume and checkpoint_has_progress and write_mode == "insert":
+                    # Non-idempotent resume would duplicate; force upsert when PK known.
+                    if conflict_columns:
+                        write_mode = "upsert"
+                    else:
+                        raise ValueError(
+                            "Cannot safely resume a buffered insert without primary key; "
+                            "use upsert sync mode or restart with full_refresh_overwrite"
+                        )
 
                 def _write_destination_with_drop():
                     # Drop inside the retry boundary so a failed full-refresh write
@@ -896,6 +1107,7 @@ class UniversalTransferEngine:
                         backfill_new_fields=request.backfill_new_fields,
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
+                        job_id=job_id,
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
@@ -926,6 +1138,11 @@ class UniversalTransferEngine:
                         _write_destination_with_drop,
                         budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                     )
+                    if activation_notes:
+                        ddl_log = list(ddl_log or []) + [
+                            f"reverse-ETL: {n}" for n in activation_notes
+                        ]
+                        dest_summary["reverse_etl"] = {"notes": activation_notes}
                     if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
@@ -1004,6 +1221,10 @@ class UniversalTransferEngine:
                     phase="failed",
                     progress_pct=95,
                     message=recon.get("message"),
+                    reconciliation=recon,
+                    destination_summary=dest_summary,
+                    rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 )
                 return TransferResult(
                     success=False,
@@ -1012,13 +1233,21 @@ class UniversalTransferEngine:
                     job_id=job_id,
                     records_transferred=rows_written,
                     destination_summary=dest_summary,
+                    reconciliation=recon,
                 )
 
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
+            from services.job_status import terminal_status_for
+
+            terminal_status = terminal_status_for(
+                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
             mongo.update_job_status(
-                job_id, "completed",
+                job_id, terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
@@ -1026,10 +1255,25 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                reconciliation=recon,
+                load_history_report=dest_summary.get("load_history_report") or {},
             )
+            try:
+                from services.usage_metering import record_transfer_usage
+
+                record_transfer_usage(
+                    job_id=job_id,
+                    workspace_id=str(getattr(request, "workspace_id", "") or ""),
+                    rows_written=rows_written,
+                    source_type=request.source.format,
+                    dest_type=request.destination.format,
+                )
+            except Exception:
+                pass
             if os.environ.get("DATAFLOW_POST_TRANSFER_TRAINING", "").lower() in {"1", "true", "on"}:
                 try:
                     samples = {c: [cell_to_string(r.get(c, "")) for r in records[:5] if r.get(c) is not None] for c in columns}
@@ -1057,14 +1301,13 @@ class UniversalTransferEngine:
                 source_summary={"kind": request.source.kind, "format": src_fmt, "columns": len(columns), "rows": len(records)},
                 destination_summary=dest_summary,
             )
-            # Persist this successful batch as the new data-quality baseline.
-            try:
-                from services.data_quality_history import profile_batch, save_profile
-
-                route = transfer_request_to_dict(request)
-                save_profile(route["source"], route["destination"], profile_batch(records, schema))
-            except Exception:
-                pass
+            # Append this load to the route ring buffer (last-N multi-load intelligence).
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
+            _persist_load_history_profile(
+                request, records, schema,
+                job_id=job_id, dest_summary=dest_summary, row_count=len(records),
+            )
             finalize_contract(contract_id, success=True)
             return TransferResult(
                 success=True,
@@ -1124,6 +1367,7 @@ class UniversalTransferEngine:
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
         contract_id = ""
+        load_history_report: dict[str, Any] = {}
         try:
             mongo.update_job_status(
                 job_id, "running", phase="reading", progress_pct=5,
@@ -1171,6 +1415,17 @@ class UniversalTransferEngine:
                     destination_table_exists=bool(dest_schema_types),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
+                    validation_mode=request.validation_mode,
+                    source_table=(
+                        request.source.table
+                        or request.source.collection
+                        or request.source_filename
+                        or ""
+                    ),
+                    destination_table=(
+                        request.destination.table or request.destination.collection or ""
+                    ),
+                    source_filename=request.source_filename or "",
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1202,50 +1457,7 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
-                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
-                    error_details = {
-                        "reason": "Preflight blocked transfer",
-                        "blockers": blocker_reasons,
-                        "guidance": [
-                            {
-                                "gate": b.get("id"),
-                                "message": b.get("message"),
-                                "why": (b.get("guidance") or {}).get("why", ""),
-                                "fix": (b.get("guidance") or {}).get("fix", ""),
-                            }
-                            for b in pf.get("blockers", [])
-                            if b.get("guidance")
-                        ],
-                        "proof_bundle": {
-                            "decision": decision.get("decision"),
-                            "reason": decision.get("reason"),
-                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
-                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
-                        },
-                        "readiness_score": pf.get("readiness_score"),
-                        "validation_plan": pf.get("validation_plan"),
-                        "payload_shape": pf.get("payload_shape"),
-                    }
-                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
-                    lineage.emit_preflight_completed(
-                        run_id=job_id, passed=False,
-                        readiness_score=pf.get("readiness_score", 0),
-                        blockers=pf.get("blockers", []),
-                        validation_plan=pf.get("validation_plan"),
-                    )
-                    lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=error_message,
-                        error_details=error_details,
-                    )
-                    mongo.update_job_status(
-                        job_id, "failed", error=error_message,
-                        phase="failed", progress_pct=0,
-                        error_details=error_details,
-                        preflight=pf,
-                    )
+                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -1271,6 +1483,28 @@ class UniversalTransferEngine:
                     error_details={"violations": cv.violations},
                     operation=request.operation,
                     job_id=job_id,
+                )
+
+            # Sample-based history compare (full table never loaded in streaming path).
+            load_history_report = _compare_and_publish_load_history(
+                mongo, job_id, sample_rows or [], request, schema,
+                validation_mode=request.validation_mode,
+                row_count_hint=total_rows,
+            )
+            if load_history_report.get("strict_blocked"):
+                anomalies = list(load_history_report.get("anomalies") or [])
+                msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    load_history_report=load_history_report,
+                )
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                    destination_summary={"load_history_report": load_history_report},
+                    error_details={"load_history_report": load_history_report},
                 )
 
             def _check_cancelled() -> None:
@@ -1300,6 +1534,7 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
+                    _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1389,6 +1624,10 @@ class UniversalTransferEngine:
                     phase="failed",
                     progress_pct=95,
                     message=recon.get("message"),
+                    reconciliation=recon,
+                    destination_summary=dest_summary,
+                    rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 )
                 return TransferResult(
                     success=False,
@@ -1397,13 +1636,25 @@ class UniversalTransferEngine:
                     job_id=job_id,
                     records_transferred=rows_written,
                     destination_summary=dest_summary,
+                    reconciliation=recon,
                 )
 
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
+            from services.job_status import terminal_status_for
+
+            terminal_status = terminal_status_for(
+                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
+            _persist_load_history_profile(
+                request, sample_rows or [], schema,
+                job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+            )
             mongo.update_job_status(
-                job_id, "completed",
+                job_id, terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
@@ -1411,9 +1662,13 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                reconciliation=recon,
+                load_history_report=load_history_report or {},
+                **_cdc_fields_from_summary(dest_summary),
             )
 
             lineage.emit_preflight_completed(
@@ -1493,6 +1748,7 @@ class UniversalTransferEngine:
         dst_fmt = request.destination.format or "mongodb"
         pf: dict | None = None
         contract_id = ""
+        load_history_report: dict[str, Any] = {}
         try:
             filename = request.source_filename or "upload.csv"
             content = prepare_stream_content(
@@ -1545,6 +1801,17 @@ class UniversalTransferEngine:
                     destination_table_exists=bool(dest_schema_types),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
+                    validation_mode=request.validation_mode,
+                    source_table=(
+                        request.source.table
+                        or request.source.collection
+                        or request.source_filename
+                        or ""
+                    ),
+                    destination_table=(
+                        request.destination.table or request.destination.collection or ""
+                    ),
+                    source_filename=request.source_filename or "",
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1576,50 +1843,7 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
-                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
-                    error_details = {
-                        "reason": "Preflight blocked transfer",
-                        "blockers": blocker_reasons,
-                        "guidance": [
-                            {
-                                "gate": b.get("id"),
-                                "message": b.get("message"),
-                                "why": (b.get("guidance") or {}).get("why", ""),
-                                "fix": (b.get("guidance") or {}).get("fix", ""),
-                            }
-                            for b in pf.get("blockers", [])
-                            if b.get("guidance")
-                        ],
-                        "proof_bundle": {
-                            "decision": decision.get("decision"),
-                            "reason": decision.get("reason"),
-                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
-                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
-                        },
-                        "readiness_score": pf.get("readiness_score"),
-                        "validation_plan": pf.get("validation_plan"),
-                        "payload_shape": pf.get("payload_shape"),
-                    }
-                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
-                    lineage.emit_preflight_completed(
-                        run_id=job_id, passed=False,
-                        readiness_score=pf.get("readiness_score", 0),
-                        blockers=pf.get("blockers", []),
-                        validation_plan=pf.get("validation_plan"),
-                    )
-                    lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=error_message,
-                        error_details=error_details,
-                    )
-                    mongo.update_job_status(
-                        job_id, "failed", error=error_message,
-                        phase="failed", progress_pct=0,
-                        error_details=error_details,
-                        preflight=pf,
-                    )
+                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -1645,6 +1869,28 @@ class UniversalTransferEngine:
                     error_details={"violations": cv.violations},
                     operation=request.operation,
                     job_id=job_id,
+                )
+
+            # Sample-based history compare (file is streamed; full table never loaded).
+            load_history_report = _compare_and_publish_load_history(
+                mongo, job_id, sample_rows or [], request, schema,
+                validation_mode=request.validation_mode,
+                row_count_hint=total_rows,
+            )
+            if load_history_report.get("strict_blocked"):
+                anomalies = list(load_history_report.get("anomalies") or [])
+                msg = "Data quality anomaly: " + "; ".join(anomalies[:8])
+                mongo.update_job_status(
+                    job_id, "failed", error=msg, phase="failed", progress_pct=0,
+                    load_history_report=load_history_report,
+                )
+                return TransferResult(
+                    success=False,
+                    error=msg,
+                    operation=request.operation,
+                    job_id=job_id,
+                    destination_summary={"load_history_report": load_history_report},
+                    error_details={"load_history_report": load_history_report},
                 )
 
             def _check_cancelled() -> None:
@@ -1674,6 +1920,7 @@ class UniversalTransferEngine:
                         "rejected_rows": checkpoint.get("rejected_rows", 0),
                         "rejected_details": (checkpoint.get("rejected_details") or [])[:50],
                     }
+                    _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
@@ -1728,6 +1975,10 @@ class UniversalTransferEngine:
                     phase="failed",
                     progress_pct=95,
                     message=recon.get("message"),
+                    reconciliation=recon,
+                    destination_summary=dest_summary,
+                    rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                    coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 )
                 return TransferResult(
                     success=False,
@@ -1736,13 +1987,25 @@ class UniversalTransferEngine:
                     job_id=job_id,
                     records_transferred=rows_written,
                     destination_summary=dest_summary,
+                    reconciliation=recon,
                 )
 
             explanation = _build_explanation(
                 request, columns, schema, mappings, recon, dest_summary, pf, rows_written
             )
+            from services.job_status import terminal_status_for
+
+            terminal_status = terminal_status_for(
+                dest_summary.get("rejected_rows", 0), dest_summary.get("coerced_null_rows", 0)
+            )
+            if load_history_report:
+                dest_summary["load_history_report"] = load_history_report
+            _persist_load_history_profile(
+                request, sample_rows or [], schema,
+                job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
+            )
             mongo.update_job_status(
-                job_id, "completed",
+                job_id, terminal_status,
                 records_processed=rows_written,
                 progress_pct=100,
                 phase="completed",
@@ -1750,9 +2013,12 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get("database", request.destination.database or ""),
                 destination_collection=dest_summary.get("collection") or dest_summary.get("table", ""),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                reconciliation=recon,
+                load_history_report=load_history_report or {},
             )
 
             lineage.emit_preflight_completed(
@@ -1821,9 +2087,24 @@ class UniversalTransferEngine:
     def _create_pending_job(self, request: TransferRequest) -> str:
         self._resolve_saved_connectors(request)
         mongo = get_mongodb_service()
+        source_name = (
+            request.source_filename
+            or request.source.table
+            or request.source.collection
+            or "database"
+        )
+        dest_label = (
+            request.destination.collection
+            or request.destination.table
+            or request.destination.database
+            or request.destination.format
+            or "destination"
+        )
         return mongo.create_transfer_job({
             "source_type": request.source.kind,
-            "source_name": request.source_filename or request.source.table or request.source.collection or "database",
+            "source_name": source_name,
+            "name": f"{source_name} → {dest_label}",
+            "name_key": f"{source_name} → {dest_label}".strip().casefold(),
             "source_format": request.source.format,
             "destination_type": request.destination.format,
             "destination_kind": request.destination.kind,

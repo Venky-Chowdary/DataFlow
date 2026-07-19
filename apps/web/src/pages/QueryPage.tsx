@@ -2,9 +2,10 @@ import { useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { useToast } from "../components/Toast";
 import { executeQuery, exportQuery, type QueryResult, type QueryExportResult } from "../lib/api";
 import { Connector } from "../lib/types";
@@ -104,8 +105,9 @@ export function QueryPage({ connectors }: QueryPageProps) {
     <PageShell
       wide
       className="df2-page-query"
-      title="Query Playground"
-      description="Run ad-hoc queries and export results to files or destinations."
+      title="Query"
+      kicker="Operations"
+      description="Run ad-hoc queries against saved connectors and export results."
     >
       <PageFrame className="df2-query-page">
         {connectors.length === 0 ? (
@@ -120,6 +122,20 @@ export function QueryPage({ connectors }: QueryPageProps) {
           />
         ) : (
         <>
+        <PageContextBar
+          ariaLabel="Query workspace summary"
+          stats={[
+            { label: "Connectors", value: connectors.length, icon: "connectors", title: "Saved connectors available to query" },
+            { label: "Access", value: "Read-only", icon: "lock", tone: "ok", title: "Queries run in a safe, read-only sandbox" },
+            { label: "Export formats", value: FORMATS.length, icon: "download", tone: "muted", title: FORMATS.map((f) => f.toUpperCase()).join(" · ") },
+            {
+              label: "Last result",
+              value: result ? `${result.row_count.toLocaleString()} rows` : "—",
+              icon: "layers",
+              tone: "muted",
+            },
+          ]}
+        />
         <div className="df2-query-form df2-card">
           <div className="df2-card-head">
             <div>

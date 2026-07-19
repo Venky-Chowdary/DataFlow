@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { DocsShotReel } from "../components/docs/DocsShotReel";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -14,69 +15,227 @@ interface CatalogStats {
   planned: number;
   categories: number;
   transfer_live?: number;
+  unique_drivers?: number;
+  catalog_tiles?: number;
   connect_only?: number;
   roadmap?: number;
 }
 
-function RevealSection({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+function RevealSection({
+  children,
+  className = "",
+  id,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  id?: string;
+}) {
   const { ref, visible } = useRevealOnScroll();
   return (
-    <div ref={ref} className={`df2-docs-reveal ${visible ? "df2-docs-reveal--in" : ""} ${className}`.trim()}>
+    <section
+      id={id}
+      ref={ref}
+      className={`df2-docs-reveal ${visible ? "df2-docs-reveal--in" : ""} ${className}`.trim()}
+    >
       {children}
-    </div>
+    </section>
+  );
+}
+
+const DOC_SECTIONS = [
+  { id: "walkthrough", label: "Workspace walkthrough", icon: "book" },
+  { id: "architecture", label: "Architecture", icon: "layers" },
+  { id: "coverage", label: "Connector coverage", icon: "connectors" },
+  { id: "pipeline", label: "How it works", icon: "transfer" },
+  { id: "preflight", label: "Preflight gates", icon: "shield" },
+  { id: "trust", label: "Trust & fidelity", icon: "check" },
+  { id: "use-cases", label: "Use cases", icon: "database" },
+  { id: "security", label: "Security & compliance", icon: "lock" },
+  { id: "troubleshooting", label: "Troubleshooting", icon: "alert" },
+] as const;
+
+const WORKSPACE_SHOTS = [
+  {
+    src: "/docs/screenshots/app-overview.png",
+    title: "Overview",
+    caption: "Live rows moved, success rate, data plane, and connection health.",
+  },
+  {
+    src: "/docs/screenshots/app-transfer-source.png",
+    title: "Transfer Studio",
+    caption: "Source step with sample-orders.csv — typed columns and real sample rows.",
+  },
+  {
+    src: "/docs/screenshots/app-connectors.png",
+    title: "Connectors",
+    caption: "Local Postgres, MySQL, MongoDB with Test passed / failed status.",
+  },
+  {
+    src: "/docs/screenshots/app-jobs.png",
+    title: "Job Theater",
+    caption: "Completed e2e_customers run with reconcile timeline and row fidelity.",
+  },
+  {
+    src: "/docs/screenshots/app-query.png",
+    title: "Query Playground",
+    caption: "Read-only SQL against saved connectors before you transfer.",
+  },
+  {
+    src: "/docs/screenshots/app-pilot.png",
+    title: "Data Pilot",
+    caption: "Natural-language triage on the same governed engine.",
+  },
+] as const;
+
+function DocsHero({
+  transferLive,
+  total,
+  activeSection,
+  onJump,
+}: {
+  transferLive: number;
+  total: number;
+  activeSection: string;
+  onJump: (id: string) => void;
+}) {
+  return (
+    <header className="df2-docs-hero">
+      <div className="df2-docs-hero-copy">
+        <span className="df2-docs-hero-kicker">
+          <DtIcon name="book" size={14} /> Product documentation
+        </span>
+        <h2 className="df2-docs-hero-title">Move any data, prove every row.</h2>
+        <p className="df2-docs-hero-sub">
+          DataFlow runs one canonical pipeline — profile, map, validate, execute, reconcile —
+          so any source reaches any destination with zero silent data loss. Everything below is
+          how it works, end to end.
+        </p>
+        <div className="df2-docs-hero-actions">
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => onJump("pipeline")}>
+            <DtIcon name="transfer" size={14} /> How a transfer runs
+          </button>
+          <button type="button" className="df2-btn df2-btn-sm" onClick={() => onJump("preflight")}>
+            <DtIcon name="shield" size={14} /> Preflight gates
+          </button>
+        </div>
+        <div className="df2-docs-hero-stats">
+          <div className="df2-docs-hero-stat">
+            <strong>{transferLive.toLocaleString()}</strong>
+            <span>Transfer-ready connectors</span>
+          </div>
+          <div className="df2-docs-hero-stat">
+            <strong>{total.toLocaleString()}</strong>
+            <span>Catalog connectors</span>
+          </div>
+          <div className="df2-docs-hero-stat">
+            <strong>8</strong>
+            <span>Preflight gates</span>
+          </div>
+          <div className="df2-docs-hero-stat">
+            <strong>10k+</strong>
+            <span>Any-to-any routes</span>
+          </div>
+        </div>
+      </div>
+      <nav className="df2-docs-hero-progress" aria-label="On this page">
+        <span className="df2-docs-hero-progress-label">On this page</span>
+        <ol>
+          {DOC_SECTIONS.map((s) => (
+            <li key={s.id}>
+              <button
+                type="button"
+                className={activeSection === s.id ? "is-active" : ""}
+                onClick={() => onJump(s.id)}
+              >
+                <span className="df2-docs-hero-progress-dot" aria-hidden />
+                {s.label}
+              </button>
+            </li>
+          ))}
+        </ol>
+      </nav>
+    </header>
   );
 }
 
 function ArchitectureDiagram() {
   const width = 1200;
-  const height = 320;
-  const y = 160;
+  const height = 380;
+  const y = 168;
   const nodes = [
-    { x: 80, w: 150, label: "Sources", sub: "Files · Databases · Warehouses · SaaS" },
-    { x: 280, w: 120, label: "Ingestion", sub: "Parse · Profile · Normalize" },
-    { x: 440, w: 120, label: "Canonical", sub: "Schema · Types · Keys" },
-    { x: 600, w: 120, label: "Mapper", sub: "AI · Semantic · Rules" },
-    { x: 760, w: 120, label: "Preflight", sub: "Gates · Evidence · Decision" },
-    { x: 920, w: 120, label: "Execution", sub: "Chunk · Transform · Write" },
-    { x: 1080, w: 150, label: "Targets", sub: "Any database · File · Warehouse" },
+    { x: 48, w: 142, label: "Sources", sub: "Files · DBs · Warehouses · SaaS", tone: "edge" },
+    { x: 230, w: 118, label: "Ingestion", sub: "Parse · Profile · Normalize", tone: "core" },
+    { x: 384, w: 118, label: "Canonical", sub: "Schema · Types · Keys", tone: "core" },
+    { x: 538, w: 118, label: "Mapper", sub: "AI · Semantic · Rules", tone: "core" },
+    { x: 692, w: 118, label: "Preflight", sub: "8 gates · Evidence", tone: "gate" },
+    { x: 846, w: 118, label: "Execution", sub: "Chunk · Transform · Write", tone: "core" },
+    { x: 1004, w: 148, label: "Targets", sub: "DB · File · Warehouse", tone: "edge" },
   ];
 
   const path = nodes
     .map((n, i) => {
-      const x1 = n.x + (i === 0 ? n.w / 2 : 0);
-      const x2 = n.x + (i === 0 ? n.w / 2 : n.w / 2);
-      return i === 0 ? `M ${x1} ${y}` : `L ${x2} ${y}`;
+      const x = n.x + n.w / 2;
+      return i === 0 ? `M ${x} ${y}` : `L ${x} ${y}`;
     })
     .join(" ");
 
+  const surfaces = [
+    { label: "Transfer Studio", x: 180 },
+    { label: "Data Pilot", x: 420 },
+    { label: "MCP Agents", x: 640 },
+    { label: "Pipelines API", x: 880 },
+  ];
+
   return (
     <div className="df2-docs-architecture" aria-label="DataFlow architecture diagram">
+      <div className="df2-docs-arch-planes">
+        <span className="df2-docs-arch-plane-tag">Control surfaces</span>
+        <span className="df2-docs-arch-plane-tag is-data">Canonical data plane</span>
+      </div>
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="df2-docs-architecture-svg"
         preserveAspectRatio="xMidYMid meet"
         role="img"
-        aria-label="Data pipeline flow"
+        aria-label="Data pipeline flow from sources through preflight to targets"
       >
         <defs>
+          <linearGradient id="df2-docs-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#14b8a6" />
+            <stop offset="55%" stopColor="#0d9488" />
+            <stop offset="100%" stopColor="#0f766e" />
+          </linearGradient>
           <marker id="df2-docs-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--df-brand, #2563eb)" />
+            <path d="M0,0 L0,6 L9,3 z" fill="#0d9488" />
           </marker>
+          <filter id="df2-docs-soft" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="4" stdDeviation="6" floodColor="#0f172a" floodOpacity="0.08" />
+          </filter>
         </defs>
 
-        {nodes.map((n, i) => (
-          <g key={n.label}>
+        <rect x="36" y="36" width="1128" height="64" rx="14" className="df2-docs-arch-surface-band" />
+        {surfaces.map((s) => (
+          <g key={s.label}>
+            <rect x={s.x} y="48" width="140" height="40" rx="10" className="df2-docs-arch-surface" />
+            <text x={s.x + 70} y="72" textAnchor="middle" className="df2-docs-arch-surface-label">{s.label}</text>
+          </g>
+        ))}
+
+        <path d={path} className="df2-docs-arch-flow" markerEnd="url(#df2-docs-arrow)" />
+
+        {nodes.map((n) => (
+          <g key={n.label} filter="url(#df2-docs-soft)">
             <rect
               x={n.x}
-              y={y - 50}
+              y={y - 52}
               width={n.w}
-              height={100}
-              rx={12}
-              className="df2-docs-arch-node"
+              height={104}
+              rx={14}
+              className={`df2-docs-arch-node df2-docs-arch-node--${n.tone}`}
             />
             <text
               x={n.x + n.w / 2}
-              y={y - 24}
+              y={y - 22}
               className="df2-docs-arch-title"
               textAnchor="middle"
               dominantBaseline="middle"
@@ -85,31 +244,24 @@ function ArchitectureDiagram() {
             </text>
             <text
               x={n.x + n.w / 2}
-              y={y - 4}
+              y={y + 2}
               className="df2-docs-arch-sub"
               textAnchor="middle"
               dominantBaseline="middle"
             >
               {n.sub.split(" · ").map((line, idx) => (
-                <tspan key={line} x={n.x + n.w / 2} dy={idx === 0 ? 0 : "1.2em"}>
+                <tspan key={line} x={n.x + n.w / 2} dy={idx === 0 ? 0 : "1.25em"}>
                   {line}
                 </tspan>
               ))}
             </text>
-            {n.label === "Preflight" && (
-              <circle
-                cx={n.x + n.w / 2}
-                cy={y - 50}
-                r={6}
-                className="df2-docs-pulse-ring"
-              />
+            {n.tone === "gate" && (
+              <circle cx={n.x + n.w / 2} cy={y - 52} r={6} className="df2-docs-pulse-ring" />
             )}
           </g>
         ))}
 
-        <path d={path} className="df2-docs-arch-flow" markerEnd="url(#df2-docs-arrow)" />
-
-        <circle r="7" fill="var(--df-brand, #2563eb)" className="df2-docs-flow-particle">
+        <circle r="7" fill="url(#df2-docs-flow-grad)" className="df2-docs-flow-particle">
           <animateMotion dur="3.5s" repeatCount="indefinite" path={path} />
         </circle>
         <circle r="5" fill="#06b6d4" className="df2-docs-flow-particle df2-docs-flow-particle--lag">
@@ -118,6 +270,10 @@ function ArchitectureDiagram() {
         <circle r="5" fill="#f59e0b" className="df2-docs-flow-particle df2-docs-flow-particle--lag2">
           <animateMotion dur="3.5s" begin="1.4s" repeatCount="indefinite" path={path} />
         </circle>
+
+        <text x="600" y="320" textAnchor="middle" className="df2-docs-arch-footnote">
+          One engine under every surface — profile → map → validate → execute → reconcile
+        </text>
       </svg>
 
       <div className="df2-docs-arch-legend">
@@ -132,6 +288,10 @@ function ArchitectureDiagram() {
         <div className="df2-docs-legend-item">
           <span className="df2-docs-legend-dot df2-docs-legend-dot--amber" />
           <span>Streaming / CDC</span>
+        </div>
+        <div className="df2-docs-legend-item">
+          <span className="df2-docs-legend-dot df2-docs-legend-dot--teal" />
+          <span>Preflight gate</span>
         </div>
       </div>
     </div>
@@ -194,12 +354,24 @@ const PREFLIGHT_RULES = [
   },
   {
     id: "G5",
-    title: "Dry-Run Integrity",
-    icon: "check",
-    desc: "A sample is run through the real pipeline. Duplicates, missing keys, and invalid transforms are surfaced.",
+    title: "Nullability & Keys",
+    icon: "key",
+    desc: "Required fields, primary keys, and uniqueness constraints are checked against sampled values before write.",
   },
   {
     id: "G6",
+    title: "Destination Probe",
+    icon: "server",
+    desc: "Connectivity, privileges, and target object presence are verified with a live probe — not assumed.",
+  },
+  {
+    id: "G7",
+    title: "Capacity & Dry-Run",
+    icon: "check",
+    desc: "A sample runs through the real pipeline. Volume estimates, duplicates, and invalid transforms are surfaced.",
+  },
+  {
+    id: "G8",
     title: "Target DDL Compatibility",
     icon: "shield",
     desc: "Will the target table or collection accept the data? Existing schemas, PKs, and required fields are checked.",
@@ -276,6 +448,7 @@ function UseCase({ title, body }: { title: string; body: string }) {
 export function DocsPage() {
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [statsError, setStatsError] = useState(false);
+  const [activeSection, setActiveSection] = useState<string>(DOC_SECTIONS[0].id);
 
   useEffect(() => {
     fetchCatalogStats()
@@ -283,64 +456,123 @@ export function DocsPage() {
       .catch(() => setStatsError(true));
   }, []);
 
-  const transferLive = stats?.transfer_live ?? stats?.live ?? 130;
+  const jumpTo = (id: string) => {
+    setActiveSection(id);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live ?? 130;
   const total = stats?.total ?? 734;
-  const planned = stats?.planned ?? 600;
 
   return (
     <PageShell
-      title="Docs"
+      title="Help & documentation"
       description="How DataFlow plans, maps, validates, and proves every transfer."
       fit={false}
       className="df2-page-docs"
     >
       <PageFrame className="df2-docs-workspace">
-      <div className="df2-docs dt-stagger">
-        <RevealSection>
-          <PageSection title="Architecture" subtitle="One canonical pipeline for every source and destination" asCard>
-            <ArchitectureDiagram />
+      <DocsHero transferLive={transferLive} total={total} activeSection={activeSection} onJump={jumpTo} />
+
+      <div className="df2-docs-shell">
+        <aside className="df2-docs-toc" aria-label="Documentation sections">
+          <span className="df2-docs-toc-label">Contents</span>
+          <nav>
+            {DOC_SECTIONS.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className={`df2-docs-toc-item ${activeSection === s.id ? "is-active" : ""}`}
+                onClick={() => jumpTo(s.id)}
+                aria-current={activeSection === s.id ? "true" : undefined}
+              >
+                <DtIcon name={s.icon} size={15} />
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="df2-docs-toc-card">
+            <StatCard
+              label="Connector catalog"
+              value={total.toLocaleString()}
+              sub={statsError ? "Catalog offline" : `${transferLive.toLocaleString()} transfer-ready`}
+              icon="database"
+              tone="blue"
+            />
+          </div>
+        </aside>
+
+        <div className="df2-docs dt-stagger">
+        {activeSection === "walkthrough" && (
+        <RevealSection id="walkthrough">
+          <PageSection
+            title="Workspace walkthrough"
+            subtitle="Real screenshots from inside the signed-in application — not marketing mocks"
+            asCard
+          >
+            <ol className="df2-docs-walkthrough-steps">
+              <li>
+                <strong>Overview</strong> — confirm workspace health, throughput, and recent jobs.
+              </li>
+              <li>
+                <strong>Connectors</strong> — add or test sources/destinations; watch Test passed vs failed.
+              </li>
+              <li>
+                <strong>Transfer Studio</strong> — Source → Destination → Map → Validate → Run.
+              </li>
+              <li>
+                <strong>Job Theater</strong> — open the job and verify reconcile / row fidelity.
+              </li>
+              <li>
+                <strong>Query / Pilot</strong> — inspect data or triage failures in plain language.
+              </li>
+            </ol>
+            <DocsShotReel
+              frames={WORKSPACE_SHOTS.map((shot) => ({
+                src: shot.src,
+                alt: shot.title,
+                caption: `${shot.title} — ${shot.caption}`,
+              }))}
+            />
+            <div className="df2-docs-shot-grid">
+              {WORKSPACE_SHOTS.map((shot) => (
+                <figure key={shot.src} className="df2-docs-shot">
+                  <img src={shot.src} alt={shot.title} loading="lazy" />
+                  <figcaption>
+                    <strong>{shot.title}</strong>
+                    <span>{shot.caption}</span>
+                  </figcaption>
+                </figure>
+              ))}
+            </div>
           </PageSection>
         </RevealSection>
+        )}
 
-        <RevealSection>
-          <div className="df2-docs-stats">
-            <StatCard label="Connector catalog" value={total.toLocaleString()} sub={statsError ? "Catalog offline" : "Source and destination connectors"} icon="database" tone="blue" />
-            <StatCard label="Live routes" value="10,000+" sub="Any source to any destination" icon="transfer" tone="teal" />
-            <StatCard label="Preflight gates" value="6" sub="Hard and soft validation gates" icon="shield" tone="green" />
-            <StatCard label="Test coverage" value="753" sub="API tests + preflight suite" icon="check" tone="default" />
-          </div>
-        </RevealSection>
-
-        <RevealSection>
-          <PageSection title="Data flow" subtitle="From any source to any verified target">
+        {activeSection === "architecture" && (
+        <RevealSection id="architecture">
+          <PageSection title="Architecture" subtitle="One canonical pipeline for every source and destination" asCard>
+            <ArchitectureDiagram />
             <img
               src="/docs/pipeline.png"
-              alt="DataFlow pipeline illustration"
+              alt="DataFlow pipeline illustration — source ingestion through verified target write"
               className="df2-docs-illustration"
               loading="lazy"
             />
           </PageSection>
         </RevealSection>
+        )}
 
-        <RevealSection>
+        {activeSection === "coverage" && (
+        <RevealSection id="coverage">
           <PageSection title="Connector coverage" subtitle="A single platform for the systems you already use">
             <ConnectorOrbit />
           </PageSection>
         </RevealSection>
+        )}
 
-        <RevealSection>
-          <PageSection title="Preflight rules" subtitle="Why transfers are blocked or approved">
-            <PreflightRules />
-          </PageSection>
-        </RevealSection>
-
-        <RevealSection>
-          <PageSection title="Trust pillars" subtitle="Built for data governance and compliance">
-            <TrustPillars />
-          </PageSection>
-        </RevealSection>
-
-        <RevealSection>
+        {activeSection === "pipeline" && (
+        <RevealSection id="pipeline">
           <PageSection title="How it works" subtitle="From raw source to verified target">
             <div className="df2-docs-steps">
               <div className="df2-docs-step">
@@ -369,10 +601,50 @@ export function DocsPage() {
                 <p>Rows are chunked, transformed, written, and reconciled. Rejected rows are quarantined and reported.</p>
               </div>
             </div>
+            <figure className="df2-docs-shot df2-docs-shot--wide">
+              <img
+                src="/docs/screenshots/app-transfer-source.png"
+                alt="Transfer Studio source profiling with sample orders rows"
+                loading="lazy"
+              />
+              <figcaption>
+                <strong>Transfer Studio · Source</strong>
+                <span>Profiled sample-orders.csv with INTEGER / VARCHAR / DECIMAL / DATE columns before destination.</span>
+              </figcaption>
+            </figure>
+            <figure className="df2-docs-shot df2-docs-shot--wide">
+              <img
+                src="/docs/screenshots/app-jobs.png"
+                alt="Job Theater reconcile timeline for completed transfer"
+                loading="lazy"
+              />
+              <figcaption>
+                <strong>Job Theater · Proof</strong>
+                <span>Queue → preflight → extract → load → reconcile with 100% row fidelity on a live job.</span>
+              </figcaption>
+            </figure>
           </PageSection>
         </RevealSection>
+        )}
 
-        <RevealSection>
+        {activeSection === "preflight" && (
+        <RevealSection id="preflight">
+          <PageSection title="Preflight gates" subtitle="Why transfers are blocked or approved before any write">
+            <PreflightRules />
+          </PageSection>
+        </RevealSection>
+        )}
+
+        {activeSection === "trust" && (
+        <RevealSection id="trust">
+          <PageSection title="Trust & fidelity" subtitle="Built for data governance and compliance">
+            <TrustPillars />
+          </PageSection>
+        </RevealSection>
+        )}
+
+        {activeSection === "use-cases" && (
+        <RevealSection id="use-cases">
           <PageSection title="Real-world use cases" subtitle="From logistics to warehouses">
             <div className="df2-docs-use-cases">
               <UseCase
@@ -394,8 +666,10 @@ export function DocsPage() {
             </div>
           </PageSection>
         </RevealSection>
+        )}
 
-        <RevealSection>
+        {activeSection === "security" && (
+        <RevealSection id="security">
           <PageSection title="Security & compliance" subtitle="Defense in depth for sensitive data">
             <ul className="df2-docs-list">
               <li><strong>Encryption in transit and at rest</strong> — all cloud connectors use TLS by default; credentials are encrypted at rest.</li>
@@ -406,9 +680,11 @@ export function DocsPage() {
             </ul>
           </PageSection>
         </RevealSection>
+        )}
 
-        <RevealSection>
-          <PageSection title="What to do when a transfer is blocked" subtitle="Reading the preflight result">
+        {activeSection === "troubleshooting" && (
+        <RevealSection id="troubleshooting">
+          <PageSection title="Troubleshooting a blocked transfer" subtitle="Reading the preflight result">
             <div className="df2-docs-faq">
               <p><strong>Mapping confidence too low?</strong> Review the map step, pin the correct target column, and the gate will re-score.</p>
               <p><strong>Target DDL incompatible?</strong> Check the target schema. DataFlow can create the target for you or report a type/precision conflict.</p>
@@ -417,6 +693,8 @@ export function DocsPage() {
             </div>
           </PageSection>
         </RevealSection>
+        )}
+        </div>
       </div>
       </PageFrame>
     </PageShell>

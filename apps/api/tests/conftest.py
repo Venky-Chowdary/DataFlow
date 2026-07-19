@@ -23,6 +23,11 @@ for path in (_src_root, _api_root):
 sys.path.insert(0, str(_src_root))
 sys.path.insert(0, str(_api_root))
 
+# Pin the bare package name before tests import `src.*`.  Without this, Python
+# can cache src/services as `services` when a runner exposes src on sys.path,
+# causing compatibility shims to import themselves recursively.
+import services as _canonical_services  # noqa: E402,F401
+
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 

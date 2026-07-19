@@ -26,28 +26,36 @@ const TARGET_LABELS: Partial<Record<Screen, string>> = {
 };
 
 const TRUST_POINTS = [
-  "Semantic mapping with reviewable confidence scores",
-  "Eight preflight gates before any production write",
-  "Post-load reconciliation and Job Theater proof",
-  "SSO, RBAC, and audit trails for enterprise teams",
+  { title: "Semantic mapping", body: "Reviewable confidence — never silent remap." },
+  { title: "Preflight gates", body: "Eight checks before any production write." },
+  { title: "Proof & reconcile", body: "Job Theater evidence after every run." },
+  { title: "Enterprise control", body: "SSO, RBAC, and audit-ready trails." },
 ];
 
 export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
   const { toast } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(true);
   const [submitted, setSubmitted] = useState(false);
   const [checking, setChecking] = useState(false);
   const [credentialError, setCredentialError] = useState("");
+  const [capsLock, setCapsLock] = useState(false);
   const [ssoProviders, setSsoProviders] = useState<Array<{ type: SsoType; label: string; login_path: string }>>([]);
 
   useEffect(() => {
     fetchSsoProviders().then(setSsoProviders).catch(() => setSsoProviders([]));
   }, []);
 
-  const emailError = submitted && !isValidEmail(email) ? "Enter a valid work email." : "";
-  const passwordError = submitted && password.length < 8 ? "Use at least 8 characters." : "";
+  const emailTrimmed = email.trim();
+  const emailError = submitted && !isValidEmail(email) ? "Enter a valid work email (name@company.com)." : "";
+  const passwordError =
+    submitted && password.length === 0
+      ? "Password is required."
+      : submitted && password.length < 8
+        ? "Password must be at least 8 characters."
+        : "";
   const targetLabel = TARGET_LABELS[target] ?? "DataFlow";
   const ready = useMemo(() => isValidEmail(email) && password.length >= 8, [email, password]);
 
@@ -57,7 +65,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
     setCredentialError("");
     if (!ready) {
       toast({
-        title: "Sign-in details need attention",
+        title: "Complete the form",
         message: "Use a valid work email and a password with at least 8 characters.",
         tone: "warning",
       });
@@ -66,7 +74,7 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
 
     setChecking(true);
     try {
-      const result = await loginWorkspace(email, password);
+      const result = await loginWorkspace(emailTrimmed, password);
       writeSession(
         {
           email: result.user.email,
@@ -86,19 +94,20 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
         msg.includes("Failed to fetch") ||
         msg.includes("NetworkError") ||
         msg.includes("timed out") ||
-        msg.includes("fetch");
+        (msg.includes("fetch") && !msg.includes("Sign-in"));
       if (apiOffline) {
-        setCredentialError("Cannot reach the API. Verify the server is running and VITE_API_BASE is correct.");
+        setCredentialError("Cannot reach the API. Confirm the control plane URL and that the API service is online.");
         toast({
           title: "API offline",
-          message: "The control plane is not running. Start the API server and try again.",
+          message: "The control plane is not reachable from this browser.",
           tone: "error",
         });
       } else {
-        setCredentialError("Email or password is incorrect.");
+        // Surface the real API detail (password `$` hint, missing users, etc.)
+        setCredentialError(msg || "Email or password is incorrect.");
         toast({
           title: "Sign-in failed",
-          message: "Check your credentials and try again.",
+          message: msg || "Check your credentials and try again.",
           tone: "error",
         });
       }
@@ -133,29 +142,49 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
   };
 
   return (
-    <main className="lp-login">
+    <main className="lp-login lp-login--enterprise">
+      <div className="lp-login-atmosphere" aria-hidden>
+        <span className="lp-login-grid" />
+        <span className="lp-login-glow lp-login-glow--a" />
+        <span className="lp-login-glow lp-login-glow--b" />
+      </div>
+
       <header className="lp-login-topbar">
         <button type="button" className="lp-login-back" onClick={onBack}>
           <DtIcon name="chevron-left" size={15} /> Back
         </button>
-        <a className="lp-login-topbar-brand" href="#/" onClick={(e) => { e.preventDefault(); onBack(); }}>
-          <DtLogo size={24} />
+        <a
+          className="lp-login-topbar-brand"
+          href="#/"
+          onClick={(e) => {
+            e.preventDefault();
+            onBack();
+          }}
+        >
+          <DtLogo size={26} />
           <span>DataFlow</span>
         </a>
+        <span className="lp-login-topbar-meta">Secure workspace</span>
       </header>
 
       <div className="lp-login-layout">
         <aside className="lp-login-aside" aria-label="DataFlow platform">
-          <p className="lp-login-aside-kicker">Enterprise workspace</p>
-          <h1 className="lp-login-aside-title">Governed data movement with proof</h1>
+          <p className="lp-login-aside-kicker">Universal data platform</p>
+          <h1 className="lp-login-aside-title">
+            <span className="lp-login-brand-mark">DataFlow</span>
+            <span className="lp-login-aside-headline">Sign in to governed movement</span>
+          </h1>
           <p className="lp-login-aside-lead">
-            Sign in to open <strong>{targetLabel}</strong> — the same engine powers Transfer Studio, Data Pilot, and MCP-connected agents.
+            Continue to <strong>{targetLabel}</strong> with the same engine behind Transfer Studio, Job Theater, and Data Pilot.
           </p>
-          <ul className="lp-login-trust">
+          <ul className="lp-login-trust lp-login-trust--cards">
             {TRUST_POINTS.map((point) => (
-              <li key={point}>
+              <li key={point.title}>
                 <DtIcon name="check" size={16} />
-                <span>{point}</span>
+                <div>
+                  <strong>{point.title}</strong>
+                  <span>{point.body}</span>
+                </div>
               </li>
             ))}
           </ul>
@@ -165,14 +194,23 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
           <div className="lp-login-card">
             <div className="lp-login-card-head">
               <h2 id="login-form-title">Sign in</h2>
-              <p className="lp-login-sub">Work email and password for your workspace.</p>
+              <p className="lp-login-sub">Use your workspace email and password.</p>
             </div>
 
-            {credentialError && credentialError.includes("API") && (
-              <div className="lp-login-alert" role="alert">
+            {credentialError && (
+              <div
+                className={`lp-login-alert ${credentialError.toLowerCase().includes("api") || credentialError.toLowerCase().includes("configured") ? "" : "lp-login-alert--warn"}`}
+                role="alert"
+              >
                 <DtIcon name="alert" size={18} />
                 <div>
-                  <strong>Control plane unreachable</strong>
+                  <strong>
+                    {credentialError.toLowerCase().includes("api")
+                      ? "Control plane unreachable"
+                      : credentialError.toLowerCase().includes("configured")
+                        ? "Workspace not ready"
+                        : "Sign-in failed"}
+                  </strong>
                   <p>{credentialError}</p>
                 </div>
               </div>
@@ -185,38 +223,68 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                   id="login-email"
                   className="lp-input"
                   type="email"
+                  inputMode="email"
                   value={email}
-                  onChange={(e) => { setEmail(e.target.value); setCredentialError(""); }}
-                  autoComplete="email"
-                  placeholder="you@company.com"
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    setCredentialError("");
+                  }}
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder="admin@company.com"
+                  aria-invalid={Boolean(emailError)}
+                  aria-describedby={emailError ? "login-email-error" : undefined}
                 />
-                {emailError && <small className="lp-field-error">{emailError}</small>}
+                {emailError && <small id="login-email-error" className="lp-field-error">{emailError}</small>}
               </div>
 
-              <div className={`lp-field ${passwordError || credentialError ? "is-error" : ""}`}>
-                <label className="lp-label" htmlFor="login-password">Password</label>
-                <input
-                  id="login-password"
-                  className="lp-input"
-                  type="password"
-                  value={password}
-                  onChange={(e) => { setPassword(e.target.value); setCredentialError(""); }}
-                  autoComplete="current-password"
-                  placeholder="At least 8 characters"
-                />
-                {passwordError && <small className="lp-field-error">{passwordError}</small>}
-                {!passwordError && credentialError && !credentialError.includes("API") && (
-                  <small className="lp-field-error">{credentialError}</small>
-                )}
+              <div className={`lp-field ${passwordError ? "is-error" : ""}`}>
+                <div className="lp-label-row">
+                  <label className="lp-label" htmlFor="login-password">Password</label>
+                  {capsLock && <span className="lp-login-caps">Caps Lock is on</span>}
+                </div>
+                <div className="lp-input-password">
+                  <input
+                    id="login-password"
+                    className="lp-input"
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setCredentialError("");
+                    }}
+                    onKeyUp={(e) => setCapsLock(e.getModifierState?.("CapsLock") ?? false)}
+                    onKeyDown={(e) => setCapsLock(e.getModifierState?.("CapsLock") ?? false)}
+                    autoComplete="current-password"
+                    placeholder="At least 8 characters"
+                    aria-invalid={Boolean(passwordError || (credentialError && !credentialError.toLowerCase().includes("api")))}
+                    aria-describedby={passwordError ? "login-password-error" : undefined}
+                  />
+                  <button
+                    type="button"
+                    className="lp-input-password-toggle"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
+                    <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
+                  </button>
+                </div>
+                {passwordError && <small id="login-password-error" className="lp-field-error">{passwordError}</small>}
               </div>
 
               <label className="lp-login-remember">
                 <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-                <span>Keep me signed in</span>
+                <span>Keep me signed in on this device</span>
               </label>
 
-              <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit" disabled={checking}>
-                {checking ? "Signing in…" : "Sign in"}
+              <button
+                type="submit"
+                className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit"
+                disabled={checking}
+              >
+                {checking ? "Signing in…" : "Sign in to workspace"}
               </button>
             </form>
 
@@ -236,13 +304,22 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                 <div className="lp-login-divider"><span>Enterprise SSO</span></div>
                 <div className="lp-login-sso">
                   {ssoProviders.map((provider) => (
-                    <button key={provider.type} type="button" className="lp-btn lp-btn--outline" onClick={() => startSso(provider.type, provider.label)}>
+                    <button
+                      key={provider.type}
+                      type="button"
+                      className="lp-btn lp-btn--outline"
+                      onClick={() => startSso(provider.type, provider.label)}
+                    >
                       {provider.label}
                     </button>
                   ))}
                 </div>
               </>
             )}
+
+            <p className="lp-login-footnote">
+              Protected session · credentials verified by the DataFlow API · never stored in the browser as plain text
+            </p>
           </div>
         </section>
       </div>

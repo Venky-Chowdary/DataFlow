@@ -61,6 +61,25 @@ for _src in LIVE_SOURCE_DATABASES:
 
 
 def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest_format: str) -> tuple[bool, str]:
+    # Catalog honesty first — Planned brands must not inherit live from generic_sql/rest_api.
+    try:
+        from .connector_capabilities import assert_transfer_endpoint_honesty
+        honest, honest_msg = assert_transfer_endpoint_honesty(
+            source_kind, source_format, dest_kind, dest_format
+        )
+        if not honest:
+            return False, honest_msg
+    except Exception:
+        try:
+            from transfer.connector_capabilities import assert_transfer_endpoint_honesty
+            honest, honest_msg = assert_transfer_endpoint_honesty(
+                source_kind, source_format, dest_kind, dest_format
+            )
+            if not honest:
+                return False, honest_msg
+        except Exception:
+            pass
+
     def _resolve(fmt: str) -> str:
         try:
             from .connector_capabilities import resolve_driver_type
@@ -100,17 +119,17 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
     # Source-only SaaS connectors can feed any live destination.
     if source_kind == "database" and _source_only_supported(src_fmt):
         if dest_kind == "database" and _dest_supported(dst_fmt):
-            return True, "supported"
+            return True, f"Live route: {src_fmt} → {dst_fmt}"
         if dest_kind == "file_export" and dst_fmt.lower() in LIVE_DEST_FILE_FORMATS:
-            return True, "supported"
+            return True, f"Live route: {src_fmt} → {dst_fmt} export"
 
     key = (source_kind, src_fmt.lower(), dest_kind, dst_fmt.lower())
     if key in LIVE_MATRIX:
-        return True, "supported"
+        return True, f"Live route: {src_fmt} → {dst_fmt}"
     for sk, sf, dk, df in LIVE_MATRIX:
         if sk == source_kind and dk == dest_kind and df == dst_fmt.lower():
             if source_kind == "file" and src_fmt.lower() in LIVE_SOURCE_FORMATS:
-                return True, "supported"
+                return True, f"Live route: {src_fmt} → {dst_fmt}"
     return False, f"Combination {source_kind}/{source_format} → {dest_kind}/{dest_format} not yet live"
 
 
@@ -122,29 +141,68 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "csv", "database", "sqlite"),
     ("file", "csv", "database", "postgresql"),
     ("file", "csv", "database", "mongodb"),
+    ("file", "csv", "database", "mysql"),
     ("file", "csv", "file_export", "csv"),
     ("file", "csv", "file_export", "json"),
     ("file", "json", "database", "sqlite"),
     ("file", "json", "database", "postgresql"),
     ("file", "json", "database", "mongodb"),
+    ("file", "json", "database", "mysql"),
     ("file", "json", "file_export", "csv"),
     ("file", "json", "file_export", "json"),
     # Database sources
     ("database", "sqlite", "database", "sqlite"),
     ("database", "sqlite", "database", "postgresql"),
     ("database", "sqlite", "database", "mongodb"),
+    ("database", "sqlite", "database", "mysql"),
     ("database", "sqlite", "file_export", "csv"),
     ("database", "sqlite", "file_export", "json"),
     ("database", "postgresql", "database", "sqlite"),
     ("database", "postgresql", "database", "postgresql"),
     ("database", "postgresql", "database", "mongodb"),
+    ("database", "postgresql", "database", "mysql"),
     ("database", "postgresql", "file_export", "csv"),
     ("database", "postgresql", "file_export", "json"),
     ("database", "mongodb", "database", "sqlite"),
     ("database", "mongodb", "database", "postgresql"),
     ("database", "mongodb", "database", "mongodb"),
+    ("database", "mongodb", "database", "mysql"),
     ("database", "mongodb", "file_export", "csv"),
     ("database", "mongodb", "file_export", "json"),
+    ("database", "mysql", "database", "sqlite"),
+    ("database", "mysql", "database", "postgresql"),
+    ("database", "mysql", "database", "mongodb"),
+    ("database", "mysql", "database", "mysql"),
+    ("database", "mysql", "file_export", "csv"),
+    ("database", "mysql", "file_export", "json"),
+    # First-class enterprise engines + lakehouse / activation destinations
+    ("database", "postgresql", "database", "sqlserver"),
+    ("database", "postgresql", "database", "oracle"),
+    ("database", "mysql", "database", "sqlserver"),
+    ("database", "sqlite", "database", "iceberg"),
+    ("file", "csv", "database", "iceberg"),
+    ("file", "json", "database", "kafka"),
+    ("database", "postgresql", "database", "salesforce"),
+    ("database", "postgresql", "database", "hubspot"),
+    ("database", "snowflake", "database", "salesforce"),
+    ("database", "bigquery", "database", "hubspot"),
+    # Warehouse proof routes (exercised when cloud credentials/emulators present)
+    ("database", "postgresql", "database", "snowflake"),
+    ("database", "postgresql", "database", "bigquery"),
+    ("database", "postgresql", "database", "s3"),
+    ("file", "csv", "database", "s3"),
+    ("file", "parquet", "database", "snowflake"),
+    # Unlocked enterprise / object / vector destinations
+    ("database", "postgresql", "database", "sftp"),
+    ("database", "mysql", "database", "adls"),
+    ("file", "csv", "database", "adls"),
+    ("file", "csv", "database", "sftp"),
+    ("database", "sqlserver", "database", "postgresql"),
+    ("database", "oracle", "database", "postgresql"),
+    ("database", "postgresql", "database", "pgvector"),
+    ("database", "postgresql", "database", "qdrant"),
+    ("database", "rest_api", "database", "postgresql"),
+    ("database", "rest_api", "database", "mongodb"),
 ]
 
 
@@ -231,21 +289,26 @@ def get_capabilities() -> dict:
         if dest_ready(caps):
             dest_dbs.append(cid)
 
+    drivers = transfer_live_driver_types()
     return {
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
         "destination_databases": dest_dbs,
         "destination_file_formats": LIVE_DEST_FILE_FORMATS,
         "source_databases": source_dbs,
-        "transfer_live_drivers": transfer_live_driver_types(),
+        "transfer_live_drivers": drivers,
         "transfer_live_count": summary["transfer_live_count"],
+        "unique_transfer_drivers": len(drivers),
+        "production_sku_routes": len(PRODUCTION_SKU),
         "connect_only_count": summary["connect_only_count"],
         "live_route_combinations": summary["live_route_combinations"],
         "operations": ["upload", "migration", "convert", "dump", "transfer"],
         "auto_ddl": True,
         "description": (
-            f"{summary['transfer_live_count']} drivers support full transfer. "
-            f"{summary['live_route_combinations']} route combinations are live. "
+            f"{len(drivers)} unique transfer-ready drivers "
+            f"({summary['transfer_live_count']} catalog aliases). "
+            f"{len(PRODUCTION_SKU)} PRODUCTION_SKU routes committed in CI; "
+            f"{summary['live_route_combinations']} capability combinations. "
             "Catalog roadmap entries require driver implementation before production use."
         ),
     }

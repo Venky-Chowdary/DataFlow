@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 from typing import Any
 
 from services.value_serializer import json_default
+
+logger = logging.getLogger(__name__)
 
 
 def _bson_decimal_type():
@@ -23,7 +26,7 @@ _BSON_DECIMAL = _bson_decimal_type()
 def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str | None:
     """Use DataFlow value inference to narrow TEXT/CHAR columns."""
     try:
-        from services.schema_inference import infer_type
+        from services.schema_inference import infer_column
 
         mapped = {
             "JSON": "JSON",
@@ -36,8 +39,10 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
             "VARCHAR": "TEXT",
             "TEXT": "TEXT",
         }
-        return mapped.get(infer_type(samples, field_name=field_name))
+        intel = infer_column(samples, field_name=field_name)
+        return mapped.get(str(intel["logical_type"]))
     except Exception:
+        logger.debug("schema infer_column failed for %s", field_name, exc_info=True)
         return None
 
 
@@ -83,7 +88,9 @@ def _refine_columns_by_samples(
             if inferred and inferred != "TEXT":
                 c["inferred_type"] = inferred
     except Exception:
-        pass
+        logger.warning(
+            "sample refine failed for %s.%s", schema, table, exc_info=True,
+        )
     return columns
 
 
@@ -370,29 +377,161 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 
+def _snowflake_list_schemas(cur: Any) -> list[str]:
+    """Return schema names visible in the current database (uppercase)."""
+    try:
+        cur.execute(
+            """
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE catalog_name = CURRENT_DATABASE()
+               OR catalog_name IS NULL
+            ORDER BY schema_name
+            LIMIT 200
+            """
+        )
+        names = [str(r[0]).upper() for r in (cur.fetchall() or []) if r and r[0]]
+        if names:
+            return names
+    except Exception:
+        logger.debug("Snowflake schemata catalog query failed; trying SHOW SCHEMAS", exc_info=True)
+    try:
+        cur.execute("SHOW SCHEMAS")
+        # SHOW SCHEMAS columns vary; "name" is typically index 1
+        rows = cur.fetchall() or []
+        names = []
+        for row in rows:
+            if not row:
+                continue
+            # Prefer named access when available
+            if hasattr(row, "get"):
+                n = row.get("name") or row.get("schema_name")
+            else:
+                n = row[1] if len(row) > 1 else row[0]
+            if n:
+                names.append(str(n).upper())
+        return names
+    except Exception:
+        logger.debug("SHOW SCHEMAS failed", exc_info=True)
+        return []
+
+
+def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str], str | None]:
+    """Pick a usable schema. Returns (schema, available, warning_or_none)."""
+    from connectors.writer_common import quote_sql_identifier
+
+    requested = (requested or "PUBLIC").strip() or "PUBLIC"
+    # Snowflake unquoted identifiers fold to uppercase.
+    candidates = []
+    for c in (requested, requested.upper(), requested.lower(), "PUBLIC", "public"):
+        if c and c not in candidates:
+            candidates.append(c)
+
+    available = _snowflake_list_schemas(cur)
+    available_set = {a.upper() for a in available}
+
+    for cand in candidates:
+        try:
+            cur.execute(f"USE SCHEMA {quote_sql_identifier(cand)}")
+            resolved = cand.upper()
+            warning = None
+            if requested.upper() != resolved:
+                warning = (
+                    f"Schema '{requested}' was not usable; using '{resolved}' instead."
+                )
+            elif available_set and resolved not in available_set:
+                # USE succeeded even if catalog list was incomplete — fine.
+                warning = None
+            return resolved, available, warning
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "002043" in str(exc) or "does not exist" in msg or "not exist" in msg:
+                continue
+            # Unexpected errors (permissions, etc.) — re-raise for outer handler
+            raise
+
+    # Requested schema missing: fall back to first available, preferring PUBLIC.
+    fallback = None
+    if "PUBLIC" in available_set:
+        fallback = "PUBLIC"
+    elif available:
+        fallback = available[0]
+    if fallback:
+        cur.execute(f"USE SCHEMA {quote_sql_identifier(fallback)}")
+        sample = ", ".join(available[:12])
+        more = f" (+{len(available) - 12} more)" if len(available) > 12 else ""
+        warning = (
+            f"Schema '{requested}' does not exist in this database. "
+            f"Using '{fallback}'. Available schemas: {sample}{more}."
+        )
+        return fallback, available, warning
+
+    raise RuntimeError(
+        f"Schema '{requested}' does not exist, and no schemas were found in the "
+        f"current Snowflake database. Check the database name and that your role "
+        f"can see information_schema.schemata."
+    )
+
+
 def _introspect_snowflake(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
-    schema = (kwargs.get("schema") or "PUBLIC").upper()
+    schema = (kwargs.get("schema") or "PUBLIC").strip() or "PUBLIC"
     try:
         from connectors.snowflake_conn import get_connection, normalize_account
+        from connectors.writer_common import quote_sql_identifier
 
         conn = get_connection(
             account=normalize_account(kwargs.get("host", "")),
             username=kwargs.get("username", ""),
             password=kwargs.get("password", ""),
             database=kwargs.get("database", ""),
-            schema=schema,
+            schema=schema.upper(),
             warehouse=kwargs.get("warehouse", ""),
             connection_string=kwargs.get("connection_string", ""),
         )
+
+        warnings: list[str] = []
         with conn.cursor() as cur:
-            wh = kwargs.get("warehouse", "")
+            wh = (kwargs.get("warehouse") or "").strip()
             if wh:
-                cur.execute(f"USE WAREHOUSE {wh}")
-            db = kwargs.get("database", "")
+                try:
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception as exc:
+                    # Warehouse optional for metadata reads on some accounts.
+                    warnings.append(f"USE WAREHOUSE '{wh}' failed: {exc}")
+                    logger.info("Snowflake USE WAREHOUSE skipped: %s", exc)
+
+            db = (kwargs.get("database") or "").strip()
             if db:
-                cur.execute(f"USE DATABASE {db}")
-            cur.execute(f"USE SCHEMA {schema}")
+                try:
+                    cur.execute(f"USE DATABASE {quote_sql_identifier(db)}")
+                except Exception as exc:
+                    conn.close()
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Snowflake database '{db}' does not exist or is not accessible "
+                            f"with the current role ({exc})."
+                        ),
+                        "columns": [],
+                        "tables": [],
+                        "schema": schema.upper(),
+                    }
+
+            try:
+                schema, _available, schema_warning = _snowflake_resolve_schema(cur, schema)
+            except RuntimeError as exc:
+                conn.close()
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "columns": [],
+                    "tables": [],
+                    "schema": (kwargs.get("schema") or "PUBLIC").upper(),
+                }
+            if schema_warning:
+                warnings.append(schema_warning)
+
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
@@ -423,7 +562,17 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                         }
                     )
         conn.close()
-        return {"ok": True, "tables": tables, "columns": columns, "schema": schema}
+        out: dict[str, Any] = {
+            "ok": True,
+            "tables": tables,
+            "columns": columns,
+            "schema": schema,
+        }
+        if warnings:
+            out["warnings"] = warnings
+            # Surface the primary warning in error-adjacent field for older UI clients.
+            out["message"] = warnings[0]
+        return out
     except ImportError:
         return {
             "ok": False,
@@ -432,7 +581,27 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             "tables": [],
         }
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+        msg = str(exc)
+        # Expected "object does not exist" — actionable, no stack spam.
+        if "002043" in msg or "does not exist" in msg.lower():
+            logger.info("Snowflake introspect schema/database missing: %s", msg)
+            return {
+                "ok": False,
+                "error": (
+                    "Snowflake object does not exist or cannot be accessed. "
+                    "Verify database, schema, warehouse, and role. "
+                    f"Detail: {msg}"
+                ),
+                "columns": [],
+                "tables": [],
+            }
+        logger.warning("Snowflake introspect failed: %s", msg, exc_info=True)
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {msg}",
+            "columns": [],
+            "tables": [],
+        }
 
 
 def _introspect_mysql(**kwargs) -> dict[str, Any]:
@@ -605,7 +774,9 @@ def _sf_to_logical(dtype: str) -> str:
 
 def _sample_logical_type(value: Any, key: str = "") -> str:
     if value is None:
-        return "TEXT"
+        # Null/absent is unknown, not TEXT. Returning "" keeps a null observation
+        # from demoting a field that is typed (e.g. OBJECT) in other documents.
+        return ""
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
@@ -623,9 +794,9 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, dict):
         return "OBJECT"
     if isinstance(value, str):
-        from services.schema_inference import infer_type
+        from services.schema_inference import infer_column
 
-        inferred = infer_type([value], field_name=key)
+        inferred = str(infer_column([value], field_name=key)["logical_type"])
         if inferred == "JSON":
             return "OBJECT"
         if inferred == "VARCHAR":
@@ -634,16 +805,36 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     return "TEXT"
 
 
+_STRUCTURAL_TYPES = {"OBJECT", "ARRAY", "JSON"}
+
+
 def _widen_mongodb_type(current: str, observed: str) -> str:
     """Widen inferred type across sampled documents; prefer more specific type.
 
     TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE,
     UUID/BINARY/OBJECT are retained when observed.
 
-    Any observed or current TEXT/VARCHAR value demotes a column to TEXT so that
-    mixed fields (e.g. a referral code that is sometimes a date string and
-    sometimes a hex token) do not force a strict date/number type on all rows.
+    Nested documents / arrays (OBJECT / ARRAY / JSON) are semi-structured and
+    "sticky": a later scalar, text, or null observation does NOT flatten them to
+    TEXT. This keeps schemaless nested fields queryable at columnar destinations
+    (Snowflake VARIANT, BigQuery JSON, Redshift SUPER) instead of landing as
+    JSON-in-VARCHAR. The write path losslessly wraps any bare scalar as JSON so
+    those mixed values still load without data loss.
+
+    Any other observed/current TEXT/VARCHAR value still demotes a column to TEXT
+    so that mixed scalar fields (e.g. a referral code that is sometimes a date
+    string and sometimes a hex token) do not force a strict date/number type.
     """
+    # Null/unknown observations are neutral — never demote a known type.
+    if not observed:
+        return current
+    if not current:
+        return observed
+    # Semi-structured wins over scalars/text so nested docs/arrays stay queryable.
+    if current in _STRUCTURAL_TYPES or observed in _STRUCTURAL_TYPES:
+        if current in _STRUCTURAL_TYPES and observed in _STRUCTURAL_TYPES:
+            return current if current == observed else "JSON"
+        return current if current in _STRUCTURAL_TYPES else observed
     if current in {"TEXT", "VARCHAR"} or observed in {"TEXT", "VARCHAR"}:
         return "TEXT"
     order = {
@@ -699,6 +890,11 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                             columns[key]["inferred_type"], inferred
                         )
         client.close()
+        # A field that was null in every sampled document has no observed type;
+        # fall back to TEXT so the column is still created.
+        for col in columns.values():
+            if not col.get("inferred_type"):
+                col["inferred_type"] = "TEXT"
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -727,7 +923,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         # attributes not defined by the table key schema.
         try:
             from connectors.dynamodb_reader import read_table_batch
-            from services.schema_inference import infer_type
+            from services.schema_inference import infer_schema_map
 
             sample, _ = read_table_batch(cfg=cfg, table=table, limit=50)
             if sample.rows:
@@ -736,11 +932,12 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
                     for i, h in enumerate(sample.headers):
                         if i < len(row):
                             samples_by_col[h].append(row[i])
+                inferred_map, _intel = infer_schema_map(samples_by_col)
                 for name in names:
-                    if name in samples_by_col and (types.get(name) == "TEXT" or name not in types):
-                        types[name] = infer_type(samples_by_col[name], field_name=name)
+                    if name in inferred_map and (types.get(name) == "TEXT" or name not in types):
+                        types[name] = inferred_map[name]
         except Exception:
-            pass
+            logger.warning("DynamoDB sample inference failed for %s", table, exc_info=True)
 
         columns = [
             {"name": name, "inferred_type": types.get(name, "TEXT"), "nullable": True}
@@ -750,12 +947,12 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         try:
             tables = list_tables(cfg) or [table]
         except Exception:
-            pass
+            logger.warning("DynamoDB list_tables failed", exc_info=True)
         row_estimate = 0
         try:
             row_estimate = estimate_item_count(cfg, table)
         except Exception:
-            pass
+            logger.debug("DynamoDB estimate_item_count failed for %s", table, exc_info=True)
         return {
             "ok": True,
             "tables": tables,
@@ -773,7 +970,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
     try:
         from connectors.elasticsearch_reader import _client
-        from services.schema_inference import infer_type
+        from services.schema_inference import infer_column
 
         cfg = {
             "host": kwargs.get("host") or "localhost",
@@ -814,15 +1011,20 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                         else:
                             samples_by_name[name].append(str(value))
             except Exception:
-                pass
+                logger.warning(
+                    "Elasticsearch sample fetch failed for index %s", index, exc_info=True,
+                )
 
             columns = []
             for name, info in props.items():
                 es_type = info.get("type", "text")
                 mapped = _es_mapping_type(es_type)
                 samples = samples_by_name.get(name, [])
+                semantic_role = None
                 if es_type == "date" or (es_type in ("text", "keyword") and samples):
-                    inferred = infer_type(samples, field_name=name)
+                    intel = infer_column(samples, field_name=name)
+                    inferred = str(intel["logical_type"])
+                    semantic_role = intel.get("semantic_role")
                     if inferred in ("VARCHAR", "TEXT"):
                         inferred = mapped if mapped != "VARCHAR" else inferred
                     mapped = inferred
@@ -830,11 +1032,14 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                     mapped = "BINARY"
                 elif es_type == "object":
                     mapped = "JSON"
-                columns.append({
+                col_rec: dict[str, Any] = {
                     "name": name,
                     "inferred_type": mapped,
                     "nullable": True,
-                })
+                }
+                if semantic_role:
+                    col_rec["semantic_role"] = semantic_role
+                columns.append(col_rec)
             return {"ok": True, "tables": [index], "columns": columns, "schema": index}
         finally:
             client.close()
@@ -870,9 +1075,12 @@ def _introspect_sqlite(
     """
     import sqlite3
 
-    from services.schema_inference import infer_type
+    from connectors.sqlite_common import sqlite_file_path
 
-    path = connection_string or database or host
+    try:
+        path = sqlite_file_path(database or "", connection_string or "", host or "")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
     if not path:
         return {"ok": False, "error": "SQLite path is required", "columns": [], "tables": []}
     if not table:
@@ -908,32 +1116,44 @@ def _introspect_sqlite(
                         else:
                             samples[name].append(str(value) if value is not None else "")
             except Exception:
-                pass
+                logger.warning("SQLite sample read failed for %s", table, exc_info=True)
 
             columns: list[dict[str, Any]] = []
             for name in col_names:
                 declared = declared_types.get(name, "")
                 values = samples.get(name, [])
+                semantic_role = None
                 if declared == "BLOB" or any(isinstance(v, bytes) for v in values):
                     inferred = "BINARY"
                 else:
+                    from services.schema_inference import infer_column
+
                     str_values = [v for v in values if not isinstance(v, bytes)]
-                    inferred = infer_type(str_values, field_name=name)
+                    intel = infer_column(str_values, field_name=name)
+                    inferred = str(intel["logical_type"])
+                    semantic_role = intel.get("semantic_role")
                     if inferred in ("VARCHAR", "TEXT") and declared in ("INTEGER", "INT"):
                         inferred = "INTEGER"
                     elif inferred in ("VARCHAR", "TEXT") and declared in ("REAL", "FLOAT", "NUMERIC", "DOUBLE"):
                         inferred = "DECIMAL"
 
-                columns.append(
-                    {
-                        "name": name,
-                        "inferred_type": inferred,
-                        "nullable": True,
-                    }
-                )
+                col_out: dict[str, Any] = {
+                    "name": name,
+                    "inferred_type": inferred,
+                    "nullable": True,
+                }
+                if semantic_role:
+                    col_out["semantic_role"] = semantic_role
+                columns.append(col_out)
 
             return {"ok": True, "tables": [table], "columns": columns, "schema": ""}
         finally:
             conn.close()
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+        logger.warning("SQLite introspect failed for %s", table, exc_info=True)
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: SQLite schema introspection failed",
+            "columns": [],
+            "tables": [],
+        }

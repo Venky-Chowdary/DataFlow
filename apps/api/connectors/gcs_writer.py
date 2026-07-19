@@ -13,10 +13,11 @@ from typing import Any, Callable
 from connectors.gcs_common import gcs_client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    build_mapped_rows,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
     to_json_value,
+    transform_error_policy,
 )
 
 _api_root = Path(__file__).resolve().parents[1]
@@ -53,7 +54,8 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    del ssl, create_table, error_policy, username, backfill_new_fields
+    del ssl, create_table, username, backfill_new_fields
+    policy = transform_error_policy(error_policy)
     bucket = database
     if not bucket:
         return WriteResult(
@@ -78,7 +80,7 @@ def write_mapped_rows(
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    mapped_rows, errors = build_mapped_rows(
+    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
@@ -86,6 +88,7 @@ def write_mapped_rows(
         column_types=column_types,
         dest_types=dest_types,
         preserve_case=True,
+        error_policy=policy,
     )
 
     records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
@@ -129,7 +132,8 @@ def write_mapped_rows(
             checksum=checksum,
             chunks_completed=1,
             warnings=errors[:10],
-            rejected_rows=len(data_rows) - len(mapped_rows),
+            rejected_rows=len({d["row"] for d in rejected_details}),
+            rejected_details=rejected_details[:100],
         )
     except Exception as exc:
         return WriteResult(

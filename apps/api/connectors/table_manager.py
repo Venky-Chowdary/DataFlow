@@ -188,7 +188,22 @@ def delete_by_primary_keys(
         return _delete_generic_sql(cfg, table_name, primary_key_column, keys, schema)
     if dt == "mongodb":
         return _delete_mongodb(cfg, table_name, primary_key_column, keys)
+    if dt in {"sqlserver", "mssql", "oracle", "snowflake", "bigquery", "redshift"}:
+        # Route warehouse/SQL dialects through the generic SQLAlchemy deleter.
+        from connectors.generic_sql import delete_by_primary_keys as _generic_delete
+
+        return _generic_delete(
+            {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"},
+            table_name,
+            primary_key_column,
+            keys,
+            schema=schema,
+        )
     return 0
+
+
+class UnsupportedCdcDeleteError(RuntimeError):
+    """Raised when CDC deletes cannot be applied on the destination."""
 
 
 def _delete_postgresql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[str], schema: str | None) -> int:

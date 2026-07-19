@@ -4,11 +4,9 @@
 @import "./jarvis-ui.css";
 @import "./landing.css";
 @import "./enterprise-platform.css";
-@import "./enterprise-motion.css";
 @import "./premium-theme.css";
 @import "./brand-system.css";
 @import "./shell-polish.css";
-@import "./transfer-studio.css";
 @import "./enterprise-pages.css";
 @import "./ui-consistency.css";
 @import "./settings-workspace.css";
@@ -16,20 +14,21 @@
 @import "./mcp-enterprise.css";
 @import "./responsive-fixes.css";
 @import "./pipeline-topology.css";
-@import "./transfer-studio-v2.css";
 @import "./responsive-shell-fixes.css";
 @import "./column-workbench.css";
-@import "./transfer-viewport.css";
-@import "./transfer-studio-polish.css";
 @import "./connectors-page.css";
 @import "./pilot-chat.css";
 @import "./docs-page.css";
 @import "./query-playground.css";
 @import "./benchmarks.css";
-/* Canonical final layer — do not add enterprise-ui-vN / enterprise-primitives siblings.
-   Extend enterprise-ui.css or tokens.css only. */
+/* transfer-studio.css is a self-contained, exclusively-namespaced merge of what
+   used to be 5 separate files; no other stylesheet touches its selectors, so it
+   is safe to load ahead of the canonical layer below. */
+@import "./transfer-studio.css";
+/* Canonical final layer (genuinely last now) — do not add enterprise-ui-vN /
+   enterprise-primitives / workspace-enterprise-vN siblings. Extend this file
+   or tokens.css only. Includes former workspace-enterprise.css content. */
 @import "./enterprise-ui.css";
-@import "./transfer-studio-refresh.css";
 
 .df2-map-step-body {
   display: flex;
@@ -136,4 +135,359 @@
 /* Hide scrollbar on empty hero when content fits (WebKit) */
 .df2-pilot-v2 .df2-pilot-main-scroll:not(:has(.df2-pilot-msg)) {
   overflow-y: auto;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   WORKSPACE SHELL CONTRACT — single source of truth (final cascade layer)
+   Resolves the header-height, scroll, page-header, and dashboard grid
+   conflicts scattered across the legacy stylesheets. Everything here is
+   intentionally last-word so the three shell columns line up, the content
+   area scrolls deterministically, and every page reads as one system.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.df2-app {
+  --df-header-height: 60px;
+}
+
+/* ── 1. Header alignment: topbar = sidebar brand = pilot rail head ───────── */
+.df2-app .df2-topbar,
+.df2-app .df2-sidebar-brand,
+.df2-app .df2-copilot-rail .df2-copilot-head {
+  height: var(--df-header-height) !important;
+  min-height: var(--df-header-height) !important;
+  max-height: var(--df-header-height) !important;
+  box-sizing: border-box !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  flex: 0 0 auto;
+}
+
+.df2-app .df2-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-left: 18px !important;
+  padding-right: 12px !important;
+  margin-bottom: 0 !important;
+  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  overflow: hidden;
+}
+
+.df2-app .df2-copilot-rail .df2-copilot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 18px !important;
+  padding-right: 12px !important;
+  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  overflow: hidden;
+}
+
+.df2-app .df2-copilot-rail .df2-copilot-head > div {
+  min-width: 0;
+}
+
+.df2-app .df2-topbar {
+  padding-left: 24px !important;
+  padding-right: 24px !important;
+}
+
+/* ── 2. Topbar controls: one height, perfectly centered ──────────────────── */
+.df2-app .df2-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-app .df2-topbar-actions > .df2-btn,
+.df2-app .df2-topbar-actions > button {
+  height: 36px;
+  min-height: 36px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.df2-app .df2-topbar-actions > .df2-btn {
+  padding: 0 14px;
+  font-weight: 600;
+}
+
+.df2-app .df2-topbar-actions .df2-btn-ghost.active {
+  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-hover, #0f766e);
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 30%, var(--df-border, #e2e8f0));
+}
+
+/* ── 3. Deterministic content scroll (no :has() / inline-style races) ─────── */
+.df2-app .df2-main .df2-content.df2-content-scroll {
+  overflow-y: auto !important;
+  overflow-x: clip;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+}
+
+.df2-app .df2-main .df2-content.df2-content-fixed {
+  overflow: hidden !important;
+}
+
+/* ── 4. Page identity lives in the topbar breadcrumb (Workspace > Page) ─────
+   The in-content page title/kicker/description are intentionally removed to
+   avoid duplicating the breadcrumb. Any legacy visible header is hard-hidden;
+   pages reclaim the space for high-signal content (KPIs, status, actions).
+   An sr-only <h1> is still emitted by PageShell for accessibility + SEO.     */
+.df2-app .df2-page .df2-page-header,
+.df2-app .df2-page .df2-page-header .df2-page-title,
+.df2-app .df2-page .df2-page-header .df2-page-kicker,
+.df2-app .df2-page .df2-page-header .df2-page-description,
+.df2-app .df2-page-untitled > .df2-page-title,
+.df2-app .df2-page-untitled > .df2-page-kicker,
+.df2-app .df2-page-untitled > .df2-page-description {
+  display: none !important;
+}
+
+/* Reclaim the vertical space the header used to occupy — content sits up top. */
+.df2-app .df2-page-untitled.df2-page-fluid:not(.df2-page-fit) {
+  padding-top: 14px;
+}
+
+/* Slim action bar (only when a page supplies actions — no title beside them) */
+.df2-app .df2-page-untitled .df2-page-actionbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 14px;
+  margin: 0;
+  border: none;
+  background: transparent;
+}
+
+/* ── PageContextBar — reusable high-signal summary strip (design system) ───
+   A restrained, enterprise glass row of precise KPIs that leads a page where
+   the title used to be. One visual language across Connectors, Pipelines, etc. */
+.df2-app .df2-context-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  padding: 14px 16px;
+  margin: 0 0 14px;
+  border: 1px solid var(--df-border, #e6e9ee);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface, #fff);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.df2-app .df2-context-bar-stats {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 0;
+  min-width: 0;
+}
+
+.df2-app .df2-context-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 18px 6px 14px;
+  border-right: 1px solid var(--df-border, #e6e9ee);
+  min-height: 48px;
+  box-sizing: border-box;
+}
+
+.df2-app .df2-context-stat:first-child {
+  padding-left: 4px;
+}
+
+.df2-app .df2-context-stat:last-child {
+  border-right: none;
+  padding-right: 4px;
+}
+
+.df2-app .df2-context-stat-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--df-radius-md, 8px);
+  color: var(--df-brand-hover, #0f766e);
+  background: var(--df-brand-muted, #f0fdfa);
+  flex: 0 0 auto;
+}
+
+.df2-app .df2-context-stat-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  line-height: 1.25;
+  min-width: 0;
+}
+
+.df2-app .df2-context-stat-value {
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--df-text-primary, #0f172a);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-app .df2-context-stat-label {
+  margin-top: 0;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  color: var(--df-text-tertiary, #94a3b8);
+  white-space: nowrap;
+}
+
+.df2-app .df2-context-stat--ok .df2-context-stat-icon {
+  color: var(--df-success, #059669);
+  background: var(--df-success-bg, #ecfdf5);
+}
+.df2-app .df2-context-stat--warn .df2-context-stat-icon {
+  color: var(--df-warning, #d97706);
+  background: var(--df-warning-bg, #fffbeb);
+}
+.df2-app .df2-context-stat--danger .df2-context-stat-value {
+  color: var(--df-danger, #dc2626);
+}
+.df2-app .df2-context-stat--danger .df2-context-stat-icon {
+  color: var(--df-danger, #dc2626);
+  background: var(--df-danger-bg, #fef2f2);
+}
+.df2-app .df2-context-stat--muted .df2-context-stat-value {
+  color: var(--df-text-tertiary, #94a3b8);
+}
+
+.df2-app .df2-context-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .df2-app .df2-context-bar {
+    padding: 12px;
+  }
+  .df2-app .df2-context-stat {
+    padding: 6px 12px;
+    min-height: 44px;
+  }
+  .df2-app .df2-context-stat-value {
+    font-size: 15px;
+  }
+  .df2-app .df2-context-bar-actions {
+    width: 100%;
+  }
+}
+
+/* ── 5. Overview dashboard — consistent card sizing + responsive grid ────── */
+.df2-app .df2-overview-v3 {
+  gap: 16px;
+}
+
+/* KPI strip — four equal panel tiles, one row */
+.df2-app .df2-overview-v3-kpis {
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass {
+  min-height: 112px;
+  height: auto;
+  padding: 16px 18px 18px;
+  border-radius: var(--df-radius-panel, 12px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+/* Cards share one radius + one head rhythm so the grid reads uniform */
+.df2-app .df2-overview-v3-card {
+  border-radius: var(--df-radius-panel, 12px);
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-app .df2-overview-v3-card-head {
+  padding: 14px 18px;
+  align-items: flex-start;
+  min-height: 0;
+}
+
+.df2-app .df2-overview-v3-card-body {
+  padding: 16px 18px;
+}
+
+/* Analytics row: both charts equal height */
+.df2-app .df2-overview-v3-analytics {
+  gap: 16px;
+  align-items: stretch;
+}
+
+.df2-app .df2-overview-v3-analytics > .df2-overview-v3-card {
+  min-height: 280px;
+}
+
+.df2-app .df2-overview-v3-card--chart .df2-overview-v3-chart-body {
+  flex: 1 1 auto;
+  min-height: 196px;
+}
+
+/* Workspace row: main column + sticky rail, aligned tops */
+.df2-app .df2-overview-v3-workspace {
+  gap: 16px;
+}
+
+.df2-app .df2-overview-v3-main,
+.df2-app .df2-overview-v3-rail {
+  gap: 16px;
+}
+
+/* Wider rail on large screens so the health ring + lists breathe */
+@media (min-width: 1440px) {
+  .df2-app .df2-overview-v3-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
+  }
+}
+
+/* Keep four KPIs on one row until narrow tablets */
+@media (max-width: 1100px) {
+  .df2-app .df2-overview-v3-kpis {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .df2-app .df2-overview-v3-analytics,
+  .df2-app .df2-overview-v3-workspace {
+    grid-template-columns: 1fr;
+  }
+  .df2-app .df2-overview-v3-analytics > .df2-overview-v3-card {
+    min-height: 240px;
+  }
+}
+
+@media (max-width: 820px) {
+  .df2-app .df2-overview-v3-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .df2-app .df2-overview-v3-kpis {
+    grid-template-columns: 1fr;
+  }
 }

@@ -130,6 +130,13 @@ def test_stream_sqlite_to_sqlite_resume_from_checkpoint():
             rows_processed=250,
         )
 
+        # Resume is only safe with an idempotent write. Declaring the primary key
+        # upgrades the resumed chunk to an upsert so re-processing cannot duplicate
+        # rows — the engine enforces this (see test below for the guard).
+        stream_contracts = [
+            {"name": "orders", "primary_key": "id", "sync_mode": "full_refresh_overwrite"}
+        ]
+
         rows_written, _ddl, _summary, _columns = stream_database_transfer(
             source,
             destination,
@@ -138,15 +145,61 @@ def test_stream_sqlite_to_sqlite_resume_from_checkpoint():
             job_id="000000000000000000000000",
             checkpoint=checkpoint,
             checkpoint_service=CheckpointService(fake_mongo),
+            stream_contracts=stream_contracts,
         )
 
-        # The first 250 rows should be skipped, then the remaining 250 written.
+        # The first 250 rows should be skipped, then the remaining 250 upserted.
         # rows_written is cumulative (250 already + 250 new = 500).
         assert rows_written == 500
         conn = sqlite3.connect(dst)
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        # No duplicate ids after idempotent resume.
+        distinct = conn.execute("SELECT count(DISTINCT id) FROM orders_out").fetchone()[0]
         conn.close()
         assert count == 500
+        assert distinct == 500
+
+
+def test_stream_resume_insert_without_primary_key_is_refused():
+    """Resuming an insert-mode stream without a primary key would risk duplicate
+    rows, so the engine must refuse it rather than corrupt the destination."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(500, tmp_path)
+        dst = tmp_path / "dst.db"
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
+
+        from services.checkpoint_service import Checkpoint
+
+        checkpoint = Checkpoint(
+            job_id="000000000000000000000000",
+            chunk_index=1,
+            offset=250,
+            rows_processed=250,
+        )
+
+        with pytest.raises(ValueError, match="without a primary key"):
+            stream_database_transfer(
+                source,
+                destination,
+                mappings,
+                schema,
+                job_id="000000000000000000000000",
+                checkpoint=checkpoint,
+                checkpoint_service=CheckpointService(_FakeMongo()),
+            )
 
 
 def test_stream_sqlite_includes_ddl_log_and_summary():

@@ -231,6 +231,24 @@
   padding: 10px;
 }
 
+/* Pilot v2 is a flush chat shell — no nested card frames */
+.df2-content-flush .df2-pilot-v2 .df2-pilot-aside,
+.df2-pilot-workspace.df2-pilot-v2 .df2-pilot-aside {
+  width: auto;
+  border: none !important;
+  border-right: 1px solid #eef2f6 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: #fafbfc;
+  padding: 10px 8px;
+}
+
+.df2-content-flush .df2-pilot-v2 .df2-pilot-aside.is-collapsed,
+.df2-pilot-workspace.df2-pilot-v2 .df2-pilot-aside.is-collapsed {
+  padding: 8px 0;
+  background: #fff;
+}
+
 .df2-pilot-aside-scroll {
   flex: 1;
   min-height: 0;
@@ -249,6 +267,13 @@
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   background: #fff;
+}
+
+.df2-content-flush .df2-pilot-v2 .df2-pilot-main,
+.df2-pilot-workspace.df2-pilot-v2 .df2-pilot-main {
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
 }
 
 .df2-pilot-main-inner,

@@ -1,6 +1,16 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    # wal_level=logical + replication slots so Postgres CDC (logical decoding)
+    # tests can create a real slot instead of mocking the decode stream.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
     environment:
       POSTGRES_USER: dataflow
       POSTGRES_PASSWORD: dataflow
@@ -37,8 +47,37 @@ services:
     volumes:
       - miniodata:/data
 
+  mysql:
+    image: mysql:8.0
+    # ROW-based binlog + a server id so MySQL CDC (binlog replication) tests can
+    # attach a real stream, not just parse fixtures.
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --binlog-row-metadata=FULL
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    environment:
+      MYSQL_ROOT_PASSWORD: dataflow
+      MYSQL_DATABASE: dataflow
+      MYSQL_USER: dataflow
+      MYSQL_PASSWORD: dataflow
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pdataflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   mongodb:
     image: mongo:7
+    # Single-node replica set so Mongo change-stream (CDC) tests have an oplog.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
@@ -49,7 +88,48 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-shot: promote the mongo node to a replica set so change streams work.
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+      - |
+        mongosh --host mongodb:27017 --quiet --eval '
+          try { rs.status(); }
+          catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongodb:27017" }] }); }
+        '
+
+  # SQL Server Change Tracking for CDC integration tests.
+  # Enable CT after first boot: see apps/api/tests/sqlserver_ct_init.sql
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "DataFlow_CDC_2022!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssqldata:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
 volumes:
   pgdata:
   miniodata:
   mongodata:
+  mysqldata:
+  mssqldata:

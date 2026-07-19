@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from services.health_service import aggregate_health
 from services.platform_config import (
@@ -43,6 +43,9 @@ from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
 from .routers.training_agent_router import router as training_agent_router
 from .routers.transfer_router import router as transfer_router
+from .routers.repair_router import router as repair_router
+from .routers.ops_router import router as ops_router
+from .routers.usage_router import router as usage_router
 from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
 
@@ -51,7 +54,12 @@ logger = logging.getLogger("dataflow.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle management"""
+    """Application lifecycle management.
+
+    Bind the HTTP server as soon as critical config is ready. Heavy work
+    (RAG / HF model download, orphaned-job resume) runs *after* yield so
+    Railway ``/health`` liveness can pass within the healthcheck window.
+    """
     apply_railway_defaults()
     enforce_production_config()
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
@@ -79,73 +87,104 @@ async def lifespan(app: FastAPI):
     training_enabled = os.getenv("DATAFLOW_TRAINING", "off" if is_production() else "on").lower() not in (
         "off", "0", "false",
     )
-    try:
-        from .ai.knowledge.semantic_patterns import get_pattern_count
-        from .ai.knowledge.synonyms import get_synonym_count
-        from .ai.rag.pipeline import get_rag_pipeline
-        from .ai.training.training_scheduler import run_training_loop
 
-        pipeline = get_rag_pipeline()
-        init_result = pipeline.initialize()
-        print(f"[+] RAG Pipeline initialized: {init_result.get('ingested', 0)} documents")
-        print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
+    # Accept traffic immediately — do not block on HuggingFace / RAG init.
+    app.state.ready = False
+    print("[+] HTTP listener ready (background warm-up starting)")
 
-        async def _background_training():
-            await asyncio.sleep(120)
-            try:
-                from .ai.training.training_agent import get_training_agent
-                training = get_training_agent()
-                run = await asyncio.to_thread(training.run_full_training, False, False)
-                ready = run.metrics.get("copilot_evaluation", {}).get("ready", False)
-                examples = run.metrics.get("conversation_examples", 0)
-                print(f"[+] Copilot Training Agent: {run.status} ({examples} examples, ready={ready})")
-            except Exception as te:
-                print(f"[!] Copilot training warning: {te}")
+    async def _warm_up():
+        try:
+            from .ai.knowledge.semantic_patterns import get_pattern_count
+            from .ai.knowledge.synonyms import get_synonym_count
+            from .ai.rag.pipeline import get_rag_pipeline
+            from .ai.training.training_scheduler import run_training_loop
 
-        if training_enabled:
-            app.state.training_task = asyncio.create_task(_background_training())
-            asyncio.create_task(run_training_loop())
-            print("[+] Training Agent enabled")
-        else:
-            print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
+            pipeline = get_rag_pipeline()
+            init_result = await asyncio.to_thread(pipeline.initialize)
+            print(f"[+] RAG Pipeline initialized: {init_result.get('ingested', 0)} documents")
+            print(f"[+] Knowledge Base: {get_pattern_count()} patterns, {get_synonym_count()} synonyms")
 
-        from .services.schedule_runner import run_schedule_loop
-        asyncio.create_task(run_schedule_loop())
-        print("[+] Pipeline scheduler started")
-    except Exception as e:
-        print(f"[!] RAG initialization warning: {e}")
+            async def _background_training():
+                await asyncio.sleep(120)
+                try:
+                    from .ai.training.training_agent import get_training_agent
+                    training = get_training_agent()
+                    run = await asyncio.to_thread(training.run_full_training, False, False)
+                    ready = run.metrics.get("copilot_evaluation", {}).get("ready", False)
+                    examples = run.metrics.get("conversation_examples", 0)
+                    print(f"[+] Copilot Training Agent: {run.status} ({examples} examples, ready={ready})")
+                except Exception as te:
+                    print(f"[!] Copilot training warning: {te}")
 
-    try:
-        from services.transfer_scheduler import start as start_transfer_scheduler
+            if training_enabled:
+                app.state.training_task = asyncio.create_task(_background_training())
+                asyncio.create_task(run_training_loop())
+                print("[+] Training Agent enabled")
+            else:
+                print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
+        except Exception as e:
+            print(f"[!] RAG initialization warning: {e}")
 
-        start_transfer_scheduler()
+        # Scheduler must start even when RAG warm-up fails — otherwise due
+        # pipelines sit on Next run forever with Runs=0.
+        try:
+            from services.schedule_store import import_file_schedules_into_mongo
 
-        from .services.mongodb_service import get_mongodb_service
-        from .services.worker_leases import get_worker_lease_store
-        from .transfer.background import run_transfer_async
-        from .transfer.models import transfer_request_from_dict
+            imported = await asyncio.to_thread(import_file_schedules_into_mongo)
+            if imported:
+                print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
-        mongo = get_mongodb_service()
-        lease_store = get_worker_lease_store()
-        resumed = 0
-        for job in mongo.list_jobs(limit=200):
-            if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
-                payload = job["transfer_request"]
-                if payload.get("requires_file_reupload"):
-                    mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
-                    continue
-                if lease_store.is_held(job["_id"]):
-                    continue
-                request = transfer_request_from_dict(payload)
-                run_transfer_async(job["_id"], request, resume=True)
-                resumed += 1
-        print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
-    except Exception as e:
-        print(f"[!] Orphaned job resume warning: {e}")
+            from .services.schedule_runner import run_schedule_loop
+
+            asyncio.create_task(run_schedule_loop())
+            print("[+] Pipeline scheduler started")
+        except Exception as e:
+            print(f"[!] Pipeline scheduler failed to start: {e}")
+
+        try:
+            from services.transfer_scheduler import start as start_transfer_scheduler
+
+            start_transfer_scheduler()
+
+            from .services.mongodb_service import get_mongodb_service
+            from .services.worker_leases import get_worker_lease_store
+            from .transfer.background import run_transfer_async
+            from .transfer.models import transfer_request_from_dict
+
+            mongo = get_mongodb_service()
+            lease_store = get_worker_lease_store()
+            resumed = 0
+            for job in mongo.list_jobs(limit=200):
+                if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
+                    payload = job["transfer_request"]
+                    if payload.get("requires_file_reupload"):
+                        mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
+                        continue
+                    if lease_store.is_held(job["_id"]):
+                        continue
+                    request = transfer_request_from_dict(payload)
+                    run_transfer_async(job["_id"], request, resume=True)
+                    resumed += 1
+            print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
+        except Exception as e:
+            print(f"[!] Orphaned job resume warning: {e}")
+        finally:
+            app.state.ready = True
+            print("[+] Warm-up complete — readiness probes may pass")
+
+    warm_task = asyncio.create_task(_warm_up())
+    app.state.warm_task = warm_task
 
     yield
 
-    task = getattr(app, "state", None) and getattr(app.state, "training_task", None)
+    warm = getattr(app.state, "warm_task", None)
+    if warm and not warm.done():
+        warm.cancel()
+        try:
+            await warm
+        except asyncio.CancelledError:
+            pass
+    task = getattr(app.state, "training_task", None)
     if task:
         task.cancel()
         try:
@@ -253,10 +292,15 @@ app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
+# Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
+app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(query_router, prefix="/api/v1")
+app.include_router(usage_router, prefix="/api/v1")
+app.include_router(ops_router, prefix="/api/v1")
+app.include_router(repair_router, prefix="/api/v1")
 
 
 @app.get("/")
@@ -274,7 +318,43 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return aggregate_health()
+    """Liveness — process is up and accepting traffic.
+
+    Railway deploy healthchecks must hit this path. Keep it cheap and never
+    block on Mongo/RAG/catalog so a slow warm-up cannot fail the deploy.
+    """
+    return {
+        "status": "healthy",
+        "liveness": True,
+        "ready": bool(getattr(app.state, "ready", False)),
+        # Present only after proxy-write hardening is deployed. Use this to
+        # confirm Railway is not still running a pre-fix API image.
+        "features": {
+            "proxy_write_ledger": True,
+            "proxy_write_reconnect": True,
+        },
+    }
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness — dependencies (Mongo, storage, drivers) are usable."""
+    payload = aggregate_health()
+    payload["ready"] = bool(getattr(app.state, "ready", False))
+    if not payload["ready"] and payload.get("status") == "healthy":
+        payload["status"] = "starting"
+    return payload
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus exposition format for job/CDC/quarantine ops metrics."""
+    from services.ops_metrics import prometheus_text
+
+    return PlainTextResponse(
+        content=prometheus_text(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/api/v1")

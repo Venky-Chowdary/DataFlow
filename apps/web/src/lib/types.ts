@@ -1,9 +1,54 @@
-export const API_BASE =
-  (typeof window !== "undefined" && (window as any).DATAFLOW_API_BASE) ||
-  import.meta.env.VITE_API_BASE ||
-  "/api/v1";
+/** Normalize API origin so login and all routes hit `/api/v1/...`. */
+function resolveApiBase(): string {
+  const fromWindow =
+    typeof window !== "undefined"
+      ? (window as { DATAFLOW_API_BASE?: string }).DATAFLOW_API_BASE
+      : undefined;
+  const raw = fromWindow || import.meta.env.VITE_API_BASE || "/api/v1";
+  // Strip quotes/whitespace (Railway paste / "white" blank env values).
+  let trimmed = String(raw).trim().replace(/^['"]|['"]$/g, "").replace(/\/+$/, "");
+  if (!trimmed) return "/api/v1";
+  if (trimmed === "/api/v1" || trimmed.endsWith("/api/v1")) return trimmed;
+  if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith("/")) {
+    trimmed = `https://${trimmed}`;
+  }
+  // Operators often set the Railway host without the version prefix.
+  return `${trimmed}/api/v1`;
+}
 
-export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "mcp" | "settings" | "docs" | "benchmarks";
+export const API_BASE = resolveApiBase();
+
+/** Human-readable API target for Pilot / Settings diagnostics. */
+export function describeApiBase(): string {
+  return API_BASE;
+}
+
+export type Screen = "landing" | "dashboard" | "pilot" | "transfer" | "query" | "connectors" | "schedules" | "jobs" | "contracts" | "mcp" | "settings" | "docs" | "benchmarks";
+
+export interface DataContract {
+  id: string;
+  name: string;
+  version: number;
+  status: "draft" | "signed" | "broken" | "deprecated" | string;
+  source: Record<string, unknown>;
+  destination: Record<string, unknown>;
+  columns: {
+    source_name: string;
+    target_name: string;
+    source_type: string;
+    target_type: string;
+    transform?: string | null;
+    nullable?: boolean;
+    primary_key?: boolean;
+  }[];
+  mappings: Record<string, unknown>[];
+  quality_rules: { name: string; expectation: string; threshold?: number | null; severity?: string }[];
+  preflight_gates?: Record<string, unknown>[];
+  strict: boolean;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
 
 export interface Connector {
   id: string;
@@ -42,14 +87,52 @@ export interface TransferCheckpoint {
   status?: string;
 }
 
+/**
+ * Canonical transfer-job lifecycle vocabulary (mirrors `services/job_status.py`).
+ * `completed_with_quarantine` is a SUCCESS-with-warnings terminal state — the
+ * data landed, but rows were rejected and/or values were coerced to NULL.
+ */
+export type JobStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "completed_with_quarantine"
+  | "failed"
+  | "cancelled";
+
+/** A single quarantined/rejected cell, emitted by every writer. */
+export interface RejectedDetail {
+  row?: number;
+  column?: string;
+  target?: string;
+  value?: string;
+  reason?: string;
+  policy?: string;
+  values?: Record<string, string>;
+  chars?: string[];
+  suggested_transform?: string;
+}
+
+export interface CdcStreamHealth {
+  name: string;
+  status?: string;
+  records_processed?: number;
+  cdc_lag_seconds?: number | null;
+  replication_lag_bytes?: number | null;
+  watermark?: string | null;
+  error?: string | null;
+}
+
 export interface TransferJob {
   _id: string;
+  /** User-editable display name (defaults to source → dest on create). */
+  name?: string;
   source_type: string;
   source_name: string;
   destination_type: string;
   destination_database: string;
   destination_collection: string;
-  status: string;
+  status: JobStatus | string;
   records_processed: number;
   created_at: string;
   total_rows?: number;
@@ -58,6 +141,8 @@ export interface TransferJob {
   message?: string;
   operation?: string;
   error?: string;
+  rejected_rows?: number;
+  coerced_null_rows?: number;
   chunk_current?: number;
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
@@ -65,12 +150,21 @@ export interface TransferJob {
   updated_at?: string;
   started_at?: string;
   completed_at?: string;
+  /** CDC heartbeat / event age in seconds (not end-to-end pipeline latency). */
+  cdc_lag_seconds?: number | null;
+  replication_lag_bytes?: number | null;
+  cdc_heartbeat_at?: string | null;
+  cdc_last_ddl_at?: string | null;
+  streams?: CdcStreamHealth[];
 }
 
 export interface JobPhase {
   name: string;
   status: "pending" | "active" | "done" | "failed" | "skipped";
   message?: string;
+  started_at?: string;
+  ended_at?: string;
+  elapsed_ms?: number;
 }
 
 export interface JobNotificationResult {
@@ -88,11 +182,28 @@ export interface JobProgress extends TransferJob {
   message?: string;
   error?: string;
   rejected_rows?: number;
-  rejected_details?: { row?: number; column?: string; reason?: string; value?: string }[];
+  /** Distinct rows where a value was coerced to NULL (kept, but fidelity lost). */
+  coerced_null_rows?: number;
+  rejected_details?: RejectedDetail[];
   destination_summary?: Record<string, unknown>;
+  /** Last-N load intelligence for this source→destination route. */
+  load_history_report?: LoadHistoryReport;
   preflight?: PreflightResult;
+  /** Gate-8 reconcile payload persisted on the job at terminal status. */
+  reconciliation?: {
+    passed?: boolean;
+    message?: string;
+    source_rows?: number;
+    target_rows?: number;
+    rejected_rows?: number;
+    coerced_null_rows?: number;
+    source_checksum?: string;
+    target_checksum?: string;
+  };
   phases?: JobPhase[];
   notifications?: JobNotificationResult[];
+  records_per_second?: number;
+  chunk_size?: number;
 }
 
 export interface CsvValidationReport {
@@ -121,6 +232,13 @@ export interface ActiveDataContext {
   row_count: number;
   samples?: Record<string, string[]>;
   schema?: Record<string, string>;
+  /** Validation run ID (pf_…) — Data Pilot can look this up. */
+  preflight_run_id?: string;
+  /** Live transfer job ID once Execute starts. */
+  job_id?: string;
+  validation_status?: "passed" | "blocked" | "running" | string;
+  route?: string;
+  blockers?: string[];
 }
 
 export interface ColumnAnalysis {
@@ -175,7 +293,12 @@ export interface PreflightProofBundle {
     missing_key_count?: number;
     extra_key_count?: number;
     message?: string;
-    sample_compare?: { passed: boolean; compared: number; mismatches: Record<string, unknown>[]; skipped?: boolean };
+    sample_compare?: {
+      passed: boolean;
+      compared: number;
+      mismatches: { row: string; source: string; target: string; source_value: string; target_value: string }[];
+      skipped?: boolean;
+    };
   };
   transfer_decision: {
     decision: "approve" | "review" | "block";
@@ -185,14 +308,142 @@ export interface PreflightProofBundle {
   };
 }
 
+export interface CoercionSampleFailure {
+  row: number;
+  value: string;
+  reason: string;
+  wire_form?: string | null;
+}
+
+/** Per-column value-aware coercion prediction (from `coercion_report.columns[]`). */
+export interface CoercionColumn {
+  source: string;
+  target: string;
+  source_type: string;
+  target_type: string;
+  target_logical?: string;
+  transform?: string;
+  sampled: number;
+  ok: number;
+  nulls: number;
+  sentinel_nulls: number;
+  failed: number;
+  wire_normalize?: number;
+  wire_failures?: number;
+  sample_failures: CoercionSampleFailure[];
+  sentinel_examples?: { row: number; value: string }[];
+  wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
+  sample_wire_form?: string | null;
+  severity: "ok" | "warn" | "block";
+  suggested_fix?: string;
+  suggested_target_type?: string | null;
+  suggested_transform?: string | null;
+}
+
+export interface CoercionReport {
+  checked: number;
+  sampled_rows: number;
+  has_blocking_failures: boolean;
+  columns: CoercionColumn[];
+  by_source?: Record<string, CoercionColumn>;
+}
+
+/** Last-N load comparison for the same source→destination route. */
+export interface LoadHistoryReport {
+  prior_load_count?: number;
+  compare_last_k?: number;
+  passed?: boolean;
+  anomalies?: string[];
+  column_findings?: { column: string; signals?: { kind?: string; message?: string }[] }[];
+  novel_quarantine_patterns?: {
+    column: string;
+    reason?: string;
+    count?: number;
+    prior_count?: number;
+    kind?: string;
+  }[];
+  volume_note?: string | null;
+  prior_runs_summary?: {
+    captured_at?: string;
+    job_id?: string | null;
+    row_count?: number;
+    rejected_rows?: number;
+    quarantine_keys?: number;
+  }[];
+  warning?: string;
+}
+
 export interface PreflightResult {
   passed: boolean;
   passed_count: number;
   total_gates: number;
   readiness_score: number;
+  /** Stable ID for this validation run — surface in UI and feed Data Pilot. */
+  run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
   proof_bundle?: PreflightProofBundle;
+  coercion_report?: CoercionReport;
+  load_history_report?: LoadHistoryReport;
+}
+
+/** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
+export type ValidationActionKind =
+  | "change_target_type"
+  | "add_transform"
+  | "review_mappings"
+  | "rerun_mapping"
+  | "check_connection"
+  | "normalize_control_chars"
+  | "quarantine_and_rerun"
+  | "open_bad_data_fix";
+
+export interface ValidationSuggestedAction {
+  kind: ValidationActionKind | string;
+  column?: string;
+  target?: string;
+  to_type?: string;
+  transform?: string;
+  label: string;
+  /** True when mapping-only type change cannot ALTER existing destination DDL. */
+  requires_ddl?: boolean;
+}
+
+export interface ValidationIssue {
+  gate: string;
+  title: string;
+  severity: "block" | "warning" | string;
+  what: string;
+  why: string;
+  fix: string;
+  examples: string[];
+  columns: string[];
+  detail_messages: string[];
+}
+
+export interface ValidationColumnFix {
+  column: string;
+  target?: string;
+  source_type?: string;
+  target_type?: string;
+  severity: "block" | "warn" | "ok" | string;
+  failed: number;
+  sentinel_nulls: number;
+  sampled: number;
+  sample_failures: CoercionSampleFailure[];
+  suggested_fix?: string;
+  suggested_target_type?: string | null;
+  suggested_transform?: string | null;
+}
+
+export interface ValidationExplanation {
+  passed: boolean;
+  summary: string;
+  issues: ValidationIssue[];
+  column_fixes: ValidationColumnFix[];
+  suggested_actions: ValidationSuggestedAction[];
+  narrative: string;
+  assistant_provider: string;
 }
 
 export interface TransferResult {
@@ -210,25 +461,36 @@ export interface TransferResult {
     checksum?: string;
     driver?: string;
     rejected_rows?: number;
-    rejected_details?: { row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[];
+    coerced_null_rows?: number;
+    rejected_details?: RejectedDetail[];
     warnings?: string[];
     error_policy?: string;
     filename?: string;
     download_url?: string;
+    load_method?: string;
+    chunk_size?: number;
+    batches?: number;
+    records_per_second?: number;
+    load_history_report?: LoadHistoryReport;
   };
+  records_per_second?: number;
   ddl_executed?: string[];
   operation?: string;
   error?: string;
+  error_details?: Record<string, unknown>;
   reconciliation?: {
     passed?: boolean;
     message?: string;
     source_rows?: number;
     target_rows?: number;
     rejected_rows?: number;
+    coerced_null_rows?: number;
     source_checksum?: string;
     target_checksum?: string;
   };
   job_id?: string;
+  /** Workspace notification dispatch results copied from the completed job. */
+  notifications?: JobNotificationResult[];
   /** Full client-captured event log from live theater (persisted for result dashboard) */
   event_log?: string[];
 }
@@ -243,6 +505,42 @@ export interface TransferPlan {
   source_schema?: Record<string, string>;
 }
 
+export type ScheduleInterval = "hourly" | "daily" | "weekly";
+export type ScheduleSyncMode =
+  | "full_refresh_overwrite"
+  | "full_refresh_append"
+  | "incremental"
+  | "cdc"
+  | "scd2"
+  | "mirror";
+
+/** Editable config shared by create (POST) and partial update (PATCH). */
+export interface ScheduleInput {
+  name: string;
+  source_connector_id: string;
+  source_table: string;
+  dest_connector_id: string;
+  dest_table: string;
+  interval: ScheduleInterval | string;
+  cron: string;
+  timezone: string;
+  sync_mode: ScheduleSyncMode | string;
+  validation_mode: string;
+  schema_policy: string;
+  backfill_new_fields: boolean;
+  cursor_column: string;
+  primary_key: string;
+  mappings: Record<string, unknown>[];
+  stream_contracts: Record<string, unknown>[];
+  workspace_id: string;
+  max_retries: number;
+  retry_backoff_seconds: number;
+  notify_on_failure: boolean;
+  notify_on_success: boolean;
+  enabled: boolean;
+}
+
+/** Full schedule record (list/detail) — config plus read-only run state. */
 export interface PipelineSchedule {
   id: string;
   name: string;
@@ -250,13 +548,62 @@ export interface PipelineSchedule {
   source_table: string;
   dest_connector_id: string;
   dest_table: string;
-  interval: "hourly" | "daily" | "weekly";
+  interval: ScheduleInterval | string;
+  cron: string;
+  timezone: string;
+  sync_mode: ScheduleSyncMode | string;
+  validation_mode: string;
+  schema_policy: string;
+  backfill_new_fields: boolean;
+  cursor_column: string;
+  primary_key: string;
+  cursor_value: string;
+  workspace_id: string;
+  max_retries: number;
+  retry_backoff_seconds: number;
+  notify_on_failure: boolean;
+  notify_on_success: boolean;
   enabled: boolean;
   last_run_at: string | null;
   next_run_at: string | null;
   last_job_id: string | null;
+  last_status: string | null;
   run_count: number;
+  running: boolean;
   created_at: string;
+  /** Present on GET /schedules/{id}; omitted from list summaries. */
+  mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
+  mapping_count?: number;
+}
+
+/** A single persisted run attempt from GET /schedules/{id}/history. */
+export interface ScheduleRun {
+  job_id: string;
+  status: string;
+  attempt: number;
+  started_at: string;
+  finished_at: string;
+  duration_seconds: number;
+  records_transferred: number;
+  rejected_rows: number;
+  coerced_null_rows: number;
+  error: string;
+  retry_scheduled?: boolean;
+}
+
+export interface ScheduleHistory {
+  schedule_id: string;
+  runs: ScheduleRun[];
+}
+
+export interface ScheduleIntervalOption {
+  id: string;
+  label: string;
+}
+
+export interface ScheduleIntervals {
+  intervals: ScheduleIntervalOption[];
+  sync_modes: string[];
 }
 
 export const CONNECTOR_CATALOG = [

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-import responses
+responses = pytest.importorskip("responses", reason="requires the optional HTTP mocking test dependency")
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:

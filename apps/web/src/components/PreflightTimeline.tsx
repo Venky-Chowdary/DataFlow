@@ -6,23 +6,48 @@ import { useEffect, useState } from "react";
 const GATE_LABELS: Record<string, string> = {
   g1_source: "Source readable",
   g2_destination: "Destination reachable",
-  g3_schema: "Schema contract",
-  g4_mapping: "Column mappings",
-  g5_transform: "Dry-run transform",
-  g9_data_integrity: "Data integrity",
-  g6_ddl: "Target DDL",
+  g3_schema_contract: "Schema contract",
+  g4_mapping_confidence: "Column mappings",
+  g5_dry_run: "Dry-run / integrity",
+  g6_target_ddl: "Target DDL",
   g7_capacity: "Staging capacity",
   g8_reconciliation: "Reconciliation (post-transfer)",
   g9_sync_contract: "Sync contract",
   g10_schema_policy: "Schema change policy",
   g11_validation_posture: "Validation posture",
+  // legacy aliases
+  g3_schema: "Schema contract",
+  g4_mapping: "Column mappings",
+  g5_transform: "Dry-run / integrity",
+  g6_ddl: "Target DDL",
+  g9_data_integrity: "Dry-run / integrity",
 };
 
-const GATE_ORDER = Object.keys(GATE_LABELS);
+const CORE_GATE_ORDER = [
+  "g1_source",
+  "g2_destination",
+  "g3_schema_contract",
+  "g4_mapping_confidence",
+  "g5_dry_run",
+  "g6_target_ddl",
+  "g7_capacity",
+  "g8_reconciliation",
+];
 
 function gateLabel(id: string): string {
-  const entry = Object.entries(GATE_LABELS).find(([key]) => id.includes(key));
-  return entry ? entry[1] : id.replace(/^g\d+_/, "").replace(/_/g, " ");
+  return GATE_LABELS[id] ?? id.replace(/^g\d+_/, "").replace(/_/g, " ");
+}
+
+function formatElapsed(ms: number): string {
+  const s = ms / 1000;
+  return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`;
+}
+
+function formatDuration(ms: number | undefined): string {
+  if (ms == null || Number.isNaN(ms)) return "";
+  if (ms < 10) return "<10ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 interface PreflightTimelineProps {
@@ -46,48 +71,60 @@ export function PreflightTimeline({
   onRerun,
   onUseBalanced,
 }: PreflightTimelineProps) {
-  const [preflightProgress, setPreflightProgress] = useState(0);
-  const totalGates = result.total_gates || GATE_ORDER.length;
-  const currentGateIndex = Math.min(totalGates - 1, Math.max(0, Math.floor((preflightProgress / 100) * totalGates)));
-  const currentGateId = GATE_ORDER[currentGateIndex] || GATE_ORDER[0];
-  const currentGateLabel = gateLabel(currentGateId);
-  const currentGateNumber = currentGateIndex + 1;
-  const phaseLabel = running
-    ? preflightProgress >= 100
-      ? "Done — finishing validation…"
-      : `Step ${currentGateNumber}/${totalGates} · ${currentGateLabel}`
-    : `${currentGateLabel}`;
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [revealCount, setRevealCount] = useState(0);
 
   useEffect(() => {
     if (!running) {
-      setPreflightProgress(0);
+      setElapsedMs(0);
       return;
     }
-    setPreflightProgress(10);
-    const timer = window.setInterval(() => {
-      setPreflightProgress((prev) => {
-        if (prev >= 99) return prev;
-        const step = prev >= 90 ? 1 : prev >= 75 ? Math.max(1, Math.round(Math.random() * 3)) : Math.max(2, Math.round(Math.random() * 8));
-        const next = Math.min(prev + step, 99);
-        return next;
-      });
-    }, 200);
+    const t0 = performance.now();
+    const timer = window.setInterval(() => setElapsedMs(performance.now() - t0), 100);
     return () => window.clearInterval(timer);
   }, [running]);
-  const gates = result.gates.length > 0
-    ? result.gates
-    : running
-      ? [{
-          id: currentGateId,
-          status: "running" as const,
-          message: `Running ${currentGateLabel.toLowerCase()}…`,
-          duration_ms: 0,
-        }]
+
+  useEffect(() => {
+    if (running || !result.gates?.length) {
+      setRevealCount(0);
+      return;
+    }
+    setRevealCount(0);
+    let i = 0;
+    let timer = 0;
+    const advance = () => {
+      i += 1;
+      setRevealCount(i);
+      if (i >= result.gates.length) return;
+      const pace = Math.min(900, Math.max(140, Number(result.gates[i - 1]?.duration_ms) || 180));
+      timer = window.setTimeout(advance, pace);
+    };
+    timer = window.setTimeout(advance, 60);
+    return () => window.clearTimeout(timer);
+  }, [running, result.run_id, result.gates]);
+
+  const gates = running
+    ? CORE_GATE_ORDER.map((id) => ({
+        id,
+        status: "pending" as const,
+        message: "Queued — waiting for engine result",
+        duration_ms: 0,
+      }))
+    : result.gates.length > 0
+      ? result.gates.map((g, i) =>
+          i < revealCount
+            ? g
+            : {
+                ...g,
+                status: "pending" as const,
+                message: "Result ready — revealing…",
+              },
+        )
       : [];
 
-  const passCount = gates.filter((g) => g.status === "pass").length;
-  const blockCount = gates.filter((g) => g.status === "block").length;
-  const skipCount = gates.filter((g) => g.status === "skip").length;
+  const passCount = (result.gates || []).filter((g) => g.status === "pass").length;
+  const blockCount = (result.gates || []).filter((g) => g.status === "block").length;
+  const skipCount = (result.gates || []).filter((g) => g.status === "skip").length;
 
   const proof = result.proof_bundle;
   const decision = proof?.transfer_decision?.decision ?? (result.passed ? "approve" : "review");
@@ -126,22 +163,30 @@ export function PreflightTimeline({
               cy="40"
               r="34"
               className="df2-score-fill"
-              strokeDasharray={`${(result.readiness_score / 100) * 213.6} 213.6`}
+              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : result.readiness_score) / 100) * 213.6} 213.6`}
               transform="rotate(-90 40 40)"
             />
           </svg>
           <div className="df2-preflight-score-val">
-            <span>{result.readiness_score}</span>
-            <small>%</small>
+            {running ? (
+              <>
+                <span style={{ fontSize: 14 }}>{formatElapsed(elapsedMs)}</span>
+              </>
+            ) : (
+              <>
+                <span>{result.readiness_score}</span>
+                <small>%</small>
+              </>
+            )}
           </div>
         </div>
         <div>
           <h3 className="df2-preflight-title">
-            {running ? "Running validation…" : result.passed ? "Ready to transfer" : "Validation — action needed"}
+            {running ? "Engine running G1–G8…" : result.passed ? "Ready to transfer" : "Validation — action needed"}
           </h3>
           <p className="df2-preflight-sub">
             {running
-              ? phaseLabel
+              ? `Wall-clock ${formatElapsed(elapsedMs)} · real gates, not a fake step animation`
               : `${passCount} passed · ${blockCount} blocked · ${skipCount} skipped · ${result.total_gates} total`}
             {result.passed ? " · you can execute the transfer" : !running ? " · fix items below, then re-run" : ""}
           </p>
@@ -269,23 +314,14 @@ export function PreflightTimeline({
           <div className="df2-validate-stage-core">
             <Spinner size="sm" label="" />
             <h3>Validating route</h3>
-            <p title={phaseLabel}>{phaseLabel}</p>
-            <div
-              className="df2-preflight-progress"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={preflightProgress}
-            >
+            <p>Engine evaluating G1–G8 · {formatElapsed(elapsedMs)} elapsed</p>
+            <div className="df2-preflight-progress is-indeterminate" role="status">
               <div className="df2-mapping-progress-meta">
-                <strong>{preflightProgress}%</strong>
-                <span>Safety gates</span>
+                <strong>{formatElapsed(elapsedMs)}</strong>
+                <span>Wall clock · not fake %</span>
               </div>
               <div className="df2-mapping-progress-track">
-                <span
-                  className={`df2-mapping-progress-fill ${preflightProgress >= 80 ? "is-finishing" : ""} is-animating`}
-                  style={{ width: `${preflightProgress}%` }}
-                />
+                <span className="df2-mapping-progress-fill is-animating" style={{ width: "42%" }} />
               </div>
             </div>
           </div>
@@ -305,9 +341,17 @@ export function PreflightTimeline({
               {gate.status === "block" && <DtIcon name="x" size={12} />}
               {gate.status === "running" && <Spinner size="sm" label="" />}
               {gate.status === "skip" && <span>—</span>}
+              {gate.status === "pending" && <span>·</span>}
             </div>
             <div className="df2-preflight-step-copy">
-              <div className="df2-preflight-step-title">{gateLabel(gate.id)}</div>
+              <div className="df2-preflight-step-title">
+                {gateLabel(gate.id)}
+                {gate.status !== "pending" && gate.duration_ms > 0 ? (
+                  <span style={{ marginLeft: 8, color: "#94a3b8", fontWeight: 500, fontSize: 11 }}>
+                    {formatDuration(gate.duration_ms)}
+                  </span>
+                ) : null}
+              </div>
               <div className="df2-preflight-step-msg">{gate.message}</div>
             </div>
           </div>

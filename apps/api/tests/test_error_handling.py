@@ -28,6 +28,17 @@ def test_classify_operational_error_as_retriable():
     assert any("operationalerror" in e for e in classification["evidence"])
 
 
+def test_classify_wrapped_connection_drop_as_retriable():
+    """Writers often wrap psycopg2/pymysql drops as RuntimeError(message)."""
+    classification = classify_error(
+        RuntimeError(
+            "server closed the connection unexpectedly "
+            "This probably means the server terminated abnormally before or while processing the request."
+        )
+    )
+    assert classification["retriable"] is True
+
+
 def test_classify_unique_violation_as_non_retriable():
     class FakeIntegrityError(Exception):
         pass

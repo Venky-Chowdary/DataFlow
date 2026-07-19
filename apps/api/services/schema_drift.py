@@ -2,15 +2,185 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.schema_fingerprint import fingerprint_schema, schemas_match
-from services.type_system import is_lossy_coercion
+from services.type_system import is_lossy_coercion, normalize_logical_type
 
 
 def _norm_type(value: str | None) -> str:
     return (value or "VARCHAR").strip().upper()
+
+
+def _type_length(type_name: str) -> int | None:
+    match = re.search(r"\((\d+)", type_name or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _unpack_schema(schema: dict[str, Any] | None) -> tuple[dict[str, str], dict[str, bool], list[str]]:
+    """Accept flat col→type maps or nested {columns, nullable, primary_key}."""
+    schema = schema or {}
+    if "columns" in schema and isinstance(schema.get("columns"), dict):
+        columns = {str(k): str(v) for k, v in schema["columns"].items()}
+        nullable_raw = schema.get("nullable") or {}
+        nullable = {str(k): bool(v) for k, v in nullable_raw.items()} if isinstance(nullable_raw, dict) else {}
+        pk_raw = schema.get("primary_key") or schema.get("primary_keys") or []
+        if isinstance(pk_raw, str):
+            primary_key = [pk_raw] if pk_raw else []
+        else:
+            primary_key = [str(p) for p in pk_raw]
+        return columns, nullable, primary_key
+
+    columns = {str(k): str(v) for k, v in schema.items() if not str(k).startswith("_")}
+    return columns, {}, []
+
+
+def _is_type_widen(old_type: str, new_type: str) -> bool:
+    """True when new_type can hold all values of old_type without loss."""
+    old_logical = normalize_logical_type(old_type)
+    new_logical = normalize_logical_type(new_type)
+    if old_logical == new_logical:
+        old_len = _type_length(old_type)
+        new_len = _type_length(new_type)
+        return (
+            old_len is not None
+            and new_len is not None
+            and new_len > old_len
+        )
+    # Differing logical types: safe (non-lossy) promotions count as widens.
+    return not is_lossy_coercion(old_type, new_type)
+
+
+def _is_type_narrow(old_type: str, new_type: str) -> bool:
+    old_logical = normalize_logical_type(old_type)
+    new_logical = normalize_logical_type(new_type)
+    if old_logical == new_logical:
+        old_len = _type_length(old_type)
+        new_len = _type_length(new_type)
+        return (
+            old_len is not None
+            and new_len is not None
+            and new_len < old_len
+        )
+    return is_lossy_coercion(old_type, new_type)
+
+
+def classify_schema_change(
+    old_schema: dict[str, Any] | None,
+    new_schema: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Classify a schema evolution as additive vs breaking.
+
+    Additive: new nullable columns, widen types.
+    Breaking: drop/rename/type-narrow/pk change / new NOT NULL columns.
+    """
+    old_cols, old_null, old_pk = _unpack_schema(old_schema)
+    new_cols, new_null, new_pk = _unpack_schema(new_schema)
+
+    additive: list[dict[str, Any]] = []
+    breaking: list[dict[str, Any]] = []
+
+    old_names = set(old_cols)
+    new_names = set(new_cols)
+    added = sorted(new_names - old_names)
+    dropped = sorted(old_names - new_names)
+
+    # Heuristic rename: one drop + one add with compatible types → rename (breaking).
+    renamed_pairs: list[tuple[str, str]] = []
+    if len(dropped) == 1 and len(added) == 1:
+        d, a = dropped[0], added[0]
+        if not _is_type_narrow(old_cols[d], new_cols[a]):
+            renamed_pairs.append((d, a))
+            breaking.append({
+                "kind": "rename",
+                "column": d,
+                "to": a,
+                "old_type": old_cols[d],
+                "new_type": new_cols[a],
+            })
+            dropped = []
+            added = []
+
+    for col in dropped:
+        breaking.append({"kind": "drop", "column": col, "old_type": old_cols[col]})
+
+    for col in added:
+        nullable = new_null.get(col, True)
+        entry = {
+            "kind": "add_column",
+            "column": col,
+            "new_type": new_cols[col],
+            "nullable": nullable,
+        }
+        if nullable:
+            additive.append(entry)
+        else:
+            breaking.append({**entry, "kind": "add_not_null"})
+
+    for col in sorted(old_names & new_names):
+        old_t, new_t = old_cols[col], new_cols[col]
+        same_logical = normalize_logical_type(old_t) == normalize_logical_type(new_t)
+        same_length = _type_length(old_t) == _type_length(new_t)
+        if same_logical and same_length:
+            # Same declared type; nullability tighten is breaking.
+            if col in old_null and col in new_null and old_null[col] and not new_null[col]:
+                breaking.append({
+                    "kind": "nullability_tighten",
+                    "column": col,
+                    "old_type": old_t,
+                    "new_type": new_t,
+                })
+            continue
+        if _is_type_widen(old_t, new_t):
+            additive.append({
+                "kind": "widen_type",
+                "column": col,
+                "old_type": old_t,
+                "new_type": new_t,
+            })
+        elif _is_type_narrow(old_t, new_t):
+            breaking.append({
+                "kind": "narrow_type",
+                "column": col,
+                "old_type": old_t,
+                "new_type": new_t,
+            })
+        elif not same_logical:
+            breaking.append({
+                "kind": "type_change",
+                "column": col,
+                "old_type": old_t,
+                "new_type": new_t,
+            })
+
+    if old_pk or new_pk:
+        if [c.lower() for c in old_pk] != [c.lower() for c in new_pk]:
+            breaking.append({
+                "kind": "primary_key_change",
+                "old_primary_key": old_pk,
+                "new_primary_key": new_pk,
+            })
+
+    if breaking:
+        severity = "breaking"
+    elif additive:
+        severity = "additive"
+    else:
+        severity = "none"
+
+    return {
+        "additive": additive,
+        "breaking": breaking,
+        "severity": severity,
+        "renamed": [{"from": a, "to": b} for a, b in renamed_pairs],
+    }
 
 
 def detect_schema_drift(

@@ -1,4 +1,13 @@
-/** Public marketing routes — never require auth. */
+/** Public marketing routes — never require auth. Includes help/* article routes. */
+
+import {
+  HELP_DOC_IDS,
+  getHelpDoc,
+  hashForHelpDoc,
+  helpDocFromSlug,
+  isHelpDocRoute,
+  type HelpDocId,
+} from "./helpDocs";
 
 export type PublicRoute =
   | "home"
@@ -13,12 +22,16 @@ export type PublicRoute =
   | "product-transfer"
   | "product-pilot"
   | "product-mcp"
+  | "product-jobs"
+  | "product-pipelines"
+  | "product-query"
   | "integrations"
   | "solution-migrations"
   | "solution-warehouse"
-  | "solution-sync";
+  | "solution-sync"
+  | HelpDocId;
 
-const HASH_TO_ROUTE: Record<string, PublicRoute> = {
+const BASE_HASH_TO_ROUTE: Record<string, Exclude<PublicRoute, HelpDocId>> = {
   "": "home",
   home: "home",
   landing: "home",
@@ -32,18 +45,22 @@ const HASH_TO_ROUTE: Record<string, PublicRoute> = {
   help: "help",
   docs: "help",
   guide: "help",
+  documentation: "help",
   integrations: "integrations",
   connectors: "integrations",
   catalog: "integrations",
   "product/transfer": "product-transfer",
   "product/pilot": "product-pilot",
   "product/mcp": "product-mcp",
+  "product/jobs": "product-jobs",
+  "product/pipelines": "product-pipelines",
+  "product/query": "product-query",
   "solutions/migrations": "solution-migrations",
   "solutions/warehouse": "solution-warehouse",
   "solutions/sync": "solution-sync",
 };
 
-const ROUTE_TO_HASH: Record<PublicRoute, string> = {
+const BASE_ROUTE_TO_HASH: Record<Exclude<PublicRoute, HelpDocId>, string> = {
   home: "#/",
   pricing: "#/pricing",
   enterprise: "#/enterprise",
@@ -56,6 +73,9 @@ const ROUTE_TO_HASH: Record<PublicRoute, string> = {
   "product-transfer": "#/product/transfer",
   "product-pilot": "#/product/pilot",
   "product-mcp": "#/product/mcp",
+  "product-jobs": "#/product/jobs",
+  "product-pipelines": "#/product/pipelines",
+  "product-query": "#/product/query",
   integrations: "#/integrations",
   "solution-migrations": "#/solutions/migrations",
   "solution-warehouse": "#/solutions/warehouse",
@@ -111,6 +131,18 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, { title: string; description:
     title: "MCP Server",
     description: "Governed transfers from Cursor, Claude, and VS Code.",
   },
+  "product-jobs": {
+    title: "Job Theater",
+    description: "Live batch progress, phases, quarantine, and proof reports for every transfer.",
+  },
+  "product-pipelines": {
+    title: "Pipelines",
+    description: "Scheduled sync with watermarks, upsert modes, and governed preflight.",
+  },
+  "product-query": {
+    title: "Query Playground",
+    description: "Ad-hoc SQL and document queries against live connectors with export paths.",
+  },
   integrations: {
     title: "Connectors",
     description: "Native drivers and SQLAlchemy generics with honest transfer-ready labels.",
@@ -127,11 +159,24 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, { title: string; description:
     title: "Recurring sync",
     description: "Incremental pipelines with quarantine and upsert modes.",
   },
-};
+  ...Object.fromEntries(
+    HELP_DOC_IDS.map((id) => {
+      const doc = getHelpDoc(id);
+      return [id, { title: doc.title, description: doc.description }] as const;
+    }),
+  ),
+} as Record<PublicRoute, { title: string; description: string }>;
 
 export function publicRouteFromHash(hash: string): PublicRoute | null {
   const raw = hash.replace(/^#\/?/, "").split("?")[0].trim().toLowerCase();
-  // App screens handled elsewhere — not public marketing
+  if (!raw) return "home";
+
+  // Doc articles: #/help/<slug>  (must run before the bare "help" map)
+  const helpMatch = raw.match(/^help\/([a-z0-9-]+)$/);
+  if (helpMatch) {
+    return helpDocFromSlug(helpMatch[1]);
+  }
+
   const appOnly = new Set([
     "dashboard",
     "transfer",
@@ -145,12 +190,15 @@ export function publicRouteFromHash(hash: string): PublicRoute | null {
     "login",
   ]);
   if (appOnly.has(raw)) return null;
-  if (raw in HASH_TO_ROUTE) return HASH_TO_ROUTE[raw];
+
+  if (raw in BASE_HASH_TO_ROUTE) return BASE_HASH_TO_ROUTE[raw];
+  if (isHelpDocRoute(raw)) return raw;
   return null;
 }
 
 export function hashForPublicRoute(route: PublicRoute): string {
-  return ROUTE_TO_HASH[route];
+  if (isHelpDocRoute(route)) return hashForHelpDoc(route);
+  return BASE_ROUTE_TO_HASH[route];
 }
 
 export function readPublicHash(): PublicRoute | null {

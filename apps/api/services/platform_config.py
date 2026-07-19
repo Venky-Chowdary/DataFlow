@@ -143,13 +143,29 @@ def validate_production_config() -> list[str]:
     if os.getenv("DATAFLOW_REQUIRE_AUTH", "0").lower() not in ("1", "true", "yes"):
         errors.append("DATAFLOW_REQUIRE_AUTH must be 1 in production")
 
-    if os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() not in ("1", "true", "yes"):
-        users_raw = os.getenv("DATAFLOW_AUTH_USERS", "").strip()
-        if not users_raw:
-            errors.append("DATAFLOW_AUTH_USERS must define at least one user (or set DATAFLOW_ALLOW_DEV_USER=1 for staging only)")
-
-    if not os.getenv("DATAFLOW_SECRETS_KEY", "").strip() and not secret:
-        errors.append("DATAFLOW_SECRETS_KEY or DATAFLOW_AUTH_SECRET required for connector encryption")
+    # At least one real login path: admin pair and/or AUTH_USERS JSON.
+    # DATAFLOW_ALLOW_DEV_USER is staging-only and must not be required in prod.
+    admin_email = (os.getenv("DATAFLOW_ADMIN_EMAIL") or "").strip()
+    admin_password = (os.getenv("DATAFLOW_ADMIN_PASSWORD") or "").strip()
+    users_raw = (os.getenv("DATAFLOW_AUTH_USERS") or "").strip()
+    allow_dev = os.getenv("DATAFLOW_ALLOW_DEV_USER", "0").lower() in ("1", "true", "yes")
+    if not ((admin_email and admin_password) or users_raw or allow_dev):
+        errors.append(
+            "Set DATAFLOW_ADMIN_EMAIL + DATAFLOW_ADMIN_PASSWORD "
+            "(recommended), or a valid DATAFLOW_AUTH_USERS JSON array"
+        )
+    if allow_dev:
+        print(
+            "[!] DATAFLOW_ALLOW_DEV_USER=1 is set — staging/dev login only; "
+            "disable for real production tenants",
+            file=sys.stderr,
+        )
+    if not os.getenv("DATAFLOW_SECRETS_KEY", "").strip():
+        errors.append("DATAFLOW_SECRETS_KEY must be set for Fernet encryption of connector credentials in production")
+    try:
+        import cryptography.fernet  # noqa: F401
+    except Exception:
+        errors.append("cryptography package must be installed in production (Fernet secret vault)")
 
     mongo = mongodb_uri()
     if _mongo_is_localhost(mongo) and not mongo.startswith("mongodb://mongo:"):

@@ -81,3 +81,26 @@ def test_authenticate_with_env_credentials(auth_env):
 
     assert authenticate("admin@example.com", "strong-password-123") is not None
     assert authenticate("admin@example.com", "wrong-password") is None
+
+
+def test_normalize_secret_handles_dollar_escape(auth_env, monkeypatch):
+    """Railway/shell often expand $FOO — operators escape as $$FOO."""
+    import src.services.auth_service as auth_mod
+
+    monkeypatch.setenv("DATAFLOW_ADMIN_EMAIL", "admin@dataflow.app")
+    monkeypatch.setenv("DATAFLOW_ADMIN_PASSWORD", "p@ss$$word")
+    # Reset admin cache between env mutations
+    auth_mod._ADMIN_USER_CACHE = None
+    auth_mod._ADMIN_CACHE_KEY = None
+    user = auth_mod.authenticate("admin@dataflow.app", "p@ss$word")
+    assert user is not None
+
+
+def test_auth_bootstrap_status_reports_admin(auth_env):
+    from src.services.auth_service import auth_bootstrap_status
+
+    status = auth_bootstrap_status()
+    assert status["admin_email_configured"] is True
+    assert status["admin_password_configured"] is True
+    assert status["user_count"] >= 1
+    assert "admin@example.com" in status["emails"]

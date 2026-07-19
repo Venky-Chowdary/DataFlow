@@ -39,6 +39,18 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="read_table_batch",
         writer="connectors.mysql_writer",
     ),
+    "sqlserver": ConnectorModules(
+        probe=("connectors.sqlserver", "test_sqlserver"),
+        reader="connectors.sqlserver_reader",
+        reader_fn="read_table_batch",
+        writer="connectors.sqlserver_writer",
+    ),
+    "oracle": ConnectorModules(
+        probe=("connectors.oracle", "test_oracle"),
+        reader="connectors.oracle_reader",
+        reader_fn="read_table_batch",
+        writer="connectors.oracle_writer",
+    ),
     "mongodb": ConnectorModules(
         probe=None,
         reader="connectors.mongodb_reader",
@@ -121,15 +133,27 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         probe=("connectors.salesforce", "test_salesforce"),
         reader="connectors.salesforce",
         reader_fn="read_object",
-        writer="connectors.saas_common",
-        writer_fn="write_not_supported",
+        writer="connectors.salesforce_writer",
+        writer_fn="write_mapped_rows",
     ),
     "hubspot": ConnectorModules(
         probe=("connectors.hubspot", "test_hubspot"),
         reader="connectors.hubspot",
         reader_fn="read_object",
-        writer="connectors.saas_common",
-        writer_fn="write_not_supported",
+        writer="connectors.hubspot_writer",
+        writer_fn="write_mapped_rows",
+    ),
+    "iceberg": ConnectorModules(
+        probe=("connectors.iceberg_writer", "test_iceberg"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.iceberg_writer",
+    ),
+    "kafka": ConnectorModules(
+        probe=("connectors.kafka_writer", "test_kafka"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.kafka_writer",
     ),
     "stripe": ConnectorModules(
         probe=("connectors.stripe", "test_stripe"),
@@ -178,6 +202,15 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="",
         writer="connectors.qdrant_writer",
     ),
+    # Singer tap bridge (Connector SDK) — source-only extract over the Singer
+    # protocol. Reader is the SDK matrix helper; writes are not supported.
+    "singer_tap": ConnectorModules(
+        probe=("connectors.sdk.singer_bridge", "test_singer_tap"),
+        reader="connectors.sdk",
+        reader_fn="sdk_read_as_matrix",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    ),
 }
 
 
@@ -199,6 +232,51 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     """Convert low-level driver/connection errors into user-friendly messages."""
     text = str(raw).lower()
     driver = (driver or "").lower()
+    raw_s = str(raw)
+
+    # Railway private DNS — guidance depends on whether THIS API is on Railway.
+    if ".railway.internal" in text:
+        try:
+            from connectors.sql_dsn import is_running_on_railway, private_cloud_host_hint
+
+            on_railway = is_running_on_railway()
+        except Exception:
+            on_railway = False
+        if on_railway:
+            # Keep the real cause when present; append railway-internal guidance.
+            base = raw_s
+            # Strip our previously-injected hint if nested
+            hint = private_cloud_host_hint("x.railway.internal", "")
+            if hint and hint.strip() not in base:
+                # Prefer a concise primary message over dumping raw driver noise
+                if re.search(
+                    r"name or service not known|nodename|getaddrinfo|cannot resolve|not known|"
+                    r"could not translate host name|temporary failure in name resolution|unknown host",
+                    text,
+                ):
+                    return (
+                        "Railway private hostname did not resolve from this API service. "
+                        "Confirm the database service is in the same Railway project and the "
+                        "host matches its private domain (e.g. mysql.railway.internal). "
+                        "Use private port 3306 (MySQL) or 5432 (Postgres)."
+                    )
+                if re.search(r"timed out|timeout|connection refused|unreachable", text):
+                    return (
+                        "Cannot reach the Railway private database host from this API service. "
+                        "Check the service is running, use private port 3306/5432, and that both "
+                        "services share the same Railway project/network."
+                    )
+                return f"Connection failed on Railway private network: {raw_s.split(hint)[0].strip()}"
+            return (
+                "Cannot reach the Railway private database host from this API service. "
+                "Check project linking, private hostname, and private port (3306/5432)."
+            )
+        return (
+            "Cannot reach this Railway private hostname from here. "
+            "In Connectors, use the *public* proxy host (*.proxy.rlwy.net) and the "
+            "*public* TCP port from Railway — not mysql.railway.internal / postgres.railway.internal "
+            "and not ports 3306/5432."
+        )
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
@@ -221,6 +299,11 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
 
     # DNS / host unknown
     if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known", text):
+        if "internal" in text:
+            return (
+                "Host not found — this looks like a private/internal address. "
+                "Use the provider public proxy host and port (for Railway: *.proxy.rlwy.net)."
+            )
         return "Host not found. Check the host/address and that it is reachable from the network."
 
     # Connection refused / unreachable
@@ -229,6 +312,11 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
 
     # Timeouts
     if re.search(r"timed out|timeout|sockettimeout|connecttimeout|operation timed out", text):
+        if "internal" in text or "railway" in text:
+            return (
+                "Connection timed out. If you used a *.railway.internal host, switch to the "
+                "public proxy host and port from Railway. Otherwise check network/firewall."
+            )
         return "Connection timed out. Check the host/port, network, and that the service is running."
 
     # SSL / TLS

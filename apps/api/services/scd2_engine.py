@@ -18,10 +18,43 @@ IS_CURRENT_COLUMN = "is_current"
 ROW_HASH_COLUMN = "row_hash"
 
 SCD2_COLUMNS = [VALID_FROM_COLUMN, VALID_TO_COLUMN, IS_CURRENT_COLUMN, ROW_HASH_COLUMN]
+# Unit separator — safe delimiter for composite natural keys in-memory.
+_KEY_SEP = "\x1f"
 
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _compose_key(row: dict[str, Any], columns: list[str]) -> str:
+    from services.value_serializer import cell_to_string
+
+    return _KEY_SEP.join(cell_to_string(row.get(c)) for c in columns)
+
+
+def _pk_or_clause(columns: list[str], keys: set[str], *, prefix: str) -> tuple[str, dict[str, Any]]:
+    """Build ``(c1=:p0_0 AND c2=:p0_1) OR …`` for composite PK membership."""
+    from connectors.writer_common import quote_sql_identifier
+
+    if not keys or not columns:
+        return "1=0", {}
+    quoted = [quote_sql_identifier(c) for c in columns]
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, key in enumerate(keys):
+        parts = key.split(_KEY_SEP)
+        if len(parts) != len(columns):
+            continue
+        ands = []
+        for j, col_q in enumerate(quoted):
+            pname = f"{prefix}{i}_{j}"
+            ands.append(f"{col_q} = :{pname}")
+            params[pname] = parts[j]
+        if ands:
+            clauses.append("(" + " AND ".join(ands) + ")")
+    if not clauses:
+        return "1=0", {}
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 def _qualified_name(table: str, schema: str | None) -> str:
@@ -133,36 +166,33 @@ def _build_scd_table(
 def _fetch_current_rows(
     conn: Any,
     qualified: str,
-    pk_target: str,
+    pk_columns: list[str],
     keys: set[str],
     dialect_name: str,
 ) -> dict[str, str]:
-    """Return {key: row_hash} for current rows whose key is in ``keys``."""
+    """Return {composite_key: row_hash} for current rows whose key is in ``keys``."""
     import sqlalchemy as sa
 
     from connectors.writer_common import quote_sql_identifier
 
-    if not keys:
+    if not keys or not pk_columns:
         return {}
-    pk_quoted = quote_sql_identifier(pk_target)
+    pk_select = ", ".join(quote_sql_identifier(c) for c in pk_columns)
     hash_quoted = quote_sql_identifier(ROW_HASH_COLUMN)
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
-
-    # SQLite and PostgreSQL both bind lists with ``IN (:k0, :k1, ...)``.
-    placeholders = ",".join([f":k{i}" for i in range(len(keys))])
-    params = {f"k{i}": k for i, k in enumerate(keys)}
+    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k")
+    current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
     sql = (
-        f"SELECT {pk_quoted}, {hash_quoted} FROM {qualified} "
-        f"WHERE {pk_quoted} IN ({placeholders}) AND {current_quoted} IS TRUE"
+        f"SELECT {pk_select}, {hash_quoted} FROM {qualified} "
+        f"WHERE {where_keys} AND {current_pred}"
     )
-    # SQLite does not have a TRUE literal in some contexts; fallback to 1.
-    if dialect_name == "sqlite":
-        sql = (
-            f"SELECT {pk_quoted}, {hash_quoted} FROM {qualified} "
-            f"WHERE {pk_quoted} IN ({placeholders}) AND {current_quoted} = 1"
-        )
     result = conn.execute(sa.text(sql), params)
-    return {str(row._mapping[pk_target]): str(row._mapping[ROW_HASH_COLUMN]) for row in result}
+    out: dict[str, str] = {}
+    for row in result:
+        mapping = row._mapping
+        key = _compose_key(dict(mapping), pk_columns)
+        out[key] = str(mapping[ROW_HASH_COLUMN])
+    return out
 
 
 def _insert_rows(conn: Any, table_obj: Any, rows: list[dict[str, Any]]) -> int:
@@ -178,7 +208,7 @@ def _insert_rows(conn: Any, table_obj: Any, rows: list[dict[str, Any]]) -> int:
 def _expire_rows(
     conn: Any,
     qualified: str,
-    pk_target: str,
+    pk_columns: list[str],
     keys: set[str],
     timestamp: str,
     dialect_name: str,
@@ -188,25 +218,19 @@ def _expire_rows(
 
     from connectors.writer_common import quote_sql_identifier
 
-    if not keys:
+    if not keys or not pk_columns:
         return 0
-    pk_quoted = quote_sql_identifier(pk_target)
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
     valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN)
-    placeholders = ",".join([f":k{i}" for i in range(len(keys))])
-    params = {f"k{i}": k for i, k in enumerate(keys)}
+    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="e")
     params["ts"] = timestamp
+    current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
+    false_lit = "0" if dialect_name == "sqlite" else "FALSE"
     sql = (
         f"UPDATE {qualified} "
-        f"SET {valid_to_quoted} = :ts, {current_quoted} = FALSE "
-        f"WHERE {pk_quoted} IN ({placeholders}) AND {current_quoted} IS TRUE"
+        f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
+        f"WHERE {where_keys} AND {current_pred}"
     )
-    if dialect_name == "sqlite":
-        sql = (
-            f"UPDATE {qualified} "
-            f"SET {valid_to_quoted} = :ts, {current_quoted} = 0 "
-            f"WHERE {pk_quoted} IN ({placeholders}) AND {current_quoted} = 1"
-        )
     result = conn.execute(sa.text(sql), params)
     return result.rowcount or 0
 
@@ -267,7 +291,7 @@ def apply_scd2(
 ) -> dict[str, Any]:
     """Apply an SCD2 merge to ``records`` against the SQL destination.
 
-    ``conflict_columns`` is the destination primary key (currently one column).
+    ``conflict_columns`` is the destination primary key (one or more columns).
     Returns a summary dict with ``rows_written`` (new current versions),
     ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
     """
@@ -279,10 +303,10 @@ def apply_scd2(
 
     if not conflict_columns:
         raise ValueError("SCD2 sync requires a primary key / conflict column")
-    if len(conflict_columns) > 1:
-        raise NotImplementedError("composite primary key SCD2 is not yet supported")
 
-    pk_target = conflict_columns[0]
+    pk_columns = [c for c in conflict_columns if c]
+    if not pk_columns:
+        raise ValueError("SCD2 sync requires a primary key / conflict column")
 
     target_cols = _target_columns(columns, mappings)
 
@@ -320,19 +344,24 @@ def apply_scd2(
         timestamp = _now_utc()
         inserted_total = 0
         expired_total = 0
+        qualified = _qualified_name(table, schema_name)
 
         with engine.begin() as conn:
             for i in range(0, len(mapped_rows), batch_size):
                 batch = mapped_rows[i : i + batch_size]
-                keys = {str(r.get(pk_target, "")) for r in batch if r.get(pk_target) is not None}
-                current_hashes = _fetch_current_rows(conn, _qualified_name(table, schema_name), pk_target, keys, dialect_name)
+                keys: set[str] = set()
+                for r in batch:
+                    key = _compose_key(r, pk_columns)
+                    if key and not all(p == "" for p in key.split(_KEY_SEP)):
+                        keys.add(key)
+                current_hashes = _fetch_current_rows(conn, qualified, pk_columns, keys, dialect_name)
 
                 to_insert: list[dict[str, Any]] = []
                 to_expire: set[str] = set()
 
                 for row in batch:
-                    key = str(row.get(pk_target, ""))
-                    if not key:
+                    key = _compose_key(row, pk_columns)
+                    if not key or all(p == "" for p in key.split(_KEY_SEP)):
                         continue
                     new_hash = row[ROW_HASH_COLUMN]
                     if key in current_hashes and current_hashes[key] == new_hash:
@@ -346,16 +375,18 @@ def apply_scd2(
                     to_insert.append(row)
 
                 if to_expire:
-                    expired_total += _expire_rows(conn, _qualified_name(table, schema_name), pk_target, to_expire, timestamp, dialect_name)
+                    expired_total += _expire_rows(
+                        conn, qualified, pk_columns, to_expire, timestamp, dialect_name
+                    )
                 inserted_total += _insert_rows(conn, table_obj, to_insert)
 
                 # Update in-memory current_hashes so duplicate keys within the same batch
                 # do not create multiple current versions.
                 for row in to_insert:
-                    current_hashes[str(row.get(pk_target, ""))] = row[ROW_HASH_COLUMN]
+                    current_hashes[_compose_key(row, pk_columns)] = row[ROW_HASH_COLUMN]
 
             active_rows, active_checksum = _active_checksum(
-                conn, _qualified_name(table, schema_name), target_cols, batch_size, dialect_name
+                conn, qualified, target_cols, batch_size, dialect_name
             )
     finally:
         engine.dispose()
@@ -366,5 +397,6 @@ def apply_scd2(
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "mode": "scd2",
+        "primary_key_columns": pk_columns,
         "target_columns": target_cols,
     }

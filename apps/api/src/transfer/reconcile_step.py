@@ -76,8 +76,19 @@ def run_reconciliation(
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
-    source_rows = len(records) if records else rows_written + rejected_rows
-    expected_written = max(source_rows - rejected_rows, 0)
+    coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
+    # Coerced rows are KEPT (a cell became NULL); only genuinely dropped rows are
+    # absent from the destination. Reconstructing the source count from the write
+    # side must therefore add back only the dropped rows, not the coerced ones.
+    dropped_rows = max(rejected_rows - coerced_null_rows, 0)
+    # Prefer independent source accounting when the caller provides it
+    # (streaming paths should pass source_row_count from the read side).
+    source_row_count = dest_summary.get("source_row_count")
+    if isinstance(source_row_count, int) and source_row_count >= 0:
+        source_rows = source_row_count
+    else:
+        source_rows = len(records) if records else rows_written + dropped_rows
+    expected_written = max(source_rows - dropped_rows, 0)
 
     if endpoint.kind != "database":
         return {
@@ -86,6 +97,7 @@ def run_reconciliation(
             "source_rows": source_rows,
             "target_rows": rows_written,
             "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
         }
 
     db_type = endpoint.format.lower()
@@ -128,6 +140,7 @@ def run_reconciliation(
                 strict_checksum=True,
                 allow_extra_rows=False,
                 sample_compare=None,
+                coerced_null_rows=coerced_null_rows,
             )
             return report.to_dict()
 
@@ -170,9 +183,22 @@ def run_reconciliation(
                 sort_key=sort_key,
             )
 
-    # No read-back verifier available for this destination. Trust the writer row
-    # count but do not fake a matching checksum.
+    # No read-back verifier available for this destination.
     if target_rows < 0:
+        if strict_checksum:
+            return {
+                "passed": False,
+                "message": (
+                    "Strict reconciliation requires an independent destination read-back; "
+                    f"verifier unavailable for '{db_type}'"
+                ),
+                "source_rows": source_rows,
+                "target_rows": -1,
+                "source_checksum": source_checksum,
+                "target_checksum": "",
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+            }
         if rows_written == expected_written:
             return {
                 "passed": True,
@@ -186,6 +212,7 @@ def run_reconciliation(
                 "source_checksum": source_checksum,
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
             }
         report = reconcile(
             source_rows=source_rows,
@@ -194,6 +221,7 @@ def run_reconciliation(
             target_checksum="",
             rejected_rows=rejected_rows,
             strict_checksum=False,
+            coerced_null_rows=coerced_null_rows,
         )
         return report.to_dict()
 
@@ -207,6 +235,7 @@ def run_reconciliation(
             rejected_rows=rejected_rows,
             strict_checksum=strict_checksum,
             sample_compare=sample_compare,
+            coerced_null_rows=coerced_null_rows,
         )
         return report.to_dict()
 
@@ -221,5 +250,6 @@ def run_reconciliation(
         strict_checksum=strict_checksum,
         allow_extra_rows=True,
         sample_compare=sample_compare,
+        coerced_null_rows=coerced_null_rows,
     )
     return report.to_dict()

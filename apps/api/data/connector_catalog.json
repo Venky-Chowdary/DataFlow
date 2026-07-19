@@ -62,14 +62,14 @@
       "id": "sql_server",
       "name": "SQL Server",
       "category": "database",
-      "status": "planned",
+      "status": "live",
       "description": "SQL Server source and destination connector"
     },
     {
       "id": "oracle",
       "name": "Oracle",
       "category": "database",
-      "status": "planned",
+      "status": "live",
       "description": "Oracle source and destination connector"
     },
     {
@@ -587,14 +587,14 @@
       "id": "salesforce",
       "name": "Salesforce",
       "category": "saas",
-      "status": "planned",
+      "status": "live",
       "description": "Salesforce SaaS application sync"
     },
     {
       "id": "hubspot",
       "name": "HubSpot",
       "category": "saas",
-      "status": "planned",
+      "status": "live",
       "description": "HubSpot SaaS application sync"
     },
     {
@@ -1483,7 +1483,7 @@
       "id": "kafka",
       "name": "Kafka",
       "category": "api",
-      "status": "planned",
+      "status": "live",
       "description": "Kafka integration adapter"
     },
     {
@@ -4381,7 +4381,7 @@
       "id": "apache_iceberg",
       "name": "Apache Iceberg",
       "category": "lake",
-      "status": "planned",
+      "status": "live",
       "description": "Open table format for data lakes"
     },
     {
@@ -4437,7 +4437,7 @@
       "id": "apache_kafka",
       "name": "Apache Kafka",
       "category": "streaming",
-      "status": "planned",
+      "status": "live",
       "description": "Distributed event streaming"
     },
     {

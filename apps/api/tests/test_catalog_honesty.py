@@ -1,0 +1,113 @@
+"""Catalog honesty: REST brand stubs must not appear as live/certified."""
+
+from __future__ import annotations
+
+from src.transfer.connector_capabilities import (
+    assert_transfer_endpoint_honesty,
+    certification_tier,
+    endpoint_allowed_for_role,
+    enrich_catalog_entry,
+    resolve_driver_type,
+)
+from src.transfer.registry import validate_transfer
+
+
+def test_rest_api_brand_alias_is_planned_not_live() -> None:
+    """Catalog brand IDs that only route to generic rest_api are Planned."""
+    for brand in ("zendesk", "shopify", "netsuite", "servicenow"):
+        driver = resolve_driver_type(brand)
+        assert driver == "rest_api", brand
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is False, brand
+        assert row["effective_status"] == "planned", brand
+        assert row["certification_tier"] == "planned", brand
+        assert row["capability_label"] == "Planned", brand
+
+
+def test_dedicated_saas_drivers_activation_and_source_only() -> None:
+    """Salesforce/HubSpot are reverse-ETL write-ready; Stripe remains source-only."""
+    for brand in ("hubspot", "salesforce"):
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is True, brand
+        assert row["certification_tier"] == "certified", brand
+        assert row["effective_status"] == "live", brand
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live", "description": ""}
+    )
+    assert stripe["transfer_ready"] is False
+    assert stripe["certification_tier"] == "source_only"
+    assert stripe["effective_status"] == "live"
+
+
+def test_first_class_rest_api_is_source_only() -> None:
+    row = enrich_catalog_entry(
+        {"id": "rest_api", "name": "REST API", "category": "api", "status": "live", "description": ""}
+    )
+    assert row["transfer_ready"] is False
+    assert row["effective_status"] == "live"
+    assert row["certification_tier"] == "source_only"
+    assert "Source" in row["capability_label"]
+
+
+def test_postgresql_is_certified_transfer_ready() -> None:
+    row = enrich_catalog_entry(
+        {"id": "postgresql", "name": "PostgreSQL", "category": "database", "status": "live", "description": ""}
+    )
+    assert row["transfer_ready"] is True
+    assert row["effective_status"] == "live"
+    assert row["certification_tier"] == "certified"
+    assert certification_tier("postgresql", "postgresql", row["capabilities"], transfer_ready_flag=True) == "certified"
+
+
+def test_uncertified_generic_sql_brands_are_planned() -> None:
+    # db2/teradata always Planned; oracle/sql_server only when DBAPI missing.
+    for brand in ("db2", "teradata"):
+        row = enrich_catalog_entry(
+            {"id": brand, "name": brand, "category": "database", "status": "live", "description": ""}
+        )
+        assert row["transfer_ready"] is False, brand
+        assert row["effective_status"] == "planned", brand
+        assert row["certification_tier"] == "planned", brand
+
+
+def test_planned_brand_blocked_as_transfer_endpoint() -> None:
+    ok, msg = endpoint_allowed_for_role("db2", "source")
+    assert ok is False
+    assert "Planned" in msg
+
+    ok, msg = endpoint_allowed_for_role("hubspot", "destination")
+    assert ok is True, msg
+
+    ok, msg = endpoint_allowed_for_role("hubspot", "source")
+    assert ok is True
+
+    ok, msg = endpoint_allowed_for_role("postgresql", "destination")
+    assert ok is True
+
+    honest, _ = assert_transfer_endpoint_honesty("database", "db2", "database", "postgresql")
+    assert honest is False
+    route_ok, route_msg = validate_transfer("database", "db2", "database", "postgresql")
+    assert route_ok is False
+    assert "Planned" in route_msg
+
+
+def test_catalog_search_live_is_certified_only() -> None:
+    from services.catalog_service import _enriched_connectors, search_catalog
+
+    _enriched_connectors.cache_clear()
+    try:
+        data = search_catalog(status="live", limit=500)
+        ids = {c["id"] for c in data["connectors"]}
+        assert all(c.get("transfer_ready") for c in data["connectors"])
+        # Reverse-ETL SaaS (hubspot/salesforce) may appear as certified destinations.
+        # Source-only Stripe and REST brand stubs must not.
+        for brand in ("stripe", "zendesk", "shopify"):
+            assert brand not in ids
+        assert data.get("transfer_live", 0) < 200  # not hundreds of greenwashed stubs
+        assert data.get("certified", 0) > 0
+    finally:
+        _enriched_connectors.cache_clear()

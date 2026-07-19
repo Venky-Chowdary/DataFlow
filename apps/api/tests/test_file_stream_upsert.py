@@ -6,8 +6,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-import duckdb
 import pytest
+
+duckdb = pytest.importorskip("duckdb", reason="requires the optional DuckDB test dependency")
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:

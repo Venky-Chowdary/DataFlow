@@ -1,0 +1,289 @@
+import { useMemo, useState } from "react";
+import { DtIcon } from "../../components/DtIcon";
+import {
+  HELP_DOC_CATEGORIES,
+  HELP_PRODUCT_CARDS,
+  HELP_VIDEO_TUTORIALS,
+  getHelpDoc,
+  helpDocNeighbors,
+  searchHelpDocs,
+  type HelpDocId,
+} from "../../lib/helpDocs";
+import type { PublicRoute } from "../../lib/publicNavigation";
+
+interface DocsPortalProps {
+  onNavigate: (route: PublicRoute) => void;
+  onGetStarted: () => void;
+}
+
+export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
+  const [query, setQuery] = useState("");
+  const faqItems = getHelpDoc("help-faq").sections.slice(0, 4);
+  const searchHits = useMemo(() => searchHelpDocs(query).slice(0, 8), [query]);
+
+  return (
+    <div className="docs-portal">
+      <section className="docs-hero">
+        <div className="docs-hero-inner">
+          <p className="docs-hero-kicker">Documentation</p>
+          <h1>DataFlow product documentation</h1>
+          <p className="docs-hero-lead">
+            The comprehensive guide for Transfer Studio, connectors, preflight gates, pipelines, Data Pilot, and MCP —
+            everything you need to move data with proof.
+          </p>
+          <form className="docs-search" role="search" onSubmit={(e) => e.preventDefault()}>
+            <DtIcon name="search" size={20} />
+            <input
+              type="search"
+              placeholder="Search docs — preflight, mapping, Snowflake, MCP…"
+              aria-label="Search documentation"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <kbd>⌘K</kbd>
+          </form>
+          {query.trim() && searchHits.length > 0 ? (
+            <div className="docs-search-results" role="listbox" aria-label="Search results">
+              {searchHits.map((doc) => (
+                <button
+                  key={doc.id}
+                  type="button"
+                  className="docs-search-hit"
+                  role="option"
+                  onClick={() => {
+                    setQuery("");
+                    onNavigate(doc.id);
+                  }}
+                >
+                  <strong>{doc.title}</strong>
+                  <span>{doc.description}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {query.trim() && searchHits.length === 0 ? (
+            <p className="docs-hero-lead" style={{ marginTop: "0.75rem", fontSize: "0.9375rem" }}>
+              No articles match &ldquo;{query}&rdquo;. Try preflight, connectors, or MCP.
+            </p>
+          ) : null}
+        </div>
+      </section>
+
+      <div className="docs-body">
+        {HELP_DOC_CATEGORIES.map((cat) => (
+          <section key={cat.id} className="docs-category">
+            <div className="docs-category-head">
+              <h2>{cat.title}</h2>
+              <p>{cat.description}</p>
+            </div>
+            <div className="docs-card-grid">
+              {cat.docs.map((docId) => {
+                const doc = getHelpDoc(docId);
+                return (
+                  <button
+                    key={docId}
+                    type="button"
+                    className="docs-card"
+                    onClick={() => onNavigate(docId)}
+                  >
+                    <span className="docs-card-icon">
+                      <DtIcon name={doc.icon} size={22} />
+                    </span>
+                    <h3>{doc.title}</h3>
+                    <p>{doc.description}</p>
+                    <span className="docs-card-meta">{doc.readTime} read</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        ))}
+
+        <section className="docs-category">
+          <div className="docs-category-head">
+            <h2>Video tutorials</h2>
+            <p>Watch walkthroughs to get started fast with Transfer Studio and MCP.</p>
+          </div>
+          <div className="docs-video-grid">
+            {HELP_VIDEO_TUTORIALS.map((v) => (
+              <article key={v.title} className="docs-video-card">
+                <div className="docs-video-thumb">
+                  <span className="docs-video-play" aria-hidden>▶</span>
+                  <span className="docs-video-duration">{v.duration}</span>
+                </div>
+                <div className="docs-video-body">
+                  <span className="docs-video-topic">{v.topic}</span>
+                  <h3>{v.title}</h3>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="docs-category">
+          <div className="docs-category-head">
+            <h2>Product guides</h2>
+            <p>Deep dives for each DataFlow surface.</p>
+          </div>
+          <div className="docs-product-grid">
+            {HELP_PRODUCT_CARDS.map((p) => (
+              <button key={p.title} type="button" className="docs-product-card" onClick={() => onNavigate(p.doc)}>
+                <span className="docs-card-icon docs-card-icon--lg">
+                  <DtIcon name={p.icon} size={26} />
+                </span>
+                <h3>{p.title}</h3>
+                <p>{p.body}</p>
+                <span className="docs-card-link">Learn more →</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="docs-faq-section">
+          <h2>Frequently asked questions</h2>
+          <div className="docs-faq-grid">
+            {faqItems.map((item) => (
+              <article key={item.id} className="docs-faq-item">
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </article>
+            ))}
+          </div>
+          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help-faq")}>
+            View all FAQs
+          </button>
+        </section>
+
+        <section className="docs-cta-band">
+          <div>
+            <h2>Need more help? Get in touch with us today.</h2>
+            <p>Our solutions team scopes pilots to your sources, destinations, and compliance needs.</p>
+          </div>
+          <div className="docs-cta-actions">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Contact us
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={onGetStarted}>
+              Open the app
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+interface DocArticlePageProps {
+  docId: HelpDocId;
+  onNavigate: (route: PublicRoute) => void;
+  onGetStarted: () => void;
+}
+
+export function DocArticlePage({ docId, onNavigate, onGetStarted }: DocArticlePageProps) {
+  const doc = getHelpDoc(docId);
+  const { prev, next } = helpDocNeighbors(docId);
+
+  return (
+    <div className="docs-article-layout">
+      <aside className="docs-sidebar" aria-label="Documentation navigation">
+        {HELP_DOC_CATEGORIES.map((cat) => (
+          <div key={cat.id} className="docs-sidebar-group">
+            <h3>{cat.title}</h3>
+            <ul>
+              {cat.docs.map((id) => {
+                const item = getHelpDoc(id);
+                return (
+                  <li key={id}>
+                    <button
+                      type="button"
+                      className={id === docId ? "is-active" : ""}
+                      onClick={() => onNavigate(id)}
+                    >
+                      {item.title}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </aside>
+
+      <article className="docs-article">
+        <nav className="docs-breadcrumb" aria-label="Breadcrumb">
+          <button type="button" onClick={() => onNavigate("help")}>Docs</button>
+          <span aria-hidden>/</span>
+          <span>{doc.category}</span>
+          <span aria-hidden>/</span>
+          <span aria-current="page">{doc.title}</span>
+        </nav>
+
+        <header className="docs-article-head">
+          <p className="docs-article-kicker">{doc.category}</p>
+          <h1>{doc.title}</h1>
+          <p className="docs-article-lead">{doc.description}</p>
+          <span className="docs-article-meta">{doc.readTime} read</span>
+        </header>
+
+        <nav className="docs-toc" aria-label="On this page">
+          <h2>On this page</h2>
+          <ul>
+            {doc.sections.map((s) => (
+              <li key={s.id}>
+                <a href={`#${s.id}`}>{s.title}</a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
+        <div className="docs-article-content">
+          {doc.sections.map((section) => (
+            <section key={section.id} id={section.id} className="docs-section">
+              <h2>{section.title}</h2>
+              <p>{section.body}</p>
+              {section.steps ? (
+                <ol className="docs-steps">
+                  {section.steps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+              ) : null}
+              {section.code ? (
+                <pre className="docs-code"><code>{section.code}</code></pre>
+              ) : null}
+              {section.tip ? (
+                <aside className="docs-callout">
+                  <strong>Tip</strong>
+                  <p>{section.tip}</p>
+                </aside>
+              ) : null}
+            </section>
+          ))}
+        </div>
+
+        <footer className="docs-article-footer">
+          <div className="docs-pager">
+            {prev ? (
+              <button type="button" className="docs-pager-prev" onClick={() => onNavigate(prev)}>
+                ← {getHelpDoc(prev).title}
+              </button>
+            ) : <span />}
+            {next ? (
+              <button type="button" className="docs-pager-next" onClick={() => onNavigate(next)}>
+                {getHelpDoc(next).title} →
+              </button>
+            ) : null}
+          </div>
+          <div className="docs-article-cta">
+            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
+              Try in Transfer Studio
+            </button>
+            <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("contact")}>
+              Contact sales
+            </button>
+          </div>
+        </footer>
+      </article>
+    </div>
+  );
+}

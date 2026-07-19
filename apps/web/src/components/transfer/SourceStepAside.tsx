@@ -1,9 +1,11 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { StructurePreview } from "../ui/StructurePreview";
+import { MultiStreamSchemaPreview } from "./MultiStreamSchemaPreview";
 import type { Connector } from "../../lib/types";
 import type { SourceKind } from "../ui/SourceKindTiles";
+import type { StreamSchemaPreview } from "../../lib/sourceStreams";
 
 const FILE_FORMATS = ["CSV", "JSON", "JSONL", "TSV", "Parquet"];
 
@@ -27,6 +29,13 @@ interface SourceStepAsideProps {
   sourceManual?: boolean;
   sourceManualType?: string;
   sourceIntrospecting?: boolean;
+  sourceIntrospectError?: string | null;
+  onRetrySourceIntrospect?: () => void;
+  sourceObjectLabel?: string;
+  streamNames?: string[];
+  streamPreviews?: StreamSchemaPreview[];
+  activeStreamTab?: string;
+  onActiveStreamTabChange?: (name: string) => void;
 }
 
 function ProfilingSteps({ active }: { active: boolean }) {
@@ -80,6 +89,82 @@ function SchemaSkeleton() {
   );
 }
 
+const ANALYZE_PHASES = [
+  "Connecting to source…",
+  "Reading table & column metadata…",
+  "Sampling representative rows…",
+  "Inferring types & building preview…",
+];
+
+/**
+ * Polished, honest loader shown while live schema introspection runs. The bar
+ * is intentionally indeterminate (the backend returns one result, not a stream
+ * of progress) but the cycling caption reflects the real phases of the analysis.
+ */
+function SchemaAnalyzingPanel({ target }: { target?: string }) {
+  const [phaseIdx, setPhaseIdx] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(
+      () => setPhaseIdx((i) => (i + 1) % ANALYZE_PHASES.length),
+      1100,
+    );
+    return () => window.clearInterval(t);
+  }, []);
+
+  return (
+    <div className="df2-source-aside df2-source-analyze">
+      <div className="df2-source-aside-head">
+        <div>
+          <h4>Analyzing source{target ? ` · ${target}` : ""}</h4>
+          <p>Introspecting schema and sampling live rows from the connector…</p>
+        </div>
+        <span className="df2-badge df2-badge-xs df2-badge-live">Analyzing</span>
+      </div>
+
+      <div
+        className="df2-source-analyze-progress"
+        role="progressbar"
+        aria-label="Schema analysis in progress"
+        aria-busy="true"
+      >
+        <div className="df2-source-analyze-track">
+          <span className="df2-source-analyze-indeterminate" />
+        </div>
+        <p className="df2-source-analyze-phase" aria-live="polite">
+          <DtIcon name="sparkle" size={13} />
+          {ANALYZE_PHASES[phaseIdx]}
+        </p>
+      </div>
+
+      <ProfilingSteps active />
+      <SchemaSkeleton />
+    </div>
+  );
+}
+
+function SchemaErrorPanel({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="df2-source-aside df2-source-aside-error">
+      <div className="df2-source-aside-head">
+        <div>
+          <h4>Couldn’t read the source</h4>
+          <p>{message}</p>
+        </div>
+        <span className="df2-badge df2-badge-xs df2-badge-run">Error</span>
+      </div>
+      <div className="df2-source-aside-empty">
+        <DtIcon name="alert" size={22} />
+        <p>Verify the table or collection name, credentials, and network access.</p>
+        {onRetry && (
+          <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" onClick={onRetry}>
+            Retry schema read
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
   return (
     <div className="df2-source-aside">
@@ -107,7 +192,7 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           <div className="df2-source-aside-format-chips">
             {FILE_FORMATS.map((fmt) => (
               <span key={fmt} className="df2-source-aside-format-chip">{fmt}</span>
-            )).reduce((acc: React.ReactNode[], chip, i) => {
+            )).reduce((acc: ReactNode[], chip, i) => {
               acc.push(chip);
               if (i < FILE_FORMATS.length - 1) acc.push(" ");
               return acc;
@@ -138,7 +223,18 @@ export function SourceStepAside({
   sourceManual,
   sourceManualType,
   sourceIntrospecting,
+  sourceIntrospectError,
+  onRetrySourceIntrospect,
+  sourceObjectLabel,
+  streamNames,
+  streamPreviews = [],
+  activeStreamTab,
+  onActiveStreamTabChange,
 }: SourceStepAsideProps) {
+  const multiStream = (streamNames?.length ?? 0) > 1 || streamPreviews.length > 1;
+  // Tabbed card only when the user entered multiple streams — single-stream keeps the simple preview.
+  const hasStreamTabs = multiStream && streamPreviews.length > 0;
+
   if (sourceKind === "file" && parsed) {
     return (
       <StructurePreview
@@ -150,22 +246,63 @@ export function SourceStepAside({
         subtitle={`${parsed.columns.length} fields · ${parsed.row_count.toLocaleString()} rows`}
         fill
         showBadge
+        allowJson
       />
     );
   }
 
+  // Comma-separated multi-stream: one tab per table/collection with its own schema.
+  if (sourceKind === "database" && hasStreamTabs) {
+    return (
+      <div className="df2-source-aside df2-source-aside-multistream">
+        <MultiStreamSchemaPreview
+          streams={streamPreviews}
+          connectorName={sourceConnector?.name}
+          activeName={activeStreamTab}
+          onActiveChange={onActiveStreamTabChange}
+          loading={sourceIntrospecting}
+        />
+        {sourceIntrospectError && (
+          <div className="df2-source-aside-stream-warn" role="status">
+            <DtIcon name="alert" size={14} />
+            <p>{sourceIntrospectError}</p>
+            {onRetrySourceIntrospect && (
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onRetrySourceIntrospect}>
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (sourceColumns.length > 0 && !sourceIntrospecting) {
+    const missingSamples = samplePreviewRows.length === 0;
     return (
       <StructurePreview
         columns={sourceColumns}
         schema={sourceSchema}
         rows={samplePreviewRows}
+        rowCount={parsed?.row_count}
         title="Source schema"
         subtitle={
           sourceConnector
-            ? `${sourceColumns.length} fields from ${sourceConnector.name}`
+            ? `${sourceColumns.length} fields${samplePreviewRows.length ? ` · ${samplePreviewRows.length} sample rows` : " · no sample rows yet"} from ${sourceConnector.name}${
+              sourceObjectLabel ? ` · ${sourceObjectLabel}` : ""
+            }`
             : "Fields discovered from the selected connector"
         }
+        fill
+        showBadge
+        allowJson
+        sampleWarning={
+          missingSamples
+            ? (sourceIntrospectError
+              || "No preview rows returned for this table. Reload sample so Validate dry-run can run.")
+            : null
+        }
+        onRetrySample={missingSamples ? onRetrySourceIntrospect : undefined}
       />
     );
   }
@@ -175,18 +312,11 @@ export function SourceStepAside({
   }
 
   if (sourceIntrospecting) {
-    return (
-      <div className="df2-source-aside">
-        <div className="df2-source-aside-head">
-          <div>
-            <h4>Reading source schema</h4>
-            <p>Detecting columns and sample rows from the connector…</p>
-          </div>
-          <span className="df2-badge df2-badge-xs df2-badge-live">Profiling</span>
-        </div>
-        <SchemaSkeleton />
-      </div>
-    );
+    return <SchemaAnalyzingPanel target={sourceObjectLabel} />;
+  }
+
+  if (sourceIntrospectError) {
+    return <SchemaErrorPanel message={sourceIntrospectError} onRetry={onRetrySourceIntrospect} />;
   }
 
   if (sourceKind === "database") {
@@ -200,7 +330,7 @@ export function SourceStepAside({
               {sourceManual
                 ? `Manual ${sourceManualType} source. Schema loads when you continue.`
                 : sourceConnector
-                  ? `Schema from ${sourceConnector.name} loads when you continue.`
+                  ? `Enter table/collection name(s) on the left — each is read separately for preview.`
                   : pool.length
                     ? `Select one of ${pool.length} saved database connector${pool.length === 1 ? "" : "s"} on the left.`
                     : "Add a database connector to read tables and collections, or use manual connection."}
@@ -209,17 +339,24 @@ export function SourceStepAside({
         </div>
 
         {sourceConnector ? (
-          <article className="df2-source-aside-connector">
-            <ConnectorIcon id={sourceConnector.type} size={28} />
-            <div>
-              <strong>{sourceConnector.name}</strong>
-              <span>{sourceConnector.type} · {sourceConnector.host}:{sourceConnector.port}</span>
-              <span>{sourceConnector.database || "default database"}</span>
-            </div>
-            <span className={`df2-badge df2-badge-xs ${sourceConnector.last_test_ok !== false ? "df2-badge-live" : "df2-badge-run"}`}>
-              {sourceConnector.last_test_ok !== false ? "Tested" : "Untested"}
-            </span>
-          </article>
+          <>
+            <article className="df2-source-aside-connector">
+              <ConnectorIcon id={sourceConnector.type} size={28} />
+              <div>
+                <strong>{sourceConnector.name}</strong>
+                <span>{sourceConnector.type} · {sourceConnector.host}:{sourceConnector.port}</span>
+                <span>{sourceConnector.database || "default database"}</span>
+              </div>
+              <span className={`df2-badge df2-badge-xs ${sourceConnector.last_test_ok !== false ? "df2-badge-live" : "df2-badge-run"}`}>
+                {sourceConnector.last_test_ok !== false ? "Tested" : "Untested"}
+              </span>
+            </article>
+            <p className="df2-source-aside-path">
+              {sourceObjectLabel
+                ? <>Waiting for schema from <strong>{sourceObjectLabel}</strong></>
+                : "Enter one name, or comma-separate several for multi-stream CDC / incremental (one preview tab each)."}
+            </p>
+          </>
         ) : pool.length > 0 ? (
           <div className="df2-source-aside-connector-list">
             {pool.slice(0, 6).map((c) => (
@@ -244,7 +381,9 @@ export function SourceStepAside({
 
         <div className="df2-source-aside-hint">
           <DtIcon name="sparkle" size={14} />
-          Table or collection schema appears here after you continue.
+          {multiStream
+            ? "Multi-stream preview opens one tab per name once schemas are read."
+            : "Schema appears here as soon as the table or collection is readable."}
         </div>
       </div>
     );

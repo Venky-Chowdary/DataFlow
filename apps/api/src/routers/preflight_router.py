@@ -186,8 +186,11 @@ async def run_preflight(body: PreflightRequest):
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
         destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
+        source_table="",
+        destination_table=(body.dest_table or body.dest_collection or ""),
+        source_filename="",
     )
-    return apply_policy_gates(
+    gated = apply_policy_gates(
         result,
         run_transfer_policy_gates(
             sync_mode=body.sync_mode,
@@ -198,3 +201,122 @@ async def run_preflight(body: PreflightRequest):
         ),
         validation_mode=body.validation_mode,
     )
+    from services.preflight_run_store import save_preflight_run
+
+    dest_label = (
+        body.dest_table
+        or body.dest_collection
+        or body.dest_database
+        or body.dest_type
+        or body.dest_kind
+        or "destination"
+    )
+    return save_preflight_run(
+        gated,
+        source_label=body.source_type or body.source_kind or "source",
+        dest_label=str(dest_label),
+        validation_mode=body.validation_mode,
+        route={
+            "source_kind": body.source_kind,
+            "source_type": body.source_type,
+            "source_connector_id": body.source_connector_id,
+            "dest_kind": body.dest_kind,
+            "dest_type": body.dest_type,
+            "dest_connector_id": body.connector_id,
+            "dest_table": body.dest_table,
+            "dest_collection": body.dest_collection,
+            "row_count": body.row_count,
+        },
+    )
+
+
+@router.get("/runs")
+async def list_preflight_runs(limit: int = 20):
+    """List recent validation runs (IDs Data Pilot / Jobs can reference)."""
+    from services.preflight_run_store import list_preflight_runs as _list
+
+    return {"runs": _list(limit=limit), "count": min(limit, 100)}
+
+
+@router.get("/runs/{run_id}")
+async def get_preflight_run(run_id: str):
+    """Fetch a stored validation run by ID for Pilot triage and audit."""
+    from services.preflight_run_store import get_preflight_run as _get
+
+    record = _get(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Preflight run '{run_id}' not found")
+    return record
+
+
+class ExplainRequest(BaseModel):
+    """A preflight result to explain (as returned by POST /preflight/run)."""
+
+    preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
+    dest_type: Optional[str] = None
+    validation_mode: str = "strict"
+    use_llm: bool = Field(True, description="Reuse Data Pilot LLM for a natural-language narrative when available")
+
+
+@router.post("/explain")
+async def explain_preflight(body: ExplainRequest):
+    """AI-assisted 'explain & suggest fix' for a preflight/validation result.
+
+    Returns a structured, actionable explanation — what failed, which
+    column/row/value/type, why, and concrete fixes plus machine-readable
+    ``suggested_actions``. Works deterministically offline; reuses the Data
+    Pilot LLM only to add a friendlier narrative when a provider is configured.
+    """
+    from services.validation_assistant import explain_validation
+
+    try:
+        return explain_validation(
+            body.preflight,
+            dest_kind=(body.dest_type or "").lower(),
+            validation_mode=body.validation_mode,
+            use_llm=body.use_llm,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SchemaDriftRequest(BaseModel):
+    old_schema: dict[str, Any] = Field(default_factory=dict)
+    new_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/schema-drift")
+async def classify_schema_drift(body: SchemaDriftRequest):
+    """Classify schema evolution as additive vs breaking (approve/reject UX)."""
+    from services.schema_drift import classify_schema_change
+
+    try:
+        return classify_schema_change(body.old_schema, body.new_schema)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CellPreviewRequest(BaseModel):
+    headers: list[str] = Field(default_factory=list)
+    sample_rows: list[list[Any]] = Field(default_factory=list)
+    mappings: list[dict[str, Any]] = Field(default_factory=list)
+    column_types: dict[str, str] = Field(default_factory=dict)
+    sample_size: int = Field(25, ge=1, le=200)
+
+
+@router.post("/preview-cells")
+async def preview_quarantine_cells(body: CellPreviewRequest):
+    """Cell-level quarantine/coerce preview before transfer run."""
+    from services.transform_engine import preview_quarantine_cells as _preview
+
+    try:
+        rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
+        return _preview(
+            headers=body.headers,
+            sample_rows=rows,
+            mappings=body.mappings,
+            column_types=body.column_types,
+            sample_size=body.sample_size,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

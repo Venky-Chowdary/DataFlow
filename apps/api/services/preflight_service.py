@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 # Add preflight package to path
-_PREFLIGHT_ROOT = Path(__file__).resolve().parents[4] / "packages" / "preflight" / "src"
+# apps/api/services → repo root is parents[3]
+_PREFLIGHT_ROOT = Path(__file__).resolve().parents[3] / "packages" / "preflight" / "src"
 if str(_PREFLIGHT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PREFLIGHT_ROOT))
 
@@ -40,12 +44,22 @@ class FilePreflightContext(PreflightContext):
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
-            return False, ["No sample rows available for dry-run validation"]
+            return False, [
+                "No sample rows available for dry-run validation. "
+                "Re-run Source introspect so DataFlow can load a preview sample "
+                "from the source table (column metadata alone is not enough)."
+            ]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
         # Use cell_to_string so nested lists/dicts from schemaless sources become
         # valid JSON strings instead of Python repr() artifacts.
-        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in self.sample_rows[:sample_size]]
+        scanned = self.sample_rows[:sample_size]
+        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in scanned]
+        self._last_dry_run_meta = {
+            "sample_rows_scanned": len(scanned),
+            "sample_rows_available": len(self.sample_rows),
+            "sample_cap": sample_size,
+        }
         column_types = {c.name: c.inferred_type for c in self.plan.source.columns}
         dest_types_by_name = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
         mapping_dicts = [
@@ -76,6 +90,44 @@ class FilePreflightContext(PreflightContext):
                         if len(errors) >= 10:
                             return False, errors
             return len(errors) == 0, errors
+
+    def coercion_report(self) -> dict[str, Any]:
+        """Predict per-value write coercion for the plan against sample rows.
+
+        Reuses the exact transform-resolution and coercion the write path uses so
+        the preflight verdict matches the real write outcome. Cached so G3 and the
+        API response layer share one computation.
+        """
+        cached = getattr(self, "_coercion_report_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            from services.coercion_probe import analyze_coercion
+
+            source_types = {c.name: c.inferred_type for c in self.plan.source.columns}
+            dest_types = {c.name: c.inferred_type for c in self.plan.destination.target_columns}
+            mapping_dicts = [
+                {
+                    "source": m.source,
+                    "target": m.target,
+                    "transform": getattr(m, "transform", None),
+                    "target_type": dest_types.get(m.target),
+                }
+                for m in self.plan.mappings
+            ]
+            report = analyze_coercion(
+                sample_rows=self.sample_rows,
+                mappings=mapping_dicts,
+                source_types=source_types,
+                dest_types=dest_types,
+                dest_db_type=self.plan.destination.db_type,
+                table_exists=bool(getattr(self.plan.destination, "table_exists", False)),
+            )
+        except Exception:
+            logger.warning("coercion probe failed during preflight", exc_info=True)
+            report = {}
+        self._coercion_report_cache = report
+        return report
 
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         if not columns or not self.sample_rows:
@@ -159,7 +211,7 @@ def run_transfer_policy_gates(
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
     requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
-    requires_primary_key = sync in {"upsert", "incremental_deduped", "cdc"}
+    requires_primary_key = sync in {"upsert", "incremental_deduped", "cdc", "scd2", "mirror"}
 
     missing_cursor = [
         c.get("name") or c.get("stream") or "stream"
@@ -202,10 +254,25 @@ def run_transfer_policy_gates(
         })
 
     schema_issues: list[str] = []
-    if schema not in {"manual_review", "propagate_columns", "propagate_all", "pause_on_change"}:
+    allowed_schema = {
+        "manual_review",
+        "propagate_columns",
+        "propagate_all",
+        "pause_on_change",
+        "type_locked",
+    }
+    if schema not in allowed_schema:
         schema_issues.append(f"Unknown schema policy '{schema}'")
     if backfill_new_fields and schema not in {"propagate_columns", "propagate_all"}:
         schema_issues.append("Backfill new fields requires automatic column propagation")
+
+    breaking = {
+        "manual_review": "pause_for_manual_review",
+        "pause_on_change": "halt_pipeline",
+        "type_locked": "reject_type_changes",
+        "propagate_columns": "auto_add_columns",
+        "propagate_all": "auto_propagate_schema",
+    }.get(schema, "pause_for_manual_review")
 
     if schema_issues:
         gates.append({
@@ -224,7 +291,7 @@ def run_transfer_policy_gates(
             "details": {
                 "schema_policy": schema,
                 "backfill_new_fields": backfill_new_fields,
-                "breaking_changes": "pause_for_manual_review",
+                "breaking_changes": breaking,
             },
         })
 
@@ -385,6 +452,9 @@ def run_file_preflight(
     destination_can_create: bool | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
+    source_table: str = "",
+    destination_table: str = "",
+    source_filename: str = "",
 ) -> dict[str, Any]:
     """Run 9 preflight gates for a file-based transfer."""
     if row_count <= 0 and sample_rows:
@@ -606,11 +676,44 @@ def run_file_preflight(
         "proof_bundle": proof_bundle,
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
+        "coercion_report": ctx.coercion_report(),
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
     }
+    # Multi-load intelligence: compare sample to last N loads of this route.
+    try:
+        from services.data_quality_history import compare_route_to_history
+
+        src_table = (source_table or source_filename or "").strip()
+        dst_table = (destination_table or "").strip()
+        src_ep = {
+            "kind": source_kind,
+            "format": source_format or "",
+            "table": src_table,
+            "collection": src_table,
+        }
+        dst_ep = {
+            "kind": "database",
+            "format": destination_db_type or "",
+            "table": dst_table,
+            "collection": dst_table,
+        }
+        out["load_history_report"] = compare_route_to_history(
+            sample_rows or [],
+            src_ep,
+            dst_ep,
+            schema=column_types,
+        )
+    except Exception as hist_exc:
+        logger.warning("load history compare failed during preflight", exc_info=True)
+        out["load_history_report"] = {
+            "passed": True,
+            "anomalies": [],
+            "prior_load_count": 0,
+            "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
+        }
     return out
 
 

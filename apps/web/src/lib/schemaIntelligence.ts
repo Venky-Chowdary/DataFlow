@@ -90,7 +90,7 @@ export function buildCompetitiveAdvantages(ctx: {
       title: "Any source → any destination",
       detail: ctx.destType
         ? `Route to ${ctx.destType} with native DDL — not limited to loading JSON into one MongoDB collection.`
-        : "File, MongoDB, S3, Snowflake, Postgres, and 600+ catalog connectors in one governed path.",
+        : "File, MongoDB, S3, Snowflake, Postgres, SQL Server, Oracle, and Iceberg in one governed path.",
       icon: "connectors",
     },
     {
@@ -211,6 +211,25 @@ export function detectTypeRisks(
           suggestedTransform: "cast_number",
         });
       }
+    }
+
+    const mappingDest = (m.destType || destType || "").toLowerCase();
+    const enumLike =
+      m.semanticRole === "string_enum"
+      || /active|inactive|pending|invalidated|approved|draft/i.test(m.sample || "");
+    if (
+      enumLike
+      && (mappingDest.includes("bool") || m.transform === "cast_boolean")
+    ) {
+      risks.push({
+        id: `enum-bool-${m.source}`,
+        column: m.source,
+        severity: "block",
+        title: "String enum cannot map to BOOLEAN",
+        detail: m.existsInDestination
+          ? `Sample "${(m.sample || "").slice(0, 40)}" is a status label but destination column already exists as BOOLEAN — remap to a VARCHAR column or ALTER the destination. Mapping Widen alone will not change DDL.`
+          : `Sample "${(m.sample || "").slice(0, 40)}" looks like a status label — use VARCHAR (Widen → VARCHAR), not Cast boolean.`,
+      });
     }
 
     if (m.sample && JSON_LIKE.test(m.sample.trim()) && m.transform !== "parse_json") {

@@ -100,3 +100,14 @@ def test_fail_fast_stops_at_first_blocker():
     result = PreflightEngine(fail_fast=True).run(PreflightContext(plan=plan))
     assert len(result.blockers) == 1
     assert len(result.gates) == 1
+
+
+def test_g5_block_message_includes_concrete_issue():
+    from preflight.gates import _block_message
+
+    msg = _block_message(
+        "Dry-run / integrity failed",
+        ["age: cannot cast 'abc' to NUMBER", "score: invalid decimal"],
+    )
+    assert "age: cannot cast 'abc' to NUMBER" in msg
+    assert "+1 more" in msg

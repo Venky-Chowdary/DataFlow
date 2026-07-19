@@ -7,12 +7,15 @@ import { DtIcon } from "./components/DtIcon";
 import { DtLogo } from "./components/DtLogo";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ToastProvider, useToast } from "./components/Toast";
+import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
-import { deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
+import { StudioActionsProvider } from "./lib/StudioActionsContext";
+import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
+import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
@@ -23,6 +26,7 @@ import { TransferPage } from "./pages/TransferPage";
 import { ConnectorsPage } from "./pages/ConnectorsPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
 import { JobsPage } from "./pages/JobsPage";
+import { ContractsPage } from "./pages/ContractsPage";
 import { McpPage } from "./pages/McpPage";
 import { QueryPage } from "./pages/QueryPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -36,28 +40,30 @@ import {
   publicRouteFromHash,
   type PublicRoute,
   writePublicHash,
-} from "./lib/publicNavigation";
-import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
+} from "./lib/publicNavigation"; // help article routes
+import { apiOfflineMessage } from "./lib/runtimeEnv";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 
-const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "developers" }[] = [
-  { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Platform overview & live topology", group: "platform" },
-  { id: "transfer", label: "Transfer Studio", icon: "transfer", desc: "Move any data anywhere", group: "platform" },
-  { id: "query", label: "Query", icon: "search", desc: "Run and export ad-hoc queries", group: "platform" },
-  { id: "pilot", label: "Data Pilot", icon: "sparkle", desc: "AI agent · natural language", group: "platform" },
-  { id: "connectors", label: "Connectors", icon: "connectors", desc: "Sources & destinations", group: "platform" },
-  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring scheduled syncs", group: "platform" },
-  { id: "jobs", label: "Job Theater", icon: "jobs", desc: "Live transfer progress", group: "platform" },
-  { id: "mcp", label: "MCP Server", icon: "zap", desc: "Cursor · Claude · VS Code", group: "developers" },
-  { id: "docs", label: "Docs", icon: "book", desc: "How DataFlow works", group: "developers" },
-  { id: "benchmarks", label: "Benchmarks", icon: "speed", desc: "Scale proofs vs Fivetran & Airbyte", group: "developers" },
-  { id: "settings", label: "Settings", icon: "settings", desc: "Security & team", group: "developers" },
+const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "ops" | "system" }[] = [
+  { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Health, throughput, and recent jobs", group: "platform" },
+  { id: "transfer", label: "Transfer", icon: "transfer", desc: "Move data with preflight gates", group: "platform" },
+  { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
+  { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
+  { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
+  { id: "schedules", label: "Pipelines", icon: "activity", desc: "Recurring syncs", group: "ops" },
+  { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
+  { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
+  { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
+  { id: "mcp", label: "MCP", icon: "zap", desc: "IDE tool integrations", group: "system" },
+  { id: "docs", label: "Help", icon: "book", desc: "How DataFlow works", group: "system" },
+  { id: "benchmarks", label: "Proofs", icon: "speed", desc: "Scale and fidelity benchmarks", group: "system" },
 ];
 
 const PLATFORM_NAV = NAV.filter((item) => item.group === "platform");
-const DEVELOPER_NAV = NAV.filter((item) => item.group === "developers");
-
+const OPS_NAV = NAV.filter((item) => item.group === "ops");
+const SYSTEM_NAV = NAV.filter((item) => item.group === "system");
+const DEVELOPER_NAV = SYSTEM_NAV;
 function readStoredUser() {
   return readSession()?.email ?? "";
 }
@@ -72,52 +78,61 @@ function AppShell({
   onSignOut: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [screen, setScreenState] = useState<Screen>(() => {
     const fromHash = readAppHash();
     if (fromHash) return fromHash;
     return initialScreen === "landing" ? "dashboard" : initialScreen;
   });
-
-  const setScreen = useCallback((next: Screen) => {
-    setScreenState(next);
-    writeAppHash(next);
-  }, []);
-
-  useEffect(() => {
-    const onHash = () => {
-      const fromHash = readAppHash();
-      if (fromHash) setScreenState(fromHash);
-    };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [jobs, setJobs] = useState<TransferJob[]>([]);
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
+  /** False until the first connectors fetch settles — prevents false “no connectors” empty states. */
+  const [connectorsReady, setConnectorsReady] = useState(false);
   const [apiOnline, setApiOnline] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState("");
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [sidebarNavCompact, setSidebarNavCompact] = useState(false);
+  const [sidebarNavCompact, setSidebarNavCompact] = useState(() => loadSidebarNavCompact());
   const [searchQuery, setSearchQuery] = useState("");
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
+  /** Bump to remount Transfer Studio and clear prior job/source/map cache. */
+  const [transferStudioKey, setTransferStudioKey] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
 
-  useEffect(() => {
+  const setScreen = useCallback((next: Screen) => {
+    // Mount keep-alive screens synchronously so the first paint after navigate
+    // is not an empty content hole (useEffect mount races Save → Contracts).
     setMountedScreens((prev) => {
-      if (prev.has(screen)) return prev;
-      const next = new Set(prev);
-      next.add(screen);
-      return next;
+      if (prev.has(next)) return prev;
+      const nextSet = new Set(prev);
+      nextSet.add(next);
+      return nextSet;
     });
-  }, [screen]);
+    setScreenState(next);
+    writeAppHash(next);
+  }, []);
+
+  const openFreshTransfer = useCallback(() => {
+    setTransferStudioKey((k) => k + 1);
+    setScreen("transfer");
+  }, [setScreen]);
+
+  useEffect(() => {
+    const onHash = () => {
+      const fromHash = readAppHash();
+      if (fromHash) setScreen(fromHash);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [setScreen]);
 
   const showScreen = (id: Screen) => (mountedScreens.has(id) ? (screen === id ? "is-active" : "is-kept") : "");
 
@@ -147,18 +162,52 @@ function AppShell({
   const loadConnectors = useCallback(async (notifyOnError = true) => {
     try {
       setConnectors(await fetchConnectors());
+      noteApiSuccess();
       setApiOnline(true);
-    } catch {
-      setApiOnline(false);
-      if (notifyOnError) {
-        toast({ title: "Could not load connectors", message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in.", tone: "error" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      const authOnly = /authentication required|sign in|401/i.test(msg);
+      const timedOut = /timed out|abort/i.test(msg);
+      // 401/session is not an outage — Railway /health can still be green.
+      const up = await probeApiHealth();
+      if (up || authOnly) {
+        noteApiSuccess();
+        setApiOnline(true);
+        if (notifyOnError && authOnly) {
+          toast({
+            title: "Could not load connectors",
+            message: "Sign in again or check connector permissions.",
+            tone: "warning",
+          });
+        } else if (notifyOnError && timedOut && up) {
+          // Slow control-plane response, not offline — don't scare the user.
+          toast({
+            title: "Connectors took longer than usual",
+            message: "The API is healthy; retrying in the background.",
+            tone: "warning",
+          });
+        }
+      } else if (shouldMarkApiOffline(false)) {
+        setApiOnline(false);
+        if (notifyOnError) {
+          toast({
+            title: "Control plane offline",
+            message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) and deployment health.",
+            tone: "error",
+          });
+        }
       }
+      // Below threshold: keep previous online state (no flicker).
+    } finally {
+      setConnectorsReady(true);
     }
   }, [toast]);
 
   const loadJobs = useCallback(async (notifyOnError = true) => {
     try {
       setJobs(await fetchJobs());
+      noteApiSuccess();
+      setApiOnline(true);
     } catch {
       if (notifyOnError) {
         toast({ title: "Could not load jobs", message: "Job history may be unavailable.", tone: "warning" });
@@ -169,6 +218,8 @@ function AppShell({
   const loadSchedules = useCallback(async () => {
     try {
       setSchedules(await fetchSchedules());
+      noteApiSuccess();
+      setApiOnline(true);
     } catch {
       setSchedules([]);
     }
@@ -178,18 +229,12 @@ function AppShell({
     let cancelled = false;
     (async () => {
       setBootLoading(true);
-      const timeout = window.setTimeout(() => {
-        if (!cancelled) setBootLoading(false);
-      }, 2500);
       await Promise.allSettled([
         loadConnectors(false),
         loadJobs(false),
         loadSchedules(),
       ]);
-      if (!cancelled) {
-        window.clearTimeout(timeout);
-        setBootLoading(false);
-      }
+      if (!cancelled) setBootLoading(false);
     })();
     return () => { cancelled = true; };
   }, [loadConnectors, loadJobs, loadSchedules]);
@@ -216,6 +261,42 @@ function AppShell({
     return () => window.clearInterval(poll);
   }, [loadConnectors]);
 
+  // Dedicated health pulse — recovers the banner when Railway is green again,
+  // and only flips offline after repeated health failures (not one slow request).
+  useEffect(() => {
+    const pulse = window.setInterval(async () => {
+      const up = await probeApiHealth();
+      if (up) {
+        noteApiSuccess();
+        setApiOnline(true);
+      } else if (shouldMarkApiOffline(false)) {
+        setApiOnline(false);
+      }
+    }, 20000);
+    return () => window.clearInterval(pulse);
+  }, []);
+
+  useEffect(() => {
+    const onConnectorsChanged = () => {
+      void loadConnectors(false);
+    };
+    window.addEventListener("df2:connectors-changed", onConnectorsChanged);
+    return () => window.removeEventListener("df2:connectors-changed", onConnectorsChanged);
+  }, [loadConnectors]);
+
+  useEffect(() => {
+    const onAuthRequired = () => {
+      toast({
+        title: "Session expired",
+        message: "Sign in again to load connectors, jobs, and transfers.",
+        tone: "warning",
+      });
+      onSignOut();
+    };
+    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+  }, [onSignOut, toast]);
+
   const navigateFromSearch = (target: SearchNavigateTarget) => {
     setScreen(target.screen);
     setSearchFocus(target);
@@ -231,7 +312,11 @@ function AppShell({
   }, [searchFocus]);
 
   const userInitial = userEmail ? userEmail.charAt(0).toUpperCase() : "U";
-  const userShort = userEmail ? userEmail.split("@")[0] : "User";
+  const userShort = (() => {
+    const raw = userEmail ? userEmail.split("@")[0] : "User";
+    if (!raw) return "User";
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  })();
 
   const openModal = (type?: string) => {
     setEditingConnector(null);
@@ -254,23 +339,28 @@ function AppShell({
           ? "df2-content-viewport"
           : "df2-content-document";
 
+  /** Document pages own the scroll on the host; immersive/viewport pages lock it
+      and scroll internally. Deterministic class beats the legacy :has() toggles. */
+  const contentScrolls = contentInnerClass === "df2-content-document";
+  const contentModeClass = contentScrolls ? "df2-content-scroll" : "df2-content-fixed";
+
   useEffect(() => {
     const scrollHost = document.querySelector<HTMLElement>(".df2-content");
     if (!scrollHost) return;
 
-    scrollHost.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" } as ScrollToOptions);
-
-    // Force scroll host to recognize content height after route / keep-alive swap
+    // Reset to top on every route / keep-alive swap. Overflow is governed purely
+    // by the .df2-content-scroll / .df2-content-fixed class (no inline mutation
+    // that could get stuck fighting !important rules).
+    scrollHost.scrollTop = 0;
     const raf = window.requestAnimationFrame(() => {
-      scrollHost.style.overflowY = "auto";
-      void scrollHost.offsetHeight;
+      void scrollHost.offsetHeight; // force reflow so scrollHeight is recomputed
+      scrollHost.scrollTop = 0;
     });
     return () => window.cancelAnimationFrame(raf);
   }, [screen, bootLoading]);
 
   const showCopilotRail = screen !== "pilot" && copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
-  const envLabel = apiEnvLabel(apiOnline);
   const offlineCopy = apiOfflineMessage();
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
@@ -283,7 +373,7 @@ function AppShell({
 
       <aside className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Main navigation">
         <div className="df2-sidebar-brand">
-          <DtLogo size={40} />
+          <DtLogo size={sidebarNavCompact ? 32 : 36} />
           <div className="df2-sidebar-brand-copy">
             <div className="df2-brand-name">DataFlow</div>
             <div className="df2-brand-tag">Universal data platform</div>
@@ -291,9 +381,15 @@ function AppShell({
           <button
             type="button"
             className="df2-sidebar-collapse-btn"
-            onClick={() => setSidebarNavCompact((c) => !c)}
-            aria-label={sidebarNavCompact ? "Expand menu labels" : "Compact menu icons"}
-            title={sidebarNavCompact ? "Expand menu labels" : "Compact menu icons"}
+            onClick={() => {
+              setSidebarNavCompact((c) => {
+                const next = !c;
+                saveSidebarNavCompact(next);
+                return next;
+              });
+            }}
+            aria-label={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
+            title={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
           >
             <DtIcon name={sidebarNavCompact ? "chevron-right" : "chevron-left"} size={16} />
           </button>
@@ -316,14 +412,30 @@ function AppShell({
               {item.id === "connectors" && connectors.length > 0 && (
                 <span className="df2-nav-badge" aria-hidden="true"> {connectors.length}</span>
               )}
+            </button>
+          ))}
+
+          <div className="df2-nav-group-label">Operations</div>
+          {OPS_NAV.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`df2-nav-item ${screen === item.id ? "active" : ""}`}
+              onClick={() => { setScreen(item.id); setMobileNavOpen(false); }}
+              title={item.desc}
+            >
+              <span className="dt-nav-icon" aria-hidden>
+                <DtIcon name={item.icon} size={18} />
+              </span>
+              <span>{item.label}</span>
               {item.id === "jobs" && jobs.length > 0 && (
                 <span className="df2-nav-badge" aria-hidden="true"> {jobs.length}</span>
               )}
             </button>
           ))}
 
-          <div className="df2-nav-group-label">Developers</div>
-          {DEVELOPER_NAV.map((item) => (
+          <div className="df2-nav-group-label">System</div>
+          {SYSTEM_NAV.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -340,15 +452,10 @@ function AppShell({
         </nav>
 
         <div className="df2-sidebar-foot">
-          <button type="button" className="df2-sidebar-cta" onClick={() => setScreen("transfer")}>
+          <button type="button" className="df2-sidebar-cta" onClick={openFreshTransfer}>
             <DtIcon name="transfer" size={16} />
             <span className="df2-sidebar-collapse-label">New transfer</span>
           </button>
-          <div className={`df2-sidebar-env ${apiOnline ? "" : "offline"}`} title="Control plane health">
-            <span className="df2-system-dot" />
-            <strong>{apiOnline ? "API connected" : "API offline"}</strong>
-            <small>{apiOnline ? envLabel : "Check API service"}</small>
-          </div>
           <div className="df2-sidebar-user">
             <button
               type="button"
@@ -403,10 +510,20 @@ function AppShell({
             />
           </div>
           <div className="df2-topbar-actions">
-            <div className={`df2-system-pill ${apiOnline ? "" : "degraded"}`} title="Control plane status">
-              <span className="df2-system-dot" />
-              <span className="df2-topbar-pill-text">{apiOnline ? "Online" : "Offline"}</span>
-            </div>
+            {sidebarNavCompact && (
+              <button
+                type="button"
+                className="df2-sidebar-expand-topbar"
+                onClick={() => {
+                  setSidebarNavCompact(false);
+                  saveSidebarNavCompact(false);
+                }}
+                aria-label="Expand navigation"
+                title="Expand navigation"
+              >
+                <DtIcon name="menu" size={18} />
+              </button>
+            )}
             <StatusPopover
               apiOnline={apiOnline}
               failedJobsCount={failedJobsCount}
@@ -425,10 +542,10 @@ function AppShell({
                 <span className="df2-topbar-btn-text">Pilot</span>
               </Button>
             )}
-            {screen !== "transfer" && (
+            {screen !== "pilot" && (
               <Button
                 variant="primary"
-                onClick={() => setScreen("transfer")}
+                onClick={openFreshTransfer}
               >
                 <span className="df2-topbar-btn-text">New transfer</span>
               </Button>
@@ -446,7 +563,7 @@ function AppShell({
           </div>
         )}
 
-        <div className="df2-content">
+        <div className={`df2-content ${contentModeClass}`}>
         {bootLoading && (
           <div className="df2-boot-progress" role="progressbar" aria-label="Loading workspace">
             <div className="df2-boot-progress-fill" />
@@ -463,8 +580,6 @@ function AppShell({
                     connectors={connectors}
                     jobs={jobs}
                     schedules={schedules}
-                    onNewTransfer={() => setScreen("transfer")}
-                    onOpenPilot={() => setScreen("pilot")}
                     onOpenConnectors={() => setScreen("connectors")}
                     onOpenJobs={() => setScreen("jobs")}
                   />
@@ -482,8 +597,12 @@ function AppShell({
                 <div className={`df2-screen-keep ${showScreen("transfer")}`} hidden={screen !== "transfer"} aria-hidden={screen !== "transfer"}>
                 <PageErrorBoundary label="Transfer Studio">
                   <TransferPage
+                    key={transferStudioKey}
                     connectors={connectors}
+                    connectorsLoading={!connectorsReady}
                     onOpenSchedules={() => setScreen("schedules")}
+                    onOpenContracts={() => setScreen("contracts")}
+                    onFreshTransfer={openFreshTransfer}
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
@@ -505,12 +624,15 @@ function AppShell({
                 <PageErrorBoundary label="Connectors">
                   <ConnectorsPage
                     connectors={connectors}
+                    connectorsLoading={!connectorsReady}
                     jobs={jobs}
                     schedules={schedules}
                     onAdd={openModal}
                     onEdit={openEditModal}
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
+                    onOpenTransfer={() => setScreen("transfer")}
+                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     showConnectionsTab={connectorsViewToken}
                     highlightConnectorId={
                       searchFocus?.screen === "connectors" ? searchFocus.connectorId : undefined
@@ -525,6 +647,7 @@ function AppShell({
                   <SchedulesPage
                     connectors={connectors}
                     onViewJobs={() => setScreen("jobs")}
+                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     onSchedulesChange={loadSchedules}
                     highlightScheduleId={
                       searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined
@@ -542,6 +665,13 @@ function AppShell({
                     onStartTransfer={() => setScreen("transfer")}
                     initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
                   />
+                </PageErrorBoundary>
+                </div>
+              )}
+              {mountedScreens.has("contracts") && (
+                <div className={`df2-screen-keep ${showScreen("contracts")}`} hidden={screen !== "contracts"} aria-hidden={screen !== "contracts"}>
+                <PageErrorBoundary label="Contracts">
+                  <ContractsPage active={screen === "contracts"} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -598,15 +728,17 @@ function AppShell({
         />
       )}
 
-      {screen !== "pilot" && screen !== "transfer" && !copilotOpen && (
+      {/* Mid-right edge tab only — no bottom-corner FAB (duplicates the rail Pilot). */}
+      {screen !== "pilot" && !copilotOpen && (
         <button
           type="button"
-          className="df2-copilot-fab"
+          className="df2-copilot-edge-open"
           onClick={() => setCopilotOpen(true)}
-          aria-label="Open Data Pilot"
-          title="Data Pilot"
+          aria-label="Expand Data Pilot"
+          title="Expand Data Pilot"
         >
-          <DtIcon name="sparkle" size={22} />
+          <DtIcon name="chevron-left" size={14} />
+          <span>Pilot</span>
         </button>
       )}
     </div>
@@ -614,9 +746,13 @@ function AppShell({
 
   async function handleDeleteConnector(id: string) {
     const target = connectors.find((c) => c.id === id);
-    const confirmed = window.confirm(
-      `Delete ${target?.name ?? "this connector"}? This removes saved credentials and route references for this connection.`,
-    );
+    const confirmed = await confirm({
+      title: `Delete ${target?.name ?? "this connector"}?`,
+      message: "This removes saved credentials and route references for this connection. Pipelines that used it will need a new connection.",
+      confirmLabel: "Delete connection",
+      cancelLabel: "Keep connection",
+      tone: "danger",
+    });
     if (!confirmed) return;
 
     try {
@@ -632,7 +768,9 @@ function AppShell({
 export function DataTransferApp() {
   return (
     <ToastProvider>
-      <DataTransferAppInner />
+      <ConfirmProvider>
+        <DataTransferAppInner />
+      </ConfirmProvider>
     </ToastProvider>
   );
 }
@@ -772,7 +910,9 @@ function DataTransferAppInner() {
 
       {stage === "app" && (
         <DataProvider>
-          <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+          <StudioActionsProvider>
+            <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+          </StudioActionsProvider>
         </DataProvider>
       )}
     </>

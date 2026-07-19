@@ -14,6 +14,7 @@ from connectors.sqlite_common import sqlite_file_path
 from services.value_serializer import json_default
 from connectors.writer_common import (
     CHUNK_SIZE,
+    _coerced_null_row_count,
     _rejected_row_count,
     build_mapped_rows_with_details,
     quote_sql_identifier,
@@ -58,17 +59,22 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             except Exception:
                 return value.encode("utf-8")
         return value
-    if upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ"}:
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return value
-    if upper == "DATE":
-        if isinstance(value, date):
-            return value.isoformat()
-        return value
-    if upper == "TIME":
-        if isinstance(value, time):
-            return value.isoformat()
+    if upper in {
+        "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
+        "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "DATE", "TIME",
+    }:
+        from connectors.sql_temporal import coerce_sql_temporal, format_wire_value
+
+        coerced = coerce_sql_temporal(value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP")
+        wire = format_wire_value(value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP")
+        if wire is not None:
+            return wire
+        if isinstance(coerced, datetime):
+            return coerced.isoformat(sep=" ")
+        if isinstance(coerced, date) and not isinstance(coerced, datetime):
+            return coerced.isoformat()
+        if isinstance(coerced, time):
+            return coerced.isoformat()
         return value
     if upper == "BOOLEAN":
         return 1 if value else 0
@@ -136,7 +142,16 @@ def write_mapped_rows(
             checksum="", chunks_completed=0, error="SQLite path is required (database or connection_string).",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    from connectors.writer_common import sample_values_by_source_from_batch
+
+    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        sample_values_by_source=batch_samples,
+        table_exists=False if create_table else None,
+    )
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=schema or "main",
@@ -173,6 +188,7 @@ def write_mapped_rows(
         ]
 
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
                 ok=False,
@@ -241,6 +257,7 @@ def write_mapped_rows(
                 chunks_completed=chunks,
                 rejected_rows=max(rejected_rows, len(data_rows) - written),
                 rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
                 warnings=transform_errors,
             )
         finally:

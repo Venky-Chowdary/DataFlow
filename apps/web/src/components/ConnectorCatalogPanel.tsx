@@ -23,10 +23,11 @@ const CATEGORY_LABELS: Record<string, string> = {
 const STATIC_CATEGORIES = Object.keys(CATEGORY_LABELS);
 
 const STATUS_FILTERS = [
-  { id: "live", label: "Transfer ready" },
+  { id: "live", label: "Certified" },
+  { id: "source_only", label: "Source only" },
   { id: "connect_only", label: "Test only" },
   { id: "", label: "All catalog" },
-  { id: "planned", label: "Roadmap" },
+  { id: "planned", label: "Planned" },
 ];
 
 function catalogType(id: string) {
@@ -47,10 +48,18 @@ function highlightMatch(text: string, query: string) {
 }
 
 function statusBadge(item: CatalogConnector) {
-  const eff = item.effective_status || item.status;
-  if (item.transfer_ready || eff === "live") return { cls: "df2-badge-live", label: item.capability_label || "Full transfer" };
-  if (item.connect_only || eff === "connect_only") return { cls: "df2-badge-run", label: item.capability_label || "Test only" };
-  return { cls: "df2-badge-muted", label: "Roadmap" };
+  const tier = item.certification_tier || "";
+  // Green = certified full transfer only. Never greenwash REST brand stubs.
+  if (item.transfer_ready || tier === "certified") {
+    return { cls: "df2-badge-live", label: item.capability_label || "Certified" };
+  }
+  if (tier === "source_only") {
+    return { cls: "df2-badge-run", label: item.capability_label || "Source only" };
+  }
+  if (item.connect_only || tier === "connect_only" || item.effective_status === "connect_only") {
+    return { cls: "df2-badge-run", label: item.capability_label || "Test only" };
+  }
+  return { cls: "df2-badge-muted", label: item.capability_label || "Planned" };
 }
 
 interface ConnectorCatalogPanelProps {
@@ -83,6 +92,8 @@ export function ConnectorCatalogPanel({
   const [filtered, setFiltered] = useState(0);
   const [total, setTotal] = useState(0);
   const [transferLive, setTransferLive] = useState(0);
+  const [sourceOnlyCount, setSourceOnlyCount] = useState(0);
+  const [plannedCount, setPlannedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -107,7 +118,9 @@ export function ConnectorCatalogPanel({
       setCategories(data.categories || []);
       setFiltered(data.filtered ?? data.connectors?.length ?? 0);
       setTotal(data.total ?? 0);
-      setTransferLive(data.transfer_live ?? 0);
+      setTransferLive(data.certified ?? data.transfer_live ?? 0);
+      setSourceOnlyCount(data.source_only ?? 0);
+      setPlannedCount(data.planned_count ?? data.roadmap ?? 0);
     } catch {
       setConnectors([]);
       setError("Could not load connector catalog. Start the API with npm run dev:api and refresh.");
@@ -189,7 +202,15 @@ export function ConnectorCatalogPanel({
           <p className="df2-catalog-meta">
             {filtered.toLocaleString()} shown
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
-            {transferLive > 0 && ` · ${transferLive.toLocaleString()} transfer-ready`}
+            {transferLive > 0 && ` · ${transferLive.toLocaleString()} certified`}
+            {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
+            {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
+            {role !== "all" && (
+              <>
+                {" · "}
+                Filter is catalog browsing only — saved databases stay usable as source and destination
+              </>
+            )}
           </p>
         )}
 
@@ -212,23 +233,31 @@ export function ConnectorCatalogPanel({
           <div className="df2-connector-grid">
             {connectors.map((item) => {
               const badge = statusBadge(item);
-              const clickable = item.transfer_ready || (!requireAvailable && (item.connect_only || item.status === "beta"));
-              const blocked = requireAvailable && !item.transfer_ready && !item.connect_only;
+              const tier = item.certification_tier || "";
+              const selectable =
+                item.transfer_ready ||
+                item.connect_only ||
+                tier === "source_only" ||
+                item.effective_status === "live" ||
+                item.status === "beta";
+              const blocked = requireAvailable
+                ? !item.transfer_ready && !item.connect_only && tier !== "source_only"
+                : !selectable && (tier === "planned" || item.effective_status === "planned");
               return (
                 <button
                   key={item.id}
                   type="button"
-                  className={`df2-connector-tile ${!item.transfer_ready ? "is-planned" : ""} ${item.transfer_ready ? "is-live" : ""}`}
+                  className={`df2-connector-tile ${item.transfer_ready ? "is-live" : selectable ? "" : "is-planned"}`}
                   onClick={() => {
-                    if (blocked && !item.connect_only) return;
+                    if (blocked) return;
                     onSelect(item);
                   }}
-                  disabled={blocked && !item.connect_only}
+                  disabled={blocked}
                   title={
                     item.transfer_ready
                       ? `${item.name} — ${item.description}`
-                      : item.connect_only
-                        ? `${item.name} — connection test only, transfer not yet supported`
+                      : selectable
+                        ? `${item.name} — ${item.capability_label || "available"}`
                         : `${item.name} — on roadmap`
                   }
                 >
@@ -240,8 +269,8 @@ export function ConnectorCatalogPanel({
                     <span className="df2-connector-tile-desc">{item.description}</span>
                   )}
                   <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
-                  {!clickable && !item.connect_only && (
-                    <span className="df2-connector-tile-lock">Roadmap</span>
+                  {!selectable && (
+                    <span className="df2-connector-tile-lock">Planned</span>
                   )}
                 </button>
               );

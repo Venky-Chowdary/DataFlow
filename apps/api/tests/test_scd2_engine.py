@@ -136,3 +136,41 @@ def test_scd2_reidentical_snapshot_is_idempotent():
         assert summary["active_rows"] == 2
     finally:
         Path(db_path).unlink(missing_ok=True)
+
+
+def test_scd2_composite_primary_key():
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path), table="line_items")
+        rows = [
+            {"order_id": "o1", "line": "1", "sku": "A"},
+            {"order_id": "o1", "line": "2", "sku": "B"},
+        ]
+        summary = apply_scd2(
+            endpoint,
+            rows,
+            columns=["order_id", "line", "sku"],
+            schema={"order_id": "string", "line": "string", "sku": "string"},
+            mappings=None,
+            conflict_columns=["order_id", "line"],
+        )
+        assert summary["rows_written"] == 2
+        assert summary["primary_key_columns"] == ["order_id", "line"]
+
+        updated = [
+            {"order_id": "o1", "line": "1", "sku": "A2"},
+            {"order_id": "o1", "line": "2", "sku": "B"},
+        ]
+        summary2 = apply_scd2(
+            endpoint,
+            updated,
+            columns=["order_id", "line", "sku"],
+            schema={"order_id": "string", "line": "string", "sku": "string"},
+            mappings=None,
+            conflict_columns=["order_id", "line"],
+        )
+        assert summary2["rows_written"] == 1
+        assert summary2["updated_rows"] == 1
+        assert summary2["active_rows"] == 2
+    finally:
+        Path(db_path).unlink(missing_ok=True)

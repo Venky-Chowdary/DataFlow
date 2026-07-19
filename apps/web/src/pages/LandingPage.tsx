@@ -1,10 +1,12 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { DtLogo } from "../components/DtLogo";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ComparisonSection } from "../components/landing/ComparisonSection";
 import { TrustSection } from "../components/landing/TrustSection";
 import { TestimonialSection } from "../components/landing/TestimonialSection";
+import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
+import { LandingInfraRibbon } from "../components/landing/LandingInfraRibbon";
 import { fetchCatalogStats } from "../lib/api";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { MarketingSectionFooter } from "../components/marketing/MarketingSectionFooter";
@@ -100,203 +102,384 @@ function ConnectorMarqueeBand() {
   );
 }
 
+/**
+ * Count-up metric that animates once when scrolled into view. Honors
+ * prefers-reduced-motion by rendering the final value immediately.
+ */
+function CountUpStat({
+  target,
+  prefix = "",
+  suffix = "",
+  label,
+  detail,
+  index,
+}: {
+  target: number;
+  prefix?: string;
+  suffix?: string;
+  label: string;
+  detail: string;
+  index: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [value, setValue] = useState(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced || target === 0) {
+      setValue(target);
+      return;
+    }
+
+    let raf = 0;
+    let started = false;
+    const run = () => {
+      if (started) return;
+      started = true;
+      const duration = 1100;
+      const start = performance.now();
+      const tick = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const eased = 1 - Math.pow(1 - t, 3);
+        setValue(Math.round(eased * target));
+        if (t < 1) raf = window.requestAnimationFrame(tick);
+      };
+      raf = window.requestAnimationFrame(tick);
+    };
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          run();
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.4 },
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(raf);
+    };
+  }, [target]);
+
+  return (
+    <div ref={ref} className="lp-outcome" style={{ "--reveal-i": index } as CSSProperties}>
+      <strong className="lp-outcome-value">
+        {prefix}
+        {value.toLocaleString()}
+        {suffix}
+      </strong>
+      <span className="lp-outcome-label">{label}</span>
+      <span className="lp-outcome-detail">{detail}</span>
+    </div>
+  );
+}
+
+function OutcomesBand({
+  uniqueDrivers,
+  catalogTiles,
+}: {
+  uniqueDrivers: number | null;
+  catalogTiles: number | null;
+}) {
+  const driverTarget = uniqueDrivers ?? 0;
+  const driverDetail =
+    catalogTiles != null && catalogTiles > 0
+      ? `${catalogTiles} catalog tiles · unique drivers primary`
+      : "Package-available unique drivers — not alias inflation";
+
+  return (
+    <section className="lp-section lp-outcomes" id="outcomes" aria-label="Outcomes">
+      <Reveal>
+        <div className="lp-section-head">
+          <p className="lp-section-kicker">Outcomes</p>
+          <h2>Built to prove every transfer</h2>
+          <p>Governance isn&rsquo;t a dashboard afterthought — it&rsquo;s enforced on every run, before and after write.</p>
+        </div>
+      </Reveal>
+      <Reveal className="lp-outcomes-grid">
+        <CountUpStat index={0} target={8} label="Preflight gates" detail="Block bad writes before production" />
+        <CountUpStat
+          index={1}
+          target={driverTarget || 24}
+          suffix={uniqueDrivers != null ? "" : "+"}
+          label="Unique drivers"
+          detail={driverDetail}
+        />
+        <CountUpStat index={2} target={100} suffix="%" label="Row & checksum proof" detail="Reconciled end-to-end after write" />
+        <CountUpStat index={3} target={0} label="Silently dropped rows" detail="Bad rows are quarantined, never lost" />
+      </Reveal>
+    </section>
+  );
+}
+
 /** Home marketing body — chrome (nav/footer) lives in MarketingChrome. */
+function HeroStudioMock({ gateStep }: { gateStep: number }) {
+  const gates = [
+    "Schema contract",
+    "Type coercion",
+    "Nullability",
+    "Destination probe",
+    "Capacity",
+    "Write plan",
+    "Quarantine policy",
+    "Reconcile plan",
+  ];
+
+  return (
+    <div className="lp-hero-mock" aria-label="DataFlow Transfer Studio preview">
+      <div className="lp-mock-shell">
+        <aside className="lp-mock-side">
+          <div className="lp-mock-side-title">
+            <span className="lp-mock-org">
+              <DtLogo size={16} />
+              DataFlow
+            </span>
+            <DtIcon name="chevron-down" size={12} />
+          </div>
+          {[
+            { id: "transfer", label: "Transfer Studio", icon: "transfer" as const, active: true },
+            { id: "pilot", label: "Data Pilot", icon: "sparkle" as const, active: false },
+            { id: "jobs", label: "Job Theater", icon: "jobs" as const, active: false },
+            { id: "connectors", label: "Connectors", icon: "connectors" as const, active: false },
+          ].map((item) => (
+            <div key={item.id} className={`lp-mock-nav-item ${item.active ? "is-active" : ""}`}>
+              <DtIcon name={item.icon} size={14} />
+              {item.label}
+            </div>
+          ))}
+          <div className="lp-mock-section-label">
+            <span>Recent</span>
+            <span className="lp-mock-section-actions">
+              <DtIcon name="search" size={12} />
+              <DtIcon name="plus" size={12} />
+            </span>
+          </div>
+          {[
+            { title: "Orders CSV → PostgreSQL", meta: "Completed · 12k rows", active: true, badge: "proof" },
+            { title: "Mongo customers → BigQuery", meta: "Running · 64%", active: false, badge: "live" },
+            { title: "S3 events → Snowflake", meta: "Queued", active: false, badge: "queued" },
+          ].map((job) => (
+            <div key={job.title} className={`lp-mock-job ${job.active ? "is-active" : ""}`}>
+              <strong>{job.title}</strong>
+              <span>{job.meta}</span>
+              <em>{job.badge}</em>
+            </div>
+          ))}
+        </aside>
+
+        <div className="lp-mock-main">
+          <div className="lp-mock-main-head">
+            <span>Transfer Studio / Orders migration</span>
+            <span className="lp-mock-live-chip">
+              <span className="lp-mock-live-dot" aria-hidden />
+              Live
+            </span>
+          </div>
+          <div className="lp-mock-prompt">
+            <div className="lp-mock-prompt-text">
+              Map source <code>order_amt</code> to destination <code>payment_amount</code>, then run preflight before load.
+            </div>
+            <div className="lp-mock-avatar" aria-hidden>DF</div>
+          </div>
+          <div className="lp-mock-reply">
+            Mapping <code>order_amt → payment_amount</code> at 96% confidence. Running eight preflight gates, then writing with reconciliation.
+          </div>
+          <div className="lp-mock-stat">
+            <span>Preflight</span>
+            <strong>{Math.min(gateStep + 1, 8)} / 8 gates passed</strong>
+            <div className="lp-mock-progress" aria-hidden>
+              <i style={{ width: `${((Math.min(gateStep + 1, 8)) / 8) * 100}%` }} />
+            </div>
+          </div>
+          <div className="lp-mock-pr">
+            <div className="lp-mock-pr-top">
+              <strong>Proof report: Orders migration</strong>
+              <span className="lp-mock-open">matched</span>
+            </div>
+            <div className="lp-mock-pr-meta">
+              <span>Source 12,480</span>
+              <span>·</span>
+              <span>Target 12,480</span>
+              <span>·</span>
+              <span>Checksum OK</span>
+            </div>
+          </div>
+        </div>
+
+        <aside className="lp-mock-detail">
+          <h3>Proof report: Orders migration</h3>
+          <p>Independent reconciliation verifies row counts and content checksums after write.</p>
+          <ul>
+            <li>Source rows: 12,480</li>
+            <li>Target rows: 12,480</li>
+            <li>Checksum: matched</li>
+          </ul>
+          <div className="lp-mock-gates">
+            {gates.map((g, i) => (
+              <div key={g} className={`lp-mock-gate ${i <= gateStep ? "is-pass" : "is-pending"}`}>
+                <span>{g}</span>
+                <em>{i <= gateStep ? "pass" : "…"}</em>
+              </div>
+            ))}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
   const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
+  const [catalogTiles, setCatalogTiles] = useState<number | null>(null);
+  const [gateStep, setGateStep] = useState(0);
+  const heroRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     fetchCatalogStats()
-      .then((s) => setLiveDrivers(s.transfer_live ?? s.live))
-      .catch(() => setLiveDrivers(null));
+      .then((s) => {
+        setLiveDrivers(s.unique_drivers ?? s.transfer_live ?? s.live);
+        setCatalogTiles(s.catalog_tiles ?? s.transfer_live_tiles ?? null);
+      })
+      .catch(() => {
+        setLiveDrivers(null);
+        setCatalogTiles(null);
+      });
+  }, []);
+
+  useEffect(() => {
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced) {
+      setGateStep(7);
+      return;
+    }
+    const id = window.setInterval(() => setGateStep((s) => (s + 1) % 8), 900);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Parallax the immersive 3D stage
+  useEffect(() => {
+    const hero = heroRef.current;
+    if (!hero) return;
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced) return;
+
+    const stage = hero.querySelector<HTMLElement>(".lp-d3");
+    if (!stage) return;
+
+    const onScroll = () => {
+      const rect = hero.getBoundingClientRect();
+      const progress = Math.min(1, Math.max(0, -rect.top / Math.max(rect.height, 1)));
+      stage.style.setProperty("--lp-parallax", `${progress * 48}px`);
+      stage.style.setProperty("--lp-parallax-op", String(1 - progress * 0.18));
+      stage.style.setProperty("--lp-tilt", `${progress * 4}deg`);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
   return (
     <>
-      <section className="lp-hero">
-        <p className="lp-hero-brand">DataFlow</p>
-        <h1>Move any schema anywhere</h1>
-        <p className="lp-hero-sub">
-          Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
-          {liveDrivers != null ? ` ${liveDrivers}+ live transfer drivers ready today.` : ""}
-        </p>
+      <section className="lp-hero lp-hero--immersive lp-hero--bleed" ref={heroRef}>
+        <div className="lp-hero-immersive-grid">
+          <div className="lp-hero-copy">
+            <span className="lp-hero-eyebrow">
+              <span className="lp-hero-eyebrow-dot" aria-hidden />
+              Universal data movement, proven end-to-end
+            </span>
+            <h1 className="lp-hero-title">
+              Move any schema <span className="lp-hero-title-b">anywhere</span>
+            </h1>
+            <p className="lp-hero-sub">
+              Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
+              {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
+            </p>
 
-        <div className="lp-hero-cta">
-          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-            Try DataFlow
-          </button>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("product-transfer")}>
-            See Transfer Studio
-          </button>
-        </div>
-
-        <div className="lp-hero-value-strip" aria-label="Platform highlights">
-          <article>
-            <span className="lp-hero-value-icon"><DtIcon name="gate" size={18} /></span>
-            <div>
-              <strong>8 preflight gates</strong>
-              <span>Block bad writes before production</span>
-            </div>
-          </article>
-          <article>
-            <span className="lp-hero-value-icon"><DtIcon name="check" size={18} /></span>
-            <div>
-              <strong>Checksum proof</strong>
-              <span>Reconcile every load end-to-end</span>
-            </div>
-          </article>
-          <article>
-            <span className="lp-hero-value-icon"><DtIcon name="connectors" size={18} /></span>
-            <div>
-              <strong>600+ connectors</strong>
-              <span>Any source to any destination</span>
-            </div>
-          </article>
-        </div>
-
-        <div className="lp-hero-mock" aria-label="DataFlow Transfer Studio preview">
-          <div className="lp-mock-shell">
-            <aside className="lp-mock-side">
-              <div className="lp-mock-side-title">
-                <span className="lp-mock-org">
-                  <DtLogo size={16} />
-                  DataFlow
-                </span>
-                <DtIcon name="chevron-down" size={12} />
-              </div>
-              {[
-                { id: "transfer", label: "Transfer Studio", icon: "transfer" as const, active: true },
-                { id: "pilot", label: "Data Pilot", icon: "sparkle" as const, active: false },
-                { id: "jobs", label: "Job Theater", icon: "jobs" as const, active: false },
-                { id: "connectors", label: "Connectors", icon: "connectors" as const, active: false },
-              ].map((item) => (
-                <div key={item.id} className={`lp-mock-nav-item ${item.active ? "is-active" : ""}`}>
-                  <DtIcon name={item.icon} size={14} />
-                  {item.label}
-                </div>
-              ))}
-              <div className="lp-mock-section-label">
-                <span>Recent</span>
-                <span className="lp-mock-section-actions">
-                  <DtIcon name="search" size={12} />
-                  <DtIcon name="plus" size={12} />
-                </span>
-              </div>
-              {[
-                { title: "Orders CSV → PostgreSQL", meta: "Completed · 12k rows", active: true, badge: "1 open" },
-                { title: "Mongo customers → BigQuery", meta: "Running · 64%", active: false, badge: "2 open" },
-                { title: "S3 events → Snowflake", meta: "Queued", active: false, badge: "1 merged" },
-              ].map((job) => (
-                <div key={job.title} className={`lp-mock-job ${job.active ? "is-active" : ""}`}>
-                  <strong>{job.title}</strong>
-                  <span>{job.meta}</span>
-                  <em>{job.badge}</em>
-                </div>
-              ))}
-            </aside>
-
-            <div className="lp-mock-main">
-              <div className="lp-mock-main-head">Transfer Studio / Orders migration</div>
-              <div className="lp-mock-prompt">
-                <div className="lp-mock-prompt-text">
-                  Map source <code>order_amt</code> to destination <code>payment_amount</code>, then run preflight before load.
-                </div>
-                <div className="lp-mock-avatar" aria-hidden>DF</div>
-              </div>
-              <div className="lp-mock-reply">
-                Mapping <code>order_amt → payment_amount</code> at 96% confidence. Running eight preflight gates, then writing with reconciliation. Starting now.
-              </div>
-              <div className="lp-mock-stat">
-                <span>Preflight</span>
-                <strong>8 / 8 gates passed</strong>
-              </div>
-              <div className="lp-mock-pr">
-                <div className="lp-mock-pr-top">
-                  <strong>Proof report: Orders migration</strong>
-                  <span className="lp-mock-open">matched</span>
-                </div>
-                <div className="lp-mock-pr-meta">
-                  <span>Source 12,480</span>
-                  <span>·</span>
-                  <span>Target 12,480</span>
-                  <span>·</span>
-                  <span>Checksum OK</span>
-                </div>
-              </div>
+            <div className="lp-hero-cta">
+              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+                Try DataFlow
+              </button>
+              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
+                Read the docs
+              </button>
             </div>
 
-            <aside className="lp-mock-detail">
-              <h3>Proof report: Orders migration</h3>
-              <p>Independent reconciliation verifies row counts and content checksums after write.</p>
-              <ul>
-                <li>Source rows: 12,480</li>
-                <li>Target rows: 12,480</li>
-                <li>Checksum: matched</li>
-              </ul>
-              <div className="lp-mock-gates">
-                {["Schema contract", "Type coercion", "Nullability", "Destination probe", "Capacity", "Write plan"].map((g) => (
-                  <div key={g} className="lp-mock-gate">
-                    <span>{g}</span>
-                    <em>pass</em>
-                  </div>
-                ))}
-              </div>
-            </aside>
+            <ul className="lp-hero-proof-line" aria-label="Platform highlights">
+              <li>8 preflight gates</li>
+              <li>Checksum proof</li>
+              <li>{liveDrivers != null ? `${liveDrivers} unique drivers` : "Transfer-ready drivers"}</li>
+            </ul>
+          </div>
+
+          <div className="lp-hero-visual lp-hero-visual--stage">
+            <LandingHeroFlow />
           </div>
         </div>
       </section>
 
-      <section className="lp-logos" aria-label="Trusted stacks">
+      <section className="lp-studio-band lp-band--full" aria-label="Transfer Studio preview">
+        <div className="lp-studio-band-inner">
+          <div className="lp-studio-band-copy lp-band-copy--center">
+            <p className="lp-section-kicker">Product</p>
+            <h2>Transfer Studio in motion</h2>
+            <p>Map → preflight → write → reconcile on one governed path. The same engine under Pipelines, Pilot, and MCP.</p>
+          </div>
+          <HeroStudioMock gateStep={gateStep} />
+          <div className="lp-studio-band-docs">
+            <p>Prefer a step-by-step runbook? Open the public documentation with product screenshots.</p>
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("help")}>
+              Browse documentation
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="lp-logos lp-logos--float lp-band--center" aria-label="Trusted stacks">
         <h5>Industry leaders move data with</h5>
-        <div className="lp-logos-row">
-          {["postgresql", "snowflake", "bigquery", "mongodb", "kafka", "s3"].map((id) => (
-            <span key={id} className="lp-logo-item">
-              <ConnectorIcon id={id} size={22} />
-              {id}
+        <div className="lp-logos-float-row">
+          {["postgresql", "snowflake", "bigquery", "mongodb", "sqlserver", "s3"].map((id, i) => (
+            <span key={id} className="lp-logo-float" style={{ "--i": i } as CSSProperties} title={id}>
+              <ConnectorIcon id={id} size={48} />
+              <em>{id}</em>
             </span>
           ))}
         </div>
       </section>
 
-      <section className="lp-section lp-section-platform" id="platform">
+      <OutcomesBand uniqueDrivers={liveDrivers} catalogTiles={catalogTiles} />
+
+      <section className="lp-section lp-section-platform lp-band--full" id="platform">
         <Reveal>
-          <div className="lp-section-head">
+          <div className="lp-section-head lp-band-copy--center">
             <p className="lp-section-kicker">Platform</p>
             <h2>From source to proof in four steps</h2>
             <p>The same governed path in Transfer Studio, Data Pilot, MCP, and scheduled pipelines.</p>
           </div>
         </Reveal>
-        <Reveal className="lp-platform-steps">
-          {[
-            { step: "01", title: "Connect", body: "Pick from 600+ drivers or upload CSV, JSONL, and Parquet. Honest transfer-ready labels.", icon: "connectors" as const },
-            { step: "02", title: "Map", body: "Semantic column mapping with confidence scores and human review for ambiguous fields.", icon: "sparkle" as const },
-            { step: "03", title: "Preflight", body: "Eight fail-fast gates — schema, types, capacity, and destination probes before write.", icon: "gate" as const },
-            { step: "04", title: "Proof", body: "Job Theater shows batch progress, reconciliation, checksums, and quarantine for bad rows.", icon: "check" as const },
-          ].map((item, i) => (
-            <article key={item.step} className="lp-platform-step" style={{ "--reveal-i": i } as CSSProperties}>
-              <span className="lp-platform-step-num">{item.step}</span>
-              <span className="lp-platform-step-icon" aria-hidden>
-                <DtIcon name={item.icon} size={20} />
-              </span>
-              <h3>{item.title}</h3>
-              <p>{item.body}</p>
-            </article>
-          ))}
-        </Reveal>
+        <LandingInfraRibbon />
       </section>
 
-      <section className="lp-section" id="product">
+      <section className="lp-section lp-section-band" id="product">
         <Reveal>
           <div className="lp-section-head">
-            <h2>Build with DataFlow</h2>
-            <p>Governed any-schema transfers for migration, sync, and warehouse loading — with proof before and after every run.</p>
+            <p className="lp-section-kicker">Product</p>
+            <h2>Every surface. One governed engine.</h2>
+            <p>Transfer Studio plans the load. Job Theater proves it. Pipelines, Query, Pilot, and MCP reuse the same path — never a silent shortcut.</p>
           </div>
         </Reveal>
-        <Reveal className="lp-product-cards">
+        <Reveal className="lp-product-cards lp-product-cards--six">
           {[
-            { title: "Transfer Studio", body: "Wizard for map → preflight → write → reconcile.", route: "product-transfer" as PublicRoute },
-            { title: "Data Pilot", body: "Natural-language triage on the same engine.", route: "product-pilot" as PublicRoute },
-            { title: "MCP Server", body: "Agent tools for Cursor, Claude, and VS Code.", route: "product-mcp" as PublicRoute },
-            { title: "Connectors", body: "Native drivers with honest transfer-ready labels.", route: "integrations" as PublicRoute },
+            { title: "Transfer Studio", body: "Map → preflight → write → reconcile in one wizard.", route: "product-transfer" as PublicRoute, icon: "transfer" as const },
+            { title: "Job Theater", body: "Live phases, quarantine samples, and checksum proof.", route: "product-jobs" as PublicRoute, icon: "jobs" as const },
+            { title: "Pipelines", body: "Hourly to weekly sync with watermarks and gates.", route: "product-pipelines" as PublicRoute, icon: "activity" as const },
+            { title: "Query Playground", body: "Ad-hoc SQL and document queries with Studio handoff.", route: "product-query" as PublicRoute, icon: "database" as const },
+            { title: "Data Pilot", body: "Natural-language triage on failed gates and maps.", route: "product-pilot" as PublicRoute, icon: "sparkle" as const },
+            { title: "MCP Server", body: "Agent tools under RBAC — never raw passwords.", route: "product-mcp" as PublicRoute, icon: "zap" as const },
           ].map((card, i) => (
             <button
               key={card.title}
@@ -305,6 +488,9 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
               style={{ "--reveal-i": i } as CSSProperties}
               onClick={() => onNavigate(card.route)}
             >
+              <span className="lp-product-card-icon" aria-hidden>
+                <DtIcon name={card.icon} size={22} />
+              </span>
               <h3>{card.title}</h3>
               <p>{card.body}</p>
               <span className="lp-section-link">Learn more →</span>
@@ -414,11 +600,7 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
       <section className="lp-section" id="customers">
         <Reveal>
           <div className="lp-section-head">
-            <h2>
-              Learn &amp; work
-              <br />
-              together
-            </h2>
+            <h2>Learn and work together</h2>
             <p>DataFlow is built for data teams with complex, multi-system stacks.</p>
           </div>
         </Reveal>
@@ -534,21 +716,6 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
         </div>
       </section>
 
-      <section className="lp-cta-band">
-        <h3>Build more with DataFlow</h3>
-        <p className="lp-cta-band-sub">Start in Transfer Studio, scale to enterprise SSO and audit.</p>
-        <div className="lp-hero-cta">
-          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-            Get started
-          </button>
-          <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
-            Contact sales
-          </button>
-          <button type="button" className="lp-btn lp-btn--ghost lp-btn--lg" onClick={onLogin}>
-            Log in
-          </button>
-        </div>
-      </section>
     </>
   );
 }

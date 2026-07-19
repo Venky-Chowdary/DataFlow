@@ -1,0 +1,40 @@
+---
+description: DataFlow engineering standards — code quality, architecture, UI, and the bar vs. Airbyte
+alwaysApply: true
+---
+
+# DataFlow Engineering Standards
+
+DataFlow is a universal data-movement product. The bar is: **provably better than
+Airbyte/Fivetran** — any source to any destination, intelligent schema mapping, and
+zero silent data loss. Hold every change to enterprise product quality.
+
+## Code quality & algorithms
+- Prefer robust, correct algorithms over clever shortcuts. Handle failures, retries,
+  partial progress, concurrency, and multi-instance execution explicitly.
+- Never lose or silently drop data. Bad rows are quarantined and surfaced, not dropped.
+- Support the full universal type space; coerce with fail-fast preflight, not guesses.
+- Back correctness claims with tests/proof artifacts against real services — not "looks fine".
+
+## Architecture & duplication
+- No duplication. Reuse the single canonical helper/module; extract shared logic rather
+  than copy-paste (services, connectors, adapters, and CSS all share this rule).
+- One source of truth per concern (e.g. `tokens.css` for design primitives, one owner
+  per shell selector). Extend the canonical layer; do not add `*-v2`/`*-refresh` siblings.
+- Keep boundaries clean: connectors, transfer engine, and API routers stay decoupled.
+
+## UI/UX
+- Enterprise-grade, HD-quality, responsive on every screen size. Consistent spacing,
+  density, and card sizing — no ragged grids.
+- One action, one place: never duplicate a control across sidebar, ribbon, and empty state.
+- Reuse the design-system primitives in `apps/web/src/components/ui/` (Button, PageShell,
+  EmptyState, etc.). Use our own `df2-*` naming — never other companies' class/brand names.
+
+## Verification
+- `npm run build` (tsc + vite) must pass clean after frontend changes.
+- Trend `pytest` collection errors to zero; run real-service matrices and report actual
+  pass/fail counts with proof artifacts before claiming quality.
+
+## Continuous market loop
+- Recollect `.cursor/rules/continuous-product-audit.mdc` on every non-trivial change:
+  real engine audits, competitor algorithms, catalog honesty, and operator feel-good UX.

@@ -75,8 +75,24 @@ class MongodbChangeStreamCdc:
             self.resume_token = resume_token
 
     def snapshot(self) -> Iterator[ChangeBatch]:
-        """Yield the full collection as INSERT-only batches."""
+        """Yield the full collection as INSERT-only batches.
+
+        Opens a change stream briefly first to capture a resume token so the
+        subsequent poll does not miss events that arrived during the snapshot
+        (at-least-once; duplicates possible).
+        """
+        start_token: Any = None
+        try:
+            with self.coll.watch(full_document=self.full_document, max_await_time_ms=100) as stream:
+                stream.try_next()
+                start_token = stream.resume_token
+        except Exception:
+            start_token = None
+
         offset = 0
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            offset = int(self.resume_token.get("offset") or 0)
+            start_token = self.resume_token.get("token") or start_token
         while True:
             batch = read_collection_batch(
                 cfg=self.cfg,
@@ -89,10 +105,25 @@ class MongodbChangeStreamCdc:
             if not batch.rows:
                 break
             records = [_doc_to_record(dict(zip(batch.headers, row)), self.columns) for row in batch.rows]
-            yield ChangeBatch(inserts=records)
             offset += len(batch.rows)
+            # Persist snapshot progress + change-stream handoff on every batch.
+            yield ChangeBatch(
+                inserts=records,
+                resume_token={
+                    "phase": "snapshot",
+                    "offset": offset,
+                    "token": start_token,
+                    "collection": self.collection,
+                },
+            )
             if len(batch.rows) < self.batch_size:
                 break
+        if start_token is not None:
+            yield ChangeBatch(resume_token=start_token)
+        else:
+            yield ChangeBatch(
+                resume_token={"phase": "streaming", "offset": 0, "collection": self.collection}
+            )
 
     def _pk_value(self, doc: dict[str, Any]) -> str:
         from services.value_serializer import cell_to_string
@@ -107,13 +138,20 @@ class MongodbChangeStreamCdc:
 
     def poll(self) -> Iterator[ChangeBatch]:
         """Tail the change stream for a bounded window and yield one ChangeBatch."""
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            yield from self.snapshot()
+            return
+
         pipeline: list[dict[str, Any]] | None = None
         watch_kwargs: dict[str, Any] = {
             "full_document": self.full_document,
             "max_await_time_ms": 1000,
         }
-        if self.resume_token:
-            watch_kwargs["resume_after"] = self.resume_token
+        resume = self.resume_token
+        if isinstance(resume, dict) and "token" in resume and resume.get("phase") == "streaming":
+            resume = resume.get("token")
+        if resume:
+            watch_kwargs["resume_after"] = resume
 
         with self.coll.watch(pipeline, **watch_kwargs) as stream:
             inserts: list[dict[str, Any]] = []

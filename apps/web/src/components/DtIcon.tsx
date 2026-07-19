@@ -173,6 +173,20 @@ const paths: Record<string, React.ReactNode> = {
   "chevron-right": <polyline points="9,18 15,12 9,6" />,
   "chevron-down": <polyline points="6,9 12,15 18,9" />,
   "arrow-up-right": <path d="M7 17L17 7M7 7h10v10" />,
+  edit: (
+    <>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" />
+    </>
+  ),
+  expand: (
+    <>
+      <polyline points="15,3 21,3 21,9" />
+      <polyline points="9,21 3,21 3,15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </>
+  ),
   calendar: (
     <>
       <rect x="3" y="4" width="18" height="18" rx="2" />
@@ -225,10 +239,22 @@ const paths: Record<string, React.ReactNode> = {
     </>
   ),
   play: <polygon points="5,3 19,12 5,21 5,3" />,
+  pause: (
+    <>
+      <rect x="6" y="4" width="4" height="16" rx="1" />
+      <rect x="14" y="4" width="4" height="16" rx="1" />
+    </>
+  ),
   cpu: (
     <>
       <rect x="6" y="6" width="12" height="12" rx="2" />
       <path d="M9 6V3M15 6V3M9 18v3M15 18v3M6 9H3M6 15H3M18 9h3M18 15h3" />
+    </>
+  ),
+  refresh: (
+    <>
+      <path d="M21 12a9 9 0 11-2.6-6.4" />
+      <polyline points="21,3 21,9 15,9" />
     </>
   ),
   spinner: (
@@ -239,10 +265,20 @@ const paths: Record<string, React.ReactNode> = {
 };
 
 export function DtIcon({ name, size = 20 }: { name: string; size?: number }) {
-  const stroke = name === "plus" || name === "check" || name === "x" ? 2 : 1.5;
+  /* HD stroke — thin 1.5 paths wash out on light marketing surfaces */
+  const stroke = size >= 18 ? 2.15 : 2;
   return (
     <span className="dt-nav-icon" aria-hidden="true">
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         {paths[name] || paths.database}
       </svg>
     </span>

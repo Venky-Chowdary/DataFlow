@@ -218,6 +218,24 @@ def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
     return year_first + month_first + day_first
 
 
+def _is_lossless_temporal_normalize(raw: str, out: str, transform: str) -> bool:
+    """True when coerce is only canonical ISO formatting of the same instant/date."""
+    try:
+        if transform == "datetime":
+            a = _parse_datetime(raw)
+            b = _parse_datetime(out)
+            return bool(a and b and a == b)
+        if transform == "date":
+            a = _parse_date(raw, with_time=True) or _parse_date(raw)
+            b = _parse_date(out)
+            return bool(a and b and a == b)
+        if transform == "time":
+            return raw.strip()[:8] == out.strip()[:8] or raw.strip() == out.strip()
+    except Exception:
+        return False
+    return False
+
+
 @functools.lru_cache(maxsize=4096)
 def _parse_datetime(value: str) -> str | None:
     text = value.strip()
@@ -416,22 +434,39 @@ def _parse_integer(value: str) -> int | None:
     return int(dec)
 
 
+# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
+# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
+# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
+# hard-fail on values like "invalidated".
+_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
+_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
+
+
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
     if text in NULL_SENTINELS:
         return None
-    if text in {"true", "t", "yes", "y", "1", "on", "enabled", "active", "ok", "aye", "positive"}:
+    if text in _STRICT_BOOL_TRUE:
         return True
-    if text in {"false", "f", "no", "n", "0", "off", "disabled", "inactive", "nope", "negative"}:
+    if text in _STRICT_BOOL_FALSE:
         return False
     return None
 
 
 def _parse_json(value: str) -> str | None:
+    """Normalize a cell into JSON-valid text for a semi-structured target.
+
+    Valid JSON (objects, arrays, numbers, booleans, quoted strings) is preserved
+    and re-serialized compactly. A bare scalar that is not valid JSON on its own
+    — e.g. a plain word from a mixed MongoDB field that is an array in one
+    document and ``"single"`` in another — is losslessly wrapped as a JSON string
+    so it still loads into a VARIANT / JSON / SUPER column and stays queryable.
+    No value is ever dropped: the raw text is always representable as JSON.
+    """
     try:
         parsed = json.loads(value, parse_constant=lambda v: None)
-    except json.JSONDecodeError:
-        return None
+    except (json.JSONDecodeError, ValueError):
+        parsed = value  # wrap the raw scalar as a JSON string literal
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=json_default, allow_nan=False)
 
 
@@ -486,7 +521,21 @@ KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
+    "strip_controls", "normalize_unicode",
 })
+
+
+def _strip_format_controls(text: str) -> str:
+    """Remove format/control chars warehouses reject; keep tab/newline/carriage return."""
+    cleaned: list[str] = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat == "Cf":
+            continue
+        if cat == "Cc" and ch not in "\t\n\r":
+            continue
+        cleaned.append(ch)
+    return "".join(cleaned)
 
 
 def _parse_binary(value: str) -> str | None:
@@ -592,7 +641,19 @@ def infer_transform_for_mapping(
     }:
         return "decimal"
     src_lower = source_col.lower()
-    if (
+    # Only apply date transforms when the SOURCE looks temporal — never because
+    # the target name alone contains "date" (status → posted_date_estimated).
+    source_looks_temporal = (
+        semantic == "timestamp"
+        or src in {"date", "datetime", "time"}
+        or "date" in src_lower
+        or "time" in src_lower
+        or src_lower.endswith("_at")
+        or src_lower.endswith("_dt")
+        or src_col.endswith("_DT")
+        or src_col in {"TXN_DT", "PAY_DT", "PAYMENT_DT", "TRANS_DT"}
+    )
+    if source_looks_temporal and (
         "date" in tgt_name
         or tgt_name.endswith("_dt")
         or src_col.endswith("_DT")
@@ -671,6 +732,16 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         cleaned = re.sub(r"\s+", " ", text)
         return cleaned, None
 
+    if transform == "strip_controls":
+        cleaned = _strip_format_controls(text)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned, None
+
+    if transform == "normalize_unicode":
+        cleaned = unicodedata.normalize("NFKC", _strip_format_controls(text))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned, None
+
     if transform == "uuid":
         parsed = _parse_uuid(text)
         if parsed is None:
@@ -733,18 +804,22 @@ def dry_run_sample(
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
+    from services.transform_resolver import resolve_transform
+
+    dest_types = {
+        str(m.get("target")): str(m.get("target_type"))
+        for m in mappings
+        if m.get("target") and m.get("target_type")
+    }
+
     for m in mappings:
         idx = source_idx.get(m["source"])
         if idx is None:
             errors.append(f"Source column missing: {m['source']}")
             continue
-        transform = m.get("transform") or infer_transform_for_mapping(
-            m["source"],
-            m["target"],
-            column_types.get(m["source"], "VARCHAR"),
-            m.get("target_type") or column_types.get(m["target"]),
-            source_samples=[str(r[idx]) for r in sample_rows[:sample_size] if idx < len(r)],
-        )
+        # Resolve UI aliases (cast_number → decimal) before dry-run — never leave
+        # Unknown transform: 'cast_number' as a false quarantine signal.
+        transform = resolve_transform(m, column_types=column_types, dest_types=dest_types)
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
@@ -753,3 +828,84 @@ def dry_run_sample(
                 break
 
     return len(errors) == 0, errors[:25]
+
+
+def preview_quarantine_cells(
+    *,
+    headers: list[str],
+    sample_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    sample_size: int = 25,
+    max_cells: int = 120,
+) -> dict:
+    """Cell-level preview: which sample values will quarantine / coerce before run.
+
+    Operators use this so Validate feels trustworthy vs silent Airbyte/Fivetran loads.
+    """
+    column_types = column_types or {}
+    source_idx = {h: i for i, h in enumerate(headers)}
+    cells: list[dict] = []
+    quarantine_count = 0
+    coerce_count = 0
+    ok_count = 0
+
+    from services.transform_resolver import resolve_transform
+
+    for m in mappings:
+        src = m.get("source") or ""
+        tgt = m.get("target") or src
+        idx = source_idx.get(src)
+        if idx is None:
+            continue
+        transform = resolve_transform(m, column_types=column_types)
+        for row_i, row in enumerate(sample_rows[:sample_size]):
+            if len(cells) >= max_cells:
+                break
+            raw = row[idx] if idx < len(row) else ""
+            raw_s = "" if raw is None else str(raw)
+            out, err = apply_transform(raw_s, transform)
+            if err:
+                quarantine_count += 1
+                cells.append({
+                    "row": row_i,
+                    "source": src,
+                    "target": tgt,
+                    "raw": raw_s[:200],
+                    "status": "quarantine",
+                    "message": err,
+                    "transform": transform,
+                })
+            elif out is not None and str(out) != raw_s:
+                # Lossless datetime/date normalization (ISO Z ↔ same instant) is
+                # expected for CSV→SQL — do not flood Validate/Run with coerce noise.
+                if transform in {"datetime", "date", "time"} and _is_lossless_temporal_normalize(
+                    raw_s, str(out), transform
+                ):
+                    ok_count += 1
+                else:
+                    coerce_count += 1
+                    ok_count += 1
+                    cells.append({
+                        "row": row_i,
+                        "source": src,
+                        "target": tgt,
+                        "raw": raw_s[:200],
+                        "coerced": str(out)[:200],
+                        "status": "coerced",
+                        "transform": transform,
+                    })
+            else:
+                ok_count += 1
+        if len(cells) >= max_cells:
+            break
+
+    # Prefer surfacing quarantine/coerced cells; drop pure-ok noise.
+    interesting = [c for c in cells if c["status"] != "ok"]
+    return {
+        "quarantine_count": quarantine_count,
+        "coerce_count": coerce_count,
+        "ok_count": ok_count,
+        "cells": interesting[:max_cells],
+        "sample_rows_scanned": min(sample_size, len(sample_rows)),
+    }

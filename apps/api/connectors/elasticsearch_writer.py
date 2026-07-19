@@ -11,9 +11,10 @@ from services.value_serializer import json_default
 from connectors.elasticsearch_reader import _client
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    build_mapped_rows,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
+    transform_error_policy,
 )
 
 
@@ -64,7 +65,8 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    del schema, error_policy, backfill_new_fields
+    del schema, backfill_new_fields
+    policy = transform_error_policy(error_policy)
     index = table_name or database
     cfg = {
         "host": host, "port": port, "username": username, "password": password,
@@ -72,7 +74,7 @@ def write_mapped_rows(
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    mapped_rows, errors = build_mapped_rows(
+    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
@@ -80,6 +82,7 @@ def write_mapped_rows(
         column_types=column_types,
         dest_types=dest_types,
         preserve_case=True,
+        error_policy=policy,
     )
 
     client = _client(cfg)
@@ -121,7 +124,8 @@ def write_mapped_rows(
             checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=1,
             warnings=(errors + [str(e) for e in bulk_errors[:5]])[:10],
-            rejected_rows=len(errors) + len(bulk_errors or []),
+            rejected_rows=len({d["row"] for d in rejected_details}) + len(bulk_errors or []),
+            rejected_details=rejected_details[:100],
         )
     except Exception as exc:
         return WriteResult(

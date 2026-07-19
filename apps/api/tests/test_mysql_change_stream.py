@@ -5,11 +5,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pymysqlreplication.row_event import (
-    DeleteRowsEvent,
-    UpdateRowsEvent,
-    WriteRowsEvent,
+_row_event = pytest.importorskip(
+    "pymysqlreplication.row_event",
+    reason="requires the optional MySQL replication test dependency",
 )
+DeleteRowsEvent = _row_event.DeleteRowsEvent
+UpdateRowsEvent = _row_event.UpdateRowsEvent
+WriteRowsEvent = _row_event.WriteRowsEvent
 
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from services.cdc_engine import ChangeBatch
@@ -49,7 +51,8 @@ def test_poll_parses_binlog_events(base_cfg: dict) -> None:
     write = MagicMock(spec=WriteRowsEvent)
     write.schema = "test"
     write.table = "orders"
-    write.rows = [{"id": 1, "amount": 100.0}]
+    # Real pymysqlreplication wraps write rows as {"values": {...}}.
+    write.rows = [{"values": {"id": 1, "amount": 100.0}}]
     write.log_pos = 100
 
     update = MagicMock(spec=UpdateRowsEvent)
@@ -70,7 +73,8 @@ def test_poll_parses_binlog_events(base_cfg: dict) -> None:
     stream.__iter__ = MagicMock(return_value=iter([write, update, delete]))
     stream.close = MagicMock()
 
-    with patch("pymysqlreplication.BinLogStreamReader", return_value=stream):
+    with patch("pymysqlreplication.BinLogStreamReader", return_value=stream), \
+         patch.object(cdc, "_ensure_decode_schema", return_value={}):
         changes = list(cdc.poll())
 
     assert len(changes) == 1

@@ -35,6 +35,12 @@ export function jobsForConnector(connector: Connector, jobs: TransferJob[]): Tra
   return jobs.filter((j) => matchesConnector(j, connector));
 }
 
+/** Most recent transfer touching this connector — drives the "last used" signal in status-first lists. */
+export function lastUsedAtForConnector(connector: Connector, jobs: TransferJob[]): string | null {
+  const related = jobsForConnector(connector, jobs);
+  return related[0]?.created_at ?? null;
+}
+
 export function schedulesForConnector(connectorId: string, schedules: PipelineSchedule[]): PipelineSchedule[] {
   return schedules.filter(
     (s) => s.source_connector_id === connectorId || s.dest_connector_id === connectorId,
@@ -51,10 +57,11 @@ export function buildConnectionWorkbenchContext(
   const asSourceSchedules = relatedSchedules.filter((s) => s.source_connector_id === connector.id);
   const asDestSchedules = relatedSchedules.filter((s) => s.dest_connector_id === connector.id);
   const lastJob = relatedJobs[0] ?? null;
-  const lastSuccess = relatedJobs.find((j) => j.status === "completed");
+  const isSuccess = (s: string) => s === "completed" || s === "completed_with_quarantine";
+  const lastSuccess = relatedJobs.find((j) => isSuccess(j.status));
   const runningCount = relatedJobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedCount = relatedJobs.filter((j) => j.status === "failed").length;
-  const completedCount = relatedJobs.filter((j) => j.status === "completed").length;
+  const completedCount = relatedJobs.filter((j) => isSuccess(j.status)).length;
   const enabledScheduleCount = relatedSchedules.filter((s) => s.enabled).length;
 
   const streamNames = new Map<string, "job" | "schedule">();

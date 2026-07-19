@@ -127,3 +127,13 @@ class PreflightContext:
             "issues": [],
             "summary": "Integrity audit not configured",
         }
+
+    def coercion_report(self) -> dict[str, Any]:
+        """Value-level coercion analysis, injected by the host application.
+
+        The base context has no sample rows, so it returns an empty report and
+        gates fall back to the declared-type check. Hosts that carry sample rows
+        (e.g. DataFlow's ``FilePreflightContext``) override this to predict the
+        real write outcome per column and per value.
+        """
+        return {}

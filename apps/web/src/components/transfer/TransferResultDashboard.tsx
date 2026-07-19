@@ -1,10 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
+import { CopyIdChip } from "../ui/CopyIdChip";
 import { readJobEventLog } from "../../lib/jobEventLog";
-import { fetchJobQuarantine, exportJobQuarantine } from "../../lib/api";
-import type { TransferResult } from "../../lib/types";
-import { useToast } from "../Toast";
+import { useActiveData } from "../../lib/DataContext";
+import type { LoadHistoryReport, TransferResult } from "../../lib/types";
+import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
+import { QuarantinePanel } from "./QuarantinePanel";
 
 interface TransferResultDashboardProps {
   result: TransferResult;
@@ -15,11 +18,32 @@ interface TransferResultDashboardProps {
   onNewTransfer?: () => void;
   onViewJobs?: () => void;
   onSchedule?: () => void;
+  /** Jump back to Validate so Strip / Quarantine / Fix bad data stay reachable from Run. */
+  onOpenValidate?: () => void;
 }
 
 function fmt(value: string | number | undefined): string | null {
   if (value === undefined || value === null || value === "") return null;
   return typeof value === "number" ? value.toLocaleString() : String(value);
+}
+
+function StatCard({
+  value,
+  label,
+  tone,
+  title,
+}: {
+  value: string;
+  label: string;
+  tone?: "warn" | "ok";
+  title?: string;
+}) {
+  return (
+    <div className={`df2-result-stat-card${tone ? ` ${tone}` : ""}`} title={title}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
 }
 
 export function TransferResultDashboard({
@@ -31,52 +55,51 @@ export function TransferResultDashboard({
   onNewTransfer,
   onViewJobs,
   onSchedule,
+  onOpenValidate,
 }: TransferResultDashboardProps) {
-  const { toast } = useToast();
+  const { setActiveData } = useActiveData();
   const ds = result.destination_summary;
   const rec = result.records_transferred ?? 0;
-  const rejected = ds?.rejected_rows ?? result.reconciliation?.rejected_rows ?? 0;
-  const [showQuarantine, setShowQuarantine] = useState(false);
-  const [quarantineLoading, setQuarantineLoading] = useState(false);
-  const [quarantine, setQuarantine] = useState<{ row?: number; column?: string; target?: string; value?: string; reason?: string; policy?: string }[]>(ds?.rejected_details || []);
+  const errDetails = (result.error_details || {}) as Record<string, unknown>;
+  const rejected = Number(
+    ds?.rejected_rows
+    ?? result.reconciliation?.rejected_rows
+    ?? errDetails.quarantine_row_count
+    ?? 0,
+  );
+  const issueFindings = Number(errDetails.quarantine_issue_count ?? 0);
+  const coercedNull = ds?.coerced_null_rows ?? result.reconciliation?.coerced_null_rows ?? 0;
+  const droppedRows = Math.max(rejected - coercedNull, 0);
+  const hasIntegrityLoss = result.success && (rejected > 0 || coercedNull > 0);
+  const showQuarantine = Boolean(result.job_id) && (!result.success || hasIntegrityLoss || rejected > 0 || issueFindings > 0);
   const sourceRows = result.reconciliation?.source_rows ?? rec;
   const targetRows = result.reconciliation?.target_rows ?? rec;
   const passed = result.reconciliation?.passed ?? result.success;
-
-  const loadQuarantine = async () => {
-    if (!result.job_id) return;
-    setQuarantineLoading(true);
-    try {
-      const data = await fetchJobQuarantine(result.job_id);
-      setQuarantine(data.quarantine);
-      setShowQuarantine(true);
-    } catch (e) {
-      toast({ title: "Could not load quarantine", message: (e as Error).message, tone: "error" });
-    } finally {
-      setQuarantineLoading(false);
-    }
-  };
-
-  const downloadQuarantine = async () => {
-    if (!result.job_id) return;
-    try {
-      const data = await exportJobQuarantine(result.job_id);
-      if (data.download_url) {
-        const a = document.createElement("a");
-        a.href = data.download_url;
-        a.download = data.filename || `quarantine-${result.job_id}.csv`;
-        a.click();
-      }
-    } catch (e) {
-      toast({ title: "Could not export quarantine", message: (e as Error).message, tone: "error" });
-    }
-  };
+  const throughput = result.records_per_second ?? ds?.records_per_second;
+  const checksum = fmt(ds?.checksum) || fmt(result.reconciliation?.target_checksum);
 
   const eventLog = useMemo(() => {
     if (result.event_log?.length) return result.event_log;
     if (result.job_id) return readJobEventLog(result.job_id);
     return [];
   }, [result.event_log, result.job_id]);
+
+  useEffect(() => {
+    if (!result.job_id) return;
+    setActiveData((prev) => ({
+      name: prev?.name || sourceLabel,
+      filename: prev?.filename,
+      columns: prev?.columns || [],
+      row_count: rec || prev?.row_count || 0,
+      samples: prev?.samples,
+      schema: prev?.schema,
+      preflight_run_id: prev?.preflight_run_id,
+      job_id: result.job_id,
+      validation_status: result.success ? (hasIntegrityLoss ? "completed_with_quarantine" : "completed") : "failed",
+      route: `${sourceLabel} → ${destLabel}`,
+      blockers: result.error ? [result.error] : prev?.blockers,
+    }));
+  }, [destLabel, hasIntegrityLoss, rec, result.error, result.job_id, result.success, setActiveData, sourceLabel]);
 
   const destinationLine =
     ds?.table ? `${ds.schema || ds.database || "default"}.${ds.table}` :
@@ -97,20 +120,83 @@ export function TransferResultDashboard({
     result.destination?.database ? `${destType} · ${result.destination.database}` :
     destType;
 
+  const secondaryStats: Array<{
+    value: string;
+    label: string;
+    tone?: "warn" | "ok";
+    title?: string;
+  }> = [];
+
+  if (ds?.load_method) {
+    secondaryStats.push({ value: ds.load_method, label: "Load method", title: "Writer load path for this job" });
+  }
+  if (ds?.chunk_size != null && Number(ds.chunk_size) > 0) {
+    secondaryStats.push({ value: Number(ds.chunk_size).toLocaleString(), label: "Batch size" });
+  }
+  if (sourceRows !== rec && sourceRows > 0) {
+    secondaryStats.push({ value: sourceRows.toLocaleString(), label: "Source rows" });
+  }
+  if (droppedRows > 0 || (!result.success && (rejected > 0 || issueFindings > 0))) {
+    secondaryStats.push({
+      value: (droppedRows || rejected || issueFindings).toLocaleString(),
+      label: result.success ? "Dropped / rejected" : "Problem rows",
+      tone: "warn",
+      title: "Rows / findings isolated for inspection — not silently dropped",
+    });
+  }
+  if (issueFindings > 0) {
+    secondaryStats.push({
+      value: issueFindings.toLocaleString(),
+      label: "Findings",
+      tone: "warn",
+      title: "Cell-level integrity findings from preflight or write",
+    });
+  }
+  if (coercedNull > 0) {
+    secondaryStats.push({
+      value: coercedNull.toLocaleString(),
+      label: "Coerced to NULL",
+      tone: "warn",
+      title: "Rows kept, but a value was altered to NULL — original value not preserved",
+    });
+  }
+  if (checksum) {
+    secondaryStats.push({
+      value: checksum.slice(0, 12),
+      label: "Checksum",
+      title: checksum,
+    });
+  }
+
+  const showMore =
+    (result.reconciliation?.message && !hasIntegrityLoss)
+    || (ds?.warnings && ds.warnings.length > 0)
+    || (result.ddl_executed && result.ddl_executed.length > 0);
+
+  const failedPhase = String(errDetails.phase || errDetails.failed_phase || "").trim();
+
   return (
-    <div className={`df2-result-dashboard ${result.success ? "success" : "error"}`}>
-        <div className="df2-result-top">
+    <div className={`df2-result-dashboard ${result.success ? (hasIntegrityLoss ? "success is-quarantine" : "success") : "error"}`}>
+      <div className="df2-result-top">
+        <div className="df2-result-section-label">1 · Outcome</div>
         <div className="df2-result-hero df2-result-hero-compact">
-          <span className={`df2-result-badge ${result.success ? "df2-badge-live" : "df2-badge-error"}`}>
-            <DtIcon name={result.success ? "check" : "x"} size={14} />
-            {result.success ? "Transfer complete" : result.error || "Transfer failed"}
+          <span
+            className={`df2-result-badge ${!result.success ? "df2-badge-error" : hasIntegrityLoss ? "df2-badge-warn" : "df2-badge-live"}`}
+            title={!result.success ? (result.error || "Transfer failed") : undefined}
+          >
+            <DtIcon name={!result.success ? "x" : hasIntegrityLoss ? "alert" : "check"} size={14} />
+            {!result.success ? "Transfer failed" : hasIntegrityLoss ? "Completed with quarantine" : "Transfer complete"}
           </span>
           <div className="df2-result-hero-copy">
-            <h2 className="df2-result-title">{result.success ? "Data transferred" : "Transfer could not complete"}</h2>
+            <h2 className="df2-result-title">
+              {!result.success ? "Transfer could not complete" : hasIntegrityLoss ? "Data transferred — not full fidelity" : "Data transferred"}
+            </h2>
             <p className="df2-result-subtitle">
-              {result.success
-                ? `${rec.toLocaleString()} records moved and reconciled`
-                : "Fix the reported issues and try again."}
+              {!result.success
+                ? "Review failure details and bad-data findings below, then fix on Validate or Map."
+                : hasIntegrityLoss
+                  ? `${rec.toLocaleString()} records landed, but some rows were rejected or values coerced to NULL`
+                  : `${rec.toLocaleString()} records moved and reconciled`}
             </p>
           </div>
         </div>
@@ -135,58 +221,136 @@ export function TransferResultDashboard({
           </div>
         </div>
 
-        <div className="df2-result-stats df2-result-stats-compact">
-          <div className="df2-result-stat-card">
-            <strong>{rec.toLocaleString()}</strong>
-            <span>Transferred</span>
-          </div>
-          <div className="df2-result-stat-card">
-            <strong>{targetRows.toLocaleString()}</strong>
-            <span>At destination</span>
-          </div>
-          {sourceRows !== rec && sourceRows > 0 && (
-            <div className="df2-result-stat-card">
-              <strong>{sourceRows.toLocaleString()}</strong>
-              <span>Source rows</span>
-            </div>
-          )}
-          {rejected > 0 && (
-            <div className="df2-result-stat-card warn">
-              <strong>{rejected.toLocaleString()}</strong>
-              <span>Quarantined</span>
-            </div>
-          )}
-          {passed !== undefined && (
-            <div className={`df2-result-stat-card ${passed ? "ok" : "warn"}`}>
-              <strong>{passed ? "Passed" : "Failed"}</strong>
-              <span>Reconcile</span>
-            </div>
-          )}
-          {fmt(ds?.checksum) || fmt(result.reconciliation?.target_checksum) ? (
-            <div className="df2-result-stat-card" title={ds?.checksum || result.reconciliation?.target_checksum}>
-              <strong>{(ds?.checksum || result.reconciliation?.target_checksum || "").slice(0, 12)}</strong>
-              <span>Checksum</span>
-            </div>
-          ) : null}
+        <div className="df2-result-section-label">2 · Volume</div>
+        <div className="df2-result-stats df2-result-stats-primary" aria-label="Primary transfer metrics">
+          <StatCard value={rec.toLocaleString()} label="Transferred" />
+          <StatCard value={targetRows.toLocaleString()} label="At destination" />
+          <StatCard
+            value={droppedRows.toLocaleString()}
+            label="Rejected / dropped"
+            tone={droppedRows > 0 ? "warn" : undefined}
+          />
+          <StatCard
+            value={coercedNull.toLocaleString()}
+            label="Coerced to NULL"
+            tone={coercedNull > 0 ? "warn" : undefined}
+            title="Real NULL coercions only — ISO→DATETIME normalize is not counted here"
+          />
+          <StatCard
+            value={passed ? "Passed" : "Failed"}
+            label="Reconcile"
+            tone={passed ? "ok" : "warn"}
+          />
+          <StatCard
+            value={throughput != null ? Math.round(Number(throughput)).toLocaleString() : "—"}
+            label="This job rows/s"
+            title={throughput != null ? `${sourceType} → ${destType} — this job only` : "Throughput not reported for this job"}
+          />
         </div>
+
+        {secondaryStats.length > 0 && (
+          <div className="df2-result-stats df2-result-stats-secondary" aria-label="Additional transfer metrics">
+            {secondaryStats.map((s) => (
+              <StatCard key={`${s.label}-${s.value}`} value={s.value} label={s.label} tone={s.tone} title={s.title} />
+            ))}
+          </div>
+        )}
+
+        <NotificationDeliveryStrip
+          notifications={result.notifications}
+          className="df2-result-notify"
+        />
+      </div>
+
+      <div className="df2-result-panels">
+        {!result.success && (
+          <section className="df2-result-proof-panel is-error" aria-label="What went wrong">
+            <header className="df2-result-proof-head">
+              <DtIcon name="alert" size={16} />
+              <strong>3 · What went wrong</strong>
+              {failedPhase ? <span className="df2-result-phase-chip">Phase: {failedPhase}</span> : null}
+            </header>
+            <p className="df2-result-error-detail">{result.error || "The transfer could not complete."}</p>
+            {/preflight|dry-run|integrity|lossy coercion|invalid boolean/i.test(result.error || "") && (
+              <p className="df2-result-error-hint">
+                Preflight blocked this job — <strong>0 rows were written</strong>.
+                Findings labeled quarantine here are for inspection only.
+                Fix Map types/targets, re-Validate, then Execute.
+              </p>
+            )}
+            {/incorrect datetime|invalid input syntax for type|data truncation/i.test(result.error || "") && (
+              <p className="df2-result-error-hint">
+                Destination rejected a typed value (often ISO timestamps). Open Validate to see the
+                wire-form probe, or Inspect quarantine below for the exact column and sample.
+              </p>
+            )}
+          </section>
+        )}
+
+        {hasIntegrityLoss && (
+          <section className="df2-result-fidelity" role="alert" aria-label="Data fidelity warning">
+            <div className="df2-result-fidelity-head">
+              <DtIcon name="alert" size={18} />
+              <div>
+                <strong>Completed, but NOT full fidelity</strong>
+                <p>
+                  {result.reconciliation?.message
+                    || `${coercedNull > 0 ? `${coercedNull.toLocaleString()} row(s) had a value coerced to NULL. ` : ""}${droppedRows > 0 ? `${droppedRows.toLocaleString()} row(s) were rejected.` : ""}`.trim()
+                    || "Some rows were affected during this transfer."}
+                </p>
+              </div>
+            </div>
+            <div className="df2-result-fidelity-metrics">
+              <article className="is-dropped">
+                <strong>{droppedRows.toLocaleString()}</strong>
+                <span>Dropped / rejected rows</span>
+                <small>Isolated in quarantine — not written to the destination.</small>
+              </article>
+              <article className="is-coerced">
+                <strong>{coercedNull.toLocaleString()}</strong>
+                <span>Values coerced to NULL</span>
+                <small>Row was kept, but a value was altered to NULL — the original value was not preserved.</small>
+              </article>
+            </div>
+          </section>
+        )}
 
         {result.success && (
           <section className="df2-result-proof-panel" aria-label="Transfer proof">
             <header className="df2-result-proof-head">
               <DtIcon name="check" size={16} />
               <strong>Proof summary</strong>
-              {result.job_id && (
-                <span className="df2-theater-v3-job-id" title={result.job_id}>Job #{result.job_id.slice(0, 8)}</span>
-              )}
+              {result.job_id && <CopyIdChip id={result.job_id} label="Job" compact />}
             </header>
             <dl className="df2-result-proof-dl">
               <div>
                 <dt>Route</dt>
                 <dd>{sourceLabel} → {destLabel}</dd>
               </div>
+              {throughput != null && (
+                <div>
+                  <dt>This job throughput</dt>
+                  <dd>
+                    {Math.round(Number(throughput)).toLocaleString()} rows/s
+                    {" "}({sourceType} → {destType})
+                  </dd>
+                </div>
+              )}
+              {ds?.load_method && (
+                <div>
+                  <dt>Load method</dt>
+                  <dd>{ds.load_method}{ds.chunk_size ? ` · batch ${Number(ds.chunk_size).toLocaleString()}` : ""}</dd>
+                </div>
+              )}
               <div>
                 <dt>Reconciliation</dt>
-                <dd>{passed ? "Source and destination row counts and checksums matched" : result.reconciliation?.message || "Pending verification"}</dd>
+                <dd>
+                  {hasIntegrityLoss
+                    ? result.reconciliation?.message || "Completed, but not full fidelity — see the fidelity summary above."
+                    : passed
+                      ? "Source and destination row counts and checksums matched"
+                      : result.reconciliation?.message || "Pending verification"}
+                </dd>
               </div>
               {result.operation && (
                 <div>
@@ -200,10 +364,16 @@ export function TransferResultDashboard({
                   <dd>{ds.error_policy}</dd>
                 </div>
               )}
-              {rejected > 0 && (
+              {droppedRows > 0 && (
                 <div>
-                  <dt>Quarantine</dt>
-                  <dd>{rejected.toLocaleString()} rows isolated — failed validation, not silently dropped. Inspect below to fix source data or mapping.</dd>
+                  <dt>Dropped / rejected</dt>
+                  <dd>{droppedRows.toLocaleString()} rows isolated in quarantine — failed validation, not silently dropped.</dd>
+                </div>
+              )}
+              {coercedNull > 0 && (
+                <div>
+                  <dt>Coerced to NULL</dt>
+                  <dd>{coercedNull.toLocaleString()} rows kept with a value altered to NULL — not full fidelity.</dd>
                 </div>
               )}
             </dl>
@@ -219,102 +389,112 @@ export function TransferResultDashboard({
           </section>
         )}
 
-        {!result.success && (
-          <section className="df2-result-proof-panel is-error" aria-label="Transfer failure">
-            <header className="df2-result-proof-head">
-              <DtIcon name="alert" size={16} />
-              <strong>Failure details</strong>
-            </header>
-            <p className="df2-result-error-detail">{result.error || "The transfer could not complete."}</p>
-          </section>
-        )}
-
-        {(result.reconciliation?.message || (ds?.warnings && ds.warnings.length > 0) || (result.ddl_executed && result.ddl_executed.length > 0) || rejected > 0) && (
+        {showMore && (
           <div className="df2-result-more-body df2-result-more-inline">
             <p className="df2-result-explain-body">
               Checksums are computed over source and destination rows and compared. If reconciliation passed, the transfer is complete and unchanged.
             </p>
-            {result.reconciliation?.message && <p>{result.reconciliation.message}</p>}
+            {(result.reconciliation?.source_checksum || result.reconciliation?.target_checksum) && (
+              <dl className="df2-result-checksum-pair">
+                <div>
+                  <dt>Source checksum</dt>
+                  <dd><code>{(result.reconciliation?.source_checksum || "—").slice(0, 16)}</code></dd>
+                </div>
+                <div>
+                  <dt>Destination checksum</dt>
+                  <dd><code>{(result.reconciliation?.target_checksum || checksum || "—").slice(0, 16)}</code></dd>
+                </div>
+                <div>
+                  <dt>Match</dt>
+                  <dd>
+                    {result.reconciliation?.source_checksum
+                      && result.reconciliation?.target_checksum
+                      && result.reconciliation.source_checksum === result.reconciliation.target_checksum
+                      ? "Yes — fingerprints equal"
+                      : result.reconciliation?.passed
+                        ? "Passed (see reconcile message)"
+                        : "Not matched"}
+                  </dd>
+                </div>
+              </dl>
+            )}
+            {result.reconciliation?.message && !hasIntegrityLoss && <p>{result.reconciliation.message}</p>}
             {ds?.warnings && ds.warnings.length > 0 && (
-              <ul className="df2-result-warnings">
-                {ds.warnings.map((w) => <li key={w}>{w}</li>)}
-              </ul>
+              <div className="df2-result-warnings-block">
+                <p className="df2-result-warnings-note">
+                  Showing {ds.warnings.length} sample writer message{ds.warnings.length === 1 ? "" : "s"}
+                  {" "}(display capped — not the full row count).
+                </p>
+                <ul className="df2-result-warnings">
+                  {ds.warnings.map((w) => <li key={w}>{w}</li>)}
+                </ul>
+              </div>
             )}
             {result.ddl_executed && result.ddl_executed.length > 0 && (
               <ul className="df2-result-ddl">
                 {result.ddl_executed.map((d) => <li key={d}><code>{d}</code></li>)}
               </ul>
             )}
-            {!result.success && result.error && (
-              <p className="df2-result-error-detail">{result.error}</p>
-            )}
-            {rejected > 0 && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm"
-                onClick={() => void loadQuarantine()}
-                disabled={quarantineLoading}
-              >
-                <DtIcon name="warning" size={14} /> {quarantineLoading ? "Loading…" : "View quarantine"}
-              </button>
-            )}
           </div>
         )}
       </div>
 
-      {showQuarantine && rejected > 0 && (
-        <section className="df2-job-log-panel is-result is-open" aria-label="Quarantine">
-          <header className="df2-job-log-panel-head">
-            <div className="df2-job-log-panel-title">
-              <DtIcon name="warning" size={14} />
-              <strong>Quarantine</strong>
-              <span className="df2-job-log-count">{quarantine.length} rows</span>
-            </div>
-            <div className="df2-job-log-actions">
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void downloadQuarantine()}>
-                <DtIcon name="download" size={14} /> Export CSV
-              </button>
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setShowQuarantine(false)}>Close</button>
-            </div>
-          </header>
-          <div className="df2-job-log-panel-body" role="log">
-            {quarantine.length === 0 ? (
-              <div className="df2-job-log-empty">No quarantined rows recorded.</div>
-            ) : (
-              <table className="df2-query-table">
-                <thead>
-                  <tr>
-                    <th>Row</th>
-                    <th>Column</th>
-                    <th>Value</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {quarantine.map((q, i) => (
-                    <tr key={i}>
-                      <td>{q.row ?? "—"}</td>
-                      <td>{q.column ?? "—"}</td>
-                      <td className="df2-quarantine-value">{q.value ?? "—"}</td>
-                      <td>{q.reason ?? "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+      {(() => {
+        const hist =
+          (ds?.load_history_report as LoadHistoryReport | undefined)
+          || (errDetails.load_history_report as LoadHistoryReport | undefined);
+        if (!hist) return null;
+        return (
+          <div className="df2-result-section-wrap">
+            <div className="df2-result-section-label">3b · Compared to prior loads</div>
+            <LoadHistoryPanel report={hist} title="Compared to prior loads" />
           </div>
-        </section>
+        );
+      })()}
+
+      {(showQuarantine || !result.success) && result.job_id && (
+        <div className="df2-result-section-wrap">
+          <div className="df2-result-section-label">4 · Bad-data findings</div>
+          <QuarantinePanel
+            jobId={result.job_id}
+            rejectedRows={rejected || issueFindings}
+            coercedNullRows={coercedNull}
+            initialDetails={result.destination_summary?.rejected_details}
+            autoLoad
+            initiallyOpen
+          />
+        </div>
       )}
+
+      <div className="df2-result-section-label">5 · Fix actions</div>
+      <div className="df2-result-actions df2-result-actions-remediate">
+        {onOpenValidate && (!result.success || hasIntegrityLoss) && (
+          <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
+            <DtIcon name="gate" size={14} /> Open Validate (Strip / Quarantine / Fix)
+          </button>
+        )}
+        <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
+          New transfer
+        </button>
+        {onViewJobs && (
+          <button type="button" className="df2-btn" onClick={onViewJobs}>
+            <DtIcon name="jobs" size={14} /> View Job Theater
+          </button>
+        )}
+        {onSchedule && (
+          <button type="button" className="df2-btn" onClick={onSchedule}>
+            <DtIcon name="activity" size={14} /> Schedule this route
+          </button>
+        )}
+      </div>
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
         <header className="df2-job-log-panel-head">
           <div className="df2-job-log-panel-title">
             <DtIcon name="activity" size={14} />
-            <strong>Job log</strong>
+            <strong>6 · Evidence · Job log</strong>
             <span className="df2-job-log-count">{eventLog.length} events</span>
-            {result.job_id && (
-              <span className="df2-theater-v3-job-id" title={result.job_id}>#{result.job_id.slice(0, 8)}</span>
-            )}
+            {result.job_id && <CopyIdChip id={result.job_id} label="Job" compact />}
           </div>
         </header>
         <div className="df2-job-log-panel-body" role="log">
@@ -332,21 +512,6 @@ export function TransferResultDashboard({
         </div>
       </section>
 
-      <div className="df2-result-actions">
-        <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
-          New transfer
-        </button>
-        {onViewJobs && (
-          <button type="button" className="df2-btn" onClick={onViewJobs}>
-            <DtIcon name="jobs" size={14} /> View Job Theater
-          </button>
-        )}
-        {onSchedule && (
-          <button type="button" className="df2-btn" onClick={onSchedule}>
-            <DtIcon name="activity" size={14} /> Schedule this route
-          </button>
-        )}
-      </div>
     </div>
   );
 }

@@ -13,6 +13,7 @@ def validate_mapping_coercions(
     source_types: dict[str, str],
     target_types: dict[str, str],
     schema_policy: str = "manual_review",
+    confidence_floor: float = 0.85,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -20,8 +21,12 @@ def validate_mapping_coercions(
     immutable: any logical type change is a hard blocker, regardless of
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
+
+    Lossy coercions with confidence below ``confidence_floor`` block; the floor
+    must match the active validation mode (not a hardcoded strict 0.85).
     """
     type_locked = (schema_policy or "").lower() == "type_locked"
+    floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
     for m in mappings:
         src = m.get("source", "")
@@ -36,7 +41,7 @@ def validate_mapping_coercions(
         if type_locked:
             severity = "block"
         else:
-            severity = "block" if lossy and float(m.get("confidence", 0)) < 0.85 else "warn"
+            severity = "block" if lossy and float(m.get("confidence", 0)) < floor else "warn"
         issues.append({
             "source": src,
             "target": tgt,
@@ -47,6 +52,12 @@ def validate_mapping_coercions(
             "lossy": lossy,
             "severity": severity,
             "message": f"{src} ({src_type}) → {tgt} ({tgt_type})",
+            "suggested_fix": (
+                f"Remap '{src}' to a compatible {tgt_logical} column, or change the "
+                f"target type — '{src}' ({src_logical}) does not safely become {tgt_logical}."
+                if severity == "block"
+                else None
+            ),
         })
     return issues
 

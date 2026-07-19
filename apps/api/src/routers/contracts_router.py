@@ -16,10 +16,12 @@ from pydantic import BaseModel, Field
 from ..services.contract_store import get_contract_store
 from ..services.data_contract import (
     BreakerState,
+    ColumnRule,
     ContractEnforcer,
     ContractStatus,
     ContractViolation,
     DataContract,
+    QualityRule,
 )
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
@@ -39,6 +41,22 @@ class _ContractResponse(BaseModel):
     created_at: str
     updated_at: str
     metadata: dict[str, Any]
+    preflight_gates: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class _CreateFromTransferRequest(BaseModel):
+    """Create a draft contract from Transfer Studio mapping + validate gates."""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    source: dict[str, Any] = Field(default_factory=dict)
+    destination: dict[str, Any] = Field(default_factory=dict)
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    mappings: list[dict[str, Any]] = Field(default_factory=list)
+    quality_rules: list[dict[str, Any]] = Field(default_factory=list)
+    preflight_gates: list[dict[str, Any]] = Field(default_factory=list)
+    column_types: dict[str, str] = Field(default_factory=dict)
+    strict: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class _ContractListResponse(BaseModel):
@@ -77,19 +95,82 @@ def _contract_to_response(contract: DataContract) -> _ContractResponse:
 @router.get("", response_model=_ContractListResponse)
 def list_contracts(request: Request):
     store = get_contract_store()
-    # In-memory fallback does not support list; Mongo list is supported.
-    try:
-        db = store._get_db() if hasattr(store, "_get_db") else None
-    except Exception:
-        db = None
-    if db is None:
-        return _ContractListResponse(contracts=[])
-    docs = list(db["contracts"].find().sort("updated_at", -1).limit(200))
-    contracts = []
-    for doc in docs:
-        doc.pop("_id", None)
-        contracts.append(_ContractResponse(**DataContract.from_dict(doc).to_dict()))
+    contracts = [_contract_to_response(c) for c in store.list_contracts(limit=200)]
     return _ContractListResponse(contracts=contracts)
+
+
+@router.post("", response_model=_ContractResponse)
+@router.post("/from-transfer", response_model=_ContractResponse)
+def create_contract_from_transfer(body: _CreateFromTransferRequest):
+    """Persist a draft contract from Transfer Studio validate/mapping state."""
+    store = get_contract_store()
+    mappings = list(body.mappings or [])
+    columns: list[ColumnRule] = []
+    if body.columns:
+        for c in body.columns:
+            columns.append(
+                ColumnRule(
+                    source_name=str(c.get("source_name") or c.get("source") or ""),
+                    target_name=str(c.get("target_name") or c.get("target") or ""),
+                    source_type=str(c.get("source_type") or body.column_types.get(str(c.get("source_name") or c.get("source") or ""), "VARCHAR")),
+                    target_type=str(c.get("target_type") or c.get("source_type") or "VARCHAR"),
+                    transform=c.get("transform"),
+                    nullable=bool(c.get("nullable", True)),
+                    primary_key=bool(c.get("primary_key", False)),
+                )
+            )
+    else:
+        for m in mappings:
+            src = str(m.get("source") or m.get("source_column") or "")
+            tgt = str(m.get("target") or m.get("target_column") or src)
+            columns.append(
+                ColumnRule(
+                    source_name=src,
+                    target_name=tgt,
+                    source_type=str(body.column_types.get(src) or m.get("source_type") or "VARCHAR"),
+                    target_type=str(m.get("target_type") or body.column_types.get(src) or "VARCHAR"),
+                    transform=m.get("transform"),
+                    nullable=True,
+                    primary_key=src.lower() in {"id", "_id"} or tgt.lower() in {"id", "_id"},
+                )
+            )
+
+    quality_rules = [
+        QualityRule(
+            name=str(q.get("name") or q.get("id") or "rule"),
+            expectation=str(q.get("expectation") or q.get("message") or ""),
+            threshold=q.get("threshold"),
+            severity=str(q.get("severity") or "warning"),
+        )
+        for q in (body.quality_rules or [])
+    ]
+    # Promote blocking preflight gates into quality rules when none were sent.
+    if not quality_rules:
+        for g in body.preflight_gates or []:
+            status = str(g.get("status") or "").lower()
+            if status in {"block", "fail", "failed"}:
+                quality_rules.append(
+                    QualityRule(
+                        name=str(g.get("id") or g.get("name") or "gate"),
+                        expectation=str(g.get("message") or ""),
+                        severity="block",
+                    )
+                )
+
+    contract = DataContract(
+        name=body.name.strip(),
+        status=ContractStatus.DRAFT,
+        source=body.source or {},
+        destination=body.destination or {},
+        columns=columns,
+        mappings=mappings,
+        quality_rules=quality_rules,
+        preflight_gates=list(body.preflight_gates or []),
+        strict=body.strict,
+        metadata=dict(body.metadata or {}),
+    )
+    store.save_contract(contract)
+    return _contract_to_response(contract)
 
 
 @router.get("/{contract_id}", response_model=_ContractResponse)

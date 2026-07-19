@@ -1,52 +1,59 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { DtIcon } from "../components/DtIcon";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
-import { ConnectorSelect } from "../components/ui/ConnectorSelect";
-import { CadenceTiles } from "../components/ui/CadenceTiles";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
+import { ScheduleForm } from "../components/schedules/ScheduleForm";
+import {
+  PIPELINE_TABS,
+  PipelineDetailDrawer,
+  type PipelineTab,
+} from "../components/PipelineDetailDrawer";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
+import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   createSchedule,
   deleteSchedule,
+  fetchScheduleIntervals,
   fetchSchedules,
   runScheduleNow,
   updateSchedule,
 } from "../lib/api";
-import { Connector, PipelineSchedule } from "../lib/types";
+import { Connector, PipelineSchedule, ScheduleInput, ScheduleIntervals } from "../lib/types";
 
 interface SchedulesPageProps {
   connectors: Connector[];
   onViewJobs?: () => void;
+  onOpenJob?: (jobId: string) => void;
   onSchedulesChange?: () => void | Promise<void>;
   highlightScheduleId?: string;
 }
 
 type ScheduleFilter = "all" | "active" | "paused";
 
-export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
+export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
+  const [intervals, setIntervals] = useState<ScheduleIntervals | null>(null);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<PipelineSchedule | null>(null);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [pipelineTab, setPipelineTab] = useState<PipelineTab>(PIPELINE_TABS[0]);
   const [filter, setFilter] = useState<ScheduleFilter>("all");
   const [pipelineSearch, setPipelineSearch] = useState("");
-
-  const [name, setName] = useState("");
-  const [sourceId, setSourceId] = useState("");
-  const [sourceTable, setSourceTable] = useState("");
-  const [destId, setDestId] = useState("");
-  const [destTable, setDestTable] = useState("");
-  const [interval, setInterval] = useState<"hourly" | "daily" | "weekly">("daily");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -63,7 +70,16 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
   }, [load]);
 
   useEffect(() => {
+    fetchScheduleIntervals()
+      .then(setIntervals)
+      .catch((e) => console.error(e));
+  }, []);
+
+  useEffect(() => {
     if (!highlightScheduleId || loading) return;
+    setSelectedId(highlightScheduleId);
+    setPipelineTab("Overview");
+    setDrawerOpen(true);
     window.requestAnimationFrame(() => {
       document.getElementById(`pipeline-card-${highlightScheduleId}`)?.scrollIntoView({
         behavior: "smooth",
@@ -73,12 +89,32 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
   }, [highlightScheduleId, loading, schedules.length]);
 
   useEffect(() => {
-    if (connectors.length && !sourceId) setSourceId(connectors[0].id);
-    if (connectors.length > 1 && !destId) setDestId(connectors[1]?.id ?? connectors[0].id);
-  }, [connectors, sourceId, destId]);
+    if (!selectedId) return;
+    if (!schedules.some((s) => s.id === selectedId)) {
+      setSelectedId(null);
+      setDrawerOpen(false);
+    }
+  }, [schedules, selectedId]);
+
+  const selectedSchedule = schedules.find((s) => s.id === selectedId) ?? null;
+
+  const openDrawer = (id: string, tab: PipelineTab = "Overview") => {
+    setSelectedId(id);
+    setPipelineTab(tab);
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => setDrawerOpen(false);
 
   const enabledCount = schedules.filter((s) => s.enabled).length;
   const pausedCount = schedules.length - enabledCount;
+  const runningCount = schedules.filter((s) => s.running).length;
+  const lastRunAt = useMemo(() => {
+    const times = schedules
+      .map((s) => (s.last_run_at ? new Date(s.last_run_at).getTime() : 0))
+      .filter((t) => t > 0);
+    return times.length ? Math.max(...times) : null;
+  }, [schedules]);
   const filteredSchedules = useMemo(() => {
     let list = schedules;
     if (filter === "active") list = schedules.filter((s) => s.enabled);
@@ -86,38 +122,49 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
     const q = pipelineSearch.trim().toLowerCase();
     if (!q) return list;
     return list.filter((s) =>
-      [s.name, s.source_table, s.dest_table, s.interval]
+      [s.name, s.source_table, s.dest_table, s.interval, s.sync_mode, s.cron]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q)),
     );
   }, [schedules, filter, pipelineSearch]);
-  const sourceConnector = connectors.find((c) => c.id === sourceId);
-  const destConnector = connectors.find((c) => c.id === destId);
-  const sourceStreamLabel = sourceConnector?.type === "mongodb" ? "Collection" : "Table";
-  const destStreamLabel = destConnector?.type === "mongodb" ? "Collection" : "Table";
 
-  const handleCreate = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!name.trim() || !sourceId || !destId || !sourceTable.trim() || !destTable.trim()) return;
+  const openCreate = () => {
+    setEditing(null);
+    setShowForm(true);
+  };
+
+  const openEdit = (sched: PipelineSchedule) => {
+    setEditing(sched);
+    setShowForm(true);
+    window.requestAnimationFrame(() => {
+      document.querySelector(".df2-pipeline-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
+  const closeForm = () => {
+    setShowForm(false);
+    setEditing(null);
+  };
+
+  const handleSubmit = async (input: Partial<ScheduleInput>) => {
     setSaving(true);
     try {
-      await createSchedule({
-        name: name.trim(),
-        source_connector_id: sourceId,
-        source_table: sourceTable.trim(),
-        dest_connector_id: destId,
-        dest_table: destTable.trim(),
-        interval,
-      });
-      setShowForm(false);
-      setName("");
-      setSourceTable("");
-      setDestTable("");
+      if (editing) {
+        await updateSchedule(editing.id, input);
+        toast({ title: "Pipeline updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
+      } else {
+        await createSchedule(input as ScheduleInput);
+        toast({ title: "Pipeline created", message: `"${input.name}" is scheduled.`, tone: "success" });
+      }
+      closeForm();
       await load();
       void onSchedulesChange?.();
-      toast({ title: "Pipeline created", message: `"${name.trim()}" is scheduled.`, tone: "success" });
     } catch (err) {
-      toast({ title: "Could not create pipeline", tone: "error" });
+      toast({
+        title: editing ? "Could not update pipeline" : "Could not create pipeline",
+        message: err instanceof Error ? err.message : undefined,
+        tone: "error",
+      });
       console.error(err);
     }
     setSaving(false);
@@ -137,14 +184,20 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
 
   const handleDelete = async (id: string) => {
     const target = schedules.find((s) => s.id === id);
-    const ok = window.confirm(
-      target
-        ? `Delete pipeline “${target.name}”? This cannot be undone.`
-        : "Delete this pipeline? This cannot be undone.",
-    );
+    const ok = await confirm({
+      title: target ? `Delete pipeline “${target.name}”?` : "Delete this pipeline?",
+      message: "This cannot be undone. Scheduled runs for this pipeline will stop.",
+      confirmLabel: "Delete pipeline",
+      cancelLabel: "Keep pipeline",
+      tone: "danger",
+    });
     if (!ok) return;
     try {
       await deleteSchedule(id);
+      if (selectedId === id) {
+        setSelectedId(null);
+        setDrawerOpen(false);
+      }
       await load();
       void onSchedulesChange?.();
       toast({ title: "Pipeline deleted", tone: "success" });
@@ -162,7 +215,11 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
       onViewJobs?.();
       toast({ title: "Pipeline run started", message: "Track progress in Job Theater.", tone: "success" });
     } catch (e) {
-      toast({ title: "Run failed", tone: "error" });
+      toast({
+        title: "Run failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
       console.error(e);
     }
     setRunningId(null);
@@ -176,18 +233,36 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
       description="Schedule recurring syncs with the same governed transfer engine."
     >
       <PageFrame className="df2-pipeline-page">
+      {!loading && schedules.length > 0 && (
+        <PageContextBar
+          ariaLabel="Pipelines summary"
+          stats={[
+            { label: "Pipelines", value: schedules.length, icon: "activity" },
+            { label: "Active", value: enabledCount, icon: "check", tone: enabledCount > 0 ? "ok" : "muted" },
+            { label: "Running", value: runningCount, icon: "activity", tone: runningCount > 0 ? "ok" : "muted", title: "Runs currently in progress" },
+            { label: "Paused", value: pausedCount, icon: "pause", tone: pausedCount > 0 ? "warn" : "muted" },
+            {
+              label: "Last run",
+              value: lastRunAt ? formatRelativeTime(new Date(lastRunAt).toISOString()) : "—",
+              icon: "clock",
+              tone: "muted",
+              title: "Most recent scheduled run across all pipelines",
+            },
+          ]}
+        />
+      )}
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}
           searchValue={schedules.length > 0 ? pipelineSearch : undefined}
           onSearchChange={schedules.length > 0 && !showForm ? setPipelineSearch : undefined}
-          searchPlaceholder="Search pipelines by name, table, or cadence…"
+          searchPlaceholder="Search pipelines by name, table, cadence, or sync mode…"
           filters={
             schedules.length > 0 ? (
               <FilterBar variant="inline" ariaLabel="Filter pipelines">
                 {showForm ? (
                   <span className="df2-toolbar-status" role="status">
-                    Creating pipeline
+                    {editing ? "Editing pipeline" : "Creating pipeline"}
                   </span>
                 ) : null}
                 <FilterTabs
@@ -210,11 +285,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
           }
           actions={
             !showForm ? (
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={() => setShowForm(true)}
-              >
+              <Button size="sm" variant="primary" onClick={openCreate}>
                 New pipeline
               </Button>
             ) : undefined
@@ -223,75 +294,35 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
       )}
 
       {showForm && (
-        <form className="df2-pipeline-form is-active" onSubmit={handleCreate}>
-        <PageSection
-          title="Create recurring sync"
-          subtitle="Schedule source → destination with your saved connectors"
-          className="df2-pipeline-form-card"
-          actions={
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setShowForm(false)}>
-              Cancel
-            </button>
-          }
-        >
-            <div className="df2-field">
-              <label className="df2-label" htmlFor="sched-name">Pipeline name</label>
-              <input id="sched-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nightly orders sync" required />
-            </div>
-            <div className="df2-form-row">
-              <ConnectorSelect
-                id="sched-src"
-                label="Source connector"
-                value={sourceId}
-                onChange={setSourceId}
-                connectors={connectors}
-                placeholder="Add a connector first"
-                required
-                disabled={connectors.length === 0}
-              />
-              <div className="df2-field">
-                <label className="df2-label" htmlFor="sched-src-table">Source {sourceStreamLabel.toLowerCase()}</label>
-                <input id="sched-src-table" className="df2-input" value={sourceTable} onChange={(e) => setSourceTable(e.target.value)} placeholder={sourceConnector?.type === "mongodb" ? "orders" : "orders"} required />
-              </div>
-              <ConnectorSelect
-                id="sched-dst"
-                label="Destination connector"
-                value={destId}
-                onChange={setDestId}
-                connectors={connectors}
-                placeholder="Add a connector first"
-                required
-                disabled={connectors.length === 0}
-              />
-              <div className="df2-field">
-                <label className="df2-label" htmlFor="sched-dst-table">Destination {destStreamLabel.toLowerCase()}</label>
-                <input id="sched-dst-table" className="df2-input" value={destTable} onChange={(e) => setDestTable(e.target.value)} placeholder={destConnector?.type === "mongodb" ? "orders_archive" : "orders_warehouse"} required />
-              </div>
-            </div>
-            <div className="df2-field">
-              <label className="df2-label">Cadence</label>
-              <CadenceTiles value={interval} onChange={setInterval} />
-            </div>
-            <div className="df2-card-footer df2-card-footer--form">
-              <Button
-                type="submit"
-                variant="primary"
-                loading={saving}
-                loadingLabel="Saving…"
-                disabled={saving || connectors.length < 2}
-              >
-                Save pipeline
-              </Button>
-            </div>
-        </PageSection>
-        </form>
+        <div className="df2-pipeline-form is-active">
+          <PageSection
+            title={editing ? "Edit pipeline" : "Create recurring sync"}
+            subtitle={editing ? editing.name : "Schedule source → destination with your saved connectors"}
+            className="df2-pipeline-form-card"
+            actions={
+              <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={closeForm}>
+                Cancel
+              </button>
+            }
+          >
+            <ScheduleForm
+              key={editing?.id ?? "new"}
+              connectors={connectors}
+              intervals={intervals}
+              initial={editing}
+              saving={saving}
+              onSubmit={handleSubmit}
+              onCancel={closeForm}
+            />
+          </PageSection>
+        </div>
       )}
 
       <div className="df2-pipeline-workspace">
       {loading ? (
         <SectionLoader title="Loading pipelines" hint="Fetching scheduled syncs…" />
       ) : showForm && schedules.length === 0 ? null : (
-      <div className="df2-pipeline-grid df2-pipeline-scroll">
+      <div className="df2-pipeline-list df2-pipeline-scroll">
         {schedules.length === 0 ? (
           <EmptyState
             page
@@ -300,7 +331,7 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
             description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
             action={
               !showForm ? (
-                <Button variant="primary" onClick={() => setShowForm(true)}>
+                <Button variant="primary" onClick={openCreate}>
                   Create pipeline
                 </Button>
               ) : undefined
@@ -314,23 +345,64 @@ export function SchedulesPage({ connectors, onViewJobs, onSchedulesChange, highl
             description="Try another filter or create a new pipeline."
           />
         ) : (
-          filteredSchedules.map((sched) => (
-            <PipelineCard
-              key={sched.id}
-              schedule={sched}
-              source={connectors.find((c) => c.id === sched.source_connector_id)}
-              dest={connectors.find((c) => c.id === sched.dest_connector_id)}
-              running={runningId === sched.id}
-              highlighted={highlightScheduleId === sched.id}
-              onToggle={() => void toggleEnabled(sched)}
-              onRun={() => void handleRunNow(sched.id)}
-              onDelete={() => void handleDelete(sched.id)}
-            />
-          ))
+          <div className="df2-pipeline-rows" role="list" aria-label="Scheduled pipelines">
+            <div className="df2-pipeline-rows-head" aria-hidden>
+              <span className="df2-pipeline-rows-head-name">Pipeline</span>
+              <span>Cadence</span>
+              <span>Mode</span>
+              <span>Last run</span>
+              <span>Status</span>
+              <span />
+            </div>
+            {filteredSchedules.map((sched) => (
+              <PipelineCard
+                key={sched.id}
+                compact
+                schedule={sched}
+                source={connectors.find((c) => c.id === sched.source_connector_id)}
+                dest={connectors.find((c) => c.id === sched.dest_connector_id)}
+                running={runningId === sched.id}
+                highlighted={highlightScheduleId === sched.id}
+                selected={drawerOpen && selectedId === sched.id}
+                onSelect={() => openDrawer(sched.id)}
+              />
+            ))}
+          </div>
         )}
       </div>
       )}
       </div>
+
+      <PipelineDetailDrawer
+        open={drawerOpen && Boolean(selectedSchedule)}
+        schedule={selectedSchedule}
+        source={
+          selectedSchedule
+            ? connectors.find((c) => c.id === selectedSchedule.source_connector_id)
+            : undefined
+        }
+        dest={
+          selectedSchedule
+            ? connectors.find((c) => c.id === selectedSchedule.dest_connector_id)
+            : undefined
+        }
+        tab={pipelineTab}
+        setTab={setPipelineTab}
+        running={selectedSchedule ? runningId === selectedSchedule.id : false}
+        onClose={closeDrawer}
+        onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+        onEdit={() => {
+          if (!selectedSchedule) return;
+          closeDrawer();
+          openEdit(selectedSchedule);
+        }}
+        onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
+        onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+        onOpenJob={(jobId) => {
+          closeDrawer();
+          onOpenJob?.(jobId);
+        }}
+      />
       </PageFrame>
     </PageShell>
   );

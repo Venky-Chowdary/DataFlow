@@ -10,6 +10,7 @@ from services.sync_cursor import (
     max_cursor_value,
     requires_incremental,
     requires_upsert,
+    resolve_selected_sync_contracts,
     resolve_sync_contract,
     set_watermark,
 )
@@ -22,6 +23,15 @@ def test_resolve_sync_contract():
     assert contract is not None
     assert contract.sync_mode == "incremental_append"
     assert contract.cursor_field == "updated_at"
+
+
+def test_resolve_selected_sync_contracts_multi():
+    selected = resolve_selected_sync_contracts([
+        {"name": "orders", "selected": True, "primary_key": "id", "sync_mode": "cdc"},
+        {"name": "items", "selected": True, "primary_key": "id", "sync_mode": "cdc"},
+        {"name": "skip_me", "selected": False, "primary_key": "id", "sync_mode": "cdc"},
+    ])
+    assert [c.name for c in selected] == ["orders", "items"]
 
 
 def test_requires_incremental_and_upsert():

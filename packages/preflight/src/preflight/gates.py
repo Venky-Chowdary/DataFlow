@@ -77,6 +77,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     except ImportError:
         is_lossy_coercion = None
 
+    # Value-aware report (host-injected). When sample rows exist we can predict
+    # the *real* write outcome per value instead of guessing from declared types.
+    report = {}
+    try:
+        report = ctx.coercion_report() or {}
+    except Exception:
+        report = {}
+    by_source: dict[str, dict] = report.get("by_source", {}) if isinstance(report, dict) else {}
+    value_aware = bool(report.get("sampled_rows")) if isinstance(report, dict) else False
+
+    warnings: list[str] = []
+    issues_detail: list[dict] = []
+
     for m in ctx.plan.mappings:
         target = dest_by_name.get(m.target.lower())
         if not target:
@@ -88,11 +101,48 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         lossy = pair in LOSSY_COERCIONS
         if not lossy and is_lossy_coercion:
             lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
-        if lossy:
-            issues.append(
-                f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
-                f"{m.target} ({target.inferred_type})"
-            )
+        if not lossy:
+            continue
+
+        label = (
+            f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
+            f"{m.target} ({target.inferred_type})"
+        )
+
+        # With sampled values we only hard-block when a real value cannot be
+        # coerced. A declared-type mismatch whose values all coerce cleanly (or
+        # are placeholder text that becomes NULL) is downgraded to a warning —
+        # this is what stops schemaless sources (MongoDB widened to TEXT) from
+        # producing a wall of false coercion blocks.
+        probe = by_source.get(m.source) if value_aware else None
+        if probe is not None:
+            severity = probe.get("severity", "ok")
+            detail = {
+                "source": m.source,
+                "target": m.target,
+                "source_type": source_col.inferred_type,
+                "target_type": target.inferred_type,
+                "severity": severity,
+                "sampled": probe.get("sampled", 0),
+                "failed": probe.get("failed", 0),
+                "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                "sample_failures": probe.get("sample_failures", []),
+                "suggested_fix": probe.get("suggested_fix", ""),
+                "suggested_target_type": probe.get("suggested_target_type"),
+                "suggested_transform": probe.get("suggested_transform"),
+            }
+            issues_detail.append(detail)
+            if severity == "block":
+                issues.append(label)
+            else:
+                warnings.append(label)
+        elif value_aware:
+            # Report exists and covers this pair as clean (no entry ⇒ all values
+            # coerce): downgrade the declared-type mismatch to a warning.
+            warnings.append(label)
+        else:
+            # No samples to inspect — keep the conservative declared-type check.
+            issues.append(label)
 
     if issues:
         if (ctx.plan.validation_mode or "strict").lower() in {"strict", "maximum"}:
@@ -100,13 +150,20 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 GateId.G3_SCHEMA_CONTRACT,
                 f"{len(issues)} type coercion issue(s)",
                 start,
-                {"issues": issues},
+                {"issues": issues, "issues_detail": issues_detail, "warnings": warnings},
             )
         return _pass(
             GateId.G3_SCHEMA_CONTRACT,
             f"{len(issues)} type coercion warning(s) — will be verified by dry-run",
             start,
-            {"issues": issues, "warnings": issues},
+            {"issues": issues, "issues_detail": issues_detail, "warnings": issues + warnings},
+        )
+    if warnings:
+        return _pass(
+            GateId.G3_SCHEMA_CONTRACT,
+            f"Schema contract valid — {len(warnings)} coercion(s) verified against sampled values",
+            start,
+            {"warnings": warnings, "issues_detail": issues_detail},
         )
     return _pass(GateId.G3_SCHEMA_CONTRACT, "Schema contract valid", start)
 
@@ -167,36 +224,78 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _issue_text(issue: Any) -> str:
+    if isinstance(issue, str):
+        return issue
+    if isinstance(issue, dict):
+        for key in ("message", "error", "reason", "detail"):
+            val = issue.get(key)
+            if val:
+                col = issue.get("column") or issue.get("source") or issue.get("field")
+                return f"{col}: {val}" if col else str(val)
+        return str(issue)
+    return str(issue)
+
+
+def _block_message(prefix: str, issues: list[Any]) -> str:
+    texts = [_issue_text(i) for i in issues if i]
+    texts = [t for t in texts if t]
+    if not texts:
+        return f"{prefix} — unknown issue"
+    head = texts[0]
+    if len(texts) == 1:
+        return f"{prefix}: {head}"
+    return f"{prefix}: {head} (+{len(texts) - 1} more)"
+
+
 def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     passed, errors = ctx.run_dry_run()
-    details: dict[str, Any] = {"errors": errors[:20]}
+    details: dict[str, Any] = {"errors": list(errors[:20])}
+    dry_meta = getattr(ctx, "_last_dry_run_meta", None)
+    if isinstance(dry_meta, dict):
+        details.update(dry_meta)
 
     # Layer the data integrity audit into G5 so it runs without creating a 9th gate.
     integrity = gate_g9_data_integrity(ctx)
+    encoding_issues = list(integrity.details.get("encoding_issues") or [])
+    if encoding_issues:
+        details["encoding_issues"] = encoding_issues
+        details["issues"] = encoding_issues
     if integrity.status == GateStatus.BLOCK:
-        integrity_issues = integrity.details.get("issues", [])
+        integrity_issues = integrity.details.get("issues", []) or []
         details["errors"].extend(integrity_issues)
         details["integrity_checks_failed"] = integrity.details.get("checks_failed", 0)
+        details["issue_texts"] = [_issue_text(i) for i in details["errors"][:20]]
         return _block(
             GateId.G5_DRY_RUN,
-            f"Dry-run / integrity failed — {len(details['errors'])} issue(s)",
+            _block_message("Dry-run / integrity failed", details["errors"]),
             start,
             details,
         )
     if integrity.status == GateStatus.PASS:
         details["integrity_checks_passed"] = integrity.details.get("checks_passed", 0)
+        if integrity.details.get("warnings"):
+            details["warnings"] = list(integrity.details.get("warnings") or [])
 
     if not passed:
+        details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
         return _block(
             GateId.G5_DRY_RUN,
-            f"Dry-run failed — {len(errors)} error(s)",
+            _block_message("Dry-run failed", errors),
             start,
             details,
         )
     return _pass(
         GateId.G5_DRY_RUN,
-        "Sample transform dry-run and integrity checks passed",
+        (
+            f"Sample transform dry-run and integrity checks passed"
+            + (
+                f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
+                if details.get("sample_rows_scanned")
+                else ""
+            )
+        ),
         start,
         details,
     )
@@ -415,19 +514,36 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     report = audit()
+    encoding = next(
+        (c for c in (report.get("checks") or []) if c.get("check") == "encoding_anomalies"),
+        None,
+    )
+    encoding_issues = (encoding or {}).get("issues") or []
     if report.get("blocks_transfer"):
         issues = report.get("issues", [])[:15]
         return _block(
             GateId.G9_DATA_INTEGRITY,
-            f"Data integrity failed — {len(issues)} issue(s)",
+            _block_message("Data integrity failed", issues),
             start,
-            {"issues": issues, "checks_failed": report.get("checks_failed", 0)},
+            {
+                "issues": issues,
+                "issue_texts": [_issue_text(i) for i in issues],
+                "checks_failed": report.get("checks_failed", 0),
+                "encoding_issues": encoding_issues[:12],
+            },
         )
+    warnings = list(report.get("warnings") or [])
+    if encoding_issues and not warnings:
+        warnings = [str(i.get("message") if isinstance(i, dict) else i) for i in encoding_issues[:8]]
     return _pass(
         GateId.G9_DATA_INTEGRITY,
         report.get("summary", "Data integrity checks passed"),
         start,
-        {"checks_passed": report.get("checks_passed", 0)},
+        {
+            "checks_passed": report.get("checks_passed", 0),
+            "warnings": warnings[:12],
+            "encoding_issues": encoding_issues[:12],
+        },
     )
 
 

@@ -11,7 +11,9 @@ from typing import Any, Callable
 
 from connectors.writer_common import (
     CHUNK_SIZE,
-    build_mapped_rows,
+    _coerced_null_row_count,
+    _rejected_row_count,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -162,7 +164,7 @@ def write_mapped_rows(
         db = client[db_name]
         coll = db[collection_name]
 
-        mapped_rows, transform_errors = build_mapped_rows(
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
@@ -172,7 +174,8 @@ def write_mapped_rows(
             error_policy=policy,
             preserve_case=True,
         )
-        rejected_rows = len(data_rows) - len(mapped_rows)
+        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         if transform_errors and policy == "fail":
             return WriteResult(
                 ok=False,
@@ -183,6 +186,7 @@ def write_mapped_rows(
                 chunks_completed=0,
                 error=f"Transform errors: {'; '.join(transform_errors[:3])}",
                 rejected_rows=rejected_rows,
+                rejected_details=rejected_details,
                 warnings=transform_errors,
             )
 
@@ -227,42 +231,27 @@ def write_mapped_rows(
                     return False
                 return value
             if upper == "DATE":
-                if isinstance(value, _datetime):
-                    return value
-                if isinstance(value, _date):
-                    return _datetime.combine(value, _time.min)
-                text = value.strip() if isinstance(value, str) else str(value)
-                for fmt in (
-                    "%Y-%m-%d",
-                    "%Y-%m-%dT%H:%M:%S",
-                    "%Y-%m-%dT%H:%M:%S.%f",
-                    "%Y-%m-%dT%H:%M:%S.%fZ",
-                    "%Y-%m-%dT%H:%M:%S.%f%z",
-                    "%Y-%m-%d %H:%M:%S",
-                    "%Y-%m-%d %H:%M:%S.%f",
-                    "%m/%d/%Y",
-                    "%d/%m/%Y",
-                    "%Y%m%d",
-                ):
-                    try:
-                        return _datetime.strptime(text, fmt)
-                    except ValueError:
-                        continue
+                from connectors.sql_temporal import coerce_sql_temporal
+
+                coerced = coerce_sql_temporal(value, "DATE")
+                if isinstance(coerced, _datetime):
+                    return coerced
+                if isinstance(coerced, _date):
+                    return _datetime.combine(coerced, _time.min)
                 return value
-            if upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
-                if isinstance(value, _datetime):
-                    return value
-                text = value.strip() if isinstance(value, str) else str(value)
-                text = text.replace("Z", "+00:00")
-                try:
-                    return _datetime.fromisoformat(text)
-                except ValueError:
-                    pass
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S%z"):
-                    try:
-                        return _datetime.strptime(text, fmt)
-                    except ValueError:
-                        continue
+            if upper in {
+                "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
+                "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
+            }:
+                from connectors.sql_temporal import coerce_sql_temporal
+
+                coerced = coerce_sql_temporal(value, "DATETIME")
+                if isinstance(coerced, _datetime):
+                    # Mongo stores timezone-aware UTC when possible.
+                    if coerced.tzinfo is None:
+                        from datetime import timezone as _tz
+                        return coerced.replace(tzinfo=_tz.utc)
+                    return coerced
                 return value
             if upper in {"BINARY", "BYTEA", "BLOB"}:
                 if isinstance(value, bytes):
@@ -351,7 +340,9 @@ def write_mapped_rows(
             target_schema=db_name,
             checksum=row_checksum(mapped_rows, target_cols),
             chunks_completed=chunks,
-            rejected_rows=len(data_rows) - written,
+            rejected_rows=max(rejected_rows, len(data_rows) - written),
+            rejected_details=rejected_details,
+            coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,
         )
     except Exception as exc:

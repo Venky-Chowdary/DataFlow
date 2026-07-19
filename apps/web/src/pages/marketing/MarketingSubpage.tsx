@@ -5,7 +5,20 @@ import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand"
 import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
+import { isHelpDocRoute } from "../../lib/helpDocs";
 import type { PublicRoute } from "../../lib/publicNavigation";
+import { DocArticlePage, DocsPortal } from "./DocsPortal";
+import {
+  DataPilotPage,
+  JobTheaterPage,
+  McpServerPage,
+  MigrationsSolutionPage,
+  PipelinesPage,
+  QueryPlaygroundPage,
+  SyncSolutionPage,
+  TransferStudioPage,
+  WarehouseSolutionPage,
+} from "./ProductSurfaces";
 
 interface PageActions {
   onGetStarted: () => void;
@@ -54,6 +67,9 @@ function ComplianceBadges({ items }: { items: string[] }) {
 
 export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: { route: PublicRoute } & PageActions) {
   if (route === "home") return null;
+  if (isHelpDocRoute(route)) {
+    return <DocArticlePage docId={route} onNavigate={onNavigate} onGetStarted={onGetStarted} />;
+  }
 
   switch (route) {
     case "pricing":
@@ -71,223 +87,30 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
     case "security":
       return <SecurityPage onNavigate={onNavigate} />;
     case "help":
-      return <HelpPage onNavigate={onNavigate} onGetStarted={onGetStarted} />;
+      return <DocsPortal onNavigate={onNavigate} onGetStarted={onGetStarted} />;
     case "product-transfer":
-      return (
-        <ProductPage
-          kicker="Product"
-          title="Transfer Studio"
-          lead="Plan any-to-any loads with semantic mapping, eight preflight gates, and post-load reconciliation — before you trust production writes."
-          points={[
-            "Semantic column mapping across SQL, NoSQL, files, and warehouses",
-            "Eight fail-fast preflight gates including type, nullability, and capacity",
-            "Quarantine bad rows without silent failure",
-            "Checksum and row-count proof after every write",
-            "Same engine behind UI, Data Pilot, and MCP",
-          ]}
-          onGetStarted={onGetStarted}
-          onNavigate={onNavigate}
-          next="product-pilot"
-          nextLabel="Data Pilot"
-        />
-      );
+      return <TransferStudioPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
+    case "product-jobs":
+      return <JobTheaterPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
+    case "product-pipelines":
+      return <PipelinesPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
+    case "product-query":
+      return <QueryPlaygroundPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "product-pilot":
-      return (
-        <ProductPage
-          kicker="Product"
-          title="Data Pilot"
-          lead="Ask natural-language questions about connectors, jobs, and failed gates. Pilot uses the same governed transfer engine as Transfer Studio."
-          points={[
-            "Triage failed preflight gates in plain language",
-            "Propose mapping corrections into your synonym dictionary",
-            "Inspect Job Theater runs without leaving chat",
-            "Hand off to Transfer Studio when you need the full wizard",
-          ]}
-          onGetStarted={onGetStarted}
-          onNavigate={onNavigate}
-          next="product-mcp"
-          nextLabel="MCP Server"
-        />
-      );
+      return <DataPilotPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "product-mcp":
-      return (
-        <ProductPage
-          kicker="Product"
-          title="MCP Server"
-          lead="Trigger governed transfers from Cursor, Claude, and VS Code. Agents get tools — not raw credentials — with the same preflight and proof path as the UI."
-          points={[
-            "MCP tools for connectors, transfers, and job status",
-            "Workspace auth and RBAC respected on every call",
-            "Audit trail for agent-initiated runs",
-            "Identical mapping and quarantine behavior as Transfer Studio",
-          ]}
-          onGetStarted={onGetStarted}
-          onNavigate={onNavigate}
-          next="integrations"
-          nextLabel="Connectors"
-        />
-      );
+      return <McpServerPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "integrations":
       return <IntegrationsPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "solution-migrations":
-      return (
-        <ProductPage
-          kicker="Solutions"
-          title="Cross-schema migrations"
-          lead="Move databases and files across schemas that never matched 1:1 — with reviewable maps and proof before cutover."
-          points={[
-            "Auto-detect amount, email, and identifier roles",
-            "Review ambiguous maps before production write",
-            "Type coercion with fail-fast gates",
-            "Checksum-proven loads into warehouses",
-          ]}
-          onGetStarted={onGetStarted}
-          onNavigate={onNavigate}
-          next="solution-warehouse"
-          nextLabel="Warehouse loading"
-        />
-      );
+      return <MigrationsSolutionPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "solution-warehouse":
-      return (
-        <ProductPage
-          kicker="Solutions"
-          title="Warehouse loading"
-          lead="Bulk-load Snowflake, BigQuery, and Redshift with destination probes, capacity checks, and reconciliation reports finance can trust."
-          points={[
-            "Native warehouse destinations with upsert and overwrite",
-            "Capacity and permission probes before write",
-            "Post-load row count and content checksum reports",
-            "Schedule recurring warehouse refreshes from Pipelines",
-          ]}
-          onGetStarted={onGetStarted}
-          onNavigate={onNavigate}
-          next="solution-sync"
-          nextLabel="Recurring sync"
-        />
-      );
+      return <WarehouseSolutionPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     case "solution-sync":
-      return (
-        <ProductPage
-          kicker="Solutions"
-          title="Recurring sync"
-          lead="Hourly, daily, and weekly pipelines with watermark incremental, upsert modes, and quarantine for bad rows."
-          points={[
-            "Cadence schedules with workspace visibility",
-            "Upsert, append, overwrite, and watermark incremental",
-            "Schema-drift blocking with reviewable diffs",
-            "Job Theater from queue to reconcile",
-          ]}
-          onGetStarted={onGetStarted}
-          onNavigate={onNavigate}
-          next="pricing"
-          nextLabel="Pricing"
-        />
-      );
+      return <SyncSolutionPage onGetStarted={onGetStarted} onNavigate={onNavigate} />;
     default:
       return null;
   }
-}
-
-function ProductPage({
-  kicker,
-  title,
-  lead,
-  points,
-  onGetStarted,
-  onNavigate,
-  next,
-  nextLabel,
-}: {
-  kicker: string;
-  title: string;
-  lead: string;
-  points: string[];
-  onGetStarted: () => void;
-  onNavigate: (r: PublicRoute) => void;
-  next: PublicRoute;
-  nextLabel: string;
-}) {
-  const workflow = [
-    { step: "01", label: "Connect", detail: "Sources, files, and warehouses" },
-    { step: "02", label: "Map", detail: "Semantic columns with confidence" },
-    { step: "03", label: "Preflight", detail: "Eight fail-fast gates" },
-    { step: "04", label: "Proof", detail: "Checksums and reconciliation" },
-  ];
-
-  return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingHeroBand
-        kicker={kicker}
-        title={title}
-        lead={lead}
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Try DataFlow
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-          </div>
-        }
-        visual={
-          <div className="lp-mkt-mock">
-            <div className="lp-mkt-mock-bar">
-              <span className="lp-mkt-mock-dot" />
-              <span className="lp-mkt-mock-dot" />
-              <span className="lp-mkt-mock-dot" />
-              <span>{title}</span>
-            </div>
-            <div className="lp-mkt-mock-body">
-              {workflow.map((item, i) => (
-                <div key={item.step} className={`lp-mkt-mock-row ${i === 1 ? "is-active" : ""}`}>
-                  <span>{item.step}</span>
-                  <div>
-                    <strong>{item.label}</strong>
-                    <small>{item.detail}</small>
-                  </div>
-                  {i < 3 && <em className="lp-mkt-mock-pass">pass</em>}
-                </div>
-              ))}
-            </div>
-          </div>
-        }
-      />
-
-      <MarketingReveal>
-      <section className="lp-mkt-workflow" aria-label="Workflow">
-        {workflow.map((item) => (
-          <article key={item.step} className="lp-mkt-workflow-step">
-            <span className="lp-mkt-workflow-num">{item.step}</span>
-            <h3>{item.label}</h3>
-            <p>{item.detail}</p>
-          </article>
-        ))}
-      </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-      <section className="lp-mkt-body">
-        <h2>What you get</h2>
-        <div className="lp-mkt-feature-grid">
-          {points.map((point) => (
-            <article key={point} className="lp-mkt-feature-card">
-              <span className="lp-mkt-feature-icon" aria-hidden>
-                <DtIcon name="check" size={18} />
-              </span>
-              <p>{point}</p>
-            </article>
-          ))}
-        </div>
-        <MarketingSectionFooter>
-          <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate(next)}>
-            Next: {nextLabel} →
-          </button>
-        </MarketingSectionFooter>
-      </section>
-      </MarketingReveal>
-    </div>
-  );
 }
 
 function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
@@ -334,9 +157,20 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
+        tone="ink"
         kicker="Pricing"
         title="Plans that match how you move data"
         lead="Start free in Transfer Studio. Scale to Team or Enterprise when you need pipelines, SSO, and agent-native ops."
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+              Start free
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("contact")}>
+              Talk to sales
+            </button>
+          </div>
+        }
         visual={<MarketingIllustration kind="pricing" />}
       />
 
@@ -345,7 +179,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
           items={[
             { value: "Free", label: "Starter tier" },
             { value: "8", label: "Preflight gates" },
-            { value: "600+", label: "Connectors" },
+            { value: "CDC", label: "Native log capture" },
             { value: "48h", label: "Pilot kickoff" },
           ]}
         />
@@ -405,16 +239,33 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
 }
 
 function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const pillars = [
-    { t: "Identity", d: "SAML/OIDC SSO, SCIM-ready roles, and workspace membership controls.", icon: "users" as const },
-    { t: "Audit", d: "Immutable logs for jobs, mapping decisions, quarantine, and agent MCP calls.", icon: "book" as const },
-    { t: "Tenancy", d: "Dedicated tenants, custom domains, and region pinning for residency.", icon: "server" as const },
-    { t: "Keys", d: "BYOK wraps connector secrets with your KMS — credentials never sit in cleartext.", icon: "lock" as const },
+  const layers = [
+    {
+      phase: "01",
+      t: "Identity",
+      d: "SAML/OIDC SSO, SCIM-ready roles, and workspace membership — every transfer inherits who is allowed to run it.",
+    },
+    {
+      phase: "02",
+      t: "Tenancy",
+      d: "Dedicated tenants, custom domains, and region pinning. No shared control-plane bleed between customers.",
+    },
+    {
+      phase: "03",
+      t: "Keys",
+      d: "BYOK wraps connector secrets with your KMS. Purpose keys stay scoped to the job that needs them.",
+    },
+    {
+      phase: "04",
+      t: "Audit",
+      d: "Immutable logs for jobs, mapping decisions, quarantine, and agent MCP calls — ready for SOC review.",
+    },
   ];
 
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
+    <div className="lp-mkt-page lp-mkt-page-rich lp-mkt-enterprise">
       <MarketingHeroBand
+        tone="ink"
         kicker="Enterprise"
         title="Governed data movement for the enterprise"
         lead="SSO, RBAC, audit trails, tenant controls, and the same Transfer Studio engine your team already trusts."
@@ -423,7 +274,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
               Contact sales
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={onGetStarted}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onGetStarted}>
               Start a pilot
             </button>
           </div>
@@ -443,25 +294,30 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body">
-          <h2>Enterprise pillars</h2>
-          <div className="lp-mkt-feature-grid">
-            {pillars.map((c) => (
-              <article key={c.t} className="lp-mkt-feature-card">
-                <span className="lp-mkt-feature-icon" aria-hidden>
-                  <DtIcon name={c.icon} size={18} />
-                </span>
+        <section className="lp-mkt-body lp-mkt-security-flow">
+          <p className="lp-mkt-kicker">Control plane</p>
+          <h2>Enterprise controls on every run</h2>
+          <p className="lp-mkt-lead">
+            A continuous path — identity, tenancy, keys, and audit — not a grid of feature cards.
+          </p>
+          <ol className="lp-mkt-security-timeline">
+            {layers.map((layer) => (
+              <li key={layer.phase} className="lp-mkt-security-step">
+                <span className="lp-mkt-security-phase">{layer.phase}</span>
                 <div>
-                  <h3>{c.t}</h3>
-                  <p>{c.d}</p>
+                  <h3>{layer.t}</h3>
+                  <p>{layer.d}</p>
                 </div>
-              </article>
+              </li>
             ))}
-          </div>
+          </ol>
           <ComplianceBadges items={["SOC 2 Type II posture", "GDPR-ready", "HIPAA paths", "Regional residency"]} />
           <MarketingSectionFooter>
             <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("security")}>
               Read the security overview
+            </button>
+            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
+              Talk to sales
             </button>
           </MarketingSectionFooter>
         </section>
@@ -494,9 +350,20 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
+        tone="ink"
         kicker="Customers"
         title="Built for teams who cannot afford silent failure"
         lead="Retail, healthcare, SaaS, and finance teams use DataFlow when accuracy matters more than raw throughput alone."
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Become a design partner
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("solution-migrations")}>
+              Migration stories
+            </button>
+          </div>
+        }
         visual={<MarketingIllustration kind="customers" />}
       />
 
@@ -560,6 +427,7 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
+        tone="ink"
         kicker="Contact"
         title="Talk to DataFlow sales"
         lead="Tell us about your sources, destinations, and compliance needs. We will follow up with a pilot plan — not a generic demo reel."
@@ -691,21 +559,46 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
 }
 
 function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  const items = [
-    { t: "Tenant isolation", d: "Dedicated tenants with workspace scoping and per-tenant security posture." },
-    { t: "BYOK encryption", d: "Customer-managed keys wrap connector secrets and purpose keys." },
-    { t: "Data residency", d: "Pin jobs and artifacts to regions your policy requires." },
-    { t: "Checksum proof", d: "Post-load reconciliation verifies counts and content hashes." },
-    { t: "Audit trails", d: "Every run, quarantine row, and schema decision is logged." },
-    { t: "Agent controls", d: "MCP tools inherit RBAC — agents never get raw destination passwords." },
+  const layers = [
+    {
+      phase: "01",
+      t: "Isolate",
+      d: "Dedicated tenants, workspace scoping, and per-tenant security posture — no shared control-plane bleed.",
+    },
+    {
+      phase: "02",
+      t: "Encrypt",
+      d: "Customer-managed keys wrap connector secrets. Purpose keys stay scoped to the job that needs them.",
+    },
+    {
+      phase: "03",
+      t: "Reside",
+      d: "Pin jobs and artifacts to the regions your policy requires. Audit trails stay where you choose.",
+    },
+    {
+      phase: "04",
+      t: "Prove",
+      d: "Post-load reconciliation verifies counts and content hashes. Quarantine never silently drops rows.",
+    },
   ];
 
   return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
+    <div className="lp-mkt-page lp-mkt-page-rich lp-mkt-security">
       <MarketingHeroBand
+        tone="ink"
         kicker="Security"
-        title="Security and governance built in"
-        lead="Tenant isolation, encryption, residency, and audit-ready jobs — designed for regulated environments from day one."
+        title="Security that moves with the data"
+        lead="Isolation, encryption, residency, and checksum proof — the same governed path your transfers already use."
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Request security pack
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+              Enterprise overview
+            </button>
+          </div>
+        }
         visual={<MarketingIllustration kind="security" />}
       />
 
@@ -716,134 +609,50 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body">
-          <h2>Security controls</h2>
-          <div className="lp-mkt-feature-grid">
-            {items.map((c) => (
-              <article key={c.t} className="lp-mkt-feature-card">
-                <span className="lp-mkt-feature-icon" aria-hidden>
-                  <DtIcon name="shield" size={18} />
-                </span>
+        <section className="lp-mkt-body lp-mkt-security-flow">
+          <p className="lp-mkt-kicker">Control plane</p>
+          <h2>Four layers between source and destination</h2>
+          <p className="lp-mkt-lead">
+            Not a wall of feature cards — a continuous security path that activates on every transfer.
+          </p>
+          <ol className="lp-mkt-security-timeline">
+            {layers.map((layer) => (
+              <li key={layer.phase} className="lp-mkt-security-step">
+                <span className="lp-mkt-security-phase">{layer.phase}</span>
                 <div>
-                  <h3>{c.t}</h3>
-                  <p>{c.d}</p>
+                  <h3>{layer.t}</h3>
+                  <p>{layer.d}</p>
                 </div>
-              </article>
+              </li>
             ))}
-          </div>
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
-              Enterprise capabilities
-            </button>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
-              Request security pack
-            </button>
-          </MarketingSectionFooter>
-        </section>
-      </MarketingReveal>
-    </div>
-  );
-}
-
-function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" | "onGetStarted">) {
-  const guides = [
-    { t: "Transfer Studio basics", d: "Connect source and destination, review maps, run preflight, write with proof.", r: "product-transfer" as PublicRoute, icon: "transfer" as const },
-    { t: "Connector catalog", d: "Honest transfer-ready labels for native drivers and SQLAlchemy generics.", r: "integrations" as PublicRoute, icon: "connectors" as const },
-    { t: "Preflight gates", d: "Eight gates that block dangerous writes before production.", r: "product-transfer" as PublicRoute, icon: "gate" as const },
-    { t: "Pipelines & sync", d: "Schedule recurring loads with quarantine and watermark incremental.", r: "solution-sync" as PublicRoute, icon: "activity" as const },
-    { t: "Data Pilot", d: "Natural-language triage for failed jobs and mapping questions.", r: "product-pilot" as PublicRoute, icon: "sparkle" as const },
-    { t: "MCP for agents", d: "Call the same governed engine from Cursor and Claude.", r: "product-mcp" as PublicRoute, icon: "zap" as const },
-  ];
-
-  const quickStart = [
-    { step: "1", title: "Connect systems", body: "Add a source and destination connector — or upload CSV, JSONL, or Parquet." },
-    { step: "2", title: "Map columns", body: "Review semantic mappings and accept or reject ambiguous field matches." },
-    { step: "3", title: "Run preflight", body: "Eight gates validate schema, types, capacity, and destination readiness." },
-    { step: "4", title: "Write with proof", body: "Load data, reconcile checksums, and inspect quarantined rows in Job Theater." },
-  ];
-
-  return (
-    <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingHeroBand
-        kicker="Docs & help"
-        title="Learn DataFlow without signing in"
-        lead="Public guides for every product surface. Sign in when you are ready to run a live transfer in your workspace."
-        actions={
-          <div className="lp-hero-cta">
-            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-              Open the app
-            </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Ask sales
-            </button>
-          </div>
-        }
-        visual={<MarketingIllustration kind="help" />}
-      />
-
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <h2>Quick start</h2>
-          <p className="lp-mkt-lead">Four steps from first connector to checksum-proven load.</p>
-          <div className="lp-mkt-workflow lp-mkt-workflow--help">
-            {quickStart.map((item) => (
-              <article key={item.step} className="lp-mkt-workflow-step">
-                <span className="lp-mkt-workflow-num">{item.step}</span>
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
-              </article>
-            ))}
-          </div>
+          </ol>
         </section>
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-mkt-body">
-          <h2>Guides</h2>
-          <div className="lp-mkt-feature-grid">
-            {guides.map((g) => (
-              <button key={g.t} type="button" className="lp-mkt-feature-card lp-mkt-card--button" onClick={() => onNavigate(g.r)}>
-                <span className="lp-mkt-feature-icon" aria-hidden>
-                  <DtIcon name={g.icon} size={18} />
-                </span>
-                <div>
-                  <h3>{g.t}</h3>
-                  <p>{g.d}</p>
-                </div>
+        <section className="lp-mkt-body lp-mkt-security-proof">
+          <div className="lp-mkt-security-proof-copy">
+            <p className="lp-mkt-kicker">Runtime proof</p>
+            <h2>Agents inherit the same gates</h2>
+            <p>
+              MCP tools and Data Pilot never receive raw destination passwords. Every agent action rides the same
+              RBAC, quarantine, and reconciliation path as Transfer Studio.
+            </p>
+            <MarketingSectionFooter>
+              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("enterprise")}>
+                Enterprise capabilities
               </button>
-            ))}
+              <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
+                Request security pack
+              </button>
+            </MarketingSectionFooter>
           </div>
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
-        <section className="lp-mkt-body">
-          <div className="lp-mkt-faq">
-            <h2>Common questions</h2>
-            <dl>
-              <div>
-                <dt>What is quarantine?</dt>
-                <dd>Rows that fail validation during load are isolated with the column, value, and reason — never silently dropped.</dd>
-              </div>
-              <div>
-                <dt>Do I need the API online?</dt>
-                <dd>File-to-file demo transfers work locally. Connectors and Job Theater need the API for live runs.</dd>
-              </div>
-              <div>
-                <dt>How is DataFlow different from ETL scripts?</dt>
-                <dd>Preflight gates and post-load reconciliation prove every transfer before and after write.</dd>
-              </div>
-            </dl>
+          <div className="lp-mkt-security-proof-panel" aria-hidden>
+            <div className="lp-mkt-security-proof-row is-ok"><span>Preflight</span><em>8 / 8</em></div>
+            <div className="lp-mkt-security-proof-row is-ok"><span>Write</span><em>quarantine 0</em></div>
+            <div className="lp-mkt-security-proof-row is-ok"><span>Reconcile</span><em>checksum match</em></div>
+            <div className="lp-mkt-security-proof-row"><span>Audit</span><em>logged</em></div>
           </div>
-
-          <MarketingSectionFooter>
-            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-              Contact sales
-            </button>
-            <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
-              Start a transfer
-            </button>
-          </MarketingSectionFooter>
         </section>
       </MarketingReveal>
     </div>
@@ -856,6 +665,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingHeroBand
+        tone="ink"
         kicker="Connectors"
         title="Hundreds of systems, honest labels"
         lead="Native transfer drivers plus SQLAlchemy generics and file formats — with transfer-ready status you can trust, not inflated marketplace counts."
@@ -864,7 +674,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
               Connect a system
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("help")}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
               Driver docs
             </button>
           </div>
@@ -875,7 +685,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <StatsStrip
           items={[
-            { value: "600+", label: "Connectors" },
+            { value: "DLQ", label: "Quarantine replay" },
             { value: "Native", label: "Warehouse paths" },
             { value: "SQLA", label: "Generic drivers" },
             { value: "Files", label: "CSV · JSON · Parquet" },

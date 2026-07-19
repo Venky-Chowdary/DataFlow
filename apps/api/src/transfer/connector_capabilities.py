@@ -25,15 +25,21 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "sqlserver": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
-    "salesforce": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
-    "hubspot": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "iceberg": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "kafka": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
+    # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
+    "salesforce": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
+    "hubspot": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
 
 # File format capabilities (FileParser + registry)
@@ -87,6 +93,14 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "neon": "postgresql",
     "timescaledb": "postgresql",
     "cockroachdb": "postgresql",
+    "sql_server": "sqlserver",
+    "mssql": "sqlserver",
+    "microsoft_sql_server": "sqlserver",
+    "azure_sql": "sqlserver",
+    "azure_sql_database": "sqlserver",
+    "amazon_rds_sql_server": "sqlserver",
+    "apache_iceberg": "iceberg",
+    "apache_kafka": "kafka",
     "alibaba_oss": "s3",
     "alibaba_cloud_object_storage": "s3",
     "azure_cosmos_db": "mongodb",
@@ -106,7 +120,8 @@ CATALOG_ID_ALIASES: dict[str, str] = {
 
 # Suggested lists — only connectors users can configure today
 SUGGESTED_SOURCES = [
-    "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
+    "postgresql", "mongodb", "mysql", "sqlserver", "oracle",
+    "snowflake", "bigquery", "redshift",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
@@ -115,17 +130,22 @@ SUGGESTED_SOURCES = [
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
 TRANSFER_READY_CATALOG_IDS = frozenset({
-    "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
+    "postgresql", "mysql", "mongodb", "sqlserver", "oracle",
+    "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "adls",
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
+    "iceberg", "apache_iceberg", "kafka", "apache_kafka",
+    "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     "sftp", "email",
 })
 
 SUGGESTED_DESTINATIONS = [
-    "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
+    "postgresql", "mongodb", "mysql", "sqlserver", "oracle",
+    "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
+    "iceberg", "kafka", "salesforce", "hubspot",
     "sftp", "email",
 ]
 
@@ -147,9 +167,13 @@ def default_port(driver_type: str) -> int:
         "pgvector": 5432,
         "qdrant": 6333,
         "sqlite": 0,
+        "sqlserver": 1433,
+        "oracle": 1521,
         "generic_sql": 0,
         "sftp": 22,
         "email": 587,
+        "iceberg": 0,
+        "kafka": 9092,
         "salesforce": 443,
         "hubspot": 443,
         "stripe": 443,
@@ -221,12 +245,12 @@ def resolve_driver_type(catalog_id: str) -> str:
         ("spaces", "s3"),
         ("object_storage", "s3"),
         # Generic SQL engines
-        ("mssql", "generic_sql"),
-        ("sql_server", "generic_sql"),
-        ("sqlserver", "generic_sql"),
-        ("microsoft_sql", "generic_sql"),
-        ("azure_sql", "generic_sql"),
-        ("oracle", "generic_sql"),
+        ("mssql", "sqlserver"),
+        ("sql_server", "sqlserver"),
+        ("sqlserver", "sqlserver"),
+        ("microsoft_sql", "sqlserver"),
+        ("azure_sql", "sqlserver"),
+        ("oracle", "oracle"),
         ("db2", "generic_sql"),
         ("ibm_db2", "generic_sql"),
         ("teradata", "generic_sql"),
@@ -332,8 +356,14 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "snowflake": "snowflake.connector",
     "bigquery": "google.cloud.bigquery",
     "sqlite": "sqlite3",
+    "sqlserver": "pyodbc",  # pymssql accepted in driver_available()
+    "oracle": "oracledb",
     "sftp": "paramiko",
     "email": None,
+    "iceberg": None,  # filesystem writer; pyarrow optional for parquet data files
+    "kafka": None,  # kafka-python checked at produce time with clear error
+    "pgvector": "psycopg2",
+    "qdrant": "requests",
     "salesforce": "requests",
     "hubspot": "requests",
     "stripe": "requests",
@@ -341,6 +371,7 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "influxdb": "requests",
     "neo4j": "requests",
     "couchbase": "requests",
+    "singer_tap": None,  # optional singer SDK; module probes at read time
     "csv": None,
     "tsv": None,
     "json": None,
@@ -449,6 +480,8 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
             return _module_is_installed("clickhouse_sqlalchemy")
         return True
 
+    if driver_type == "sqlserver":
+        return _module_is_installed("pyodbc") or _module_is_installed("pymssql")
     module = _DRIVER_MODULE.get(driver_type)
     return _module_is_installed(module)
 
@@ -514,17 +547,97 @@ def capability_label(caps: dict[str, bool]) -> str:
     return "Roadmap"
 
 
+# Engines that resolve to generic_sql but are not yet CI-proven as Certified.
+# Oracle / SQL Server are first-class drivers (see _DRIVER_CAPS).
+_UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
+    "db2", "sybase_ase", "sybase",
+    "informix", "teradata", "greenplum", "vertica", "singlestore", "motherduck",
+    "amazon_emr", "cloudera_data_platform", "sap_bw_4hana", "duckdb",
+    "clickhouse", "presto", "trino", "athena", "hive", "impala",
+})
+
+# Legacy helper kept for tests that still probe generic_sql brand certification.
+_CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
+    "oracle", "sql_server", "sqlserver", "mssql",
+})
+
+
+def _generic_sql_brand_certified(catalog_id: str) -> bool:
+    """True when Oracle/SQL Server resolve as first-class transfer-ready drivers."""
+    cid = (catalog_id or "").lower().strip()
+    if cid not in _CERTIFIABLE_GENERIC_SQL_BRANDS and not any(
+        cid.startswith(p) for p in ("oracle", "sql_server", "mssql")
+    ):
+        return False
+    if "oracle" in cid:
+        return bool(_DRIVER_CAPS.get("oracle", {}).get("read") and _DRIVER_CAPS["oracle"].get("write"))
+    if "sql_server" in cid or "mssql" in cid or cid == "sqlserver":
+        return bool(_DRIVER_CAPS.get("sqlserver", {}).get("read") and _DRIVER_CAPS["sqlserver"].get("write"))
+    return False
+
+
 def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool]) -> bool:
     """True when the resolved driver is implemented and live (aliases inherit readiness)."""
     if not transfer_ready(caps):
+        return False
+    # Marketing SaaS/API brand IDs that only route to generic rest_api are never
+    # certified transfer-ready — only the first-class driver id itself qualifies.
+    if driver == "rest_api" and catalog_id != "rest_api":
+        return False
+    # generic_sql brand engines stay Planned until CI-certified (Sprint D).
+    # Oracle / SQL Server are certified when their DBAPI packages are installed.
+    if driver == "generic_sql":
+        if catalog_id == "generic_sql":
+            return True
+        if _generic_sql_brand_certified(catalog_id):
+            return True
+        if catalog_id in _UNCERTIFIED_GENERIC_SQL_BRANDS:
+            return False
+        # Substring-matched engines (e.g. "oracle_autonomous") → Planned.
+        if any(b in catalog_id for b in ("oracle", "sql_server", "mssql", "db2", "teradata", "informix", "sybase")):
+            return False
         return False
     if driver in TRANSFER_READY_CATALOG_IDS:
         return True
     if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
         return True
-    if driver == "generic_sql":
+    return False
+
+
+def _is_rest_api_brand_alias(catalog_id: str, driver: str) -> bool:
+    """True when a catalog brand id is only a catch-all rest_api stub."""
+    return driver == "rest_api" and (catalog_id or "") != "rest_api"
+
+
+def _is_uncertified_driver_alias(catalog_id: str, driver: str) -> bool:
+    """True when catalog id should not inherit Certified from its resolved driver."""
+    if _is_rest_api_brand_alias(catalog_id, driver):
+        return True
+    if driver == "generic_sql" and catalog_id != "generic_sql":
+        # Sprint D: Oracle/SQL Server become certified when DBAPI is present.
+        if _generic_sql_brand_certified(catalog_id):
+            return False
         return True
     return False
+
+
+def certification_tier(
+    catalog_id: str,
+    driver: str,
+    caps: dict[str, bool],
+    *,
+    transfer_ready_flag: bool,
+) -> str:
+    """Honest marketplace tier: certified | source_only | connect_only | planned."""
+    if _is_uncertified_driver_alias(catalog_id, driver):
+        return "planned"
+    if transfer_ready_flag and transfer_ready(caps):
+        return "certified"
+    if _source_only_ready(caps) and catalog_id == driver:
+        return "source_only"
+    if connect_only(caps):
+        return "connect_only"
+    return "planned"
 
 
 def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -532,19 +645,29 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     driver = resolve_driver_type(catalog_id)
     caps = get_capabilities(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
-    eff = effective_status(caps, entry.get("status", "planned"))
+    # Brand stubs / uncertified generic_sql engines must not inherit "live".
+    if _is_uncertified_driver_alias(catalog_id, driver):
+        eff = "planned"
+        label = "Planned"
+        is_connect_only = False
+    else:
+        eff = effective_status(caps, entry.get("status", "planned"))
+        label = capability_label(caps)
+        is_connect_only = connect_only(caps) and not ready
+    tier = certification_tier(catalog_id, driver, caps, transfer_ready_flag=ready)
     out = dict(entry)
     out["driver_type"] = driver
     out["capabilities"] = caps
     out["effective_status"] = eff
     out["transfer_ready"] = ready
-    out["connect_only"] = connect_only(caps) and not ready
-    out["capability_label"] = capability_label(caps)
+    out["connect_only"] = is_connect_only
+    out["capability_label"] = label
+    out["certification_tier"] = tier
     return out
 
 
 def source_ready(caps: dict[str, bool]) -> bool:
-    """True when connector can act as a transfer source."""
+    """True when connector can act as a transfer source (duplex / file)."""
     if caps.get("file_source"):
         return True
     return bool(caps.get("read") and caps.get("write") and not caps.get("dest_only"))
@@ -557,25 +680,116 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")))
 
 
+def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
+    """Hard gate so Planned / wrong-role catalog IDs cannot run transfers.
+
+    Uses the *selected* catalog/brand id (e.g. ``db2``), not only the resolved
+    driver (``generic_sql``), so marketing aliases cannot bypass honesty.
+    """
+    cid = (catalog_id or "").lower().strip()
+    if not cid:
+        return False, "Missing connector type"
+    role_norm = (role or "").lower().strip()
+    if role_norm not in ("source", "destination"):
+        return False, f"Unknown endpoint role: {role}"
+
+    # File formats are first-class transfer sources/exports.
+    if cid in _FILE_CAPS:
+        caps = _FILE_CAPS[cid]
+        if role_norm == "source" and caps.get("file_source"):
+            return True, "supported"
+        if role_norm == "destination" and (caps.get("file_export") or caps.get("write")):
+            return True, "supported"
+        return False, f"{cid} cannot be used as a transfer {role_norm}"
+
+    row = enrich_catalog_entry(
+        {
+            "id": cid,
+            "name": cid,
+            "category": "database",
+            "status": "planned",
+            "description": "",
+        }
+    )
+    tier = row.get("certification_tier") or "planned"
+    caps = row.get("capabilities") or {}
+    label = row.get("capability_label") or tier
+
+    if tier == "planned":
+        return False, (
+            f"{cid} is Planned ({label}) — not available for production transfer. "
+            "Choose a Certified or Source-only connector."
+        )
+    if tier == "connect_only":
+        return False, f"{cid} supports connection test only — not transfer."
+
+    if role_norm == "source":
+        if tier == "source_only" or source_ready(caps) or _source_only_ready(caps):
+            if caps.get("dest_only"):
+                return False, f"{cid} is destination-only and cannot be a source"
+            return True, "supported"
+        return False, f"{cid} cannot be used as a transfer source"
+
+    # destination
+    if tier == "source_only":
+        return False, f"{cid} is source-only and cannot be a destination"
+    if dest_ready(caps) and (row.get("transfer_ready") or caps.get("dest_only")):
+        return True, "supported"
+    if dest_ready(caps) and tier == "certified":
+        return True, "supported"
+    return False, f"{cid} cannot be used as a transfer destination"
+
+
+def assert_transfer_endpoint_honesty(
+    source_kind: str,
+    source_format: str,
+    dest_kind: str,
+    dest_format: str,
+) -> tuple[bool, str]:
+    """Validate catalog honesty for both ends of a transfer route."""
+    sk = (source_kind or "").lower().strip()
+    dk = (dest_kind or "").lower().strip()
+    if sk == "database":
+        ok, msg = endpoint_allowed_for_role(source_format, "source")
+        if not ok:
+            return False, msg
+    if dk == "database":
+        ok, msg = endpoint_allowed_for_role(dest_format, "destination")
+        if not ok:
+            return False, msg
+    return True, "supported"
+
+
 def transfer_live_driver_types() -> list[str]:
+    """Unique driver types that can run transfers *and* are package-available.
+
+    Includes duplex read+write, dest-only writers, file sources, and first-class
+    source-only drivers (e.g. rest_api) — not SaaS brand aliases.
+    """
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
-        if transfer_ready(caps):
+    keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
+    for k in keys:
+        caps = get_capabilities(k)
+        if transfer_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))
 
 
 def source_live_driver_types() -> list[str]:
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
-        if source_ready(caps):
+    keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
+    for k in keys:
+        caps = get_capabilities(k)
+        if source_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))
 
 
 def dest_live_driver_types() -> list[str]:
     live = []
-    for k, caps in {**_DRIVER_CAPS, **_FILE_CAPS, "generic_sql": get_capabilities("generic_sql")}.items():
+    keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
+    for k in keys:
+        caps = get_capabilities(k)
         if dest_ready(caps):
             live.append(k)
     return sorted(set(live))

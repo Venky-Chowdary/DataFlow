@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
-import { PageMetricsRow } from "../components/ui/PageMetricsRow";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
@@ -37,6 +38,7 @@ type AuditLog = {
 
 export function SettingsPage() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [tab, setTab] = useState<TabId>("general");
   const [orgName, setOrgName] = useState("DataFlow");
   const [timezone, setTimezone] = useState("UTC");
@@ -230,7 +232,14 @@ export function SettingsPage() {
 
   const revokeKey = async (keyId: string, keyName: string) => {
     if (revokingKeyId) return;
-    if (!window.confirm(`Revoke "${keyName}"? Applications using this key will stop working immediately.`)) return;
+    const ok = await confirm({
+      title: `Revoke “${keyName}”?`,
+      message: "Applications using this key will stop working immediately.",
+      confirmLabel: "Revoke key",
+      cancelLabel: "Keep key",
+      tone: "danger",
+    });
+    if (!ok) return;
     setRevokingKeyId(keyId);
     try {
       await revokeWorkspaceApiKey(keyId);
@@ -316,6 +325,10 @@ export function SettingsPage() {
     URL.revokeObjectURL(url);
   };
 
+  const enabledSsoCount = ssoConfigs
+    ? Object.values(ssoConfigs).filter((c) => c?.enabled).length
+    : 0;
+
   return (
     <PageShell
       wide
@@ -324,14 +337,20 @@ export function SettingsPage() {
       description="Workspace security, SSO, team access, and audit controls."
     >
       <PageFrame className="df2-settings-workspace">
-        <PageMetricsRow
-          compact
-          columns={4}
-          metrics={[
-            { label: "Organization", value: orgName, icon: "settings" },
-            { label: "Retention", value: `${retention}d`, icon: "activity" },
-            { label: "AI provider", value: modelCapabilities?.active_provider ?? "local", icon: "sparkle" },
-            { label: "Audit events", value: tab === "logs" && !auditLoading ? auditEvents.length : "—", icon: "activity" },
+        <PageContextBar
+          ariaLabel="Workspace settings summary"
+          stats={[
+            { label: "Organization", value: orgName || "—", icon: "settings", title: "Workspace name applied across the platform" },
+            {
+              label: "SSO",
+              value: enabledSsoCount > 0 ? `${enabledSsoCount} active` : "Not set",
+              icon: "gate",
+              tone: enabledSsoCount > 0 ? "ok" : "warn",
+              title: enabledSsoCount > 0 ? "Identity providers enabled for sign-in" : "No single sign-on provider configured",
+            },
+            { label: "AI provider", value: modelCapabilities?.active_provider ?? "local", icon: "sparkle", tone: "muted", title: "Active model routing provider" },
+            { label: "Job retention", value: `${retention}d`, icon: "clock", tone: "muted", title: "Completed jobs are archived after this many days" },
+            { label: "Timezone", value: timezone, icon: "activity", tone: "muted" },
           ]}
         />
 

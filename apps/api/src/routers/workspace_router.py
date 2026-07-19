@@ -550,32 +550,58 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
 
 def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     from services.byok_key_manager import key_status_summary
-    from services.platform_config import is_production
+    from services.platform_config import is_production, validate_production_config
+    from services.secret_vault import secrets_encryption_ready
 
     region = tenant.data_region if tenant else "us-east-1"
     byok = key_status_summary(tenant.id) if tenant else {"configured": False}
+    encryption_ready = bool(secrets_encryption_ready())
+    prod = is_production()
+    prod_errors = validate_production_config() if prod else []
+    audit_logging = True  # append-only JSONL audit path is always mounted
     return {
         "tenant_id": tenant.id if tenant else None,
         "workspace_id": tenant.workspace_id if tenant else None,
         "custom_domain": tenant.custom_domain if tenant else None,
         "data_region": region,
-        "environment": "production" if is_production() else "development",
-        "encryption_at_rest": True,
+        "environment": "production" if prod else "development",
+        "encryption_at_rest": encryption_ready,
+        "secrets_encryption_ready": encryption_ready,
+        "production_config_ok": not prod_errors,
+        "production_config_errors": prod_errors,
         "byok": byok,
-        "audit_logging": True,
-        "pii_detection": True,
+        "audit_logging": audit_logging,
+        "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
         "mfa_required": tenant.mfa_required if tenant else False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         "tls_version": "1.3",
+        "private_networking": {
+            "vpc_peering": False,
+            "private_link": False,
+            "status": "not_first_class",
+            "note": "Connect via customer network controls / VPN; product VPC peering is not shipped",
+        },
         "compliance": [
-            {"framework": "SOC 2 Type II", "status": "in_progress", "evidence": "Annual audit scheduled; controls documented"},
-            {"framework": "GDPR", "status": "ready", "evidence": "Data residency, right-to-delete, and audit logs available"},
-            {"framework": "HIPAA", "status": "available", "evidence": "BYOK, encryption at rest, and audit controls supported"},
+            {
+                "framework": "SOC 2 Type II",
+                "status": "controls_scaffolded",
+                "evidence": "Audit logs + RBAC + secrets encryption scaffolding; formal attestation not claimed",
+            },
+            {
+                "framework": "GDPR",
+                "status": "partial",
+                "evidence": "Workspace isolation and audit trails available; DPA/residency attestation is customer-owned",
+            },
+            {
+                "framework": "HIPAA",
+                "status": "not_attested",
+                "evidence": "BYOK and encryption controls are prerequisites only — no HIPAA BAA attestation in-product",
+            },
         ],
         "attestations": [
-            {"name": "Penetration testing", "last_completed": None, "next_due": None},
-            {"name": "Vulnerability scanning", "status": "continuous"},
+            {"name": "Penetration testing", "last_completed": None, "next_due": None, "status": "customer_owned"},
+            {"name": "Vulnerability scanning", "status": "recommended_external"},
         ],
     }
 
@@ -676,12 +702,15 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
     lines = [
         "# DataFlow Benchmark Report",
         f"Generated: {report['timestamp']}Z",
-        f"Workload: {report['rows']:,} rows from CSV → SQLite",
+        f"Workload: {report['rows']:,} rows from CSV → SQLite (local API host)",
+        "",
+        "> This report measures synthetic CSV → SQLite only. It is **not** a MongoDB→Snowflake",
+        "> or warehouse throughput claim. Use the live job theater for per-route rows/sec.",
         "",
         "## Results",
         f"- Success: {report['success']}",
         f"- Elapsed: {report['elapsed_seconds']:.3f}s",
-        f"- Throughput: {report['records_per_second']:,.1f} rows/sec",
+        f"- Throughput: {report['records_per_second']:,.1f} rows/sec (CSV→SQLite)",
         f"- Peak memory: {report['peak_memory_mb']} MB",
         f"- Row count verified: {report['destination_summary'].get('verified', False)}",
         "",
@@ -693,6 +722,30 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
         lines.append(f"| {c['product']} | {c['typical_rps']:,} | {'Yes' if c['resume_from_checkpoint'] else 'No'} | {c['notes']} |")
     lines.extend(["", "This report was produced by the DataFlow benchmark harness and can be reproduced locally without cloud credentials."])
     return "\n".join(lines)
+
+
+@router.get("/proofs/ledger")
+async def get_proof_ledger():
+    """Customer-visible migration proof ledger (SKU + fidelity + vs Airbyte)."""
+    from services.proof_ledger import build_proof_ledger
+
+    return JSONResponse(build_proof_ledger())
+
+
+@router.post("/proofs/fidelity")
+async def run_fidelity_proof():
+    """Run the rich-type CSV→SQLite fidelity proof and persist an artifact."""
+    from services.proof_ledger import run_fidelity_proof as _run
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "fidelity", "route": "csv→sqlite"},
+            status_code=500,
+        )
+    status = 200 if result.get("success") else 422
+    return JSONResponse(result, status_code=status)
 
 
 @router.post("/benchmark")

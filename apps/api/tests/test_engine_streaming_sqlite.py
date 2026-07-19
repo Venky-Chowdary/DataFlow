@@ -138,6 +138,11 @@ def test_engine_stream_sqlite_to_sqlite_resume_from_checkpoint():
             source=source,
             destination=destination,
             sync_mode="full_refresh_overwrite",
+            # A declared primary key makes the resumed chunk idempotent (upsert),
+            # which is what the engine requires to resume a partial load safely.
+            stream_contracts=[
+                {"name": "orders", "primary_key": "id", "sync_mode": "full_refresh_overwrite"}
+            ],
             skip_preflight=True,
         )
 
@@ -147,8 +152,10 @@ def test_engine_stream_sqlite_to_sqlite_resume_from_checkpoint():
 
         conn = sqlite3.connect(dst)
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        distinct = conn.execute("SELECT count(DISTINCT id) FROM orders_out").fetchone()[0]
         conn.close()
         assert count == 500
+        assert distinct == 500
 
 
 def test_engine_stream_sqlite_to_sqlite_incremental_deduped():

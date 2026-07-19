@@ -21,7 +21,11 @@ from connectors.writer_common import (  # noqa: E402
     build_mapped_rows,
     resolve_target_columns,
     row_fingerprints,
+    transform_error_policy_for_validation_mode,
 )
+
+# Keep resilient batch/quarantine path importable for streaming callers.
+from services.resilience import ResilientBatcher, adaptive_chunk_size  # noqa: E402, F401
 
 from .adapters import (
     _introspect_table_schema,
@@ -50,18 +54,22 @@ except ImportError:  # pragma: no cover - tests with api root on path
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
     rejected = int(getattr(result, "rejected_rows", 0) or 0)
+    coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     return {
         "rejected_rows": rejected,
+        "coerced_null_rows": coerced,
         "rejected_details": list(getattr(result, "rejected_details", []) or [])[:50],
         "warnings": list(getattr(result, "warnings", []) or [])[:10],
-        "error_policy": "quarantine" if rejected else "none",
+        "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
     }
 
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
+    "sqlserver", "oracle",
     "s3", "gcs", "adls", "sftp", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
+    "iceberg", "kafka", "salesforce", "hubspot",
 })
 
 
@@ -357,6 +365,21 @@ def _read_batch_impl(
             limit=limit,
             known_total_rows=known_total_rows,
         )
+    if src_type in ("sqlserver", "oracle"):
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(
+            src_type,
+            cfg=cfg,
+            table=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+        )
+    if src_type in ("salesforce", "hubspot"):
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(src_type, cfg=cfg, table=table, limit=limit, offset=offset)
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
 
@@ -381,6 +404,24 @@ def _unwrap_read(result):
     return result, None
 
 
+def _raise_write_failure(result: Any, label: str) -> None:
+    """Fail a batch write; connection drops are retriable when the writer ledger can skip commits."""
+    err = result.error or label
+    written = int(getattr(result, "rows_written", 0) or 0)
+    try:
+        from connectors.write_resilience import is_connection_lost
+    except ImportError:
+        is_connection_lost = lambda _e: False  # noqa: E731
+    # Writers stamp committed chunks in `_dataflow_write_ledger` when job_id is set,
+    # so re-invoking the same batch after a proxy drop is safe (already-written
+    # chunks are skipped). Prefer ConnectionError so with_retry can finish the job.
+    if is_connection_lost(err):
+        raise ConnectionError(err)
+    if written > 0:
+        raise RuntimeError(f"partial write ({written} rows committed before failure): {err}")
+    raise RuntimeError(err)
+
+
 def _write_batch(
     dest_type: str,
     dest: EndpointConfig,
@@ -399,9 +440,15 @@ def _write_batch(
     write_mode: str = "insert",
     conflict_columns: list[str] | None = None,
     backfill_new_fields: bool = False,
+    error_policy: str | None = None,
+    connection: Any | None = None,
+    close_connection: bool | None = None,
+    skip_session_setup: bool = False,
+    job_id: str | None = None,
 ) -> tuple[int, str, dict]:
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
+        from connectors.write_resilience import build_write_batch_key
 
         pg_port = int(cfg.get("port") or (5439 if dest_type == "redshift" else 5432))
         result = write_mapped_rows(
@@ -423,10 +470,16 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+            _raise_write_failure(result, f"{dest_type} batch write failed")
         summary = {
             "type": dest_type,
             "schema": result.target_schema,
@@ -439,6 +492,7 @@ def _write_batch(
 
     if dest_type == "mysql":
         from connectors.mysql_writer import write_mapped_rows
+        from connectors.write_resilience import build_write_batch_key
 
         result = write_mapped_rows(
             host=cfg["host"],
@@ -459,10 +513,16 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or "MySQL batch write failed")
+            _raise_write_failure(result, "MySQL batch write failed")
         summary = {
             "type": "mysql",
             "database": cfg["database"],
@@ -494,6 +554,7 @@ def _write_batch(
             write_mode=write_mode,
             conflict_columns=conflict_columns,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -530,6 +591,7 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -568,7 +630,11 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            connection=connection,
+            close_connection=close_connection,
+            skip_session_setup=skip_session_setup,
         )
         if not result.ok:
             raise RuntimeError(result.error or "Snowflake batch write failed")
@@ -597,6 +663,7 @@ def _write_batch(
             column_types=column_types,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
@@ -639,6 +706,7 @@ def _write_batch(
             "mappings": mappings,
             "column_types": column_types,
             "create_table": create_table,
+            "error_policy": error_policy,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         }
         if dest_type in ("pgvector", "qdrant"):
@@ -679,12 +747,68 @@ def _write_batch(
             conflict_columns=conflict_columns,
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
+            error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
         summary = {"type": type_name, "schema": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        return result.rows_written, result.checksum, summary
+
+    from .connector_dispatch import has_writer, write_via_registry
+
+    if has_writer(dest_type):
+        mode = write_mode
+        if dest_type in ("salesforce", "hubspot") and (mode or "insert").lower() == "insert":
+            mode = "upsert"
+        common = {
+            "host": cfg.get("host", ""),
+            "port": int(cfg.get("port") or 0),
+            "database": cfg.get("database", ""),
+            "username": cfg.get("username", ""),
+            "password": cfg.get("password", ""),
+            "schema": cfg.get("schema", ""),
+            "connection_string": cfg.get("connection_string", ""),
+            "ssl": cfg.get("ssl", False),
+            "api_key": cfg.get("api_key", ""),
+            "table_name": table_name,
+            "headers": headers,
+            "data_rows": data_rows,
+            "mappings": mappings,
+            "column_types": column_types,
+            "create_table": create_table,
+            "error_policy": error_policy,
+            "on_checkpoint": (
+                (lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r))
+                if on_checkpoint
+                else None
+            ),
+        }
+        extra = {}
+        if dest_type == "kafka":
+            extra["schema_registry_url"] = str(
+                (getattr(dest, "extra", None) or {}).get("schema_registry_url")
+                or cfg.get("schema_registry_url")
+                or ""
+            )
+        result = write_via_registry(
+            dest_type,
+            common=common,
+            write_mode=mode or "insert",
+            conflict_columns=conflict_columns or [],
+            extra=extra or None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+        summary = {
+            "type": dest_type,
+            "schema": result.target_schema,
+            "table": result.table_name,
+            "checksum": result.checksum,
+            "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
         return result.rows_written, result.checksum, summary
 
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
@@ -736,8 +860,20 @@ def stream_database_transfer(
     cursor_source_col = contract.cursor_field if contract else ""
     pk_target_cols: list[str] = []
     if contract and contract.primary_key:
-        pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
+        pk_target_cols = [
+            map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+        ]
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    # Parallel/chunked resume is only safe with idempotent writes.
+    resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
+    if resuming and write_mode == "insert":
+        if pk_target_cols:
+            write_mode = "upsert"
+        else:
+            raise ValueError(
+                "Cannot resume a streaming insert without a primary key; "
+                "set primary_key on the stream contract or use an upsert sync mode"
+            )
     watermark = None
     cursor_key = ""
     if incremental and cursor_source_col:
@@ -820,8 +956,22 @@ def stream_database_transfer(
     avg_row_size = 100
     if sample_rows:
         avg_row_size = max(1, int(sum(len(str(row)) for row in sample_rows) / len(sample_rows)))
-    target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
+    # Warehouses benefit from larger stream chunks so batches clear COPY/MERGE
+    # thresholds; Mongo already used 64MB — extend the same class to SF/BQ/RS.
+    _warehouse_dests = {"mongodb", "snowflake", "bigquery", "redshift"}
+    target_memory_bytes = 64 * 1024 * 1024 if dest_type in _warehouse_dests else 8 * 1024 * 1024
     chunk_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
+    # Cap stream batches on public TCP proxies so one socket never holds a 20k-row window.
+    try:
+        from connectors.write_resilience import proxy_stream_batch_size
+    except ImportError:
+        proxy_stream_batch_size = None  # type: ignore
+    if proxy_stream_batch_size is not None:
+        chunk_size = proxy_stream_batch_size(
+            dest_cfg.get("host"),
+            connection_string=dest_cfg.get("connection_string") or dest_cfg.get("uri") or "",
+            default=chunk_size,
+        )
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Chunked writes would overwrite the same key and silently lose data.
     # Force a single chunk so all rows are written once.
@@ -907,6 +1057,10 @@ def stream_database_transfer(
     dest_summary: dict[str, Any] = {}
     last_checksum = ""
     rejected_total = 0
+    coerced_null_total = 0
+    # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
+    # Threaded to every writer so the streaming path matches the buffered path.
+    stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
     warning_samples: list[str] = []
     ddb_total = probe.total_rows if src_type == "dynamodb" else None
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
@@ -1065,8 +1219,46 @@ def stream_database_transfer(
 
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
-    if dest_type == "sqlite":
+    # Snowflake reuses one connection for the job — must stay serial.
+    # Public TCP proxies drop under concurrent bulk writers — force one connection.
+    if dest_type in ("sqlite", "snowflake"):
         max_workers = 1
+    else:
+        try:
+            from connectors.write_resilience import is_public_proxy_host
+        except ImportError:
+            is_public_proxy_host = lambda _h: False  # noqa: E731
+        proxy_host = str(dest_cfg.get("host") or "")
+        proxy_cs = str(
+            dest_cfg.get("connection_string")
+            or dest_cfg.get("uri")
+            or dest_cfg.get("url")
+            or ""
+        )
+        if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
+            max_workers = 1
+
+    # Shared Snowflake connection for the life of this stream job (open once).
+    sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
+    batches_completed = 0
+    load_methods_seen: list[str] = []
+
+    def _ensure_snowflake_conn() -> Any:
+        if sf_conn_state["conn"] is not None:
+            return sf_conn_state["conn"]
+        from connectors.snowflake_conn import get_connection, normalize_account
+
+        sf_conn_state["conn"] = get_connection(
+            account=normalize_account(dest_cfg.get("host", "")),
+            username=dest_cfg.get("username", ""),
+            password=dest_cfg.get("password", ""),
+            database=dest_cfg.get("database", ""),
+            schema=dest_cfg.get("schema", "PUBLIC"),
+            warehouse=dest_cfg.get("warehouse", ""),
+            connection_string=dest_cfg.get("connection_string", ""),
+            role=dest_cfg.get("role", ""),
+        )
+        return sf_conn_state["conn"]
 
     def _process_db_chunk(idx: int, batch: Any) -> dict[str, Any]:
         if not batch or not getattr(batch, "rows", None):
@@ -1075,6 +1267,7 @@ def stream_database_transfer(
                 "last_checksum": "",
                 "dest_summary": {},
                 "rejected": 0,
+                "coerced_null": 0,
                 "warnings": [],
                 "batch_max": None,
                 "batch_rows": 0,
@@ -1102,6 +1295,12 @@ def stream_database_transfer(
         if incremental and cursor_source_col:
             batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
 
+        write_kwargs: dict[str, Any] = {}
+        if dest_type == "snowflake":
+            write_kwargs["connection"] = _ensure_snowflake_conn()
+            write_kwargs["close_connection"] = False
+            write_kwargs["skip_session_setup"] = bool(sf_conn_state["session_ready"])
+
         write_op = partial(
             _write_batch,
             dest_type,
@@ -1120,6 +1319,9 @@ def stream_database_transfer(
             write_mode=write_mode,
             conflict_columns=pk_target_cols or None,
             backfill_new_fields=backfill_new_fields,
+            error_policy=stream_error_policy,
+            job_id=job_id,
+            **write_kwargs,
         )
         batch_written, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1131,20 +1333,24 @@ def stream_database_transfer(
                 jitter=retry.jitter,
             ),
         )
+        if dest_type == "snowflake":
+            sf_conn_state["session_ready"] = True
         return {
             "batch_written": batch_written,
             "last_checksum": last_checksum,
             "dest_summary": dest_summary,
             "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
+            "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
             "batch_rows": len(batch.rows),
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, last_checksum, running_cursor, committed_offset, dest_summary
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed
         written += result["batch_written"]
         rejected_total += result["rejected"]
+        coerced_null_total += result.get("coerced_null", 0)
         last_checksum = result["last_checksum"] or last_checksum
         warning_samples.extend(result["warnings"])
         if result["batch_max"] is not None:
@@ -1153,6 +1359,10 @@ def stream_database_transfer(
         committed_offset += result["batch_rows"]
         if result["dest_summary"]:
             dest_summary = result["dest_summary"]
+            method = dest_summary.get("load_method")
+            if method:
+                load_methods_seen.append(str(method))
+            batches_completed += 1
 
         # Persist durable checkpoint after the batch is committed.  We use the
         # ordered result stream so checkpoint offsets/cursors can never skip
@@ -1185,35 +1395,44 @@ def stream_database_transfer(
         dispatcher.submit(idx, batch, _process_db_chunk)
         fetch_offset += len(batch.rows)
 
-    # Process the first batch synchronously so DDL (table/index creation) is
-    # committed before any parallel workers try to insert into the new table.
-    if batch:
-        batch = _filter_batch(batch)
-        if incremental and cursor_source_col and batch.rows:
-            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
-            if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
-                fetch_cursor = batch_max
-        _apply_result(first_idx, _process_db_chunk(first_idx, batch))
-        fetch_offset += len(batch.rows)
+    try:
+        # Process the first batch synchronously so DDL (table/index creation) is
+        # committed before any parallel workers try to insert into the new table.
+        if batch:
+            batch = _filter_batch(batch)
+            if incremental and cursor_source_col and batch.rows:
+                batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+                if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
+                    fetch_cursor = batch_max
+            _apply_result(first_idx, _process_db_chunk(first_idx, batch))
+            fetch_offset += len(batch.rows)
 
-    idx = first_idx + 1
-    with ChunkDispatcher(max_workers=max_workers) as dispatcher:
-        # Fetch the next batch (the first one has already been committed).
-        batch = _fetch_next_batch(batch)
-        while batch:
-            _prepare_and_submit(dispatcher, idx, batch)
-
-            # Process any completed batches in ascending index order.
-            for ready_idx, result in dispatcher.ready():
-                _apply_result(ready_idx, result)
-
-            # Fetch the next batch while earlier batches are still being written.
+        idx = first_idx + 1
+        with ChunkDispatcher(max_workers=max_workers) as dispatcher:
+            # Fetch the next batch (the first one has already been committed).
             batch = _fetch_next_batch(batch)
-            idx += 1
+            while batch:
+                _prepare_and_submit(dispatcher, idx, batch)
 
-        # Drain the remaining in-flight writes.
-        for ready_idx, result in dispatcher.results():
-            _apply_result(ready_idx, result)
+                # Process any completed batches in ascending index order.
+                for ready_idx, result in dispatcher.ready():
+                    _apply_result(ready_idx, result)
+
+                # Fetch the next batch while earlier batches are still being written.
+                batch = _fetch_next_batch(batch)
+                idx += 1
+
+            # Drain the remaining in-flight writes.
+            for ready_idx, result in dispatcher.results():
+                _apply_result(ready_idx, result)
+    finally:
+        conn = sf_conn_state.get("conn")
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            sf_conn_state["conn"] = None
 
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
@@ -1284,7 +1503,9 @@ def stream_database_transfer(
                 mappings=mappings,
                 target_cols=target_cols,
                 column_types=column_types,
-                error_policy="quarantine",
+                # Use the SAME policy as the write path so strict/maximum cannot
+                # silently coerce a bad cell to NULL here and mask a mismatch.
+                error_policy=stream_error_policy,
                 preserve_case=True,
             )
             if mapped:
@@ -1304,10 +1525,20 @@ def stream_database_transfer(
 
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
+    dest_summary["coerced_null_rows"] = coerced_null_total
     dest_summary["warnings"] = warning_samples[:10]
-    dest_summary["error_policy"] = "quarantine" if rejected_total else "none"
+    dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
     dest_summary["watermark"] = running_cursor
+    dest_summary["chunk_size"] = chunk_size
+    dest_summary["batches"] = batches_completed
+    if load_methods_seen:
+        if "copy_into" in load_methods_seen:
+            dest_summary["load_method"] = "copy_into"
+        elif "merge_batch" in load_methods_seen:
+            dest_summary["load_method"] = "merge_batch"
+        else:
+            dest_summary["load_method"] = load_methods_seen[-1]
     ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")
     return written, ddl_log, dest_summary, columns
 
@@ -1378,7 +1609,7 @@ def stream_scd2_mirror_transfer(
 
     from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
-    from services.sync_cursor import resolve_sync_contract
+    from services.sync_cursor import map_source_to_target, resolve_sync_contract
 
     contract = resolve_sync_contract(stream_contracts)
     effective_sync = (contract.sync_mode if contract else sync_mode).lower()
@@ -1451,8 +1682,12 @@ def stream_scd2_mirror_transfer(
             from src.services.scd2_engine import apply_scd2
 
             batch_size = 1_000
-            pk = (contract.primary_key if contract else "") or target_cols[0]
-            conflict_columns = [pk]
+            if contract and contract.primary_key:
+                conflict_columns = [
+                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                ]
+            else:
+                conflict_columns = [target_cols[0]]
             written_total = 0
             updated_total = 0
             active_rows = 0
@@ -1515,8 +1750,17 @@ def stream_scd2_mirror_transfer(
             # Single SQL pass to reactivate present keys and soft-delete missing keys.
             engine = get_sqlalchemy_engine(dest_cfg)
             soft_delete_col = quote_sql_identifier("_deleted")
-            pk = quote_sql_identifier(
-                contract.primary_key if contract else target_cols[0]
+            if contract and contract.primary_key:
+                pk_cols = [
+                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                ]
+            else:
+                pk_cols = [target_cols[0]]
+            # Correlate target↔staging without UPDATE aliases (SQLite-compatible).
+            join_pred = " AND ".join(
+                f"{staging_qualified}.{quote_sql_identifier(c)} = "
+                f"{target_qualified}.{quote_sql_identifier(c)}"
+                for c in pk_cols
             )
             with engine.connect() as conn:
                 _ensure_soft_delete_column(conn, target_qualified, "_deleted")
@@ -1525,7 +1769,7 @@ def stream_scd2_mirror_transfer(
                     sa.text(
                         f"UPDATE {target_qualified} "
                         f"SET {soft_delete_col} = FALSE "
-                        f"WHERE {pk} IN (SELECT {pk} FROM {staging_qualified})"
+                        f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
                     )
                 )
                 # Soft-delete rows that are no longer in the source.
@@ -1533,7 +1777,7 @@ def stream_scd2_mirror_transfer(
                     sa.text(
                         f"UPDATE {target_qualified} "
                         f"SET {soft_delete_col} = TRUE "
-                        f"WHERE {pk} NOT IN (SELECT {pk} FROM {staging_qualified}) "
+                        f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
                         f"AND ({soft_delete_col} IS NULL OR {soft_delete_col} = FALSE)"
                     )
                 )

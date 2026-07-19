@@ -98,9 +98,13 @@ _PUBLIC_PATHS = {
     "/openapi.json",
     "/redoc",
     "/api/v1/auth/login",
+    "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
     "/api/v1/auth/sso/start",
     "/api/v1/auth/sso/callback",
+    "/auth/login",
+    "/auth/bootstrap",
+    "/auth/sso/providers",
     "/api/v1/transfer/capabilities",
     "/api/v1/transfer/platform",
     "/api/v1/transfer/readiness",
@@ -112,6 +116,9 @@ _PUBLIC_PATHS = {
 # Method "*" matches any method.
 _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/admin/", Permission.WORKSPACE_MANAGE),
+    # Proof ledger is readable by any workspace member; fidelity runs need job.run.
+    ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
+    ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
@@ -154,7 +161,7 @@ def has_permission(user: dict[str, str] | None, permission: str) -> bool:
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
-    for prefix in ("/api/v1/auth/sso/", "/api/v1/catalog/"):
+    for prefix in ("/api/v1/auth/sso/", "/auth/sso/", "/api/v1/catalog/", "/api/v1/mcp"):
         if path.startswith(prefix):
             return True
     return False

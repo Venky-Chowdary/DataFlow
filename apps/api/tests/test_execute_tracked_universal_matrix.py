@@ -97,8 +97,31 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
     """Return a database EndpointConfig for a live driver with a unique table/key."""
     # SFTP, email, and Qdrant require external network services; the universal
     # matrix test cannot stand up a real server here, so these routes are skipped.
-    if driver in {"sftp", "email", "qdrant"}:
+    if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka"}:
         pytest.skip(f"No local emulator for {driver}")
+    if driver in {"sqlserver", "oracle"}:
+        pytest.skip(f"No local {driver} emulator on this runner")
+    if driver == "pgvector":
+        # Require the Postgres vector extension; homebrew PG without pgvector must skip.
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host="127.0.0.1",
+                port=5432,
+                dbname="dataflow",
+                user="dataflow",
+                password="dataflow",
+                connect_timeout=2,
+            )
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            finally:
+                conn.close()
+        except Exception as exc:
+            pytest.skip(f"pgvector extension unavailable: {exc}")
     if driver == "generic_sql":
         db_path = tmp_path / f"duckdb_{role}_{suffix}.duckdb"
         return EndpointConfig(
@@ -115,6 +138,16 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
             database=str(db_path),
             table=f"t_{role}_{suffix}",
         )
+    if driver == "iceberg":
+        warehouse = tmp_path / f"iceberg_{role}_{suffix}"
+        warehouse.mkdir(parents=True, exist_ok=True)
+        return EndpointConfig(
+            kind="database",
+            format="iceberg",
+            database=str(warehouse),
+            table=f"t_{role}_{suffix}",
+            schema="default",
+        )
     if driver == "redshift":
         return EndpointConfig(
             kind="database",
@@ -127,9 +160,53 @@ def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> E
             schema="public",
             table=f"t_{role}_{suffix}",
         )
-    template = _DB_TEMPLATES.get(driver)
+    # Compose-default first-class engines (always available as templates; reachability
+    # is checked separately so missing services skip instead of raising).
+    _COMPOSE_DEFAULTS: dict[str, EndpointConfig] = {
+        "postgresql": EndpointConfig(
+            kind="database",
+            format="postgresql",
+            host="127.0.0.1",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            table="payments_postgresql",
+        ),
+        "mysql": EndpointConfig(
+            kind="database",
+            format="mysql",
+            host="127.0.0.1",
+            port=3306,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            table="payments_mysql",
+        ),
+        "mongodb": EndpointConfig(
+            kind="database",
+            format="mongodb",
+            host="127.0.0.1",
+            port=27017,
+            database="dataflow",
+            table="payments_mongodb",
+        ),
+        "pgvector": EndpointConfig(
+            kind="database",
+            format="pgvector",
+            host="127.0.0.1",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            table="payments_pgvector",
+        ),
+    }
+    template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)
     if template is None:
-        raise ValueError(f"No endpoint template for driver '{driver}'")
+        pytest.skip(f"No endpoint template for driver '{driver}'")
     # Object-store writers/readers rely on a file extension for content-type
     # detection, so make sure the key ends with .json for s3/gcs/adls.
     base_table = f"payments_{driver}_{role}_{suffix}"

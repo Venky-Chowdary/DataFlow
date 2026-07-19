@@ -19,15 +19,46 @@ from src.services.data_contract import ColumnRule, DataContract
 
 
 @pytest.fixture(autouse=True)
-def _reset_store():
+def _reset_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json"))
     reset_contract_store()
     yield
+    reset_contract_store()
 
 
 def test_get_contract_404():
     with TestClient(app) as client:
         response = client.get("/api/v1/contracts/nonexistent")
         assert response.status_code == 404
+
+
+def test_create_contract_from_transfer():
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/contracts/from-transfer",
+            json={
+                "name": "orders-to-warehouse",
+                "source": {"kind": "file", "format": "csv"},
+                "destination": {"kind": "database", "format": "postgresql"},
+                "mappings": [
+                    {"source": "id", "target": "id", "confidence": 0.99},
+                    {"source": "amount", "target": "amount", "confidence": 0.9, "target_type": "DECIMAL"},
+                ],
+                "column_types": {"id": "INTEGER", "amount": "STRING"},
+                "preflight_gates": [{"id": "mapping", "status": "pass", "message": "ok"}],
+                "strict": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["name"] == "orders-to-warehouse"
+        assert data["status"] == "draft"
+        assert len(data["columns"]) == 2
+        assert data["id"]
+
+        listed = client.get("/api/v1/contracts")
+        assert listed.status_code == 200
+        assert any(c["id"] == data["id"] for c in listed.json()["contracts"])
 
 
 def test_sign_and_get_contract():

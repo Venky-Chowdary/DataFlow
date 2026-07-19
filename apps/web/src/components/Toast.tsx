@@ -34,7 +34,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const toast = useCallback(
     ({ title, message, tone = "info" }: { title: string; message?: string; tone?: ToastTone }) => {
       const id = crypto.randomUUID();
-      setItems((prev) => [...prev.slice(-4), { id, title, message, tone }]);
+      const cleanTitle = title.trim();
+      const cleanMessage = message?.trim() || undefined;
+      setItems((prev) => [...prev.slice(-3), { id, title: cleanTitle, message: cleanMessage, tone }]);
+      // Durations match --df-toast-duration / --df-toast-duration-error in tokens.css
       window.setTimeout(() => dismiss(id), tone === "error" ? 8000 : 4500);
     },
     [dismiss]

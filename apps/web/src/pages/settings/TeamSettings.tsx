@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../../components/DtIcon";
-import { EmptyState } from "../../components/EmptyState";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { SectionLoader } from "../../components/LoadingState";
 import { useToast } from "../../components/Toast";
+import { useConfirm } from "../../components/ui/ConfirmDialog";
 import { addWorkspaceMember, fetchWorkspaceMembers, fetchWorkspaces, removeWorkspaceMember, type Workspace, type WorkspaceMember } from "../../lib/api";
 
 const ROLE_LABELS: Record<string, string> = {
@@ -13,6 +14,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 export function TeamSettings() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
@@ -57,7 +59,14 @@ export function TeamSettings() {
 
   const remove = async (email: string) => {
     if (!selectedWorkspace) return;
-    if (!window.confirm(`Remove ${email} from this workspace?`)) return;
+    const ok = await confirm({
+      title: `Remove ${email}?`,
+      message: "They will lose access to this workspace’s connectors, pipelines, and jobs.",
+      confirmLabel: "Remove member",
+      cancelLabel: "Keep member",
+      tone: "danger",
+    });
+    if (!ok) return;
     setRemovingEmail(email);
     try {
       await removeWorkspaceMember(selectedWorkspace, email);

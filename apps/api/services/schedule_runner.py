@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -43,26 +44,51 @@ def _mongo_backend():
 def _acquire_scheduler_lock() -> bool:
     """Try to acquire a short-lived distributed lock for this scheduler beat.
 
-    When a real MongoDB is shared across Railway instances this prevents
-    multiple replicas from running the same scheduled pipelines simultaneously.
-    Falls back to an in-process lock when MongoDB is unavailable.
+    When a real MongoDB is shared across replicas this prevents duplicate runs.
+    When multi-replica coordination is required and Mongo is unavailable, fail
+    closed (return False). Single-instance / memory mode may proceed without a
+    shared lock.
     """
+    from services.worker_leases import requires_distributed_backend
+
     svc = _mongo_backend()
     if not svc:
+        if requires_distributed_backend():
+            logger.error("Scheduler lock unavailable; refuse beat (multi-replica fail-closed)")
+            return False
         return True
     db = svc.get_database()
     now = datetime.now(timezone.utc)
     instance = _scheduler_instance_id()
     try:
         result = db["schedule_locks"].find_one_and_update(
-            {"_id": "global_scheduler_lock", "$or": [{"expires_at": {"$lte": now}}, {"expires_at": None}]},
-            {"$set": {"_id": "global_scheduler_lock", "instance": instance, "acquired_at": now, "expires_at": _lock_expiry()}},
+            {
+                "_id": "global_scheduler_lock",
+                "$or": [
+                    {"expires_at": {"$lte": now}},
+                    {"expires_at": None},
+                    {"instance": instance},
+                ],
+            },
+            {
+                "$set": {
+                    "instance": instance,
+                    "acquired_at": now,
+                    "expires_at": _lock_expiry(),
+                },
+                "$setOnInsert": {"_id": "global_scheduler_lock"},
+            },
             upsert=True,
             return_document=True,
         )
         return bool(result and result.get("instance") == instance)
-    except Exception:
+    except Exception as exc:
+        name = type(exc).__name__
+        if "DuplicateKey" in name:
+            return False
         logger.exception("Failed to acquire scheduler lock")
+        if requires_distributed_backend():
+            return False
         return False
 
 
@@ -130,39 +156,256 @@ def _endpoint_from_connector(conn: dict, table: str):
     )
 
 
-def _run_schedule(schedule_id: str) -> str | None:
-    from services.schedule_store import (
-        get_schedule,
-        mark_schedule_run,
-        mark_schedule_running,
+def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
+    """Map the schedule's coarse sync_mode onto the engine's contract vocabulary."""
+    mode = (sync_mode or "full_refresh_overwrite").lower()
+    if mode == "incremental":
+        return "incremental_deduped" if primary_key else "incremental_append"
+    if mode in ("scd2", "mirror"):
+        return mode
+    return mode
+
+
+def build_schedule_request(sched, src: dict, dst: dict):
+    """Build a :class:`TransferRequest` from a persisted schedule.
+
+    Threads the per-schedule sync mode, validation mode, mappings, and any
+    watermark/primary-key contract so scheduled runs can be incremental/CDC
+    instead of always full-refresh. Backward compatible: schedules created before
+    these fields existed fall back to full_refresh_overwrite / strict.
+    """
+    from src.transfer.models import TransferRequest
+
+    source = _endpoint_from_connector(src, sched.source_table)
+    destination = _endpoint_from_connector(dst, sched.dest_table)
+
+    effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
+    stream_contracts = list(sched.stream_contracts or [])
+    if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
+        stream_contracts = [{
+            "selected": True,
+            "name": sched.source_table,
+            "stream": sched.source_table,
+            "sync_mode": effective_mode,
+            "cursor_field": sched.cursor_column,
+            "primary_key": sched.primary_key,
+            "schema_policy": sched.schema_policy,
+            "validation_mode": sched.validation_mode,
+        }]
+
+    contract_id = (getattr(sched, "contract_id", None) or "").strip()
+    require_signed = bool(getattr(sched, "require_signed_contract", False))
+    if contract_id or require_signed:
+        from services.schedule_store import assert_signed_contract
+
+        assert_signed_contract(contract_id, require_signed=require_signed)
+
+    return TransferRequest(
+        source=source,
+        destination=destination,
+        mappings=list(sched.mappings or []),
+        skip_preflight=False,
+        sync_mode=effective_mode,
+        schema_policy=sched.schema_policy or "manual_review",
+        validation_mode=sched.validation_mode or "strict",
+        backfill_new_fields=bool(sched.backfill_new_fields),
+        stream_contracts=stream_contracts,
+        workspace_id=sched.workspace_id or "",
+        contract_id=contract_id,
+        enforce_contract=bool(contract_id),
+        require_signed_contract=require_signed,
     )
+
+
+def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job_doc: dict | None) -> dict:
+    doc = job_doc or {}
+    finished = datetime.now(timezone.utc)
+    return {
+        "job_id": job_id,
+        "status": status,
+        "attempt": attempt,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration_seconds": round((finished - started_at).total_seconds(), 3),
+        "records_transferred": int(doc.get("records_processed", 0) or 0),
+        "rejected_rows": int(doc.get("rejected_rows", 0) or 0),
+        "coerced_null_rows": int(doc.get("coerced_null_rows", 0) or 0),
+        "error": (doc.get("error") or "")[:500],
+    }
+
+
+def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> None:
+    """Deliver success/failure notifications honoring per-schedule preferences."""
+    success = _is_success(status)
+    if success and not sched.notify_on_success:
+        return
+    if not success and not sched.notify_on_failure:
+        return
+    try:
+        from services.notification_service import (
+            build_job_payload,
+            log_job_notifications,
+            notify_workspace,
+        )
+        from services.platform_config import public_url, web_url
+
+        doc = job_doc or {}
+        payload = build_job_payload(
+            job_id=job_id,
+            status=status,
+            source=sched.source_table or sched.source_connector_id,
+            destination=sched.dest_table or sched.dest_connector_id,
+            records_transferred=int(doc.get("records_processed", 0) or 0),
+            rejected_rows=int(doc.get("rejected_rows", 0) or 0),
+            error=doc.get("error") or "",
+            retry_url=f"/api/v1/connectors/jobs/{job_id}/resume",
+            workspace_id=sched.workspace_id or "",
+            base_url=public_url(),
+            web_url=web_url(),
+        )
+        results = notify_workspace(sched.workspace_id or "", payload)
+        log_job_notifications(job_id, results)
+    except Exception:
+        logger.exception("Failed to send schedule notification for %s", sched.id)
+
+
+_SUCCESS_STATUSES = frozenset({"completed", "completed_with_quarantine", "success"})
+
+
+def _is_success(status: str | None) -> bool:
+    return (status or "") in _SUCCESS_STATUSES
+
+
+def _should_retry(status: str | None, attempt: int, max_retries: int) -> bool:
+    return (not _is_success(status)) and attempt < max_retries
+
+
+def _job_doc(job_id: str) -> dict | None:
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        return get_mongodb_service().get_job(job_id)
+    except Exception:
+        return None
+
+
+def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
+    """Handle a finished scheduled run: retry on failure, else record + notify."""
+    from services.schedule_store import get_schedule, mark_schedule_run, record_run_history
+
+    sched = get_schedule(schedule_id)
+    if not sched:
+        return
+    job_doc = _job_doc(job_id)
+    status = (job_doc or {}).get("status") or "failed"
+    entry = _run_entry(job_id, status, attempt, started_at, job_doc)
+
+    if _should_retry(status, attempt, sched.max_retries):
+        record_run_history(schedule_id, {**entry, "retry_scheduled": True})
+        delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
+        logger.warning(
+            "Schedule %s attempt %s failed; retrying in %ss", schedule_id, attempt + 1, delay
+        )
+        timer = threading.Timer(
+            delay, lambda: _dispatch_transfer(schedule_id, attempt=attempt + 1)
+        )
+        timer.daemon = True
+        timer.start()
+        return
+
+    cursor_value = None
+    if _is_success(status) and sched.cursor_column:
+        cursor_value = (job_doc or {}).get("cursor_value")
+    mark_schedule_run(
+        schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value
+    )
+    _notify_schedule(sched, job_id, status, job_doc)
+
+
+def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
+    """Build and submit the transfer for a schedule attempt (used for retries too)."""
+    from services.schedule_store import get_schedule, mark_schedule_run
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
     sched = get_schedule(schedule_id)
     if not sched or not sched.enabled:
         return None
-
     src = _resolve_connector(sched.source_connector_id)
     dst = _resolve_connector(sched.dest_connector_id)
     if not src or not dst:
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
+        now = datetime.now(timezone.utc)
+        mark_schedule_run(
+            schedule_id,
+            "",
+            status="failed",
+            run_entry={
+                "job_id": "",
+                "status": "failed",
+                "attempt": attempt,
+                "started_at": now.isoformat(),
+                "finished_at": now.isoformat(),
+                "duration_seconds": 0,
+                "records_transferred": 0,
+                "rejected_rows": 0,
+                "coerced_null_rows": 0,
+                "error": "Schedule skipped — source or destination connector is missing or unavailable",
+            },
+        )
         return None
 
-    source = _endpoint_from_connector(src, sched.source_table)
-    destination = _endpoint_from_connector(dst, sched.dest_table)
-    from src.transfer.models import TransferRequest
-
-    request = TransferRequest(source=source, destination=destination, skip_preflight=False)
-
+    try:
+        request = build_schedule_request(sched, src, dst)
+    except ValueError as exc:
+        logger.error("Schedule %s blocked by contract policy: %s", schedule_id, exc)
+        mark_schedule_run(
+            schedule_id,
+            "",
+            status="failed",
+            run_entry={
+                "job_id": "",
+                "status": "failed",
+                "attempt": attempt,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_seconds": 0,
+                "records_transferred": 0,
+                "rejected_rows": 0,
+                "coerced_null_rows": 0,
+                "error": str(exc)[:500],
+            },
+        )
+        return None
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
-    mark_schedule_running(schedule_id, _scheduler_instance_id())
+    started_at = datetime.now(timezone.utc)
     future = run_transfer_async(job_id, request)
     future.add_done_callback(
-        lambda _f, sid=schedule_id, jid=job_id: mark_schedule_run(sid, jid)
+        lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
     )
-    logger.info("Schedule %s started job %s", schedule_id, job_id)
+    logger.info("Schedule %s started job %s (attempt %s)", schedule_id, job_id, attempt + 1)
+    return job_id
+
+
+def _run_schedule(schedule_id: str) -> str | None:
+    from services.schedule_store import clear_schedule_running, get_schedule, mark_schedule_running
+
+    sched = get_schedule(schedule_id)
+    if not sched or not sched.enabled:
+        return None
+
+    # Concurrency guard: refuse to start when this schedule (or another schedule
+    # for the same source→dest connector pair) already has a live run in flight.
+    if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
+        logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
+        return None
+
+    job_id = _dispatch_transfer(schedule_id, attempt=0)
+    if job_id is None:
+        # Fail-closed paths (missing connector / contract) already call
+        # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
+        clear_schedule_running(schedule_id)
     return job_id
 
 
@@ -211,6 +454,16 @@ async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
     await asyncio.get_event_loop().run_in_executor(_executor, _clear_stale_running_schedules)
+    try:
+        from services.schedule_store import import_file_schedules_into_mongo
+
+        imported = await asyncio.get_event_loop().run_in_executor(
+            _executor, import_file_schedules_into_mongo
+        )
+        if imported:
+            logger.info("Imported %s schedule(s) from schedules.json into MongoDB", imported)
+    except Exception:
+        logger.exception("Schedule file→Mongo import failed")
     while True:
         try:
             count = await asyncio.get_event_loop().run_in_executor(_executor, _run_due_schedules)

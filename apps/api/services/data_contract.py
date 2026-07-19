@@ -231,9 +231,24 @@ class ContractEnforcer:
     def __init__(self, contract: DataContract):
         self.contract = contract
 
-    def enforce(self, request: Any, *, sample_schema: dict[str, str] | None = None) -> None:
+    def enforce(
+        self,
+        request: Any,
+        *,
+        sample_schema: dict[str, str] | None = None,
+        require_signed: bool = False,
+    ) -> None:
         """Raise ContractViolation if the request breaks the contract."""
         violations: list[dict[str, Any]] = []
+
+        if require_signed and self.contract.status != ContractStatus.SIGNED:
+            violations.append({
+                "rule": "contract_not_signed",
+                "message": (
+                    f"Contract {self.contract.id} must be SIGNED before transfer "
+                    f"(current status: {self.contract.status.value})"
+                ),
+            })
 
         # Enforce source/destination endpoint shape (ignore credentials).
         if self.contract.source.get("format") and self.contract.source.get("format") != request.source.format:

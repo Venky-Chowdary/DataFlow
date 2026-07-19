@@ -136,7 +136,15 @@ def test_mysql_to_snowflake():
     _run(request, uuid.uuid4().hex[:24])
 
 
-def test_mongodb_to_snowflake():
+def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
+    """Realistic schemaless MongoDB → Snowflake.
+
+    Replaces the old trivial ``{"id":1,"name":"alice"}`` + ``skip_preflight`` test
+    that could not surface real Snowflake rejections. Uses nested objects,
+    arrays, mixed int/str, ObjectId, Decimal128, datetime, missing keys, and
+    placeholder values, runs the real preflight/validation path, and then
+    round-trips the VARIANT columns back to prove queryability with no data loss.
+    """
     fakesnow = pytest.importorskip("fakesnow")
     try:
         with socket.create_connection(("localhost", 27017), timeout=1):
@@ -144,7 +152,18 @@ def test_mongodb_to_snowflake():
     except OSError as exc:
         pytest.skip(f"Emulator not reachable: {exc}")
 
+    from datetime import datetime, timezone
+
+    from bson.decimal128 import Decimal128
     from pymongo import MongoClient
+
+    from services.preflight_service import (
+        apply_policy_gates,
+        confidence_threshold_for_mode,
+        run_file_preflight,
+        run_transfer_policy_gates,
+    )
+    from src.transfer.adapters import read_source_database
 
     src_collection = "mdb_to_sf_src_" + uuid.uuid4().hex[:8]
     dst_table = "mdb_to_sf_" + uuid.uuid4().hex[:8]
@@ -152,28 +171,80 @@ def test_mongodb_to_snowflake():
     client = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
     db = client["dataflow"]
     db[src_collection].insert_many([
-        {"id": 1, "name": "alice"},
-        {"id": 2, "name": "bob"},
+        {"id": 1, "name": "alice", "profile": {"age": 30, "city": "NYC"},
+         "tags": ["vip", "beta"], "score": 10, "active": True,
+         "created": datetime(2024, 1, 1, tzinfo=timezone.utc), "balance": Decimal128("100.50")},
+        {"id": 2, "name": "bob", "profile": {"age": "unknown"}, "tags": "single",
+         "score": "N/A", "active": "yes", "created": "2024-06-01", "extra": "surprise"},
+        {"id": 3, "name": None, "profile": None, "tags": [], "score": 3.14,
+         "nested_array": [{"k": 1}, {"k": 2}]},
     ])
     client.close()
 
-    request = TransferRequest(
-        source=EndpointConfig(
-            kind="database", format="mongodb",
-            host="localhost", port=27017,
-            database="dataflow", table=src_collection,
-        ),
-        destination=_snowflake_endpoint(dst_table),
-        sync_mode="full_refresh_overwrite",
-        stream_contracts=[{
-            "name": "users",
-            "sync_mode": "full_refresh_overwrite",
-            "primary_key": "id",
-            "selected": True,
-        }],
-        skip_preflight=True,
-    )
-    _run(request, uuid.uuid4().hex[:24])
+    source = EndpointConfig(kind="database", format="mongodb", host="localhost",
+                            port=27017, database="dataflow", table=src_collection)
+
+    try:
+        # 1) Greenfield create path: nested/array fields must be typed
+        # semi-structured (VARIANT), and the messy sample must PASS preflight
+        # (no false coercion blocks) now that scalars wrap losslessly.
+        records, headers, schema = read_source_database(source, limit=500)
+        assert schema.get("profile") in {"OBJECT", "JSON"}, schema
+        assert schema.get("tags") in {"ARRAY", "JSON"}, schema
+
+        mappings = [{"source": h, "target": h, "confidence": 0.99} for h in headers]
+        with fakesnow.patch():
+            pf = apply_policy_gates(
+                run_file_preflight(
+                    columns=headers, column_types=schema, row_count=len(records),
+                    mappings=mappings, destination_connected=True, source_connected=True,
+                    source_kind="database", source_format="mongodb",
+                    sync_mode="full_refresh_overwrite", sample_rows=records,
+                    confidence_threshold=confidence_threshold_for_mode("strict"),
+                    destination_column_types={}, destination_table_exists=False,
+                    destination_can_create=True, destination_db_type="snowflake",
+                ),
+                run_transfer_policy_gates(
+                    sync_mode="full_refresh_overwrite", schema_policy="manual_review",
+                    validation_mode="strict",
+                    stream_contracts=[{"name": src_collection, "primary_key": "id",
+                                       "selected": True, "sync_mode": "full_refresh_overwrite"}],
+                    backfill_new_fields=False,
+                ),
+                validation_mode="strict",
+            )
+            assert pf["passed"] is True, pf.get("blockers")
+            assert pf["coercion_report"]["has_blocking_failures"] is False
+
+        # 2) Real transfer + round-trip: every row lands, VARIANT is queryable.
+        request = TransferRequest(
+            source=source,
+            destination=_snowflake_endpoint(dst_table),
+            sync_mode="full_refresh_overwrite",
+            stream_contracts=[{"name": src_collection, "sync_mode": "full_refresh_overwrite",
+                               "primary_key": "id", "selected": True}],
+            skip_preflight=True,
+        )
+        with fakesnow.patch():
+            import snowflake.connector as sc
+
+            engine = UniversalTransferEngine()
+            result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+            assert result.success is True, result.error
+            assert result.records_transferred == 3
+            assert result.reconciliation.get("rejected_rows", 0) == 0
+
+            conn = sc.connect(account="localhost", user="t", password="t",
+                              database="dataflow", schema="public")
+            cur = conn.cursor()
+            cur.execute(f'SELECT "tags"[0] FROM "{dst_table}" WHERE "id" = 1')
+            assert cur.fetchall()[0][0].strip('"') == "vip"
+            cur.execute(f'SELECT "tags" FROM "{dst_table}" WHERE "id" = 2')
+            assert cur.fetchall()[0][0].strip('"') == "single"
+    finally:
+        c = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
+        c["dataflow"][src_collection].drop()
+        c.close()
 
 
 def test_dynamodb_to_snowflake():

@@ -9,11 +9,13 @@ export type MappingTransform =
   | "hash_pii"
   | "cast_number"
   | "cast_boolean"
-  | "parse_json";
+  | "parse_json"
+  | "strip_controls";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
   { id: "trim", label: "Trim", detail: "Strip leading/trailing whitespace" },
+  { id: "strip_controls", label: "Strip controls", detail: "Remove zero-width / null / format-control chars (warehouse-safe)" },
   { id: "upper", label: "Uppercase", detail: "Normalize to UPPER CASE" },
   { id: "lower", label: "Lowercase", detail: "Normalize to lower case" },
   { id: "date_iso", label: "Date → ISO", detail: "Parse dates to ISO-8601" },
@@ -37,6 +39,74 @@ export interface EditableMapping {
   transform?: MappingTransform;
   requiresReview?: boolean;
   scoreGap?: number;
+  /** From schema intelligence — e.g. string_enum, boolean_flag */
+  semanticRole?: string;
+}
+
+const STATUS_ENUM_TOKENS = new Set([
+  "active", "inactive", "enabled", "disabled", "pending", "invalidated",
+  "approved", "rejected", "completed", "cancelled", "canceled", "draft",
+  "published", "archived", "deleted", "suspended", "processing", "queued",
+]);
+
+const STRICT_BOOL_TOKENS = new Set([
+  "true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off",
+]);
+
+function looksLikeStringEnumSample(sample?: string, semanticRole?: string): boolean {
+  if (semanticRole === "string_enum") return true;
+  if (!sample) return false;
+  const token = sample.trim().toLowerCase();
+  if (!token || STRICT_BOOL_TOKENS.has(token)) return false;
+  return STATUS_ENUM_TOKENS.has(token) || /^[a-z][a-z0-9_\-]{1,31}$/i.test(token);
+}
+
+export function isEnumToBooleanConflict(m: EditableMapping): boolean {
+  const dest = (m.destType || "").toLowerCase();
+  const destIsBool = dest.includes("bool");
+  const transformIsBool = m.transform === "cast_boolean";
+  if (!destIsBool && !transformIsBool) return false;
+  return looksLikeStringEnumSample(m.sample, m.semanticRole)
+    || (m.inferredType || "").toLowerCase().includes("varchar")
+    || (m.inferredType || "").toLowerCase().includes("text")
+    || (m.inferredType || "").toLowerCase().includes("string")
+    || m.semanticRole === "string_enum";
+}
+
+/** Widen destination type to VARCHAR and clear cast_boolean — safe for **new** tables only. */
+export function widenMappingToVarchar(m: EditableMapping): EditableMapping {
+  return {
+    ...m,
+    destType: "VARCHAR",
+    transform: m.transform === "cast_boolean" ? "trim" : m.transform,
+    approved: false,
+    requiresReview: false,
+    reason: [m.reason, "Widened to VARCHAR (string enum — not boolean)"].filter(Boolean).join(" · "),
+  };
+}
+
+/**
+ * True when enum→BOOLEAN conflict hits an **existing** destination column.
+ * Mapping-only Widen cannot ALTER physical BOOLEAN → VARCHAR.
+ */
+export function isExistingEnumBooleanConflict(m: EditableMapping): boolean {
+  return Boolean(m.existsInDestination && isEnumToBooleanConflict(m));
+}
+
+/** Flag for review without pretending the physical column type changed. */
+export function flagExistingEnumBooleanConflict(m: EditableMapping): EditableMapping {
+  return {
+    ...m,
+    approved: false,
+    requiresReview: true,
+    transform: m.transform === "cast_boolean" ? "none" : m.transform,
+    reason: [
+      m.reason,
+      "Existing destination is BOOLEAN but samples are a string enum — remap to a VARCHAR column or ALTER the destination; mapping Widen alone will not change DDL",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  };
 }
 
 /** Semantic target column name — matches MappingCanvas normalization. */
@@ -86,6 +156,7 @@ export function buildPreflightMappings(
     if (!t || t === "none") return undefined;
     const map: Partial<Record<MappingTransform, string>> = {
       trim: "trim",
+      strip_controls: "strip_controls",
       upper: "upper",
       lower: "lower",
       date_iso: "datetime",
@@ -98,17 +169,32 @@ export function buildPreflightMappings(
   };
 
   if (editable?.length) {
-    return editable.map((m) => ({
-      source: m.source,
-      target: m.target,
-      confidence: m.confidence,
-      reason: m.reason || "User reviewed",
-      user_override: m.approved,
-      transform: toEngineTransform(m.transform),
-      target_type: m.destType || m.inferredType,
-      requires_review: Boolean(m.requiresReview && !m.approved),
-      score_gap: m.scoreGap ?? 1,
-    }));
+    return editable.map((m) => {
+      const enumBool = isEnumToBooleanConflict(m);
+      // Existing physical BOOLEAN: keep live dest type so preflight DDL gate sees the conflict.
+      const safe =
+        enumBool && !m.existsInDestination
+          ? widenMappingToVarchar(m)
+          : enumBool && m.existsInDestination
+            ? flagExistingEnumBooleanConflict(m)
+            : m;
+      return {
+        source: safe.source,
+        target: safe.target,
+        confidence: safe.confidence,
+        reason: safe.reason || "User reviewed",
+        user_override: safe.approved && !enumBool,
+        transform: toEngineTransform(safe.transform),
+        // Prefer live dest type when column already exists (e.g. BOOLEAN status).
+        target_type: m.existsInDestination
+          ? (m.destType || safe.destType || safe.inferredType)
+          : (safe.destType || safe.inferredType),
+        source_type: safe.inferredType,
+        requires_review: Boolean((safe.requiresReview || enumBool) && !safe.approved),
+        score_gap: safe.scoreGap ?? 1,
+        semantic_role: safe.semanticRole,
+      };
+    });
   }
   return columns.map((col) => {
     const target = normalizeMappingTarget(col.column_name, col);
@@ -125,8 +211,10 @@ export function buildPreflightMappings(
 export function engineTransformToUi(engine?: string): MappingTransform {
   if (!engine) return "none";
   const map: Record<string, MappingTransform> = {
-    trim: "none",
-    trim_id: "none",
+    trim: "trim",
+    trim_id: "trim",
+    strip_controls: "strip_controls",
+    normalize_unicode: "strip_controls",
     uuid: "none",
     upper: "upper",
     lower: "lower",
@@ -153,24 +241,31 @@ export function editableFromPipelineMappings(
     source_type?: string;
     target_type?: string;
     is_pii?: boolean;
+    semantic_role?: string;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
   threshold = 0.75,
+  destSchema?: Record<string, string>,
 ): EditableMapping[] {
   const destSet = new Set((destColumns ?? []).map((c) => c.toLowerCase()));
+  const destTypeByLower = new Map(
+    Object.entries(destSchema || {}).map(([k, v]) => [k.toLowerCase(), v]),
+  );
   return mappings.map((m) => {
     const sampleVal = sampleRows?.find((r) => r[m.source] != null)?.[m.source];
     const existsInDest = destSet.has(m.target.toLowerCase());
+    const liveDestType = destTypeByLower.get(m.target.toLowerCase());
     const conf = boostIdentityConfidence(m.source, m.target, m.confidence);
     const requiresReview = Boolean(m.requires_review);
     const identityMatch = normalizeMappingTarget(m.source) === m.target.toLowerCase();
-    return {
+    const base: EditableMapping = {
       source: m.source,
       target: m.target,
       confidence: conf,
       inferredType: m.source_type,
-      destType: m.target_type || m.source_type,
+      // Prefer live destination DDL type when the column already exists.
+      destType: liveDestType || m.target_type || m.source_type,
       sample: sampleVal != null ? String(sampleVal) : undefined,
       approved: !requiresReview && (conf >= threshold || identityMatch),
       isPii: m.is_pii,
@@ -179,7 +274,19 @@ export function editableFromPipelineMappings(
       requiresReview,
       scoreGap: m.score_gap,
       transform: m.is_pii ? "hash_pii" : engineTransformToUi(m.transform),
+      semanticRole: m.semantic_role,
     };
+    if (isEnumToBooleanConflict(base)) {
+      if (base.existsInDestination) {
+        return flagExistingEnumBooleanConflict(base);
+      }
+      return {
+        ...widenMappingToVarchar(base),
+        requiresReview: true,
+        approved: false,
+      };
+    }
+    return base;
   });
 }
 

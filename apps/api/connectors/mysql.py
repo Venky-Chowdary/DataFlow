@@ -30,20 +30,33 @@ def test_mysql(
             ssl=ssl,
         )
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                ORDER BY table_name LIMIT 50
-                """,
-                (database,),
-            )
-            tables = [row[0] for row in cur.fetchall()]
+            db_name = (database or "").strip()
+            if not db_name:
+                cur.execute("SELECT DATABASE()")
+                row = cur.fetchone()
+                db_name = (row[0] if row else None) or ""
+            if not db_name:
+                cur.execute("SELECT SCHEMA()")
+                row = cur.fetchone()
+                db_name = (row[0] if row else None) or ""
+            if db_name:
+                cur.execute(
+                    """
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                    ORDER BY table_name LIMIT 50
+                    """,
+                    (db_name,),
+                )
+                tables = [row[0] for row in cur.fetchall()]
+            else:
+                tables = []
+                db_name = "(default)"
         conn.close()
         return ConnectResult(
             ok=True,
             tables=tables or ["(no tables in database)"],
-            message=f"MySQL connected — {len(tables)} tables in `{database}`",
+            message=f"MySQL connected — {len(tables)} tables in `{db_name}`",
             driver="pymysql",
         )
     except Exception as exc:

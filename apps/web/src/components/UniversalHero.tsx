@@ -6,7 +6,7 @@ interface UniversalHeroProps {
 }
 
 const SOURCES = ["CSV", "JSON", "PostgreSQL", "Snowflake", "API", "S3"];
-const DESTS = ["MongoDB", "BigQuery", "Excel", "Redis", "Kafka", "Any DB"];
+const DESTS = ["MongoDB", "BigQuery", "Excel", "Redis", "Iceberg", "SQL Server"];
 
 export function UniversalHero({ onStartTransfer, onOpenPilot }: UniversalHeroProps) {
   return (
@@ -16,11 +16,11 @@ export function UniversalHero({ onStartTransfer, onOpenPilot }: UniversalHeroPro
           <DtIcon name="zap" size={12} /> Universal Data Platform
         </div>
         <h1 className="dt-universal-hero-title">
-          Any data · any format · anywhere to anywhere
+          Move data without silent loss
         </h1>
         <p className="dt-universal-hero-sub">
-          Upload a file, connect a database, or point at an API — AI understands your schema,
-          maps columns by meaning, and validates with 8 preflight gates before a single row moves.
+          Upload a file, connect a database, or point at an API — AI maps columns by meaning,
+          validates with 8 preflight gates, and quarantines bad rows instead of dropping them.
         </p>
         <div className="dt-universal-hero-actions">
           <button type="button" className="dt-btn dt-btn-primary dt-btn-lg dt-universal-cta" onClick={onStartTransfer}>

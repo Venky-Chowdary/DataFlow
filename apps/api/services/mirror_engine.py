@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 SOFT_DELETE_COLUMN = "_deleted"
+_KEY_SEP = "\x1f"
 
 
 def _qualified_name(table: str, schema: str | None) -> str:
@@ -29,6 +30,34 @@ def _key_value(record: dict[str, Any], column: str) -> str:
     from services.value_serializer import cell_to_string
 
     return cell_to_string(record.get(column))
+
+
+def _compose_key(record: dict[str, Any], columns: list[str]) -> str:
+    return _KEY_SEP.join(_key_value(record, c) for c in columns)
+
+
+def _pk_or_clause(columns: list[str], keys: list[str], *, prefix: str) -> tuple[str, dict[str, Any]]:
+    from connectors.writer_common import quote_sql_identifier
+
+    if not keys or not columns:
+        return "1=0", {}
+    quoted = [quote_sql_identifier(c) for c in columns]
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, key in enumerate(keys):
+        parts = key.split(_KEY_SEP)
+        if len(parts) != len(columns):
+            continue
+        ands = []
+        for j, col_q in enumerate(quoted):
+            pname = f"{prefix}{i}_{j}"
+            ands.append(f"{col_q} = :{pname}")
+            params[pname] = parts[j]
+        if ands:
+            clauses.append("(" + " AND ".join(ands) + ")")
+    if not clauses:
+        return "1=0", {}
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 def _target_columns(
@@ -75,7 +104,7 @@ def _ensure_soft_delete_column(
 def _update_deleted_batch(
     conn: Any,
     qualified: str,
-    pk_column: str,
+    pk_columns: list[str],
     activate_keys: list[str],
     delete_keys: list[str],
     soft_delete_column: str,
@@ -84,18 +113,13 @@ def _update_deleted_batch(
 
     from connectors.writer_common import quote_sql_identifier
 
-    pk_quoted = quote_sql_identifier(pk_column)
     col_quoted = quote_sql_identifier(soft_delete_column)
     activated = 0
     deactivated = 0
 
     if activate_keys:
-        placeholders = ",".join([f":a{i}" for i in range(len(activate_keys))])
-        params = {f"a{i}": k for i, k in enumerate(activate_keys)}
-        stmt = (
-            f"UPDATE {qualified} SET {col_quoted} = FALSE "
-            f"WHERE {pk_quoted} IN ({placeholders})"
-        )
+        where_keys, params = _pk_or_clause(pk_columns, activate_keys, prefix="a")
+        stmt = f"UPDATE {qualified} SET {col_quoted} = FALSE WHERE {where_keys}"
         try:
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
@@ -104,11 +128,10 @@ def _update_deleted_batch(
             conn.rollback()
 
     if delete_keys:
-        placeholders = ",".join([f":d{i}" for i in range(len(delete_keys))])
-        params = {f"d{i}": k for i, k in enumerate(delete_keys)}
+        where_keys, params = _pk_or_clause(pk_columns, delete_keys, prefix="d")
         stmt = (
             f"UPDATE {qualified} SET {col_quoted} = TRUE "
-            f"WHERE {pk_quoted} IN ({placeholders}) "
+            f"WHERE {where_keys} "
             f"AND ({col_quoted} IS NULL OR {col_quoted} = FALSE)"
         )
         try:
@@ -182,22 +205,29 @@ def apply_inferred_soft_deletes(
     """
     if not conflict_columns:
         raise ValueError("mirror sync requires a primary key / conflict column")
-    if len(conflict_columns) > 1:
-        raise NotImplementedError("composite primary key mirror is not yet supported")
 
-    pk_target = conflict_columns[0]
+    pk_columns = [c for c in conflict_columns if c]
+    if not pk_columns:
+        raise ValueError("mirror sync requires a primary key / conflict column")
 
-    # Map the destination PK column back to the source column used in mappings.
-    pk_source = pk_target
-    if mappings:
-        for m in mappings:
-            if (m.get("target") or m.get("source")) == pk_target:
-                src = m.get("source")
-                if src:
-                    pk_source = src
-                    break
+    # Map each destination PK column back to the source column used in mappings.
+    pk_sources: list[str] = []
+    for pk_target in pk_columns:
+        pk_source = pk_target
+        if mappings:
+            for m in mappings:
+                if (m.get("target") or m.get("source")) == pk_target:
+                    src = m.get("source")
+                    if src:
+                        pk_source = src
+                        break
+        pk_sources.append(pk_source)
 
-    source_keys = {_key_value(r, pk_source) for r in records if _key_value(r, pk_source) != ""}
+    source_keys = {
+        _compose_key(r, pk_sources)
+        for r in records
+        if _compose_key(r, pk_sources) and not all(p == "" for p in _compose_key(r, pk_sources).split(_KEY_SEP))
+    }
     if not source_keys:
         raise ValueError("mirror sync could not build a non-empty source key set from the primary key")
 
@@ -211,6 +241,8 @@ def apply_inferred_soft_deletes(
 
     import sqlalchemy as sa
 
+    from connectors.writer_common import quote_sql_identifier
+
     target_cols = _target_columns(columns, mappings, schema)
     engine = get_sqlalchemy_engine(cfg)
     activated_total = 0
@@ -220,13 +252,14 @@ def apply_inferred_soft_deletes(
         with engine.connect() as conn:
             _ensure_soft_delete_column(conn, qualified, soft_delete_column)
 
-            pk_quoted = quote_sql_identifier(pk_target)
+            pk_quoted = ", ".join(quote_sql_identifier(c) for c in pk_columns)
+            order_by = ", ".join(quote_sql_identifier(c) for c in pk_columns)
             col_quoted = quote_sql_identifier(soft_delete_column)
             offset = 0
             while True:
                 sql = (
                     f"SELECT {pk_quoted}, {col_quoted} FROM {qualified} "
-                    f"ORDER BY {pk_quoted} LIMIT {batch_size} OFFSET {offset}"
+                    f"ORDER BY {order_by} LIMIT {batch_size} OFFSET {offset}"
                 )
                 result = conn.execute(sa.text(sql))
                 rows = result.fetchall()
@@ -236,13 +269,15 @@ def apply_inferred_soft_deletes(
 
                 target_keys: set[str] = set()
                 for row in rows:
-                    pk_val = _key_value(row._mapping, pk_target)
-                    if pk_val:
+                    pk_val = _compose_key(dict(row._mapping), pk_columns)
+                    if pk_val and not all(p == "" for p in pk_val.split(_KEY_SEP)):
                         target_keys.add(pk_val)
 
                 activate = [k for k in target_keys if k in source_keys]
                 delete = [k for k in target_keys if k not in source_keys]
-                a, d = _update_deleted_batch(conn, qualified, pk_target, activate, delete, soft_delete_column)
+                a, d = _update_deleted_batch(
+                    conn, qualified, pk_columns, activate, delete, soft_delete_column
+                )
                 activated_total += a
                 deactivated_total += d
 
@@ -264,6 +299,7 @@ def apply_inferred_soft_deletes(
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "target_columns": target_cols,
+        "primary_key_columns": pk_columns,
         "soft_delete_column": soft_delete_column,
         "mode": "mirror",
     }

@@ -109,6 +109,8 @@ class TransferRequest:
     stream_contracts: list[dict] = field(default_factory=list)
     contract_id: str = ""
     enforce_contract: bool = True
+    # When True with contract_id, transfer fails unless the contract is SIGNED.
+    require_signed_contract: bool = False
 
     @property
     def operation(self) -> str:
@@ -174,6 +176,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "stream_contracts": request.stream_contracts,
         "contract_id": request.contract_id,
         "enforce_contract": request.enforce_contract,
+        "require_signed_contract": request.require_signed_contract,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -202,6 +205,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         stream_contracts=data.get("stream_contracts") or [],
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),
+        require_signed_contract=bool(data.get("require_signed_contract", False)),
     )
 
 

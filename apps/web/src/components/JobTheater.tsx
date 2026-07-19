@@ -2,10 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
-import { JobPhase, JobProgress, PreflightResult } from "../lib/types";
-import { streamJobProgress } from "../lib/api";
-import { jobStatusBadgeClass } from "../lib/uiUtils";
+import { CopyIdChip } from "./ui/CopyIdChip";
+import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
+import { cancelJob, streamJobProgress } from "../lib/api";
+import { useActiveData } from "../lib/DataContext";
+import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
+import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
+import { useToast } from "./Toast";
 
 interface JobTheaterProps {
   jobId: string;
@@ -16,6 +21,7 @@ interface JobTheaterProps {
   preflight?: PreflightResult;
   onComplete?: (job: JobProgress) => void;
   onFailed?: (job: JobProgress) => void;
+  onCancelled?: (job: JobProgress) => void;
 }
 
 const PHASES = [
@@ -36,8 +42,8 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 function phaseIndex(phase?: string, status?: string): number {
-  if (status === "completed") return 5;
-  if (status === "failed") return -1;
+  if (isJobSuccess(status)) return 5;
+  if (status === "failed" || status === "cancelled") return -1;
   const idx = PHASES.findIndex((p) => p.id === (phase || "queued"));
   return idx >= 0 ? idx : 0;
 }
@@ -68,15 +74,35 @@ export function JobTheater({
   preflight,
   onComplete,
   onFailed,
+  onCancelled,
 }: JobTheaterProps) {
+  const { toast } = useToast();
+  const { setActiveData } = useActiveData();
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
   const [log, setLog] = useState<string[]>([]);
+  const [cancelling, setCancelling] = useState(false);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
+
+  useEffect(() => {
+    setActiveData((prev) => ({
+      name: prev?.name || sourceLabel || "transfer",
+      filename: prev?.filename,
+      columns: prev?.columns || [],
+      row_count: job?.records_processed ?? prev?.row_count ?? 0,
+      samples: prev?.samples,
+      schema: prev?.schema,
+      preflight_run_id: preflight?.run_id || prev?.preflight_run_id,
+      job_id: jobId,
+      validation_status: job?.status || prev?.validation_status,
+      route: `${sourceLabel || "source"} → ${destLabel || "destination"}`,
+      blockers: job?.error ? [job.error] : prev?.blockers,
+    }));
+  }, [destLabel, job?.error, job?.records_processed, job?.status, jobId, preflight?.run_id, setActiveData, sourceLabel]);
 
   useEffect(() => {
     startRef.current = Date.now();
@@ -116,9 +142,14 @@ export function JobTheater({
         if (elapsed > 0.5 && processed > 0) {
           setThroughput(Math.round(processed / elapsed));
         }
-        if (!doneRef.current && update.status === "completed") {
+        if (!doneRef.current && isJobSuccess(update.status)) {
           doneRef.current = true;
-          append(`Job completed — ${processed.toLocaleString()} rows transferred`);
+          const quarantine = update.status === "completed_with_quarantine";
+          append(
+            quarantine
+              ? `Job completed with quarantine — ${processed.toLocaleString()} rows landed, some rows rejected or coerced to NULL`
+              : `Job completed — ${processed.toLocaleString()} rows transferred`,
+          );
           onComplete?.(update);
         }
         if (!doneRef.current && update.status === "failed") {
@@ -126,14 +157,32 @@ export function JobTheater({
           append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
           onFailed?.(update);
         }
+        if (!doneRef.current && update.status === "cancelled") {
+          doneRef.current = true;
+          append("Job cancelled by user");
+          onCancelled?.(update);
+        }
       },
       () => {
         append("Live stream interrupted — connection lost");
-        setJob((j) => (j ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : null));
+        setJob((j) => (j && !isJobTerminal(j.status) ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : j));
       },
     );
     return stop;
-  }, [jobId, onComplete, onFailed]);
+  }, [jobId, onComplete, onFailed, onCancelled]);
+
+  const handleCancel = async () => {
+    if (cancelling || doneRef.current) return;
+    setCancelling(true);
+    try {
+      await cancelJob(jobId);
+      toast({ title: "Cancellation requested", message: "The job will stop at the next checkpoint.", tone: "info" });
+    } catch (e) {
+      toast({ title: "Could not cancel job", message: (e as Error).message, tone: "error" });
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   if (!job) {
     return (
@@ -156,6 +205,8 @@ export function JobTheater({
       log={log}
       startedAtFallback={startRef.current}
       preflight={preflight}
+      cancelling={cancelling}
+      onCancel={handleCancel}
     />
   );
 }
@@ -171,6 +222,8 @@ interface JobTheaterViewProps {
   log: string[];
   startedAtFallback?: number;
   preflight?: PreflightResult;
+  cancelling?: boolean;
+  onCancel?: () => void;
 }
 
 /** Presentational live-transfer theater. Pure — driven entirely by props. */
@@ -184,6 +237,9 @@ export function JobTheaterView({
   throughput,
   log,
   startedAtFallback,
+  preflight,
+  cancelling,
+  onCancel,
 }: JobTheaterViewProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -195,8 +251,10 @@ export function JobTheaterView({
   const processed = job.records_processed ?? 0;
   const currentPhase = phaseIndex(job.phase, job.status);
   const isFailed = job.status === "failed";
-  const isComplete = job.status === "completed";
-  const isRunning = !isFailed && !isComplete;
+  const isCancelled = job.status === "cancelled";
+  const isComplete = isJobSuccess(job.status);
+  const isQuarantine = job.status === "completed_with_quarantine";
+  const isRunning = !isFailed && !isComplete && !isCancelled;
 
   // Reconcile reported progress with row-derived progress so the bar never
   // looks frozen while a large batch is being written.
@@ -228,9 +286,15 @@ export function JobTheaterView({
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
   const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
+  const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
+  const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
-  const rejectionRate = processed > 0 && rejectedRows > 0 ? (rejectedRows / processed) * 100 : 0;
+  const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
+  const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
+  const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
+  const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
+  const routeLabel = [sourceType, destType].filter(Boolean).join(" → ") || "this job";
 
   const timelinePhases = useMemo(() => {
     if (job.phases?.length) {
@@ -238,31 +302,40 @@ export function JobTheaterView({
         id: phase.name,
         label: PHASE_LABELS[phase.name] ?? phase.name,
         state: phase.status,
+        elapsedMs: typeof phase.elapsed_ms === "number" ? phase.elapsed_ms : null,
       }));
     }
 
     return PHASES.map((phase, i) => {
-      const state = isFailed && i === currentPhase ? "failed"
+      const state = (isFailed || isCancelled) && i === currentPhase ? "failed"
         : i < currentPhase || isComplete ? "done"
         : i === currentPhase ? "active"
         : "pending";
-      return { id: phase.id, label: phase.label, state };
+      return { id: phase.id, label: phase.label, state, elapsedMs: null as number | null };
     });
-  }, [job.phases, isFailed, currentPhase, isComplete]);
+  }, [job.phases, isFailed, isCancelled, currentPhase, isComplete]);
 
   const activePhase = timelinePhases.find((p) => p.state === "active");
-  const phaseLabel = activePhase?.label || (isComplete ? "Done" : isFailed ? "Failed" : "Queued");
+  const phaseLabel = activePhase?.label
+    || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed" : "Queued");
 
   const eta = useMemo(() => {
-    if (!isRunning || throughput <= 0 || total <= processed) return null;
-    const secs = Math.ceil((total - processed) / throughput);
+    const rps = displayRps;
+    if (!isRunning || rps <= 0 || total <= processed) return null;
+    const secs = Math.ceil((total - processed) / rps);
     return secs < 60 ? `${secs}s` : `${Math.ceil(secs / 60)}m`;
-  }, [isRunning, throughput, total, processed]);
+  }, [isRunning, displayRps, total, processed]);
+
+  const slowSnowflakeTip =
+    destType === "snowflake"
+    && displayRps > 0
+    && displayRps < 100
+    && (loadMethod === "insert" || !loadMethod);
 
   const ringCircumference = 2 * Math.PI * 24;
 
   return (
-    <div className={`df2-theater-v3 ${isRunning ? "is-live" : ""} ${isFailed ? "is-failed" : ""} ${isComplete ? "is-done" : ""}`}>
+    <div className={`df2-theater-v3 ${isRunning ? "is-live" : ""} ${isFailed || isCancelled ? "is-failed" : ""} ${isComplete ? "is-done" : ""}`}>
       <div className="df2-theater-v3-scroll">
       <header className="df2-theater-v3-header">
         <div className="df2-theater-v3-route">
@@ -285,14 +358,34 @@ export function JobTheaterView({
           </div>
         </div>
         <div className="df2-theater-v3-header-meta">
-          <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isComplete ? "is-done" : "is-failed"}`}>
+          <span className={`df2-theater-v3-live-pill ${isRunning ? "is-live" : isQuarantine ? "is-quarantine" : isComplete ? "is-done" : "is-failed"}`}>
             <span className="df2-theater-v3-live-dot" aria-hidden />
-            {isRunning ? "Live" : isComplete ? "Finalized" : "Attention"}
+            {isRunning ? "Live" : isQuarantine ? "Quarantine" : isComplete ? "Finalized" : isCancelled ? "Cancelled" : "Attention"}
           </span>
-          <span className={jobStatusBadgeClass(job.status)}>{job.status}</span>
-          <span className="df2-theater-v3-job-id" title={jobId}>#{jobId.slice(0, 8)}</span>
+          <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
+          <CopyIdChip id={jobId} label="Job" compact />
+          {isRunning && onCancel && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-ghost"
+              onClick={onCancel}
+              disabled={cancelling}
+            >
+              <DtIcon name="x" size={14} /> {cancelling ? "Cancelling…" : "Cancel"}
+            </button>
+          )}
         </div>
       </header>
+
+      {isCancelled && (
+        <div className="df2-theater-v3-alert error">
+          <DtIcon name="x" size={18} />
+          <div>
+            <strong>Transfer cancelled</strong>
+            <p>{job.message || "The job was stopped before completing. Re-run from Transfer Studio when ready."}</p>
+          </div>
+        </div>
+      )}
 
       {isFailed && (
         <div className="df2-theater-v3-alert error">
@@ -300,6 +393,26 @@ export function JobTheaterView({
           <div>
             <strong>Transfer failed{job.phase ? ` during ${job.phase}` : ""}</strong>
             <p>{job.error || job.message || "The job stopped before completing. Review the event log below and re-run."}</p>
+            <p className="df2-theater-v3-fail-meta">
+              {processed > 0 ? `${processed.toLocaleString()} rows written before failure. ` : "No rows committed. "}
+              {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined. ` : ""}
+              {job.chunk_current != null
+                ? `Resume from batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""} on Jobs.`
+                : "Use Resume on Jobs if a checkpoint was saved."}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {slowSnowflakeTip && (
+        <div className="df2-theater-v3-alert warn" role="note">
+          <DtIcon name="zap" size={18} />
+          <div>
+            <strong>Low Snowflake throughput on this job</strong>
+            <p>
+              ~{displayRps.toLocaleString()} rows/s with load method {loadMethod || "insert"}.
+              Prefer COPY INTO / larger batches (warehouse stream path) after redeploy if you still see INSERT-only loads.
+            </p>
           </div>
         </div>
       )}
@@ -321,7 +434,7 @@ export function JobTheaterView({
             <strong>{progress}%</strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
-            <h3>{isComplete ? "Transfer complete" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
+            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isCancelled ? "Transfer cancelled" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
             <p title={job.message || phaseLabel}>
               {job.message || (isRunning ? `${phaseLabel} — streaming rows to destination…` : "Job finished")}
             </p>
@@ -376,13 +489,31 @@ export function JobTheaterView({
             </div>
           </article>
         )}
-        <article className="df2-theater-v3-metric">
+        <article className="df2-theater-v3-metric" title={`${routeLabel} — live job throughput, not Proofs CSV→SQLite`}>
           <DtIcon name="activity" size={16} />
           <div>
-            <strong>{throughput > 0 ? `${throughput.toLocaleString()}/s` : "—"}</strong>
-            <span>Throughput</span>
+            <strong>{displayRps > 0 ? `${displayRps.toLocaleString()}/s` : "—"}</strong>
+            <span>This job rows/s</span>
           </div>
         </article>
+        {loadMethod && (
+          <article className="df2-theater-v3-metric" title="Snowflake/warehouse load path for this job">
+            <DtIcon name="transfer" size={16} />
+            <div>
+              <strong>{loadMethod}</strong>
+              <span>Load method</span>
+            </div>
+          </article>
+        )}
+        {batchSize > 0 && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>{batchSize.toLocaleString()}</strong>
+              <span>Batch size</span>
+            </div>
+          </article>
+        )}
         {eta && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="gate" size={16} />
@@ -399,11 +530,63 @@ export function JobTheaterView({
             <span>Elapsed</span>
           </div>
         </article>
+        {job.cdc_lag_seconds != null && Number.isFinite(Number(job.cdc_lag_seconds)) && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="activity" size={16} />
+            <div>
+              <strong>{`${Number(job.cdc_lag_seconds).toFixed(1)}s`}</strong>
+              <span>CDC lag</span>
+            </div>
+          </article>
+        )}
+        {job.replication_lag_bytes != null && Number.isFinite(Number(job.replication_lag_bytes)) && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>
+                {Number(job.replication_lag_bytes) >= 1_048_576
+                  ? `${(Number(job.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
+                  : Number(job.replication_lag_bytes) >= 1024
+                    ? `${(Number(job.replication_lag_bytes) / 1024).toFixed(1)} KB`
+                    : `${Number(job.replication_lag_bytes)} B`}
+              </strong>
+              <span>WAL / binlog lag</span>
+            </div>
+          </article>
+        )}
       </div>
+
+      {Array.isArray(job.streams) && job.streams.length > 1 && (
+        <div className="df2-theater-v3-streams" aria-label="Per-stream health">
+          {job.streams.map((stream) => (
+            <div key={stream.name} className="df2-theater-v3-stream">
+              <strong>{stream.name}</strong>
+              <span>{stream.status || "—"}</span>
+              <span>{(stream.records_processed ?? 0).toLocaleString()} rows</span>
+              {stream.cdc_lag_seconds != null && (
+                <span>{Number(stream.cdc_lag_seconds).toFixed(1)}s lag</span>
+              )}
+              {stream.error && <span className="df2-muted">{stream.error}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(isComplete || isFailed || isCancelled) && (
+        <NotificationDeliveryStrip
+          notifications={job.notifications}
+          className="df2-theater-v3-notify"
+          compact
+        />
+      )}
 
       <div className="df2-theater-v3-phases" aria-label="Pipeline phases">
         {timelinePhases.map((phase) => {
           const state = phase.state;
+          const elapsedLabel =
+            phase.elapsedMs != null && phase.elapsedMs >= 0
+              ? formatDuration(phase.elapsedMs)
+              : null;
           return (
             <div key={phase.id} className={`df2-theater-v3-phase ${state}`}>
               <span className="df2-theater-v3-phase-dot" aria-hidden>
@@ -413,6 +596,9 @@ export function JobTheaterView({
                 {state === "skipped" && <span>—</span>}
               </span>
               <span className="df2-theater-v3-phase-label">{phase.label}</span>
+              {elapsedLabel && (
+                <span className="df2-theater-v3-phase-elapsed">{elapsedLabel}</span>
+              )}
             </div>
           );
         })}
@@ -420,14 +606,27 @@ export function JobTheaterView({
 
       <div className="df2-theater-v3-sla" aria-label="Execution quality and evidence">
         <article className="df2-theater-v3-sla-card">
-          <span>Rejected rows</span>
-          <strong>{rejectedRows.toLocaleString()}</strong>
-          <small>{rejectionRate > 0 ? `${rejectionRate.toFixed(2)}% of processed` : "No rejections reported"}</small>
+          <span>Dropped / rejected</span>
+          <strong>{droppedRows.toLocaleString()}</strong>
+          <small>{droppedRows > 0 ? "Isolated in quarantine — not written" : "No rows dropped"}</small>
+        </article>
+        <article className={`df2-theater-v3-sla-card${coercedNullRows > 0 ? " is-warn" : ""}`}>
+          <span>Coerced to NULL</span>
+          <strong>{coercedNullRows.toLocaleString()}</strong>
+          <small>
+            {coercedNullRows > 0
+              ? "Value altered to NULL — not full fidelity"
+              : "Normal type fits (ISO→DATETIME) are not counted here"}
+          </small>
         </article>
         <article className="df2-theater-v3-sla-card">
           <span>Writer warnings</span>
           <strong>{warningCount.toLocaleString()}</strong>
-          <small>{warningCount ? "Review in destination summary" : "No destination warnings"}</small>
+          <small>
+            {warningCount
+              ? "Sample of writer messages (capped for display)"
+              : "No destination warnings"}
+          </small>
         </article>
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
@@ -436,7 +635,7 @@ export function JobTheaterView({
         </article>
       </div>
 
-      {isComplete && (
+      {isComplete && !isQuarantine && (
         <div className="df2-theater-v3-alert success">
           <DtIcon name="check" size={18} />
           <div>
@@ -446,15 +645,63 @@ export function JobTheaterView({
         </div>
       )}
 
-      {rejectedRows > 0 && (
+      {isQuarantine && (
         <div className="df2-theater-v3-alert warn">
           <DtIcon name="alert" size={18} />
           <div>
-            <strong>{rejectedRows.toLocaleString()} rows rejected</strong>
-            <p>Review rejected details below and export them for remediation.</p>
+            <strong>Completed with quarantine — not full fidelity</strong>
+            <p>
+              {processed.toLocaleString()} rows landed
+              {droppedRows > 0 ? `, ${droppedRows.toLocaleString()} dropped/rejected` : ""}
+              {coercedNullRows > 0 ? `, ${coercedNullRows.toLocaleString()} value(s) coerced to NULL` : ""}. Review the details below.
+            </p>
           </div>
-          <QuarantinePanel jobId={jobId} rejectedRows={rejectedRows} />
         </div>
+      )}
+
+      {(() => {
+        const hist =
+          job.load_history_report
+          || (destinationSummary.load_history_report as LoadHistoryReport | undefined)
+          || preflight?.load_history_report;
+        if (!hist) return null;
+        return (
+          <section className="df2-theater-v3-quarantine" aria-label="Compared to prior loads">
+            <LoadHistoryPanel report={hist} title="Compared to prior loads" />
+          </section>
+        );
+      })()}
+
+      {(rejectedRows > 0 || isFailed || isQuarantine) && (
+        <section className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
+          <div className="df2-theater-v3-alert warn">
+            <DtIcon name="alert" size={18} />
+            <div>
+              <strong>
+                {isFailed
+                  ? (rejectedRows > 0
+                    ? `${rejectedRows.toLocaleString()} quarantined row(s) — inspect findings`
+                    : "Inspect preflight / quarantine findings")
+                  : droppedRows > 0
+                    ? `${droppedRows.toLocaleString()} rows quarantined`
+                    : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
+              </strong>
+              <p>
+                {isFailed
+                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads. Use Validate for Strip / Quarantine / Fix bad data."
+                  : "Review the quarantine details below and export them for remediation."}
+              </p>
+            </div>
+          </div>
+          <QuarantinePanel
+            jobId={jobId}
+            rejectedRows={rejectedRows}
+            coercedNullRows={coercedNullRows}
+            initialDetails={job.rejected_details}
+            autoLoad
+            initiallyOpen
+          />
+        </section>
       )}
 
       </div>

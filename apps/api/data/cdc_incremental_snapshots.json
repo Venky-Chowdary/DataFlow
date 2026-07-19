@@ -1,0 +1,30 @@
+{
+  "signals": [
+    {
+      "id": "snap_eb7e407d728d",
+      "source_key": "src:pg",
+      "table": "orders",
+      "status": "running",
+      "primary_key": "id",
+      "chunk_size": 100,
+      "last_pk": "",
+      "rows_snapshotted": 0,
+      "created_at": 1784434375.07408,
+      "updated_at": 1784434386.741007,
+      "error": ""
+    },
+    {
+      "id": "snap_908fd1915d10",
+      "source_key": "src:pg",
+      "table": "orders",
+      "status": "pending",
+      "primary_key": "id",
+      "chunk_size": 100,
+      "last_pk": "",
+      "rows_snapshotted": 0,
+      "created_at": 1784434386.740355,
+      "updated_at": 1784434386.740355,
+      "error": ""
+    }
+  ]
+}

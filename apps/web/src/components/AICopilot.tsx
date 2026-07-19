@@ -3,20 +3,16 @@ import { DtIcon } from "./DtIcon";
 import {
   copilotChat,
   fetchCopilotPrompts,
-  fetchPilotTools,
+  formatPilotReachError,
   CopilotAction,
   CopilotChatMessage,
-  PilotToolRegistry,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
-import { Screen } from "../lib/types";
+import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
+import { loadRailChat, PilotMessage, saveRailChat } from "../lib/pilotChatStore";
 
-interface Message {
-  role: "user" | "assistant";
-  text: string;
-  method?: string;
-  actions?: CopilotAction[];
+interface Message extends PilotMessage {
   dataInsight?: {
     dataset: string;
     columns: number;
@@ -24,8 +20,12 @@ interface Message {
     pii_count: number;
     quality_score: number;
   };
-  toolsUsed?: { name: string; success: boolean; summary: string }[];
 }
+
+const DEFAULT_GREETING: Message = {
+  role: "assistant",
+  text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
+};
 
 interface AICopilotProps {
   onNavigate?: (screen: Screen) => void;
@@ -42,55 +42,44 @@ const SCREEN_LABELS: Record<string, string> = {
   settings: "Settings",
 };
 
-const FALLBACK_TOOL_REGISTRY: PilotToolRegistry = {
-  tool_count: 15,
-  generated_action_count: 1740,
-  total_routable_actions: 1755,
-  families: [
-    { id: "discover", label: "Discover", tools: ["list_datasets", "search_data", "search_connectors"], tool_count: 3, generated_actions: 620 },
-    { id: "profile", label: "Profile", tools: ["analyze_dataset", "compare_datasets", "profile_quality_rules"], tool_count: 3, generated_actions: 180 },
-    { id: "move", label: "Move", tools: ["plan_transfer_route", "get_transfer_capabilities", "recommend_sync_mode"], tool_count: 3, generated_actions: 720 },
-    { id: "govern", label: "Govern", tools: ["explain_mapping_assurance", "inspect_schema_policy"], tool_count: 2, generated_actions: 140 },
-    { id: "operate", label: "Operate", tools: ["list_jobs", "navigate"], tool_count: 2, generated_actions: 80 },
-  ],
-  tools: [],
-};
-
 export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [prompts, setPrompts] = useState<string[]>([]);
-  const [history, setHistory] = useState<CopilotChatMessage[]>([]);
-  const [toolRegistry, setToolRegistry] = useState<PilotToolRegistry | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "assistant",
-      text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace.",
-    },
-  ]);
+  const restored = useRef(loadRailChat());
+  const [history, setHistory] = useState<CopilotChatMessage[]>(() => restored.current?.history ?? []);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const saved = restored.current?.messages;
+    return saved && saved.length > 0 ? saved : [DEFAULT_GREETING];
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if ((open || variant === "rail") && prompts.length === 0) {
       fetchCopilotPrompts().then(setPrompts).catch(() => {});
     }
-    if ((open || variant === "rail") && !toolRegistry) {
-      fetchPilotTools().then(setToolRegistry).catch(() => setToolRegistry(FALLBACK_TOOL_REGISTRY));
+  }, [open, variant, prompts.length]);
+
+  useEffect(() => {
+    // Persist rail chat so close/refresh does not wipe the conversation.
+    if (messages.length > 1 || history.length > 0) {
+      saveRailChat({ messages, history });
     }
-  }, [open, variant, prompts.length, toolRegistry]);
+  }, [messages, history]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   const applyActions = (actions?: CopilotAction[]) => {
-    if (!actions?.length || !onNavigate) return;
+    if (!actions?.length) return;
     for (const action of actions) {
-      if (action.type === "navigate" && action.screen) {
+      if (action.risk === "mutate" || action.type === "studio") continue;
+      if (action.type === "navigate" && action.screen && onNavigate) {
         onNavigate(action.screen as Screen);
-      } else if (action.route) {
+      } else if (action.route && onNavigate) {
         onNavigate(action.route as Screen);
       }
     }
@@ -116,20 +105,19 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {
           role: "assistant",
           text: res.answer,
-          method: res.method,
           actions: res.suggested_actions,
           dataInsight: res.data_insight,
-          toolsUsed: res.tools_used,
         },
       ]);
       applyActions(res.suggested_actions);
       if (res.suggested_prompts?.length) {
         setPrompts(res.suggested_prompts);
       }
-    } catch {
+    } catch (error) {
+      const detail = formatPilotReachError(error, API_BASE);
       setMessages((m) => [
         ...m,
-        { role: "assistant", text: "Could not reach Data Pilot. Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) or sign in." },
+        { role: "assistant", text: detail },
       ]);
     }
     setLoading(false);
@@ -141,9 +129,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         <div>
           <div style={{ fontWeight: 600, fontSize: 14 }}>Data Pilot</div>
           <div style={{ fontSize: 12, color: "#64748b" }}>
-            {activeData
-              ? `Context: ${activeData.filename || activeData.name}`
-              : "Any data question · app actions"}
+            {activeData?.preflight_run_id
+              ? `Run ${activeData.preflight_run_id}`
+              : activeData
+                ? `Context: ${activeData.filename || activeData.name}`
+                : "Any data question · app actions"}
           </div>
         </div>
         <button
@@ -159,24 +149,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       {activeData && (
         <div className="df2-copilot-context">
           <DtIcon name="zap" size={12} />
-          {activeData.columns.length} cols · {activeData.row_count.toLocaleString()} rows in context
-        </div>
-      )}
-
-      {toolRegistry && (
-        <div className="df2-copilot-console">
-          <div>
-            <span>Tools</span>
-            <strong>{toolRegistry.tool_count}</strong>
-          </div>
-          <div>
-            <span>Actions</span>
-            <strong>{toolRegistry.total_routable_actions}</strong>
-          </div>
-          <div>
-            <span>Families</span>
-            <strong>{toolRegistry.families.length}</strong>
-          </div>
+          {(activeData.columns?.length ?? 0).toLocaleString()} cols
+          {activeData.row_count != null ? ` · ${activeData.row_count.toLocaleString()} rows` : ""}
+          {activeData.preflight_run_id ? ` · ${activeData.preflight_run_id}` : ""}
+          {activeData.job_id ? ` · job ${activeData.job_id}` : ""}
+          {activeData.validation_status ? ` · ${activeData.validation_status}` : ""}
         </div>
       )}
 
@@ -192,14 +169,6 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {messages.map((msg, i) => (
           <div key={i} className={`df2-copilot-msg ${msg.role}`}>
             <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
-            {(msg.method || msg.toolsUsed?.length) && (
-              <div className="df2-copilot-evidence">
-                {msg.method && <span>{msg.method}</span>}
-                {msg.toolsUsed?.slice(0, 3).map((tool) => (
-                  <span key={tool.name} className={tool.success ? "ok" : "err"}>{tool.name}</span>
-                ))}
-              </div>
-            )}
             {msg.actions && msg.actions.length > 0 && (
               <div className="df2-copilot-actions">
                 {msg.actions.map((action, j) => {
@@ -223,7 +192,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {loading && (
           <div className="df2-copilot-msg assistant df2-copilot-thinking">
             <span className="df2-loader-bars" aria-label="Data Pilot is working"><i /><i /><i /></span>
-            <span>Routing tools</span>
+            <span>Looking that up…</span>
           </div>
         )}
         <div ref={messagesEndRef} />
@@ -231,10 +200,21 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
 
       <div className="df2-copilot-input-row">
         <input
-          placeholder={activeData ? `Ask about ${activeData.name}…` : "Move data, analyze, or navigate…"}
+          placeholder={
+            activeData?.preflight_run_id
+              ? `Ask about ${activeData.preflight_run_id} or say “strip controls”…`
+              : activeData
+                ? `Ask about ${activeData.name}…`
+                : "Ask about jobs, pf_ run IDs, or say strip controls…"
+          }
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
         />
         <button type="button" className="df2-btn df2-btn-primary" onClick={() => send()} disabled={loading}>
           <DtIcon name="transfer" size={16} />

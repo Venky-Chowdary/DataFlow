@@ -82,6 +82,46 @@ def test_saved_connector_test_success_updates_card_status(monkeypatch, tmp_path:
     assert found["status"] == "configured"
 
 
+def test_save_with_form_test_ok_persists_status(monkeypatch, tmp_path: Path) -> None:
+    """In-form Test success must show as passed on first list load (no re-Test click)."""
+    store = tmp_path / "connectors.json"
+    store.write_text('{"connectors": []}', encoding="utf-8")
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(store))
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
+    monkeypatch.setenv("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    import services.connector_store as cs
+    monkeypatch.setattr(cs, "_backend_choice", "file")
+
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    client = TestClient(app)
+    payload = {
+        "name": "Form-tested MySQL",
+        "type": "mysql",
+        "role": "both",
+        "host": "127.0.0.1",
+        "port": 3306,
+        "database": "dataflow",
+        "username": "user",
+        "password": "pass",
+        "last_test_ok": True,
+    }
+    r = client.post("/api/v1/connectors/saved", json=payload)
+    assert r.status_code == 200, r.text
+    created = r.json()
+    assert created.get("last_test_ok") is True
+    assert created.get("status") == "configured"
+
+    r = client.get("/api/v1/connectors/saved")
+    assert r.status_code == 200, r.text
+    found = [c for c in r.json()["connectors"] if c["id"] == created["id"]][0]
+    assert found.get("last_test_ok") is True
+    assert found.get("status") == "configured"
+
+
 def test_connector_store_env_override(monkeypatch, tmp_path: Path) -> None:
     """DATAFLOW_CONNECTOR_STORE should make connector CRUD use the given file."""
     store = tmp_path / "custom_connectors.json"

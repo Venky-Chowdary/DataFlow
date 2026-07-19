@@ -4,6 +4,10 @@ import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAPPING_TRANSFORMS,
+  flagExistingEnumBooleanConflict,
+  isEnumToBooleanConflict,
+  isExistingEnumBooleanConflict,
+  widenMappingToVarchar,
   type EditableMapping,
   type MappingTransform,
 } from "../lib/mapping";
@@ -19,6 +23,7 @@ import {
   paginateMappings,
   totalPages,
 } from "../lib/columnWorkbench";
+import { destTypeSelectOptions, normalizeDestTypeValue, typeBadgeClass } from "../lib/typeDisplay";
 
 interface ColumnReviewPanelProps {
   mappings: EditableMapping[];
@@ -159,10 +164,30 @@ export function ColumnReviewPanel({
   };
 
   const approveAll = () => {
-    onChange(mappings.map((m) => ({ ...m, approved: true })));
+    onChange(
+      mappings.map((m) => {
+        if (isExistingEnumBooleanConflict(m)) {
+          // Physical BOOLEAN stays — do not approve; operator must remap/ALTER.
+          return flagExistingEnumBooleanConflict(m);
+        }
+        if (isEnumToBooleanConflict(m)) {
+          return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
+        }
+        return { ...m, approved: true };
+      }),
+    );
   };
 
   const approveOne = (index: number) => {
+    const m = mappings[index];
+    if (m && isExistingEnumBooleanConflict(m)) {
+      updateMapping(index, flagExistingEnumBooleanConflict(m));
+      return;
+    }
+    if (m && isEnumToBooleanConflict(m)) {
+      updateMapping(index, { ...widenMappingToVarchar(m), approved: true, requiresReview: false });
+      return;
+    }
     updateMapping(index, { approved: true });
   };
 
@@ -438,12 +463,19 @@ export function ColumnReviewPanel({
                       {m.requiresReview && !m.approved && (
                         <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
                       )}
+                      {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && (
+                        <span className="df2-badge df2-badge-warn df2-badge-xs" title="Status/lifecycle labels — not true/false">
+                          string enum
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="df2-column-sample" title={m.sample}>
                     {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
                   </td>
-                  <td className="df2-column-type">{m.inferredType ?? "string"}</td>
+                  <td className={`df2-column-type ${typeBadgeClass(m.inferredType)}`}>
+                    <span className="df2-type-badge">{m.inferredType ?? "string"}</span>
+                  </td>
                   <td className="df2-column-arrow" aria-hidden>→</td>
                   <td className="df2-column-destination-cell">
                     <div className="df2-column-cell-content">
@@ -453,11 +485,51 @@ export function ColumnReviewPanel({
                         onChange={(e) => updateMapping(index, { target: e.target.value, approved: false })}
                         aria-label={`Destination name for ${m.source}`}
                       />
+                      <select
+                        className="df2-input df2-select df2-column-dest-type-select"
+                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR")}
+                        onChange={(e) =>
+                          updateMapping(index, { destType: e.target.value, approved: false })
+                        }
+                        aria-label={`Destination type for ${m.source}`}
+                        title="Destination logical type"
+                      >
+                        {destTypeSelectOptions(m.destType || m.inferredType).map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
                       {m.existsInDestination && (
                         <span className="df2-col-badge-exists df2-col-badge-new">exists</span>
                       )}
                       {!m.existsInDestination && destColumnSet.size > 0 && (
                         <span className="df2-col-badge-new">new</span>
+                      )}
+                      {isExistingEnumBooleanConflict(m) && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-ghost"
+                          title="Existing column is BOOLEAN — remap to a VARCHAR field or ALTER the destination; mapping Widen cannot change DDL"
+                          onClick={() => updateMapping(index, flagExistingEnumBooleanConflict(m))}
+                        >
+                          Remap / ALTER required
+                        </button>
+                      )}
+                      {isEnumToBooleanConflict(m) && !m.existsInDestination && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-ghost"
+                          title="Use VARCHAR on the new destination column instead of BOOLEAN"
+                          onClick={() =>
+                            updateMapping(index, {
+                              ...widenMappingToVarchar(m),
+                              approved: false,
+                            })
+                          }
+                        >
+                          Widen → VARCHAR
+                        </button>
                       )}
                     </div>
                   </td>
@@ -516,13 +588,15 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {compact ? (
+      {(compact || filtered.length > pageSize) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
-          <span>
-            {filtered.length === 0
-              ? "No matching columns"
-              : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
-          </span>
+          {compact && (
+            <span>
+              {filtered.length === 0
+                ? "No matching columns"
+                : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
+            </span>
+          )}
           {filtered.length > pageSize && (
             <div className="df2-column-workbench-pagination">
               <button
@@ -547,29 +621,7 @@ export function ColumnReviewPanel({
             </div>
           )}
         </div>
-      ) : filtered.length > pageSize ? (
-        <div className="df2-column-review-footer df2-column-workbench-pagination">
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm"
-            disabled={page <= 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-          >
-            ← Previous
-          </button>
-          <span className="df2-column-workbench-page-label">
-            Page {page} of {pages}
-          </span>
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm"
-            disabled={page >= pages}
-            onClick={() => setPage((p) => Math.min(pages, p + 1))}
-          >
-            Next →
-          </button>
-        </div>
-      ) : null}
+      )}
       </div>
     </div>
   );

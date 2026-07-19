@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorCatalogPanel } from "../components/ConnectorCatalogPanel";
-import { ConnectionWorkbench, CONNECTION_TABS } from "../components/ConnectionWorkbench";
-import { EmptyState } from "../components/EmptyState";
+import { CONNECTION_TABS } from "../components/ConnectionWorkbench";
+import { ConnectorDetailDrawer } from "../components/ConnectorDetailDrawer";
+import { EmptyState } from "../components/ui/EmptyState";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
@@ -9,21 +10,27 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
+import { LoadingBlock } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { buildConnectionWorkbenchContext } from "../lib/connectionWorkbench";
+import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/connectionWorkbench";
 
 interface ConnectorsPageProps {
   connectors: Connector[];
+  /** True while the first connectors fetch has not settled yet. */
+  connectorsLoading?: boolean;
   jobs?: TransferJob[];
   schedules?: PipelineSchedule[];
   onAdd: (type?: string) => void;
   onEdit: (connector: Connector) => void;
   onDelete: (id: string) => void;
   onRefresh?: () => void | Promise<void>;
+  onOpenTransfer?: () => void;
+  onOpenJob?: (jobId: string) => void;
   showConnectionsTab?: number;
   highlightConnectorId?: string;
 }
@@ -32,7 +39,20 @@ function catalogType(id: string) {
   return resolveCatalogIdToType(id);
 }
 
-export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, onEdit, onDelete, onRefresh, showConnectionsTab, highlightConnectorId }: ConnectorsPageProps) {
+export function ConnectorsPage({
+  connectors,
+  connectorsLoading = false,
+  jobs = [],
+  schedules = [],
+  onAdd,
+  onEdit,
+  onDelete,
+  onRefresh,
+  onOpenTransfer,
+  onOpenJob,
+  showConnectionsTab,
+  highlightConnectorId,
+}: ConnectorsPageProps) {
   const { toast } = useToast();
   const [tab, setTab] = useState<"connections" | "catalog">("connections");
   const [role, setRole] = useState<"all" | "source" | "destination">("all");
@@ -41,13 +61,21 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [connectionTab, setConnectionTab] = useState<(typeof CONNECTION_TABS)[number]>("Status");
+
+  const openDrawer = (id: string) => {
+    setSelectedConnectionId(id);
+    setConnectionTab("Status");
+    setDrawerOpen(true);
+  };
 
   useEffect(() => {
     if (!highlightConnectorId) return;
     if (!connectors.some((c) => c.id === highlightConnectorId)) return;
     setTab("connections");
     setSelectedConnectionId(highlightConnectorId);
+    setDrawerOpen(true);
     window.requestAnimationFrame(() => {
       document.getElementById(`connector-card-${highlightConnectorId}`)?.scrollIntoView({
         behavior: "smooth",
@@ -63,10 +91,9 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   }, [showConnectionsTab]);
 
   useEffect(() => {
-    if (!selectedConnectionId && connectors.length > 0) {
-      setSelectedConnectionId(connectors[0].id);
-    } else if (selectedConnectionId && !connectors.some((c) => c.id === selectedConnectionId)) {
-      setSelectedConnectionId(connectors[0]?.id ?? "");
+    if (selectedConnectionId && !connectors.some((c) => c.id === selectedConnectionId)) {
+      setSelectedConnectionId("");
+      setDrawerOpen(false);
     }
   }, [connectors, selectedConnectionId]);
 
@@ -84,7 +111,19 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   }, [connectors, query, statusFilter]);
   const healthyCount = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
   const errorCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
-  const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? connectors[0];
+  const connectorsInUse = useMemo(() => {
+    const ids = new Set<string>();
+    schedules.forEach((s) => {
+      if (s.source_connector_id) ids.add(s.source_connector_id);
+      if (s.dest_connector_id) ids.add(s.dest_connector_id);
+    });
+    return connectors.filter((c) => ids.has(c.id)).length;
+  }, [connectors, schedules]);
+  const distinctTypes = useMemo(
+    () => new Set(connectors.map((c) => c.type)).size,
+    [connectors],
+  );
+  const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? null;
   const workbench = useMemo(
     () => (selectedConnection ? buildConnectionWorkbenchContext(selectedConnection, jobs, schedules) : null),
     [selectedConnection, jobs, schedules],
@@ -130,18 +169,26 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
   };
 
   const handleCatalogSelect = (item: CatalogConnector) => {
-    if (item.effective_status === "planned" || (!item.transfer_ready && !item.connect_only)) {
+    const tier = item.certification_tier || "";
+    const isPlanned =
+      tier === "planned" ||
+      item.effective_status === "planned" ||
+      (!item.transfer_ready &&
+        !item.connect_only &&
+        tier !== "source_only" &&
+        item.effective_status !== "live");
+    if (isPlanned) {
       toast({
         title: "Connector not available yet",
-        message: `${item.name} is on the roadmap. Choose a transfer-ready or test-only connector.`,
+        message: `${item.name} is on the roadmap. Choose a Certified or Source-only connector.`,
         tone: "info",
       });
       return;
     }
-    if (item.connect_only) {
+    if (item.connect_only || tier === "source_only" || (!item.transfer_ready && item.effective_status === "live")) {
       toast({
-        title: "Connection test only",
-        message: `${item.name} supports credential test — transfer routes coming soon.`,
+        title: "Source only",
+        message: `${item.name} can be saved and tested as a source — full R/W transfer may be limited.`,
         tone: "warning",
       });
     }
@@ -156,6 +203,24 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
       description="Saved connections and the transfer-ready catalog."
     >
       <PageFrame className="df2-connectors-page">
+        {connectors.length > 0 && (
+          <PageContextBar
+            ariaLabel="Connections summary"
+            stats={[
+              { label: "Connections", value: connectors.length, icon: "connectors" },
+              { label: "Healthy", value: healthyCount, icon: "check", tone: healthyCount > 0 ? "ok" : "muted" },
+              {
+                label: "Needs attention",
+                value: errorCount,
+                icon: "alert",
+                tone: errorCount > 0 ? "danger" : "muted",
+                title: errorCount > 0 ? "Connections failing their last test" : "All connections passing",
+              },
+              { label: "In pipelines", value: connectorsInUse, icon: "activity", tone: "muted", title: "Connections referenced by scheduled pipelines" },
+              { label: "Data systems", value: distinctTypes, icon: "layers", tone: "muted", title: "Distinct connector types in use" },
+            ]}
+          />
+        )}
         <PageToolbar
           searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
@@ -185,13 +250,13 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
               )}
               {tab === "catalog" && (
                 <FilterTabs
-                  ariaLabel="Filter catalog by role"
+                  ariaLabel="Filter catalog by capability — dual-use systems like MySQL appear under both"
                   value={role}
                   onChange={setRole}
                   items={[
                     { id: "all", label: "All" },
-                    { id: "source", label: "Sources" },
-                    { id: "destination", label: "Destinations" },
+                    { id: "source", label: "Can be source" },
+                    { id: "destination", label: "Can be destination" },
                   ]}
                 />
               )}
@@ -224,7 +289,15 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
 
         <div className="df2-connectors-workspace">
           {tab === "connections" ? (
-            connectors.length === 0 ? (
+            connectorsLoading && connectors.length === 0 ? (
+              <div className="df2-connectors-empty" aria-busy="true">
+                <LoadingBlock
+                  title="Loading connections"
+                  hint="Fetching saved connectors from your workspace…"
+                  size="md"
+                />
+              </div>
+            ) : connectors.length === 0 ? (
               <div className="df2-connectors-empty">
                 <EmptyState
                   page
@@ -259,51 +332,85 @@ export function ConnectorsPage({ connectors, jobs = [], schedules = [], onAdd, o
                 </div>
               </div>
             ) : (
-            <div className="df2-connectors-layout">
-              <aside className="df2-connectors-list">
-                  <div className="df2-connector-card-grid" role="list" aria-label="Saved connections">
-                    {filteredConnectors.map((c) => (
-                      <ConnectorCard
-                        key={c.id}
-                        connector={c}
-                        index={connectors.findIndex((x) => x.id === c.id)}
-                        selected={selectedConnectionId === c.id}
-                        highlighted={highlightConnectorId === c.id}
-                        testing={testingId === c.id}
-                        onSelect={() => setSelectedConnectionId(c.id)}
-                        onTest={() => void handleTest(c.id)}
-                        onEdit={() => onEdit(c)}
-                        onDelete={() => onDelete(c.id)}
-                      />
-                    ))}
-                    {filteredConnectors.length === 0 && (
-                      <EmptyState
-                        compact
-                        icon="search"
-                        title="No matches"
-                        description="No saved connections match the current search or filters."
-                      />
-                    )}
-                  </div>
-              </aside>
-              <section className="df2-connectors-detail">
-                <ConnectionWorkbench
-                  selectedConnection={selectedConnection}
-                  workbench={workbench}
-                  connectionTab={connectionTab}
-                  setConnectionTab={setConnectionTab}
-                  connectors={connectors}
-                  onSelectConnection={setSelectedConnectionId}
+            <div className="df2-connectors-list-full">
+              {filteredConnectors.length === 0 ? (
+                <EmptyState
+                  compact
+                  icon="search"
+                  title="No matches"
+                  description="No saved connections match the current search or filters."
                 />
-              </section>
+              ) : (
+                <div className="df2-connector-rows" role="list" aria-label="Saved connections">
+                  <div className="df2-connector-rows-head" aria-hidden>
+                    <span className="df2-connector-rows-head-name">Connection</span>
+                    <span
+                      className="df2-connector-rows-head-role"
+                      title="Capability in Transfer Studio — databases like MySQL are Source & destination, not locked to the catalog tab you used when saving"
+                    >
+                      Capability
+                    </span>
+                    <span className="df2-connector-rows-head-test">Last test</span>
+                    <span className="df2-connector-rows-head-used">Last used</span>
+                    <span className="df2-connector-rows-head-actions" />
+                  </div>
+                  {filteredConnectors.map((c) => (
+                    <ConnectorCard
+                      key={c.id}
+                      compact
+                      connector={c}
+                      index={connectors.findIndex((x) => x.id === c.id)}
+                      selected={selectedConnectionId === c.id && drawerOpen}
+                      highlighted={highlightConnectorId === c.id}
+                      testing={testingId === c.id}
+                      lastUsedAt={lastUsedAtForConnector(c, jobs)}
+                      jobs={jobs}
+                      schedules={schedules}
+                      onSelect={() => openDrawer(c.id)}
+                      onTest={() => void handleTest(c.id)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
             )
           ) : (
             <div className="df2-connectors-pane df2-connectors-catalog">
-              <ConnectorCatalogPanel role={role} onSelect={handleCatalogSelect} initialStatus="live" requireAvailable={false} limit={200} />
+              <ConnectorCatalogPanel
+                role={role}
+                onSelect={handleCatalogSelect}
+                initialStatus="live"
+                requireAvailable={false}
+                limit={200}
+              />
             </div>
           )}
         </div>
+
+        <ConnectorDetailDrawer
+          open={drawerOpen && !!selectedConnection}
+          connector={selectedConnection}
+          workbench={workbench}
+          connectors={connectors}
+          connectionTab={connectionTab}
+          setConnectionTab={setConnectionTab}
+          testing={testingId === selectedConnection?.id}
+          onClose={() => setDrawerOpen(false)}
+          onTest={() => selectedConnection && void handleTest(selectedConnection.id)}
+          onEdit={() => {
+            if (!selectedConnection) return;
+            setDrawerOpen(false);
+            onEdit(selectedConnection);
+          }}
+          onDelete={() => {
+            if (!selectedConnection) return;
+            setDrawerOpen(false);
+            onDelete(selectedConnection.id);
+          }}
+          onOpenTransfer={onOpenTransfer}
+          onSelectConnection={setSelectedConnectionId}
+          onOpenJob={onOpenJob}
+        />
       </PageFrame>
     </PageShell>
   );

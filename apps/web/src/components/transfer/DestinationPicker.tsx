@@ -50,7 +50,12 @@ export function DestinationPicker({
   return (
     <div className="df2-dest-picker">
       <div className="df2-dest-picker-head">
-        <label className="df2-label">Choose destination</label>
+        <div>
+          <label className="df2-label">Choose destination</label>
+          <p className="df2-label-hint" style={{ margin: "2px 0 0" }}>
+            Pick a saved connection — the route updates to that system, not a default engine.
+          </p>
+        </div>
         <FilterBar ariaLabel="Filter destinations by type">
           <FilterTabs
             ariaLabel="Filter destinations by type"
@@ -77,7 +82,7 @@ export function DestinationPicker({
               {getConnectorDefaults(c.type).label}
               {c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
             </span>
-            {c.last_test_ok !== false && (
+            {c.last_test_ok === true && (
               <span className="df2-dest-connector-card-status ok">Tested</span>
             )}
           </button>

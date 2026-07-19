@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from .data_analyst import get_data_analyst
 
 
@@ -13,18 +15,25 @@ class PilotContextBuilder:
         datasets = analyst.list_datasets()
 
         session = None
-        if data_context and data_context.get("columns"):
+        if data_context and (data_context.get("columns") or data_context.get("preflight_run_id") or data_context.get("job_id")):
             session = {
                 "name": data_context.get("name") or data_context.get("filename", "active upload"),
                 "columns": data_context.get("columns", []),
                 "row_count": data_context.get("row_count", 0),
                 "samples": data_context.get("samples") or data_context.get("column_samples") or {},
+                "preflight_run_id": data_context.get("preflight_run_id"),
+                "job_id": data_context.get("job_id"),
+                "validation_status": data_context.get("validation_status"),
+                "route": data_context.get("route"),
+                "blockers": data_context.get("blockers") or [],
             }
 
         connectors = self._safe_connectors()
         jobs = self._safe_jobs()
         capabilities = self._safe_capabilities()
-        rag_snippets = self._safe_rag(message)
+        # RAG is optional — hub/embedding init must never block chat.
+        rag_on = (os.environ.get("DATAFLOW_PILOT_RAG") or "").lower() in {"1", "true", "on", "yes"}
+        rag_snippets = self._safe_rag(message) if rag_on else []
 
         dataset_summaries = []
         for ds in datasets[:12]:
@@ -36,12 +45,8 @@ class PilotContextBuilder:
                 "row_count": ds["row_count"],
                 "industry": ds.get("industry"),
             }
-            if message and self._dataset_relevant(ds, message):
-                schema = analyst.resolve_dataset(ds["name"])
-                if schema:
-                    insight = analyst.analyze_schema(schema)
-                    entry["pii_columns"] = insight.pii_columns
-                    entry["quality_score"] = insight.quality_score
+            # Skip heavy per-dataset PII/quality scans during chat context build.
+            # Tools (analyze_dataset) still run that work on demand.
             dataset_summaries.append(entry)
 
         return {
@@ -75,10 +80,25 @@ class PilotContextBuilder:
             s = ctx["session_data"]
             parts.extend([
                 "## Active User Session",
-                f"Dataset: **{s['name']}** — {s['row_count']:,} rows, {len(s['columns'])} columns",
-                f"Columns: {', '.join(s['columns'][:20])}",
-                "",
+                f"Dataset: **{s['name']}** — {s.get('row_count', 0):,} rows, {len(s.get('columns') or [])} columns",
+                f"Columns: {', '.join((s.get('columns') or [])[:20])}",
             ])
+            if s.get("preflight_run_id"):
+                parts.append(f"Preflight run ID: `{s['preflight_run_id']}` (use get_preflight_run)")
+            if s.get("job_id"):
+                parts.append(f"Transfer job ID: `{s['job_id']}` (use get_job)")
+            if s.get("validation_status"):
+                parts.append(f"Validation status: **{s['validation_status']}**")
+            if s.get("route"):
+                parts.append(f"Route: {s['route']}")
+            for b in (s.get("blockers") or [])[:4]:
+                parts.append(f"- Blocker: {b}")
+            parts.append("")
+            parts.append(
+                "When validation is blocked, prefer remediate_validation "
+                "(normalize_control_chars / open_bad_data_fix / quarantine_and_rerun)."
+            )
+            parts.append("")
 
         if ctx.get("datasets"):
             parts.append("## Available Datasets")
@@ -100,10 +120,13 @@ class PilotContextBuilder:
         if ctx.get("recent_jobs"):
             parts.append("## Recent Jobs")
             for j in ctx["recent_jobs"][:5]:
+                jid = j.get("id") or "?"
                 parts.append(
-                    f"- {j.get('source', '?')} → {j.get('destination', '?')}: "
+                    f"- `{jid}` · {j.get('source', '?')} → {j.get('destination', '?')}: "
                     f"{j.get('status')} ({j.get('records', 0):,} records)"
                 )
+            parts.append("")
+            parts.append("When the user cites a job ID, call get_job before answering.")
             parts.append("")
 
         if ctx.get("rag_knowledge"):
@@ -133,10 +156,12 @@ class PilotContextBuilder:
             from ...services.mongodb_service import get_mongodb_service
             return [
                 {
+                    "id": str(j.get("_id", j.get("id", ""))),
                     "source": j.get("source_name"),
                     "destination": j.get("destination_collection") or j.get("destination_type"),
                     "status": j.get("status"),
                     "records": j.get("records_processed", 0),
+                    "error": (j.get("error") or "")[:160] or None,
                 }
                 for j in get_mongodb_service().list_jobs(limit=8)
             ]
@@ -153,13 +178,21 @@ class PilotContextBuilder:
     def _safe_rag(self, message: str) -> list[str]:
         if not message.strip():
             return []
-        try:
+        # Hard-cap RAG so Pilot never hangs on embedding model downloads / hub retries.
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        def _run() -> list[str]:
             from ..rag.pipeline import get_rag_pipeline
+
             rag = get_rag_pipeline()
             rag.ingestion.ensure_knowledge_loaded()
             result = rag.retriever.retrieve(message, n_results=4)
             return [d.text[:400] for d in result.documents]
-        except Exception:
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_run).result(timeout=3.0)
+        except (FuturesTimeout, Exception):
             return []
 
     def _training_profile_count(self) -> int:

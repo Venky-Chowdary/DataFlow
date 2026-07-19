@@ -2,7 +2,7 @@
 
 import pytest
 
-from services.transform_engine import apply_transform, dry_run_sample, infer_transform
+from services.transform_engine import apply_transform, dry_run_sample, infer_transform, preview_quarantine_cells
 
 
 def test_infer_decimal_for_amount():
@@ -46,6 +46,18 @@ def test_apply_integer_rejects_fractional_value():
     val, err = apply_transform("10.5", "integer")
     assert val is None
     assert "Invalid integer" in err
+
+
+def test_preview_quarantine_cells_flags_bad_decimal():
+    result = preview_quarantine_cells(
+        headers=["amt"],
+        sample_rows=[["x"], ["1.25"]],
+        mappings=[{"source": "amt", "target": "amount", "transform": "decimal"}],
+        column_types={"amt": "VARCHAR"},
+    )
+    assert result["quarantine_count"] == 1
+    assert result["cells"][0]["status"] == "quarantine"
+    assert result["ok_count"] >= 1
 
 
 def test_dry_run_catches_bad_decimal():

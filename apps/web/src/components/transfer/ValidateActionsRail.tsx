@@ -9,11 +9,13 @@ interface ValidateActionsRailProps {
   mappingReviewCount: number;
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
+  savingContract?: boolean;
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
   onExecute: () => void;
   onOpenJobTheater: () => void;
+  onSaveAsContract?: () => void;
 }
 
 export function ValidateActionsRail({
@@ -23,11 +25,13 @@ export function ValidateActionsRail({
   mappingReviewCount,
   rowCount,
   transferLaunch,
+  savingContract,
   onBack,
   onRunPreflight,
   onApproveMappings,
   onExecute,
   onOpenJobTheater,
+  onSaveAsContract,
 }: ValidateActionsRailProps) {
   const passed = preflight?.passed;
   const blocked = preflight && !preflight.passed && !preflighting;
@@ -78,6 +82,11 @@ export function ValidateActionsRail({
             <p>
               <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
             </p>
+            {preflight.run_id && (
+              <p className="df2-validate-rail-runid" title="Paste into Data Pilot to triage this validation">
+                Run <code>{preflight.run_id}</code>
+              </p>
+            )}
 
             {(preflight.proof_bundle || preflight.blockers.length > 0) && (
               <div className="df2-validate-rail-details-body">
@@ -103,12 +112,25 @@ export function ValidateActionsRail({
                 )}
                 {preflight.blockers.length > 0 && (
                   <ul className="df2-validate-rail-blockers">
-                    {preflight.blockers.slice(0, 4).map((b) => (
-                      <li key={b.id}>
-                        {b.message}
-                        {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
-                      </li>
-                    ))}
+                    {preflight.blockers.slice(0, 4).map((b) => {
+                      const details = b.details || {};
+                      const issueTexts = Array.isArray(details.issue_texts)
+                        ? (details.issue_texts as string[])
+                        : Array.isArray(details.errors)
+                          ? (details.errors as unknown[]).map((e) =>
+                              typeof e === "string" ? e : String((e as { message?: string })?.message ?? e),
+                            )
+                          : [];
+                      return (
+                        <li key={b.id}>
+                          {b.message}
+                          {issueTexts.slice(0, 3).map((issue) => (
+                            <span key={issue} className="df2-validate-rail-issue">{issue}</span>
+                          ))}
+                          {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
                 {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
@@ -183,6 +205,24 @@ export function ValidateActionsRail({
               ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
               : "Execute (blocked)"}
           </Button>
+        )}
+
+        {preflight && onSaveAsContract && (
+          <>
+            <Button
+              onClick={onSaveAsContract}
+              loading={savingContract}
+              loadingLabel="Saving…"
+              disabled={savingContract || preflighting}
+              leadingIcon={<DtIcon name="shield" size={16} />}
+              title="Save mappings + gates as a draft data contract under Contracts"
+            >
+              Save as contract
+            </Button>
+            <p className="df2-validate-rail-contract-hint">
+              Saves a draft schema agreement to <strong>Contracts</strong> (sidebar). Works even while Validate is blocked.
+            </p>
+          </>
         )}
 
         {blocked && firstBlockerMessage && (

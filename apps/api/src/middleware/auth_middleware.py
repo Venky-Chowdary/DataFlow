@@ -9,10 +9,17 @@ from ..services.auth_service import auth_required, lookup_user, verify_token
 _PUBLIC_PREFIXES = (
     "/health",
     "/api/v1/auth/login",
+    "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
-    "/api/v1/mcp/manifest",
-    "/api/v1/mcp/tools",
-    "/api/v1/mcp/status",
+    # Alias paths when the web client omits /api/v1 (mis-set VITE_API_BASE).
+    "/auth/login",
+    "/auth/bootstrap",
+    "/auth/sso/providers",
+    # Marketing / docs / landing need catalog stats without a session.
+    "/api/v1/catalog",
+    "/catalog",
+    # MCP discovery + Streamable HTTP handshake (tools/call still checks auth in-handler)
+    "/api/v1/mcp",
 )
 
 if docs_enabled():
@@ -20,9 +27,9 @@ if docs_enabled():
 
 
 def _is_public_sso_path(path: str) -> bool:
-    return path.startswith("/api/v1/auth/sso/") and (
-        path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
-    )
+    if path.startswith("/api/v1/auth/sso/") or path.startswith("/auth/sso/"):
+        return path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
+    return False
 
 
 def _attach_user(request: Request, token: str) -> bool:
@@ -74,6 +81,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
             or _is_public_sso_path(path)
         ):
+            # Public routes still attach identity when a Bearer token is present
+            # (MCP tools/call uses this; discovery works without a token).
+            if token:
+                _attach_user(request, token)
             return await call_next(request)
 
         if not token or not _attach_user(request, token):

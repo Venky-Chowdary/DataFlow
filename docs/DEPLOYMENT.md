@@ -56,6 +56,20 @@ Optional:
 | `DATAFLOW_ENABLE_DOCS` | `0` | Hide `/docs` |
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
 
+### Multi-replica / enterprise coordination
+
+| Variable | Purpose |
+|----------|---------|
+| `DATAFLOW_JOB_STORE` | Use `mongodb` (shared) for multi-replica. `memory` is **single-instance / tests only**. |
+| `DATAFLOW_MULTI_REPLICA` | Set `1` to fail-closed when Mongo leases/locks are unavailable (no in-memory fallback). |
+| `DATAFLOW_WORKER_LEASE_TTL` | Lease TTL seconds (default `60`). Heartbeat loss **cancels** the job. |
+| `DATAFLOW_REQUIRE_WORKSPACE` | `1` denies empty `X-Workspace-Id` (hard tenant isolation). On in production by default. |
+| `DATAFLOW_WORKER_FLEET` | `1` enables Mongo job queue for dedicated worker processes (`services.worker_fleet`). |
+
+**Single replica (dev):** `DATAFLOW_JOB_STORE=memory` is fine; leases stay process-local.
+
+**Multi replica (Railway / prod):** require shared MongoDB, set `DATAFLOW_MULTI_REPLICA=1` (or rely on Railway production detection). Sync cursors and schedules use Mongo when connected. Do not run multiple API replicas against a memory job store.
+
 ---
 
 ## Create an admin user

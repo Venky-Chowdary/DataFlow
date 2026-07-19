@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ColumnReviewPanel } from "../../components/ColumnReviewPanel";
 import { MappingIntelligencePanel } from "../../components/MappingIntelligencePanel";
+import { Dialog } from "../../components/ui/Dialog";
+import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, filterMappings } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
@@ -60,6 +62,7 @@ export function TransferMapStep({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("all");
   const [focusSource, setFocusSource] = useState<string | null>(null);
+  const [mapDialogOpen, setMapDialogOpen] = useState(false);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");
@@ -129,6 +132,14 @@ export function TransferMapStep({
             {llmUsed ? " · semantic engine" : ""}
           </p>
         </div>
+        <button
+          type="button"
+          className="df2-btn df2-btn-sm df2-btn-ghost"
+          onClick={() => setMapDialogOpen(true)}
+          title="Open full mapping table in a dialog"
+        >
+          <DtIcon name="expand" size={14} /> Expand mapping table
+        </button>
       </div>
 
       <div className="df2-card-body df2-map-step-body">
@@ -177,6 +188,37 @@ export function TransferMapStep({
           Continue to Validate →
         </button>
       </div>
+
+      <Dialog
+        open={mapDialogOpen}
+        onClose={() => setMapDialogOpen(false)}
+        size="xl"
+        title="Edit column mappings"
+        subtitle={`${columnMappings.length} columns · choose destination names and logical types carefully — wrong types fail preflight, not silently.`}
+        ariaLabel="Full mapping table"
+        className="df2-map-dialog"
+        footer={
+          <button type="button" className="df2-btn df2-btn-primary" onClick={() => setMapDialogOpen(false)}>
+            Done
+          </button>
+        }
+      >
+        <ColumnReviewPanel
+          mappings={columnMappings}
+          rowCount={rowCount}
+          sampleRows={sampleRows}
+          confidenceThreshold={confidenceThreshold}
+          onChange={onChangeMappings}
+          destinationFields={destColumns}
+          destinationLabel={destRouteLabel}
+          search={search}
+          onSearchChange={setSearch}
+          filter={filter}
+          onFilterChange={setFilter}
+          focusSource={focusSource}
+          onFocusHandled={() => setFocusSource(null)}
+        />
+      </Dialog>
     </div>
   );
 }

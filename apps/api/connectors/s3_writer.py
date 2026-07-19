@@ -13,10 +13,11 @@ from typing import Any, Callable
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_region
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    build_mapped_rows,
+    build_mapped_rows_with_details,
     resolve_target_columns,
     row_checksum,
     to_json_value,
+    transform_error_policy,
 )
 
 _api_root = Path(__file__).resolve().parents[1]
@@ -79,7 +80,8 @@ def write_mapped_rows(
     path_style: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
-    del create_table, error_policy, backfill_new_fields
+    del create_table, backfill_new_fields
+    policy = transform_error_policy(error_policy)
     bucket = database
     if not bucket:
         return WriteResult(
@@ -108,13 +110,14 @@ def write_mapped_rows(
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    mapped_rows, errors = build_mapped_rows(
+    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
+        error_policy=policy,
         preserve_case=True,
     )
 
@@ -153,10 +156,12 @@ def write_mapped_rows(
             checksum=checksum,
             chunks_completed=1,
             warnings=errors[:10],
-            rejected_rows=len(data_rows) - len(mapped_rows),
+            rejected_rows=len({d["row"] for d in rejected_details}) or max(0, len(data_rows) - len(mapped_rows)),
+            rejected_details=rejected_details[:200],
         )
     except Exception as exc:
         return WriteResult(
             ok=False, rows_written=0, table_name=key, target_schema=bucket,
             checksum="", chunks_completed=0, error=str(exc),
+            rejected_details=rejected_details[:200],
         )

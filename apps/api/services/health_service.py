@@ -27,8 +27,14 @@ def check_storage() -> dict[str, Any]:
         test = d / ".health_probe"
         test.write_text("ok", encoding="utf-8")
         test.unlink(missing_ok=True)
+
+        from services.connector_store import connector_persistence_status
+
+        connector_status = connector_persistence_status()
         stores = {
-            "connectors": (d / "connectors.json").exists(),
+            # True when the active backend (mongo or file) is usable — not merely
+            # when connectors.json exists on disk (production uses Mongo).
+            "connectors": bool(connector_status.get("ok")),
             "audit_log": (d / "audit_events.jsonl").exists(),
             "mcp_log": (d / "mcp_invocations.jsonl").exists(),
             "transfer_plans": (d / "transfer_plans.json").exists(),
@@ -43,6 +49,8 @@ def check_storage() -> dict[str, Any]:
             "upload_dir": str(u),
             "writable": True,
             "stores": stores,
+            "connector_backend": connector_status.get("backend"),
+            "connector_store": connector_status,
         }
     except Exception as exc:
         return {"status": "down", "detail": str(exc)[:200]}

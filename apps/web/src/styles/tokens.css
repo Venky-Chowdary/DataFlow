@@ -1,6 +1,13 @@
 /**
  * DataFlow design tokens — unified light enterprise theme
  * Fonts loaded via @fontsource in main.tsx (no Google CSS import).
+ *
+ * Single source of truth for spacing, type, and color primitives (the
+ * `--df-*` custom properties below). Other stylesheets must reference these
+ * variables, not redefine literal spacing/color/radius values — that
+ * redefinition is what caused the shell-selector duplication this file's
+ * neighbors were consolidated to fix. When adding a new page or component
+ * style, check here first for an existing token before hardcoding a value.
  */
 
 :root {
@@ -9,7 +16,9 @@
   --dt-flow-particle: var(--df-brand);
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
+  --df-brand-strong: #115e59;
   --df-brand-muted: #f0fdfa;
+  --df-brand-soft: #ccfbf1;
   --df-brand-ring: rgba(13, 148, 136, 0.28);
   --df-accent: #0d9488;
   --df-accent-muted: #f0fdfa;
@@ -19,27 +28,47 @@
   --df-navy-700: #334155;
   --df-steel-500: #334155;
   --df-steel-400: #475569;
+  --df-teal-400: #2dd4bf;
   --df-teal-500: #0d9488;
+  --df-teal-600: #0f766e;
   --df-success: #059669;
   --df-success-bg: #ecfdf5;
+  --df-success-border: rgba(5, 150, 105, 0.22);
   --df-warning: #d97706;
   --df-warning-bg: #fffbeb;
+  --df-warning-border: rgba(217, 119, 6, 0.22);
   --df-danger: #dc2626;
   --df-danger-bg: #fef2f2;
+  --df-danger-border: rgba(220, 38, 38, 0.22);
+  --df-info: #0284c7;
+  --df-info-bg: #f0f9ff;
+  --df-info-border: rgba(2, 132, 199, 0.2);
 
   /* Surfaces — cool slate canvas, crisp white panels */
-  --df-bg-canvas: #f4f6f8;
+  --df-bg-canvas: #f3f5f7;
   --df-bg-subtle: #eef1f4;
   --df-surface: #ffffff;
   --df-surface-raised: #ffffff;
-  --df-border: #e6e9ee;
-  --df-border-strong: #d4d9e0;
+  --df-surface-muted: #f8fafc;
+  --df-surface-tint: #f0fdfa;
+  --df-border: #e4e8ee;
+  --df-border-strong: #d0d6de;
+  --df-border-brand: color-mix(in srgb, var(--df-brand) 28%, var(--df-border));
 
   --df-text-primary: #0f172a;
   --df-text-secondary: #475569;
   --df-text-tertiary: #94a3b8;
   --df-text-muted: #64748b;
   --df-focus-ring: var(--df-brand-ring);
+
+  /* Motion — shared easings / durations for landing + workspace */
+  --df-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --df-ease-soft: cubic-bezier(0.33, 1, 0.68, 1);
+  --df-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --df-dur-fast: 140ms;
+  --df-dur: 240ms;
+  --df-dur-slow: 420ms;
+  --df-dur-reveal: 560ms;
 
   /* Platform aliases used by enterprise-platform.css */
   --df-surface-canvas: var(--df-bg-canvas);
@@ -50,7 +79,8 @@
   --df-page-gutter: 24px;
   --df-page-gutter-sm: 16px;
 
-  --df-font-sans: "Plus Jakarta Sans", "IBM Plex Sans", Inter, system-ui, -apple-system, sans-serif;
+  --df-font-sans: "IBM Plex Sans", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
 
   --df-header-height: 56px;
@@ -71,8 +101,24 @@
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
 
+  /* Single control-height standard — every text input, select, search box,
+     and filter pill resolves to one of these so no control ever renders thin
+     or short. Referenced by inputs (app-styles/dataflow-ui), the toolbar/filter
+     cluster (enterprise-ui), and the connection workbench. Defined globally so
+     controls outside a `.df2-toolbar` (e.g. the connection workbench filter)
+     still get a real height instead of collapsing to text. */
+  --df-control-height: 38px;
+  --df-control-height-sm: 34px;
+  --df-toolbar-h: 38px;
+
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
+  --df-table-cell-pad-y: 11px;
+  --df-table-cell-pad-x: 14px;
+  --df-table-head-bg: var(--df-surface-muted);
+  --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
+  --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 55%, #fff);
+  --df-table-border: var(--df-border);
   --df-nav-item-height: 36px;
 
   --df-card-pad: 16px;
@@ -82,6 +128,17 @@
   --df-grid-gap-lg: 16px;
   --df-page-section-gap: 16px;
   --df-rail-column: minmax(260px, 320px);
+
+  /* Scrollbars — thin enterprise chrome, same on every surface */
+  --df-scrollbar-size: 10px;
+  --df-scrollbar-thumb: color-mix(in srgb, var(--df-navy-700) 28%, transparent);
+  --df-scrollbar-thumb-hover: color-mix(in srgb, var(--df-navy-700) 46%, transparent);
+  --df-scrollbar-track: transparent;
+
+  /* Toast durations — keep CSS timer + JS dismiss in lockstep */
+  --df-toast-duration: 4500ms;
+  --df-toast-duration-error: 8000ms;
+  --df-toast-width: min(400px, calc(100vw - 32px));
 
   --df-space-1: 4px;
   --df-space-2: 8px;
@@ -169,8 +226,8 @@
   --dt-radius-full: 9999px;
   --dt-sidebar-width: var(--df-sidebar-width);
   --dt-header-height: var(--df-header-height);
-  --dt-transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
-  --dt-transition-slow: 240ms cubic-bezier(0.4, 0, 0.2, 1);
+  --dt-transition: var(--df-dur-fast) var(--df-ease);
+  --dt-transition-slow: var(--df-dur) var(--df-ease);
 
   /* Stacking — single scale (do not use raw 9999/10000 elsewhere) */
   --df-z-base: 1;

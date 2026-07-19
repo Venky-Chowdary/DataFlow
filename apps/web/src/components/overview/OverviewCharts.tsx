@@ -181,11 +181,21 @@ interface MetricGlassTileProps {
   icon: string;
   sparkline?: number[];
   tone?: "default" | "teal" | "green" | "amber";
+  /** 0–100 progress ring in the accent well (e.g. success rate). */
+  ring?: number | null;
 }
 
-export function MetricGlassTile({ label, value, sub, icon, sparkline, tone = "default" }: MetricGlassTileProps) {
-  const w = 80;
-  const h = 28;
+export function MetricGlassTile({
+  label,
+  value,
+  sub,
+  icon,
+  sparkline,
+  tone = "default",
+  ring,
+}: MetricGlassTileProps) {
+  const w = 72;
+  const h = 24;
   const pts = sparkline?.length
     ? sparkline.map((v, i) => {
         const x = (i / Math.max(sparkline.length - 1, 1)) * w;
@@ -193,22 +203,44 @@ export function MetricGlassTile({ label, value, sub, icon, sparkline, tone = "de
         return `${x},${y}`;
       }).join(" ")
     : "";
+  const ringPct = ring != null && Number.isFinite(ring) ? Math.max(0, Math.min(100, ring)) : null;
+  const r = 14;
+  const circ = 2 * Math.PI * r;
 
   return (
-    <div className={`df2-metric-glass df2-metric-glass-${tone}`}>
-      <div className="df2-metric-glass-icon" aria-hidden>
-        <DtIcon name={icon} size={18} />
-      </div>
-      <div className="df2-metric-glass-body">
+    <article className={`df2-metric-glass df2-metric-glass-${tone}${ringPct != null ? " has-ring" : ""}${pts ? " has-spark" : ""}`}>
+      <header className="df2-metric-glass-head">
         <span className="df2-metric-glass-label">{label}</span>
+        {ringPct != null ? (
+          <span className="df2-metric-glass-ring" aria-hidden>
+            <svg viewBox="0 0 36 36">
+              <circle className="df2-metric-glass-ring-track" cx="18" cy="18" r={r} />
+              <circle
+                className="df2-metric-glass-ring-fill"
+                cx="18"
+                cy="18"
+                r={r}
+                strokeDasharray={`${(ringPct / 100) * circ} ${circ}`}
+                transform="rotate(-90 18 18)"
+              />
+            </svg>
+            <DtIcon name={icon} size={13} />
+          </span>
+        ) : (
+          <span className="df2-metric-glass-icon" aria-hidden>
+            <DtIcon name={icon} size={15} />
+          </span>
+        )}
+      </header>
+      <div className="df2-metric-glass-body">
         <strong className="df2-metric-glass-value">{value}</strong>
         {sub && <span className="df2-metric-glass-sub">{sub}</span>}
       </div>
       {pts && (
         <svg className="df2-metric-spark" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden>
-          <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       )}
-    </div>
+    </article>
   );
 }
