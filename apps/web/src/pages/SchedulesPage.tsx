@@ -318,7 +318,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       {loading ? (
         <SectionLoader title="Loading pipelines" hint="Fetching scheduled syncs…" />
       ) : showForm && schedules.length === 0 ? null : (
-      <div className="df2-pipeline-grid df2-pipeline-scroll">
+      <div className="df2-pipeline-list df2-pipeline-scroll">
         {schedules.length === 0 ? (
           <EmptyState
             page
@@ -341,23 +341,29 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             description="Try another filter or create a new pipeline."
           />
         ) : (
-          filteredSchedules.map((sched) => (
-            <PipelineCard
-              key={sched.id}
-              schedule={sched}
-              source={connectors.find((c) => c.id === sched.source_connector_id)}
-              dest={connectors.find((c) => c.id === sched.dest_connector_id)}
-              running={runningId === sched.id}
-              highlighted={highlightScheduleId === sched.id}
-              selected={drawerOpen && selectedId === sched.id}
-              onSelect={() => openDrawer(sched.id)}
-              onToggle={() => void toggleEnabled(sched)}
-              onRun={() => void handleRunNow(sched.id)}
-              onEdit={() => openEdit(sched)}
-              onDelete={() => void handleDelete(sched.id)}
-              onToggleHistory={() => openDrawer(sched.id, "History")}
-            />
-          ))
+          <div className="df2-pipeline-rows" role="list" aria-label="Scheduled pipelines">
+            <div className="df2-pipeline-rows-head" aria-hidden>
+              <span className="df2-pipeline-rows-head-name">Pipeline</span>
+              <span>Cadence</span>
+              <span>Mode</span>
+              <span>Last run</span>
+              <span>Status</span>
+              <span />
+            </div>
+            {filteredSchedules.map((sched) => (
+              <PipelineCard
+                key={sched.id}
+                compact
+                schedule={sched}
+                source={connectors.find((c) => c.id === sched.source_connector_id)}
+                dest={connectors.find((c) => c.id === sched.dest_connector_id)}
+                running={runningId === sched.id}
+                highlighted={highlightScheduleId === sched.id}
+                selected={drawerOpen && selectedId === sched.id}
+                onSelect={() => openDrawer(sched.id)}
+              />
+            ))}
+          </div>
         )}
       </div>
       )}

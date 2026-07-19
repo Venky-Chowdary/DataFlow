@@ -14,12 +14,14 @@ interface PipelineCardProps {
   highlighted?: boolean;
   selected?: boolean;
   historyOpen?: boolean;
+  /** Dense list row — actions live in the detail drawer. */
+  compact?: boolean;
   onSelect?: () => void;
-  onToggle: () => void;
-  onRun: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  onToggleHistory: () => void;
+  onToggle?: () => void;
+  onRun?: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  onToggleHistory?: () => void;
   children?: ReactNode;
 }
 
@@ -58,6 +60,7 @@ export function PipelineCard({
   highlighted,
   selected,
   historyOpen,
+  compact,
   onSelect,
   onToggle,
   onRun,
@@ -68,6 +71,83 @@ export function PipelineCard({
 }: PipelineCardProps) {
   const isRunning = running || sched.running;
   const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
+  const routeLabel = `${source?.name ?? "Source"} → ${dest?.name ?? "Destination"}`;
+  const tableLabel = `${sched.source_table} → ${sched.dest_table}`;
+
+  if (compact) {
+    return (
+      <div
+        id={`pipeline-card-${sched.id}`}
+        className={[
+          "df2-pipeline-row",
+          "df2-card-interactive",
+          sched.enabled ? "is-active" : "is-paused",
+          highlighted ? "is-highlighted" : "",
+          selected ? "selected" : "",
+        ].filter(Boolean).join(" ")}
+        onClick={onSelect}
+        onKeyDown={
+          onSelect
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect();
+                }
+              }
+            : undefined
+        }
+        role={onSelect ? "button" : undefined}
+        tabIndex={onSelect ? 0 : undefined}
+        aria-current={selected || undefined}
+      >
+        <span
+          className={`df2-health-dot ${sched.enabled ? "ok" : "err"}`}
+          aria-hidden
+          title={sched.enabled ? "Active" : "Paused"}
+        />
+        <span className="df2-pipeline-row-icons" aria-hidden>
+          <ConnectorIcon id={source?.type ?? "database"} size={18} />
+          <DtIcon name="transfer" size={12} />
+          <ConnectorIcon id={dest?.type ?? "database"} size={18} />
+        </span>
+        <div className="df2-pipeline-row-identity">
+          <span className="df2-pipeline-row-name" title={sched.name}>{sched.name}</span>
+          <span className="df2-pipeline-row-meta" title={`${routeLabel} · ${tableLabel}`}>
+            {routeLabel}
+          </span>
+        </div>
+        <span className="df2-pipeline-row-cadence" title="Schedule cadence">
+          {cadenceLabel(sched)}
+        </span>
+        <span className="df2-pipeline-row-sync" title="Sync mode">{syncLabel}</span>
+        <span className="df2-pipeline-row-signal">
+          {isRunning ? (
+            <span className="df2-badge df2-badge-run">Running</span>
+          ) : sched.last_status ? (
+            <span className={jobStatusBadgeClass(sched.last_status)}>
+              {jobStatusLabel(sched.last_status)}
+            </span>
+          ) : (
+            <span className="df2-badge df2-badge-muted">No runs</span>
+          )}
+        </span>
+        <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
+          {sched.enabled ? "Active" : "Paused"}
+        </span>
+        <div className="df2-pipeline-row-quick" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="df2-pipeline-row-open"
+            onClick={onSelect}
+            aria-label={`Open ${sched.name} details`}
+          >
+            <DtIcon name="chevron-right" size={16} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <article
       id={`pipeline-card-${sched.id}`}
@@ -99,7 +179,7 @@ export function PipelineCard({
           <p className="df2-pipe-card-sub">Last run {formatWhen(sched.last_run_at)}</p>
           <CopyIdChip id={sched.id} label="Pipeline" compact className="df2-pipe-card-id" />
         </div>
-        <div className="df2-pipe-card-badges" onClick={(e) => e.stopPropagation()}>
+        <div className="df2-pipe-card-badges">
           {isRunning && (
             <span className="df2-badge df2-badge-run" title="A run is in progress">
               <DtIcon name="activity" size={11} /> Running
@@ -110,15 +190,9 @@ export function PipelineCard({
               {jobStatusLabel(sched.last_status)}
             </span>
           )}
-          <button
-            type="button"
-            className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}
-            aria-pressed={sched.enabled}
-            onClick={onToggle}
-            title={sched.enabled ? "Pause pipeline" : "Enable pipeline"}
-          >
+          <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
             {sched.enabled ? "Active" : "Paused"}
-          </button>
+          </span>
         </div>
       </div>
 
@@ -145,44 +219,54 @@ export function PipelineCard({
         <span>{sched.run_count} runs</span>
       </div>
 
-      <div className="df2-pipe-card-actions" onClick={(e) => e.stopPropagation()}>
-        <Button
-          size="sm"
-          variant="primary"
-          loading={running}
-          loadingLabel="Running…"
-          disabled={isRunning}
-          onClick={onRun}
-          leadingIcon={<DtIcon name="activity" size={14} />}
-        >
-          {isRunning ? "Running…" : "Run now"}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={onSelect ?? onToggleHistory}
-          aria-expanded={historyOpen}
-          leadingIcon={<DtIcon name="jobs" size={14} />}
-        >
-          {onSelect ? "Open" : "History"}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={onEdit}
-          leadingIcon={<DtIcon name="settings" size={14} />}
-        >
-          Edit
-        </Button>
-        <Button
-          size="sm"
-          variant="danger"
-          onClick={onDelete}
-          leadingIcon={<DtIcon name="trash" size={14} />}
-        >
-          Delete
-        </Button>
-      </div>
+      {(onRun || onEdit || onDelete || onToggle || onToggleHistory || onSelect) && (
+        <div className="df2-pipe-card-actions" onClick={(e) => e.stopPropagation()}>
+          {onRun && (
+            <Button
+              size="sm"
+              variant="primary"
+              loading={running}
+              loadingLabel="Running…"
+              disabled={isRunning}
+              onClick={onRun}
+              leadingIcon={<DtIcon name="activity" size={14} />}
+            >
+              {isRunning ? "Running…" : "Run now"}
+            </Button>
+          )}
+          {(onSelect || onToggleHistory) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onSelect ?? onToggleHistory}
+              aria-expanded={historyOpen}
+              leadingIcon={<DtIcon name="jobs" size={14} />}
+            >
+              {onSelect ? "Open" : "History"}
+            </Button>
+          )}
+          {onEdit && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onEdit}
+              leadingIcon={<DtIcon name="settings" size={14} />}
+            >
+              Edit
+            </Button>
+          )}
+          {onDelete && (
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={onDelete}
+              leadingIcon={<DtIcon name="trash" size={14} />}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
+      )}
 
       {historyOpen && children && <div className="df2-pipe-card-history">{children}</div>}
     </article>

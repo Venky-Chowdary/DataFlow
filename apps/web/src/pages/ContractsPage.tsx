@@ -239,16 +239,22 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
                 </Button>
               }
             />
-            <div className="df2-contract-list">
+            <div className="df2-contract-rows" role="list" aria-label="Data contracts">
+              <div className="df2-contract-rows-head" aria-hidden>
+                <span className="df2-contract-rows-head-name">Contract</span>
+                <span>Version</span>
+                <span>Schema</span>
+                <span>Status</span>
+                <span />
+              </div>
               {contracts.map((c) => {
                 const badge = statusBadge(c.status);
                 const breaker = breakers[c.id];
-                const showReset = c.status === "broken" || breaker === "open" || breaker === "half_open";
                 const selected = drawerOpen && selectedId === c.id;
                 return (
-                  <article
+                  <div
                     key={c.id}
-                    className={`df2-contract-card df2-card-interactive${selected ? " is-selected" : ""}`}
+                    className={`df2-contract-row df2-card-interactive${selected ? " selected" : ""}`}
                     onClick={() => openDrawer(c.id)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -260,63 +266,32 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
                     tabIndex={0}
                     aria-current={selected || undefined}
                   >
-                    <header className="df2-contract-card-head">
-                      <div>
-                        <h3 className="df2-contract-name">{c.name}</h3>
-                        <p className="df2-contract-meta">
-                          v{c.version} · {c.columns?.length || 0} columns · {c.mappings?.length || 0} mappings
-                          {breaker ? ` · breaker ${breaker}` : ""}
-                        </p>
-                      </div>
-                      <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
-                    </header>
-                    <div className="df2-contract-actions" onClick={(e) => e.stopPropagation()}>
-                      {(c.status === "draft" || c.status === "broken") && (
-                        <Button
-                          size="sm"
-                          variant="primary"
-                          disabled={busyId === c.id}
-                          onClick={() => void run(c.id, () => signContract(c.id), "Contract signed")}
-                        >
-                          Sign
-                        </Button>
-                      )}
-                      {c.status !== "deprecated" && (
-                        <Button
-                          size="sm"
-                          disabled={busyId === c.id}
-                          onClick={() => void run(c.id, () => deprecateContract(c.id), "Contract deprecated")}
-                        >
-                          Deprecate
-                        </Button>
-                      )}
-                      {showReset && (
-                        <Button
-                          size="sm"
-                          disabled={busyId === c.id}
-                          onClick={() => void run(c.id, () => resetContractBreaker(c.id), "Breaker reset")}
-                        >
-                          Reset breaker
-                        </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busyId === c.id}
-                        onClick={() => void exportOne(c)}
-                      >
-                        Export
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => openDrawer(c.id)}
-                        leadingIcon={<DtIcon name="arrow-right" size={14} />}
-                      >
-                        Open
-                      </Button>
+                    <span
+                      className={`df2-health-dot ${c.status === "signed" ? "ok" : c.status === "broken" ? "err" : ""}`}
+                      aria-hidden
+                    />
+                    <div className="df2-contract-row-identity">
+                      <span className="df2-contract-row-name" title={c.name}>{c.name}</span>
+                      <span className="df2-contract-row-meta">
+                        {breaker ? `Breaker ${breaker}` : "Schema agreement"}
+                      </span>
                     </div>
-                  </article>
+                    <span className="df2-contract-row-version">v{c.version}</span>
+                    <span className="df2-contract-row-schema">
+                      {c.columns?.length || 0} cols · {c.mappings?.length || 0} maps
+                    </span>
+                    <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
+                    <div className="df2-contract-row-quick" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="df2-contract-row-open"
+                        onClick={() => openDrawer(c.id)}
+                        aria-label={`Open ${c.name} details`}
+                      >
+                        <DtIcon name="chevron-right" size={16} />
+                      </button>
+                    </div>
+                  </div>
                 );
               })}
             </div>

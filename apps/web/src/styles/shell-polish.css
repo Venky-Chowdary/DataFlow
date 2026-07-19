@@ -1585,7 +1585,9 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-pipeline-grid > .df2-empty,
-.df2-pipeline-grid > .df2-loader-block {
+.df2-pipeline-grid > .df2-loader-block,
+.df2-pipeline-list > .df2-empty,
+.df2-pipeline-list > .df2-loader-block {
   grid-column: 1 / -1;
 }
 
