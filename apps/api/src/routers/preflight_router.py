@@ -291,3 +291,29 @@ async def classify_schema_drift(body: SchemaDriftRequest):
         return classify_schema_change(body.old_schema, body.new_schema)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CellPreviewRequest(BaseModel):
+    headers: list[str] = Field(default_factory=list)
+    sample_rows: list[list[Any]] = Field(default_factory=list)
+    mappings: list[dict[str, Any]] = Field(default_factory=list)
+    column_types: dict[str, str] = Field(default_factory=dict)
+    sample_size: int = Field(25, ge=1, le=200)
+
+
+@router.post("/preview-cells")
+async def preview_quarantine_cells(body: CellPreviewRequest):
+    """Cell-level quarantine/coerce preview before transfer run."""
+    from services.transform_engine import preview_quarantine_cells as _preview
+
+    try:
+        rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
+        return _preview(
+            headers=body.headers,
+            sample_rows=rows,
+            mappings=body.mappings,
+            column_types=body.column_types,
+            sample_size=body.sample_size,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

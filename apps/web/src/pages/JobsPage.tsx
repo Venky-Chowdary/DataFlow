@@ -588,9 +588,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       </div>
                     )}
 
-                    {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0) && (
+                    {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0 || selected.status === "completed_with_quarantine") && (
                       <div className="df2-jobs-v3-actions">
-                        <QuarantinePanel jobId={selected._id} rejectedRows={liveJob.rejected_rows} coercedNullRows={liveJob.coerced_null_rows} />
+                        <QuarantinePanel
+                          jobId={selected._id}
+                          rejectedRows={liveJob.rejected_rows}
+                          coercedNullRows={liveJob.coerced_null_rows}
+                          autoLoad
+                          initiallyOpen={selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0}
+                        />
                       </div>
                     )}
 

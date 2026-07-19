@@ -394,7 +394,11 @@ def _check_encoding_anomalies(
     Columns already mapped with ``strip_controls`` / ``normalize_unicode`` are skipped.
     """
     sanitized_cols = {
-        str(m.get("source"))
+        str(m.get("source") or "").lower()
+        for m in (mappings or [])
+        if str(m.get("transform") or "").lower() in {"strip_controls", "normalize_unicode"}
+    } | {
+        str(m.get("target") or "").lower()
         for m in (mappings or [])
         if str(m.get("transform") or "").lower() in {"strip_controls", "normalize_unicode"}
     }
@@ -406,7 +410,7 @@ def _check_encoding_anomalies(
         for col, val in row.items():
             if val is None:
                 continue
-            if str(col) in sanitized_cols:
+            if str(col).lower() in sanitized_cols:
                 continue
             text = cell_to_string(val)
             checked += 1

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
-import { explainPreflight } from "../../lib/api";
+import { explainPreflight, type CellPreviewResult } from "../../lib/api";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -104,6 +104,8 @@ interface ValidateDashboardProps {
   onStripControlChars?: () => void | Promise<void>;
   /** Soften to quarantine-friendly posture and re-run. */
   onQuarantineAndRerun?: () => void | Promise<void>;
+  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
+  cellPreview?: CellPreviewResult | null;
 }
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
@@ -330,6 +332,7 @@ export function ValidateDashboard({
   onApplyAction,
   onStripControlChars,
   onQuarantineAndRerun,
+  cellPreview = null,
 }: ValidateDashboardProps) {
   const [progress, setProgress] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
@@ -546,6 +549,31 @@ export function ValidateDashboard({
           )}
         </div>
       </header>
+
+      {cellPreview && (cellPreview.quarantine_count > 0 || cellPreview.coerce_count > 0) && (
+        <div className="df2-vd-cell-preview" aria-label="Sample cell quarantine preview">
+          <div className="df2-vd-cell-preview-head">
+            <strong>Sample cell preview</strong>
+            <span>
+              {cellPreview.quarantine_count} will quarantine · {cellPreview.coerce_count} will coerce ·{" "}
+              {cellPreview.sample_rows_scanned} rows scanned
+            </span>
+          </div>
+          <ul className="df2-vd-cell-preview-list">
+            {cellPreview.cells.slice(0, 8).map((cell, i) => (
+              <li key={`${cell.source}-${cell.row}-${i}`} className={`df2-vd-cell-preview-item is-${cell.status}`}>
+                <span className="df2-vd-cell-preview-status">{cell.status}</span>
+                <span>
+                  row {cell.row + 1} · {cell.source}→{cell.target}
+                  {cell.message ? ` — ${cell.message}` : ""}
+                  {cell.coerced != null ? ` → ${cell.coerced}` : ""}
+                </span>
+                {cell.raw ? <code title={cell.raw}>{cell.raw.slice(0, 48)}</code> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {!running && preflight && (
         <div className="df2-vd-metrics">

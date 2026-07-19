@@ -61,6 +61,25 @@ for _src in LIVE_SOURCE_DATABASES:
 
 
 def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest_format: str) -> tuple[bool, str]:
+    # Catalog honesty first — Planned brands must not inherit live from generic_sql/rest_api.
+    try:
+        from .connector_capabilities import assert_transfer_endpoint_honesty
+        honest, honest_msg = assert_transfer_endpoint_honesty(
+            source_kind, source_format, dest_kind, dest_format
+        )
+        if not honest:
+            return False, honest_msg
+    except Exception:
+        try:
+            from transfer.connector_capabilities import assert_transfer_endpoint_honesty
+            honest, honest_msg = assert_transfer_endpoint_honesty(
+                source_kind, source_format, dest_kind, dest_format
+            )
+            if not honest:
+                return False, honest_msg
+        except Exception:
+            pass
+
     def _resolve(fmt: str) -> str:
         try:
             from .connector_capabilities import resolve_driver_type
@@ -122,29 +141,40 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "csv", "database", "sqlite"),
     ("file", "csv", "database", "postgresql"),
     ("file", "csv", "database", "mongodb"),
+    ("file", "csv", "database", "mysql"),
     ("file", "csv", "file_export", "csv"),
     ("file", "csv", "file_export", "json"),
     ("file", "json", "database", "sqlite"),
     ("file", "json", "database", "postgresql"),
     ("file", "json", "database", "mongodb"),
+    ("file", "json", "database", "mysql"),
     ("file", "json", "file_export", "csv"),
     ("file", "json", "file_export", "json"),
     # Database sources
     ("database", "sqlite", "database", "sqlite"),
     ("database", "sqlite", "database", "postgresql"),
     ("database", "sqlite", "database", "mongodb"),
+    ("database", "sqlite", "database", "mysql"),
     ("database", "sqlite", "file_export", "csv"),
     ("database", "sqlite", "file_export", "json"),
     ("database", "postgresql", "database", "sqlite"),
     ("database", "postgresql", "database", "postgresql"),
     ("database", "postgresql", "database", "mongodb"),
+    ("database", "postgresql", "database", "mysql"),
     ("database", "postgresql", "file_export", "csv"),
     ("database", "postgresql", "file_export", "json"),
     ("database", "mongodb", "database", "sqlite"),
     ("database", "mongodb", "database", "postgresql"),
     ("database", "mongodb", "database", "mongodb"),
+    ("database", "mongodb", "database", "mysql"),
     ("database", "mongodb", "file_export", "csv"),
     ("database", "mongodb", "file_export", "json"),
+    ("database", "mysql", "database", "sqlite"),
+    ("database", "mysql", "database", "postgresql"),
+    ("database", "mysql", "database", "mongodb"),
+    ("database", "mysql", "database", "mysql"),
+    ("database", "mysql", "file_export", "csv"),
+    ("database", "mysql", "file_export", "json"),
 ]
 
 

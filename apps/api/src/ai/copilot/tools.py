@@ -422,6 +422,8 @@ class DataPilotTools:
         return ToolResult(name="list_jobs", success=True, output={"jobs": summary, "count": len(summary)})
 
     def _get_job(self, job_id: str = "") -> ToolResult:
+        from services.quarantine_from_preflight import merge_job_quarantine
+
         from ...services.mongodb_service import get_mongodb_service
 
         job = get_mongodb_service().get_job((job_id or "").strip())
@@ -432,15 +434,33 @@ class DataPilotTools:
                 output=None,
                 error=f"Job '{job_id}' not found. Ask the user for the job ID shown on Jobs / Job Theater.",
             )
+        quarantine = merge_job_quarantine(job)
+        row_ids = {d.get("row") for d in quarantine if d.get("row") is not None}
+        quarantine_row_count = len(row_ids) if row_ids else len(quarantine)
+        samples = [
+            {
+                "row": d.get("row"),
+                "column": d.get("column"),
+                "value": str(d.get("value") or "")[:120],
+                "reason": str(d.get("reason") or "")[:200],
+            }
+            for d in quarantine[:8]
+        ]
         remediations: list[dict[str, str]] = []
         err = str(job.get("error") or "").lower()
         status = str(job.get("status") or "").lower()
-        if status in {"failed", "cancelled"} or job.get("rejected_rows"):
-            if "format-control" in err or "encoding" in err or "control" in err:
+        q_blob = " ".join(str(s.get("reason") or "") for s in samples).lower()
+        if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
+            if "format-control" in err or "encoding" in err or "control" in err or "format-control" in q_blob:
                 remediations.append({
                     "kind": "normalize_control_chars",
                     "label": "Strip control characters and re-run validation",
                 })
+                remediations.append({
+                    "kind": "quarantine_and_rerun",
+                    "label": "Apply strip_controls + balanced quarantine posture",
+                })
+            remediations.append({"kind": "open_bad_data_fix", "label": "Open Fix bad data"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         return ToolResult(
@@ -454,8 +474,11 @@ class DataPilotTools:
                 "source_type": job.get("source_type"),
                 "destination_type": job.get("destination_type"),
                 "records_processed": job.get("records_processed", 0),
-                "rejected_rows": job.get("rejected_rows", 0),
+                "rejected_rows": int(job.get("rejected_rows") or 0) or quarantine_row_count,
                 "coerced_null_rows": job.get("coerced_null_rows", 0),
+                "quarantine_issue_count": len(quarantine),
+                "quarantine_row_count": quarantine_row_count,
+                "quarantine_samples": samples,
                 "progress_pct": job.get("progress_pct"),
                 "error": job.get("error"),
                 "created_at": str(job.get("created_at", "")),

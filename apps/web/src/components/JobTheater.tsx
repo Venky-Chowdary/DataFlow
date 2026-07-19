@@ -542,14 +542,32 @@ export function JobTheaterView({
         </div>
       )}
 
-      {rejectedRows > 0 && (
+      {(rejectedRows > 0 || isFailed || isQuarantine) && (
         <div className="df2-theater-v3-alert warn">
           <DtIcon name="alert" size={18} />
           <div>
-            <strong>{droppedRows > 0 ? `${droppedRows.toLocaleString()} rows rejected` : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}</strong>
-            <p>Review the quarantine details below and export them for remediation.</p>
+            <strong>
+              {isFailed
+                ? (rejectedRows > 0
+                  ? `${rejectedRows.toLocaleString()} problem row(s) — inspect findings`
+                  : "Inspect preflight / quarantine findings")
+                : droppedRows > 0
+                  ? `${droppedRows.toLocaleString()} rows rejected`
+                  : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
+            </strong>
+            <p>
+              {isFailed
+                ? "Open Inspect to see exact columns, sample values, and reasons (including format-control findings)."
+                : "Review the quarantine details below and export them for remediation."}
+            </p>
           </div>
-          <QuarantinePanel jobId={jobId} rejectedRows={rejectedRows} coercedNullRows={coercedNullRows} />
+          <QuarantinePanel
+            jobId={jobId}
+            rejectedRows={rejectedRows}
+            coercedNullRows={coercedNullRows}
+            autoLoad
+            initiallyOpen={isFailed || rejectedRows > 0}
+          />
         </div>
       )}
 

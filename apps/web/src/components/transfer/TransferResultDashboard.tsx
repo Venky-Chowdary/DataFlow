@@ -36,11 +36,19 @@ export function TransferResultDashboard({
   const { setActiveData } = useActiveData();
   const ds = result.destination_summary;
   const rec = result.records_transferred ?? 0;
-  const rejected = ds?.rejected_rows ?? result.reconciliation?.rejected_rows ?? 0;
+  const errDetails = (result.error_details || {}) as Record<string, unknown>;
+  const rejected = Number(
+    ds?.rejected_rows
+    ?? result.reconciliation?.rejected_rows
+    ?? errDetails.quarantine_row_count
+    ?? 0,
+  );
+  const issueFindings = Number(errDetails.quarantine_issue_count ?? 0);
   const coercedNull = ds?.coerced_null_rows ?? result.reconciliation?.coerced_null_rows ?? 0;
   // rejected_rows is the superset; rows kept-but-coerced are not dropped.
   const droppedRows = Math.max(rejected - coercedNull, 0);
   const hasIntegrityLoss = result.success && (rejected > 0 || coercedNull > 0);
+  const showQuarantine = Boolean(result.job_id) && (!result.success || hasIntegrityLoss || rejected > 0 || issueFindings > 0);
   const sourceRows = result.reconciliation?.source_rows ?? rec;
   const targetRows = result.reconciliation?.target_rows ?? rec;
   const passed = result.reconciliation?.passed ?? result.success;
@@ -144,10 +152,16 @@ export function TransferResultDashboard({
               <span>Source rows</span>
             </div>
           )}
-          {droppedRows > 0 && (
-            <div className="df2-result-stat-card warn" title="Rows isolated in quarantine — not written to the destination">
-              <strong>{droppedRows.toLocaleString()}</strong>
-              <span>Dropped / rejected</span>
+          {(droppedRows > 0 || (!result.success && (rejected > 0 || issueFindings > 0))) && (
+            <div className="df2-result-stat-card warn" title="Rows / findings isolated for inspection — not silently dropped">
+              <strong>{(droppedRows || rejected || issueFindings).toLocaleString()}</strong>
+              <span>{result.success ? "Dropped / rejected" : "Problem rows"}</span>
+            </div>
+          )}
+          {issueFindings > 0 && (
+            <div className="df2-result-stat-card warn" title="Cell-level integrity findings from preflight or write">
+              <strong>{issueFindings.toLocaleString()}</strong>
+              <span>Findings</span>
             </div>
           )}
           {coercedNull > 0 && (
@@ -290,8 +304,14 @@ export function TransferResultDashboard({
         )}
       </div>
 
-      {rejected > 0 && result.job_id && (
-        <QuarantinePanel jobId={result.job_id} rejectedRows={rejected} coercedNullRows={coercedNull} />
+      {showQuarantine && result.job_id && (
+        <QuarantinePanel
+          jobId={result.job_id}
+          rejectedRows={rejected || issueFindings}
+          coercedNullRows={coercedNull}
+          autoLoad
+          initiallyOpen={!result.success || rejected > 0 || issueFindings > 0}
+        />
       )}
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">

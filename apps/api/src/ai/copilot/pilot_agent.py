@@ -8,6 +8,8 @@ Answers any data question and performs work in the app when asked.
 from __future__ import annotations
 
 import json
+import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 
 from services.value_serializer import json_default
@@ -22,6 +24,10 @@ from .tools import (
     get_pilot_tools,
     infer_tools_from_message,
 )
+
+logger = logging.getLogger(__name__)
+_LLM_TURN_TIMEOUT_S = 45
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pilot-llm")
 
 
 class _UnavailableAnthropic:
@@ -122,23 +128,45 @@ class DataPilotAgent:
         ctx = self.context_builder.build(data_context, message)
         system = self._build_system_prompt(ctx)
 
+        def _timed(label: str, fn):
+            """Run an LLM path with a hard timeout so the UI never hangs."""
+            fut = _executor.submit(fn)
+            try:
+                return fut.result(timeout=_LLM_TURN_TIMEOUT_S)
+            except FuturesTimeout:
+                logger.warning("Data Pilot %s timed out after %ss — falling back", label, _LLM_TURN_TIMEOUT_S)
+                fut.cancel()
+                return None
+            except Exception as exc:
+                logger.warning("Data Pilot %s failed: %s", label, exc)
+                return None
+
         # Anthropic agent loop with tools
         if self.anthropic.is_available():
-            result = self._anthropic_agent_loop(message, history or [], system)
+            result = _timed(
+                "anthropic",
+                lambda: self._anthropic_agent_loop(message, history or [], system),
+            )
             if result:
                 return result
 
         # OpenAI fallback with tool results injected
-        openai_result = self._openai_agent(message, history or [], system, data_context)
+        openai_result = _timed(
+            "openai",
+            lambda: self._openai_agent(message, history or [], system, data_context),
+        )
         if openai_result:
             return openai_result
 
         # Ollama local LLM fallback
-        ollama_result = self._ollama_agent(message, history or [], system, data_context)
+        ollama_result = _timed(
+            "ollama",
+            lambda: self._ollama_agent(message, history or [], system, data_context),
+        )
         if ollama_result:
             return ollama_result
 
-        # Local agent: infer tools + data analyst + compose
+        # Local agent: infer tools + data analyst + compose (always returns)
         return self._local_agent(message, history or [], ctx, data_context)
 
     @staticmethod

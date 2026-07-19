@@ -37,13 +37,15 @@ import {
   mapTransferColumns,
   mapTransferPlan,
   preflightTransferPlan,
+  previewQuarantineCells,
   runPreflight,
   runUniversalTransfer,
   syncTransferPlanMappings,
   updateTransferPlan,
   uploadFile,
+  type CellPreviewResult,
 } from "../lib/api";
-import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, resolveDriverType } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType } from "../lib/connectorTypes";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
   buildPreflightMappings,
@@ -204,6 +206,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
@@ -252,6 +255,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   const [destSchemaMap, setDestSchemaMap] = useState<Record<string, string>>({});
   const [destSchemaLoading, setDestSchemaLoading] = useState(false);
   const [destTableExists, setDestTableExists] = useState<boolean | null>(null);
+  const [liveSourceTypes, setLiveSourceTypes] = useState<string[]>([]);
   const [liveDestTypes, setLiveDestTypes] = useState<{ id: string; label: string }[]>(
     () => FALLBACK_DEST_TYPES.map((id) => ({ id, label: getConnectorDefaults(id).label })),
   );
@@ -328,8 +332,13 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   useEffect(() => {
     fetchTransferCapabilities()
       .then((caps) => {
+        const sources = (caps.source_databases as string[] | undefined) ?? [];
         const dbs = (caps.destination_databases as string[] | undefined) ?? [];
         const exports = (caps.destination_file_formats as string[] | undefined) ?? [];
+        const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
+        if (sources.length || drivers.length) {
+          setLiveSourceTypes([...new Set([...sources, ...drivers])]);
+        }
         if (dbs.length) {
           setLiveDestTypes(dbs.map((id) => ({ id, label: getConnectorDefaults(id).label })));
         }
@@ -352,15 +361,34 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
   const destConnectors = connectors.filter((c) => getGenericSqlGroup(c.type) === getGenericSqlGroup(destType));
   const testedDestConnectors = destConnectors.filter((c) => c.last_test_ok !== false);
   const selectedDestConnector = destConnectors.find((c) => c.id === connectorId);
-  // Show every saved non-cloud, non-file connector. Capabilities must not hide
-  // connections the user already saved (catalog brand IDs ≠ connector.type).
+  // Honesty: only Certified / Source-only types (capabilities). Planned brands stay hidden.
+  const isLiveSourceType = (type: string) => {
+    if (!liveSourceTypes.length) {
+      // Capabilities not loaded yet — allow duplex live drivers from the client mirror.
+      return isTransferLiveType(type) || isTransferLiveType(resolveDriverType(type));
+    }
+    const driver = resolveDriverType(type);
+    return (
+      liveSourceTypes.includes(type) ||
+      liveSourceTypes.includes(driver) ||
+      CLOUD_SOURCE_TYPES.has(type)
+    );
+  };
+  const isLiveDestType = (type: string) => {
+    if (!liveDestTypes.length) {
+      return isTransferLiveType(type) || isTransferLiveType(resolveDriverType(type));
+    }
+    const driver = resolveDriverType(type);
+    return liveDestTypes.some((d) => d.id === type || d.id === driver);
+  };
   const dbSourceConnectors = connectors.filter((c) => {
     if (CLOUD_SOURCE_TYPES.has(c.type)) return false;
     const driver = resolveDriverType(c.type);
     if (FILE_FORMAT_SOURCE_TYPES.has(driver)) return false;
-    return true;
+    return isLiveSourceType(c.type);
   });
   const cloudSourceConnectors = connectors.filter((c) => CLOUD_SOURCE_TYPES.has(c.type));
+  const transferDestConnectors = connectors.filter((c) => isLiveDestType(c.type));
   const sourceConnector =
     sourceKind === "cloud"
       ? cloudSourceConnectors.find((c) => c.id === sourceConnectorId)
@@ -375,6 +403,42 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     : (transferPlan?.source_schema ?? parsed?.schema ?? {});
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
+
+  useEffect(() => {
+    if (step !== STEP_VALIDATE) return;
+    const headers = currentSourceColumns;
+    const rows = samplePreviewRows;
+    if (!headers.length || !rows.length || !columnMappings.length) {
+      setCellPreview(null);
+      return;
+    }
+    const sample_rows = rows.slice(0, 25).map((row) =>
+      headers.map((h) => (row[h] == null ? "" : String(row[h]))),
+    );
+    let cancelled = false;
+    previewQuarantineCells({
+      headers,
+      sample_rows,
+      mappings: columnMappings.map((m) => ({
+        source: m.source,
+        target: m.target,
+        transform: m.transform || undefined,
+        target_type: m.destType || undefined,
+      })),
+      column_types: (currentSourceSchema || {}) as Record<string, string>,
+      sample_size: 25,
+    })
+      .then((res) => {
+        if (!cancelled) setCellPreview(res);
+      })
+      .catch(() => {
+        if (!cancelled) setCellPreview(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns]);
+
   const cursorCandidate = findColumn(currentSourceColumns, [
     /^updated_at$/i,
     /^modified_at$/i,
@@ -1340,7 +1404,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     normalize_unicode: "strip_controls",
   };
 
-  const stripControlCharsAndRerun = async () => {
+  const stripControlCharsAndRerun = async (modeOverride?: ValidationMode) => {
     const typed = new Set<MappingTransform>([
       "cast_number",
       "cast_boolean",
@@ -1362,17 +1426,19 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
       message: `Applied strip_controls to ${applied} text mapping${applied === 1 ? "" : "s"}. Re-running validation…`,
       tone: "success",
     });
-    await executePreflight(next);
+    await executePreflight(next, modeOverride ?? validationMode);
   };
 
   const quarantineAndRerun = async () => {
+    // Balanced alone is not enough: Run used to re-preflight as strict. Always
+    // apply strip_controls so U+200B/etc are sanitized before Snowflake write.
     setValidationMode("balanced");
     toast({
-      title: "Quarantine posture",
-      message: "Switched to balanced validation so control-character findings warn and quarantine instead of hard-blocking. Re-running…",
+      title: "Quarantine + strip controls",
+      message: "Applying strip_controls and balanced validation so format-control characters are sanitized before run…",
       tone: "info",
     });
-    await executePreflight(undefined, "balanced");
+    await stripControlCharsAndRerun("balanced");
   };
 
   /** Map an AI `suggested_action` onto the real Studio controls. */
@@ -2536,7 +2602,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
           ) : (
             <>
           <DestinationPicker
-            connectors={connectors}
+            connectors={transferDestConnectors}
             connectorId={connectorId}
             destType={destType}
             liveDestTypes={liveDestTypes}
@@ -2906,6 +2972,7 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
             onApplyAction={applySuggestedAction}
             onStripControlChars={stripControlCharsAndRerun}
             onQuarantineAndRerun={quarantineAndRerun}
+            cellPreview={cellPreview}
           />
         </div>
       )}

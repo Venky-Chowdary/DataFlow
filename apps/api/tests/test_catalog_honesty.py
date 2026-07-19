@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from src.transfer.connector_capabilities import (
+    assert_transfer_endpoint_honesty,
     certification_tier,
+    endpoint_allowed_for_role,
     enrich_catalog_entry,
     resolve_driver_type,
 )
+from src.transfer.registry import validate_transfer
 
 
 def test_rest_api_brand_alias_is_planned_not_live() -> None:
@@ -63,6 +66,28 @@ def test_uncertified_generic_sql_brands_are_planned() -> None:
         assert row["transfer_ready"] is False, brand
         assert row["effective_status"] == "planned", brand
         assert row["certification_tier"] == "planned", brand
+
+
+def test_planned_brand_blocked_as_transfer_endpoint() -> None:
+    ok, msg = endpoint_allowed_for_role("db2", "source")
+    assert ok is False
+    assert "Planned" in msg
+
+    ok, msg = endpoint_allowed_for_role("hubspot", "destination")
+    assert ok is False
+    assert "source-only" in msg.lower()
+
+    ok, msg = endpoint_allowed_for_role("hubspot", "source")
+    assert ok is True
+
+    ok, msg = endpoint_allowed_for_role("postgresql", "destination")
+    assert ok is True
+
+    honest, _ = assert_transfer_endpoint_honesty("database", "db2", "database", "postgresql")
+    assert honest is False
+    route_ok, route_msg = validate_transfer("database", "db2", "database", "postgresql")
+    assert route_ok is False
+    assert "Planned" in route_msg
 
 
 def test_catalog_search_live_is_certified_only() -> None:

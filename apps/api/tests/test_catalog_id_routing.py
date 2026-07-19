@@ -97,5 +97,11 @@ def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: l
 
 
 def test_live_catalog_count_matches_health_manifest():
+    """Certified transfer_ready only — not inflated roadmap aliases."""
     live = _all_live_catalog_ids()
-    assert len(live) >= 130, f"Expected at least 130 live catalog IDs, got {len(live)}"
+    assert 40 <= len(live) <= 200, (
+        f"Expected a honest certified live set (40–200), got {len(live)}"
+    )
+    # Planned brands must never appear under status=live.
+    for brand in ("db2", "teradata", "zendesk", "shopify"):
+        assert brand not in live, brand

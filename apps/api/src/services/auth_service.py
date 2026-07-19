@@ -81,14 +81,25 @@ def _admin_user_from_env() -> dict[str, str] | None:
     return dict(user)
 
 
+_AUTH_USERS_JSON_WARNED = False
+
+
 def _users_from_auth_users_env() -> list[dict[str, str]]:
+    global _AUTH_USERS_JSON_WARNED
     raw = os.getenv("DATAFLOW_AUTH_USERS", "").strip()
     if not raw:
         return []
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("DATAFLOW_AUTH_USERS is set but is not valid JSON — ignoring")
+        if not _AUTH_USERS_JSON_WARNED:
+            logger.warning(
+                "DATAFLOW_AUTH_USERS is set but is not valid JSON — ignoring "
+                "(fix once: use a JSON array like "
+                '[{\"email\":\"a@b.c\",\"password\":\"…\",\"role\":\"admin\"}] '
+                "or clear the variable and rely on DATAFLOW_ADMIN_*)"
+            )
+            _AUTH_USERS_JSON_WARNED = True
         return []
     if not isinstance(data, list):
         return []

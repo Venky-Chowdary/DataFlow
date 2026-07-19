@@ -604,19 +604,28 @@ async def run_universal_transfer(
         data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
     )
+    # Explicit form fields win over stored plan policies (plan used to force
+    # validation_mode=strict and re-block encoding after Studio quarantine).
+    form_validation_mode = (validation_mode or "").strip()
+    form_sync_mode = (sync_mode or "").strip()
+    form_schema_policy = (schema_policy or "").strip()
+
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import build_run_payload
         from services.transfer_plan_store import attach_job
 
         try:
             payload = build_run_payload(plan_id.strip())
-            request_obj.mappings = payload["mappings"]
             if not mappings_json.strip():
+                request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
-            request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
-            request_obj.schema_policy = policies.get("schema_policy", request_obj.schema_policy)
-            request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
+            if not form_sync_mode:
+                request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
+            if not form_schema_policy:
+                request_obj.schema_policy = policies.get("schema_policy", request_obj.schema_policy)
+            if not form_validation_mode:
+                request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip():
@@ -627,6 +636,12 @@ async def run_universal_transfer(
                 request_obj.mappings = parsed
         except Exception:
             pass
+    if form_validation_mode:
+        request_obj.validation_mode = form_validation_mode
+    if form_sync_mode:
+        request_obj.sync_mode = form_sync_mode
+    if form_schema_policy:
+        request_obj.schema_policy = form_schema_policy
     if stream_contracts_json.strip():
         try:
             import json as _json

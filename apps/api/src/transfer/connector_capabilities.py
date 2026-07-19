@@ -636,7 +636,7 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def source_ready(caps: dict[str, bool]) -> bool:
-    """True when connector can act as a transfer source."""
+    """True when connector can act as a transfer source (duplex / file)."""
     if caps.get("file_source"):
         return True
     return bool(caps.get("read") and caps.get("write") and not caps.get("dest_only"))
@@ -647,6 +647,86 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     if caps.get("file_export"):
         return True
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")))
+
+
+def endpoint_allowed_for_role(catalog_id: str, role: str) -> tuple[bool, str]:
+    """Hard gate so Planned / wrong-role catalog IDs cannot run transfers.
+
+    Uses the *selected* catalog/brand id (e.g. ``db2``), not only the resolved
+    driver (``generic_sql``), so marketing aliases cannot bypass honesty.
+    """
+    cid = (catalog_id or "").lower().strip()
+    if not cid:
+        return False, "Missing connector type"
+    role_norm = (role or "").lower().strip()
+    if role_norm not in ("source", "destination"):
+        return False, f"Unknown endpoint role: {role}"
+
+    # File formats are first-class transfer sources/exports.
+    if cid in _FILE_CAPS:
+        caps = _FILE_CAPS[cid]
+        if role_norm == "source" and caps.get("file_source"):
+            return True, "supported"
+        if role_norm == "destination" and (caps.get("file_export") or caps.get("write")):
+            return True, "supported"
+        return False, f"{cid} cannot be used as a transfer {role_norm}"
+
+    row = enrich_catalog_entry(
+        {
+            "id": cid,
+            "name": cid,
+            "category": "database",
+            "status": "planned",
+            "description": "",
+        }
+    )
+    tier = row.get("certification_tier") or "planned"
+    caps = row.get("capabilities") or {}
+    label = row.get("capability_label") or tier
+
+    if tier == "planned":
+        return False, (
+            f"{cid} is Planned ({label}) — not available for production transfer. "
+            "Choose a Certified or Source-only connector."
+        )
+    if tier == "connect_only":
+        return False, f"{cid} supports connection test only — not transfer."
+
+    if role_norm == "source":
+        if tier == "source_only" or source_ready(caps) or _source_only_ready(caps):
+            if caps.get("dest_only"):
+                return False, f"{cid} is destination-only and cannot be a source"
+            return True, "supported"
+        return False, f"{cid} cannot be used as a transfer source"
+
+    # destination
+    if tier == "source_only":
+        return False, f"{cid} is source-only and cannot be a destination"
+    if dest_ready(caps) and (row.get("transfer_ready") or caps.get("dest_only")):
+        return True, "supported"
+    if dest_ready(caps) and tier == "certified":
+        return True, "supported"
+    return False, f"{cid} cannot be used as a transfer destination"
+
+
+def assert_transfer_endpoint_honesty(
+    source_kind: str,
+    source_format: str,
+    dest_kind: str,
+    dest_format: str,
+) -> tuple[bool, str]:
+    """Validate catalog honesty for both ends of a transfer route."""
+    sk = (source_kind or "").lower().strip()
+    dk = (dest_kind or "").lower().strip()
+    if sk == "database":
+        ok, msg = endpoint_allowed_for_role(source_format, "source")
+        if not ok:
+            return False, msg
+    if dk == "database":
+        ok, msg = endpoint_allowed_for_role(dest_format, "destination")
+        if not ok:
+            return False, msg
+    return True, "supported"
 
 
 def transfer_live_driver_types() -> list[str]:

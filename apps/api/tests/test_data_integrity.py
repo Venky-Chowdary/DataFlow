@@ -254,3 +254,17 @@ def test_strip_controls_clears_encoding_block():
     assert enc is not None
     assert enc["blocks_transfer"] is False
     assert not enc["issues"]
+
+
+def test_strip_controls_skip_is_case_insensitive():
+    zwsp = "hello\u200bworld"
+    report = run_integrity_audit(
+        source_columns=["Description"],
+        mappings=[{"source": "Description", "target": "DESCRIPTION", "confidence": 0.99, "transform": "strip_controls"}],
+        sample_rows=[{"Description": zwsp}],
+        validation_mode="strict",
+    )
+    enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)
+    assert enc is not None
+    assert enc["blocks_transfer"] is False
+    assert not enc["issues"]

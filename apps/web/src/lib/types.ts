@@ -126,6 +126,8 @@ export interface TransferJob {
   message?: string;
   operation?: string;
   error?: string;
+  rejected_rows?: number;
+  coerced_null_rows?: number;
   chunk_current?: number;
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
@@ -396,6 +398,7 @@ export interface TransferResult {
   ddl_executed?: string[];
   operation?: string;
   error?: string;
+  error_details?: Record<string, unknown>;
   reconciliation?: {
     passed?: boolean;
     message?: string;

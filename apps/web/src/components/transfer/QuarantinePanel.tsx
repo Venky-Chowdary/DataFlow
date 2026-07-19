@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { exportJobQuarantine, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
@@ -9,6 +9,8 @@ export interface QuarantinePanelProps {
   /** Distinct rows where a value was coerced to NULL (kept, but fidelity lost). */
   coercedNullRows?: number;
   initiallyOpen?: boolean;
+  /** When true, always attempt load (failed preflight jobs often have issue rows). */
+  autoLoad?: boolean;
 }
 
 type QuarantineRow = {
@@ -19,6 +21,8 @@ type QuarantineRow = {
   reason?: string;
   policy?: string;
   values?: Record<string, string>;
+  chars?: string[];
+  suggested_transform?: string;
 };
 
 function summarizeReasons(rows: QuarantineRow[]) {
@@ -27,15 +31,34 @@ function summarizeReasons(rows: QuarantineRow[]) {
     const key = r.reason?.trim() || "Unknown validation failure";
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
 }
 
-export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiallyOpen = false }: QuarantinePanelProps) {
+function summarizeColumns(rows: QuarantineRow[]) {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = (r.column || r.target || "unknown").trim();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+}
+
+export function QuarantinePanel({
+  jobId,
+  rejectedRows,
+  coercedNullRows,
+  initiallyOpen = false,
+  autoLoad = false,
+}: QuarantinePanelProps) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(initiallyOpen);
+  const [open, setOpen] = useState(initiallyOpen || autoLoad);
   const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [rows, setRows] = useState<QuarantineRow[]>([]);
+  const [issueCount, setIssueCount] = useState(0);
+  const [rowCount, setRowCount] = useState(rejectedRows ?? 0);
+  const [source, setSource] = useState<string>("none");
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [replayResult, setReplayResult] = useState<{
@@ -48,14 +71,25 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
     setLoading(true);
     try {
       const data = await fetchJobQuarantine(jobId);
-      setRows(data.quarantine);
+      setRows(data.quarantine || []);
+      setIssueCount(data.issue_count ?? data.quarantine?.length ?? 0);
+      setRowCount(data.rejected_rows ?? 0);
+      setSource(data.source || "none");
       setOpen(true);
+      setLoaded(true);
     } catch (e) {
       toast({ title: "Could not load quarantine", message: (e as Error).message, tone: "error" });
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (autoLoad || initiallyOpen) {
+      void load();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per job
+  }, [jobId, autoLoad, initiallyOpen]);
 
   const download = async () => {
     try {
@@ -115,36 +149,54 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
   };
 
   const topReasons = summarizeReasons(rows);
+  const topColumns = summarizeColumns(rows);
+  const displayRowCount = rowCount || (rejectedRows ?? 0) || issueCount;
+  const canReplay = source === "write" && rows.length > 0;
 
   return (
     <div className="df2-quarantine-panel">
       <div className="df2-quarantine-explainer">
         <DtIcon name="warning" size={18} />
         <div>
-          <strong>What is quarantine?</strong>
+          <strong>Quarantine / bad-data findings</strong>
           <p>
-            Rows that fail validation during load are isolated — not silently dropped. Each row records the column,
-            offending value, validation policy, and reason so you can fix source data or mapping rules and retry.
+            Bad cells are never silently dropped. Each finding records row, column, sample value, and reason
+            so you can strip controls, fix mappings, or edit and replay.
           </p>
-          {rejectedRows != null && rejectedRows > 0 && (
+          <div className="df2-quarantine-explainer-metrics" aria-label="Quarantine counts">
             <span className="df2-quarantine-explainer-count">
-              {rejectedRows.toLocaleString()} row{rejectedRows === 1 ? "" : "s"} quarantined for this job
-              {coercedNullRows != null && coercedNullRows > 0 && (
-                <> · {coercedNullRows.toLocaleString()} had a value coerced to NULL (not full fidelity)</>
-              )}
+              <strong>{displayRowCount.toLocaleString()}</strong> row{displayRowCount === 1 ? "" : "s"} with issues
             </span>
-          )}
+            <span className="df2-quarantine-explainer-count">
+              <strong>{(loaded ? issueCount : rejectedRows ?? 0).toLocaleString()}</strong> finding{(loaded ? issueCount : rejectedRows ?? 0) === 1 ? "" : "s"}
+            </span>
+            {coercedNullRows != null && coercedNullRows > 0 && (
+              <span className="df2-quarantine-explainer-count">
+                <strong>{coercedNullRows.toLocaleString()}</strong> coerced to NULL
+              </span>
+            )}
+            {source !== "none" && loaded && (
+              <span className="df2-quarantine-explainer-count">
+                Source: {source === "preflight" ? "preflight / integrity" : "write-time reject"}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
       {!open && (
         <button
           type="button"
-          className="df2-btn df2-btn-sm"
+          className="df2-btn df2-btn-sm df2-btn-primary"
           onClick={() => void load()}
           disabled={loading}
         >
-          <DtIcon name="warning" size={14} /> {loading ? "Loading…" : rejectedRows ? `Inspect ${rejectedRows.toLocaleString()} quarantined rows` : "Inspect quarantine"}
+          <DtIcon name="warning" size={14} />{" "}
+          {loading
+            ? "Loading…"
+            : displayRowCount > 0
+              ? `Inspect ${displayRowCount.toLocaleString()} problem row${displayRowCount === 1 ? "" : "s"}`
+              : "Inspect quarantine / findings"}
         </button>
       )}
 
@@ -153,29 +205,42 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
           <header className="df2-job-log-panel-head">
             <div className="df2-job-log-panel-title">
               <DtIcon name="warning" size={14} />
-              <strong>Quarantine detail</strong>
-              <span className="df2-job-log-count">{rows.length} rows</span>
+              <strong>Inspect findings</strong>
+              <span className="df2-job-log-count">
+                {issueCount.toLocaleString()} finding{issueCount === 1 ? "" : "s"}
+                {displayRowCount > 0 ? ` · ${displayRowCount.toLocaleString()} rows` : ""}
+              </span>
             </div>
             <div className="df2-job-log-actions">
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-primary"
-                onClick={() => void replay()}
-                disabled={replaying || rows.length === 0}
-              >
-                <DtIcon name="transfer" size={14} /> {replaying ? "Replaying…" : "Replay"}
-              </button>
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void download()}>
+              {canReplay && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-primary"
+                  onClick={() => void replay()}
+                  disabled={replaying || rows.length === 0}
+                >
+                  <DtIcon name="transfer" size={14} /> {replaying ? "Replaying…" : "Replay"}
+                </button>
+              )}
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void download()} disabled={rows.length === 0}>
                 <DtIcon name="download" size={14} /> Export CSV
+              </button>
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void load()} disabled={loading}>
+                Refresh
               </button>
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setOpen(false)}>Close</button>
             </div>
           </header>
 
-          {topReasons.length > 0 && (
+          {(topReasons.length > 0 || topColumns.length > 0) && (
             <div className="df2-quarantine-summary">
+              {topColumns.map(([col, count]) => (
+                <span key={`c-${col}`} className="df2-quarantine-summary-chip">
+                  <strong>{count.toLocaleString()}</strong> in {col}
+                </span>
+              ))}
               {topReasons.map(([reason, count]) => (
-                <span key={reason} className="df2-quarantine-summary-chip">
+                <span key={`r-${reason}`} className="df2-quarantine-summary-chip">
                   <strong>{count.toLocaleString()}</strong> {reason}
                 </span>
               ))}
@@ -194,8 +259,13 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
           )}
 
           <div className="df2-job-log-panel-body" role="log">
-            {rows.length === 0 ? (
-              <div className="df2-job-log-empty">No quarantined rows recorded for this job.</div>
+            {loading && !loaded ? (
+              <div className="df2-job-log-empty">Loading findings…</div>
+            ) : rows.length === 0 ? (
+              <div className="df2-job-log-empty">
+                No row-level findings were stored for this job. If Validate blocked on encoding, re-run after
+                deploying the latest API so preflight issues are saved into quarantine.
+              </div>
             ) : (
               <table className="df2-query-table">
                 <thead>
@@ -211,17 +281,22 @@ export function QuarantinePanel({ jobId, rejectedRows, coercedNullRows, initiall
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
-                    <tr key={i}>
+                    <tr key={`${r.row}-${r.column}-${i}`}>
                       <td>{r.row ?? "—"}</td>
                       <td>{r.column || "—"}</td>
                       <td>{r.target || "—"}</td>
-                      <td className="df2-quarantine-value" title={String(r.value ?? "")}>{String(r.value ?? "")}</td>
+                      <td className="df2-quarantine-value" title={String(r.value ?? "")}>
+                        {String(r.value ?? "")}
+                        {r.chars?.length ? ` (${r.chars.join(", ")})` : ""}
+                      </td>
                       <td>{r.reason || "—"}</td>
                       <td>{r.policy || "—"}</td>
                       <td>
-                        <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => openEdit(i)}>
-                          Edit
-                        </button>
+                        {canReplay && (
+                          <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => openEdit(i)}>
+                            Edit
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}

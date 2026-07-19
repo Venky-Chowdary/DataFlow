@@ -132,6 +132,66 @@ from services.checkpoint_service import (
 logger = logging.getLogger("dataflow.transfer")
 
 
+def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
+    """Mark job failed at preflight and persist inspectable quarantine rows."""
+    from services.quarantine_from_preflight import quarantine_rows_from_preflight
+
+    decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
+    blocker_reasons = [b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)]
+    qrows = quarantine_rows_from_preflight(pf)
+    row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
+    rejected_rows = len(row_ids) if row_ids else len(qrows)
+    error_details = {
+        "reason": "Preflight blocked transfer",
+        "blockers": blocker_reasons,
+        "guidance": [
+            {
+                "gate": b.get("id"),
+                "message": b.get("message"),
+                "why": (b.get("guidance") or {}).get("why", ""),
+                "fix": (b.get("guidance") or {}).get("fix", ""),
+            }
+            for b in pf.get("blockers", [])
+            if isinstance(b, dict) and b.get("guidance")
+        ],
+        "proof_bundle": {
+            "decision": decision.get("decision"),
+            "reason": decision.get("reason"),
+            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
+            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
+            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
+            "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get("risk_score"),
+        },
+        "readiness_score": pf.get("readiness_score"),
+        "validation_plan": pf.get("validation_plan"),
+        "payload_shape": pf.get("payload_shape"),
+        "quarantine_issue_count": len(qrows),
+        "quarantine_row_count": rejected_rows,
+    }
+    error_message = decision.get("reason") or "; ".join(str(x) for x in blocker_reasons if x) or "Preflight blocked transfer"
+    lineage.emit_preflight_completed(
+        run_id=job_id, passed=False,
+        readiness_score=pf.get("readiness_score", 0),
+        blockers=pf.get("blockers", []),
+        validation_plan=pf.get("validation_plan"),
+    )
+    lineage.emit_run_failed(
+        run_id=job_id, job_id=job_id, error=error_message,
+        error_details=error_details,
+    )
+    mongo.update_job_status(
+        job_id, "failed",
+        error=error_message,
+        phase="failed",
+        progress_pct=0,
+        error_details=error_details,
+        preflight=pf,
+        rejected_details=qrows,
+        rejected_rows=rejected_rows,
+    )
+    return error_message, error_details
+
+
 def _coalesce_sort_value(value: Any) -> Any:
     """Return a tuple that sorts None/empty values last regardless of direction."""
     if value is None or value == "":
@@ -711,6 +771,7 @@ class UniversalTransferEngine:
                     destination_table_exists=bool(dest_schema_types),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
+                    validation_mode=request.validation_mode,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -742,50 +803,7 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
-                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
-                    error_details = {
-                        "reason": "Preflight blocked transfer",
-                        "blockers": blocker_reasons,
-                        "guidance": [
-                            {
-                                "gate": b.get("id"),
-                                "message": b.get("message"),
-                                "why": (b.get("guidance") or {}).get("why", ""),
-                                "fix": (b.get("guidance") or {}).get("fix", ""),
-                            }
-                            for b in pf.get("blockers", [])
-                            if b.get("guidance")
-                        ],
-                        "proof_bundle": {
-                            "decision": decision.get("decision"),
-                            "reason": decision.get("reason"),
-                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
-                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
-                        },
-                        "readiness_score": pf.get("readiness_score"),
-                        "validation_plan": pf.get("validation_plan"),
-                        "payload_shape": pf.get("payload_shape"),
-                    }
-                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
-                    lineage.emit_preflight_completed(
-                        run_id=job_id, passed=False,
-                        readiness_score=pf.get("readiness_score", 0),
-                        blockers=pf.get("blockers", []),
-                        validation_plan=pf.get("validation_plan"),
-                    )
-                    lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=error_message,
-                        error_details=error_details,
-                    )
-                    mongo.update_job_status(
-                        job_id, "failed", error=error_message,
-                        phase="failed", progress_pct=0,
-                        error_details=error_details,
-                        preflight=pf,
-                    )
+                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -1215,6 +1233,7 @@ class UniversalTransferEngine:
                     destination_table_exists=bool(dest_schema_types),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
+                    validation_mode=request.validation_mode,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1246,50 +1265,7 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
-                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
-                    error_details = {
-                        "reason": "Preflight blocked transfer",
-                        "blockers": blocker_reasons,
-                        "guidance": [
-                            {
-                                "gate": b.get("id"),
-                                "message": b.get("message"),
-                                "why": (b.get("guidance") or {}).get("why", ""),
-                                "fix": (b.get("guidance") or {}).get("fix", ""),
-                            }
-                            for b in pf.get("blockers", [])
-                            if b.get("guidance")
-                        ],
-                        "proof_bundle": {
-                            "decision": decision.get("decision"),
-                            "reason": decision.get("reason"),
-                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
-                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
-                        },
-                        "readiness_score": pf.get("readiness_score"),
-                        "validation_plan": pf.get("validation_plan"),
-                        "payload_shape": pf.get("payload_shape"),
-                    }
-                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
-                    lineage.emit_preflight_completed(
-                        run_id=job_id, passed=False,
-                        readiness_score=pf.get("readiness_score", 0),
-                        blockers=pf.get("blockers", []),
-                        validation_plan=pf.get("validation_plan"),
-                    )
-                    lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=error_message,
-                        error_details=error_details,
-                    )
-                    mongo.update_job_status(
-                        job_id, "failed", error=error_message,
-                        phase="failed", progress_pct=0,
-                        error_details=error_details,
-                        preflight=pf,
-                    )
+                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
                     return TransferResult(
                         success=False,
                         error=error_message,
@@ -1606,6 +1582,7 @@ class UniversalTransferEngine:
                     destination_table_exists=bool(dest_schema_types),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
+                    validation_mode=request.validation_mode,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1637,50 +1614,7 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
                 if not pf["passed"]:
-                    decision = pf.get("proof_bundle", {}).get("transfer_decision", {}) or {}
-                    blocker_reasons = [b.get("message") for b in pf.get("blockers", [])]
-                    error_details = {
-                        "reason": "Preflight blocked transfer",
-                        "blockers": blocker_reasons,
-                        "guidance": [
-                            {
-                                "gate": b.get("id"),
-                                "message": b.get("message"),
-                                "why": (b.get("guidance") or {}).get("why", ""),
-                                "fix": (b.get("guidance") or {}).get("fix", ""),
-                            }
-                            for b in pf.get("blockers", [])
-                            if b.get("guidance")
-                        ],
-                        "proof_bundle": {
-                            "decision": decision.get("decision"),
-                            "reason": decision.get("reason"),
-                            "semantic_mapping_score": pf.get("proof_bundle", {}).get("semantic_mapping_score"),
-                            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-                            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-                            "compliance_risk": pf.get("proof_bundle", {}).get("compliance", {}).get("risk_score"),
-                        },
-                        "readiness_score": pf.get("readiness_score"),
-                        "validation_plan": pf.get("validation_plan"),
-                        "payload_shape": pf.get("payload_shape"),
-                    }
-                    error_message = decision.get("reason") or "; ".join(blocker_reasons) or "Preflight blocked transfer"
-                    lineage.emit_preflight_completed(
-                        run_id=job_id, passed=False,
-                        readiness_score=pf.get("readiness_score", 0),
-                        blockers=pf.get("blockers", []),
-                        validation_plan=pf.get("validation_plan"),
-                    )
-                    lineage.emit_run_failed(
-                        run_id=job_id, job_id=job_id, error=error_message,
-                        error_details=error_details,
-                    )
-                    mongo.update_job_status(
-                        job_id, "failed", error=error_message,
-                        phase="failed", progress_pct=0,
-                        error_details=error_details,
-                        preflight=pf,
-                    )
+                    error_message, error_details = _fail_job_preflight(mongo, job_id, pf, lineage=lineage)
                     return TransferResult(
                         success=False,
                         error=error_message,

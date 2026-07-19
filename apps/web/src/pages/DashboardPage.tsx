@@ -310,6 +310,7 @@ export function DashboardPage({
                           <th>Status</th>
                           <th className="df2-col-progress">Progress</th>
                           <th>Rows</th>
+                          <th>Quarantine</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -325,6 +326,15 @@ export function DashboardPage({
                             <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                             <td className="df2-col-progress"><JobProgressCell job={job} /></td>
                             <td className="df2-overview-rows">{job.records_processed?.toLocaleString() ?? "—"}</td>
+                            <td className="df2-overview-rows">
+                              {(job.rejected_rows ?? 0) > 0 ? (
+                                <span className="df2-badge df2-badge-warn" title="Open Jobs → Inspect quarantine for row-level findings">
+                                  {(job.rejected_rows ?? 0).toLocaleString()}
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>

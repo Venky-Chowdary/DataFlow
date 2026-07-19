@@ -786,3 +786,82 @@ def dry_run_sample(
                 break
 
     return len(errors) == 0, errors[:25]
+
+
+def preview_quarantine_cells(
+    *,
+    headers: list[str],
+    sample_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    sample_size: int = 25,
+    max_cells: int = 120,
+) -> dict:
+    """Cell-level preview: which sample values will quarantine / coerce before run.
+
+    Operators use this so Validate feels trustworthy vs silent Airbyte/Fivetran loads.
+    """
+    column_types = column_types or {}
+    source_idx = {h: i for i, h in enumerate(headers)}
+    cells: list[dict] = []
+    quarantine_count = 0
+    coerce_count = 0
+    ok_count = 0
+
+    for m in mappings:
+        src = m.get("source") or ""
+        tgt = m.get("target") or src
+        idx = source_idx.get(src)
+        if idx is None:
+            continue
+        samples = [str(r[idx]) for r in sample_rows[:sample_size] if idx < len(r)]
+        transform = m.get("transform") or infer_transform_for_mapping(
+            src,
+            tgt,
+            column_types.get(src, "VARCHAR"),
+            m.get("target_type") or column_types.get(tgt),
+            source_samples=samples,
+        )
+        for row_i, row in enumerate(sample_rows[:sample_size]):
+            if len(cells) >= max_cells:
+                break
+            raw = row[idx] if idx < len(row) else ""
+            raw_s = "" if raw is None else str(raw)
+            out, err = apply_transform(raw_s, transform)
+            if err:
+                quarantine_count += 1
+                cells.append({
+                    "row": row_i,
+                    "source": src,
+                    "target": tgt,
+                    "raw": raw_s[:200],
+                    "status": "quarantine",
+                    "message": err,
+                    "transform": transform,
+                })
+            elif out is not None and str(out) != raw_s:
+                coerce_count += 1
+                ok_count += 1
+                cells.append({
+                    "row": row_i,
+                    "source": src,
+                    "target": tgt,
+                    "raw": raw_s[:200],
+                    "coerced": str(out)[:200],
+                    "status": "coerced",
+                    "transform": transform,
+                })
+            else:
+                ok_count += 1
+        if len(cells) >= max_cells:
+            break
+
+    # Prefer surfacing quarantine/coerced cells; drop pure-ok noise.
+    interesting = [c for c in cells if c["status"] != "ok"]
+    return {
+        "quarantine_count": quarantine_count,
+        "coerce_count": coerce_count,
+        "ok_count": ok_count,
+        "cells": interesting[:max_cells],
+        "sample_rows_scanned": min(sample_size, len(sample_rows)),
+    }

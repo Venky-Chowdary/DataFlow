@@ -183,7 +183,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     )
 
     policies = plan.policies
-    validation_mode = policies.get("validation_mode", "strict")
+    validation_mode = policies.get("validation_mode", "balanced")
     threshold = confidence_threshold_for_mode(validation_mode)
 
     sample_rows = plan.sample_rows or None

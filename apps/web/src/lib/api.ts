@@ -164,6 +164,40 @@ export async function explainPreflight(payload: {
   return res.json();
 }
 
+export type CellPreviewResult = {
+  quarantine_count: number;
+  coerce_count: number;
+  ok_count: number;
+  sample_rows_scanned: number;
+  cells: Array<{
+    row: number;
+    source: string;
+    target: string;
+    raw: string;
+    coerced?: string;
+    status: "quarantine" | "coerced" | string;
+    message?: string;
+    transform?: string;
+  }>;
+};
+
+/** Cell-level will-quarantine / will-coerce preview before run. */
+export async function previewQuarantineCells(payload: {
+  headers: string[];
+  sample_rows: string[][];
+  mappings: Array<{ source: string; target: string; transform?: string | null; target_type?: string | null }>;
+  column_types?: Record<string, string>;
+  sample_size?: number;
+}): Promise<CellPreviewResult> {
+  const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Cell preview failed"));
+  return res.json();
+}
+
 export async function analyzeDbTransfer(payload: {
   sourceConnectorId: string;
   sourceFormat: string;
@@ -1606,6 +1640,9 @@ export async function exportQuery(payload: {
 export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
+  issue_count?: number;
+  /** write = load-time rejects; preflight = Validate/Run integrity findings */
+  source?: "write" | "preflight" | "none" | string;
   quarantine: {
     row?: number;
     column?: string;
@@ -1614,6 +1651,8 @@ export interface QuarantineInfo {
     reason?: string;
     policy?: string;
     values?: Record<string, string>;
+    chars?: string[];
+    suggested_transform?: string;
   }[];
 }
 

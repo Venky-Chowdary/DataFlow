@@ -599,7 +599,13 @@ async def stream_transfer_job(job_id: str, request: Request):
 
 @router.get("/jobs/{job_id}/quarantine")
 async def get_job_quarantine(job_id: str, request: Request):
-    """Return quarantined rows for a job with their rejection reasons."""
+    """Return quarantined rows for a job with their rejection reasons.
+
+    Includes write-time rejects and preflight integrity findings (encoding, etc.)
+    so Inspect Quarantine is never empty when Validate/Run reported bad cells.
+    """
+    from services.quarantine_from_preflight import merge_job_quarantine
+
     mongo = get_mongodb_service()
     job = mongo.get_job(job_id)
     if not job:
@@ -607,10 +613,17 @@ async def get_job_quarantine(job_id: str, request: Request):
     if not _can_access_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
-    details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    details = merge_job_quarantine(job)
+    row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
+    rejected_rows = int(job.get("rejected_rows") or 0) or (len(row_ids) if row_ids else len(details))
+    source = "write" if (job.get("rejected_details") or (job.get("destination_summary") or {}).get("rejected_details")) else (
+        "preflight" if details else "none"
+    )
     return {
         "job_id": job_id,
-        "rejected_rows": int(job.get("rejected_rows") or 0),
+        "rejected_rows": rejected_rows,
+        "issue_count": len(details),
+        "source": source,
         "quarantine": details,
     }
 
@@ -628,14 +641,25 @@ async def export_job_quarantine(job_id: str, request: Request):
     if not _can_access_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
-    details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
+    from services.quarantine_from_preflight import merge_job_quarantine
+
+    details = merge_job_quarantine(job)
     if not details:
         return {"success": True, "row_count": 0, "download_url": "", "filename": ""}
 
     from services.format_converter import convert_rows
 
-    headers = ["row", "column", "value", "reason"]
-    rows = [[str(d.get("row", "")), str(d.get("column", "")), str(d.get("value", "")), str(d.get("reason", ""))] for d in details]
+    headers = ["row", "column", "value", "reason", "policy"]
+    rows = [
+        [
+            str(d.get("row", "")),
+            str(d.get("column", "")),
+            str(d.get("value", "")),
+            str(d.get("reason", "")),
+            str(d.get("policy", "")),
+        ]
+        for d in details
+    ]
     content, _ = convert_rows(headers, rows, source_format="csv", target_format="csv")
 
     api_root = Path(__file__).resolve().parents[2]
