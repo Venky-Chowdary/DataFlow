@@ -122,12 +122,24 @@ async def lifespan(app: FastAPI):
                 print("[+] Training Agent enabled")
             else:
                 print("[*] Training Agent disabled (DATAFLOW_TRAINING=off)")
+        except Exception as e:
+            print(f"[!] RAG initialization warning: {e}")
+
+        # Scheduler must start even when RAG warm-up fails — otherwise due
+        # pipelines sit on Next run forever with Runs=0.
+        try:
+            from services.schedule_store import import_file_schedules_into_mongo
+
+            imported = await asyncio.to_thread(import_file_schedules_into_mongo)
+            if imported:
+                print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
             from .services.schedule_runner import run_schedule_loop
+
             asyncio.create_task(run_schedule_loop())
             print("[+] Pipeline scheduler started")
         except Exception as e:
-            print(f"[!] RAG initialization warning: {e}")
+            print(f"[!] Pipeline scheduler failed to start: {e}")
 
         try:
             from services.transfer_scheduler import start as start_transfer_scheduler

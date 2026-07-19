@@ -4,11 +4,13 @@ import {
   copilotChat,
   CopilotAction,
   CopilotChatMessage,
+  CopilotPendingAction,
   fetchCopilotPrompts,
   fetchCopilotStatus,
   fetchModelCapabilities,
   formatPilotReachError,
   ModelCapabilities,
+  runScheduleNow,
 } from "../lib/api";
 import { AUTOMATION_CATEGORIES, AUTOMATION_IDEAS } from "../lib/automationIdeas";
 import { useActiveData } from "../lib/DataContext";
@@ -32,6 +34,21 @@ import {
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
 }
+
+const SCREEN_LABELS: Record<string, string> = {
+  dashboard: "Overview",
+  pilot: "Data Pilot",
+  transfer: "Transfer Studio",
+  connectors: "Connectors",
+  jobs: "Jobs",
+  settings: "Settings",
+  schedules: "Pipelines",
+  contracts: "Contracts",
+  query: "Query",
+  mcp: "MCP",
+  docs: "Docs",
+  benchmarks: "Proofs",
+};
 
 export function PilotPage({ onNavigate }: PilotPageProps) {
   const { toast } = useToast();
@@ -91,13 +108,61 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     ? AUTOMATION_IDEAS
     : AUTOMATION_IDEAS.filter((i) => i.category === category);
 
-  const applyActions = (actions?: CopilotAction[]) => {
+  const applySafeActions = (actions?: CopilotAction[]) => {
     actions?.forEach((a) => {
-      if (a.type === "studio" && a.kind) {
-        dispatchStudioAction({ kind: a.kind, label: a.label, run_id: a.run_id });
-      }
+      if (a.risk === "mutate" || a.type === "studio") return;
       const screen = a.screen || a.route;
-      if (a.type === "navigate" && screen) onNavigate(screen as Screen);
+      if ((a.type === "navigate" || !a.type) && screen) onNavigate(screen as Screen);
+    });
+  };
+
+  const confirmPending = async (msgIndex: number, action: CopilotPendingAction) => {
+    try {
+      if (action.type === "studio" || action.kind) {
+        onNavigate("transfer");
+        dispatchStudioAction({
+          kind: (action.kind || String(action.payload?.kind || "")) as string,
+          label: action.label,
+          run_id: action.run_id || (action.payload?.run_id as string | undefined),
+        });
+        toast({ title: "Action confirmed", message: action.label || "Applied in Transfer Studio", tone: "success" });
+      } else if (action.type === "run_schedule") {
+        const sid = String(action.payload?.schedule_id || "");
+        if (!sid) throw new Error("Missing schedule id");
+        onNavigate("schedules");
+        const res = await runScheduleNow(sid);
+        toast({
+          title: "Pipeline started",
+          message: `Job ${res.job_id || "queued"}`,
+          tone: "success",
+        });
+      } else {
+        toast({ title: "Unknown action", message: action.type, tone: "error" });
+        return;
+      }
+      updateSession(activeId, {
+        messages: session.messages.map((m, i) =>
+          i === msgIndex
+            ? { ...m, pending_actions: (m.pending_actions || []).filter((p) => p.id !== action.id) }
+            : m,
+        ),
+      });
+    } catch (error) {
+      toast({
+        title: "Action failed",
+        message: error instanceof Error ? error.message : String(error),
+        tone: "error",
+      });
+    }
+  };
+
+  const dismissPending = (msgIndex: number, actionId: string) => {
+    updateSession(activeId, {
+      messages: session.messages.map((m, i) =>
+        i === msgIndex
+          ? { ...m, pending_actions: (m.pending_actions || []).filter((p) => p.id !== actionId) }
+          : m,
+      ),
     });
   };
 
@@ -126,11 +191,6 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         { role: "assistant" as const, content: res.answer },
       ].slice(-20);
 
-      const toolEntries = (res.tools_used || []).map((t) => ({
-        ...t,
-        at: new Date().toLocaleTimeString(),
-      }));
-
       updateSession(activeId, {
         history: newHistory,
         messages: [
@@ -138,15 +198,14 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           {
             role: "assistant",
             text: res.answer,
-            method: res.method,
             actions: res.suggested_actions,
-            tools_used: res.tools_used,
+            pending_actions: res.pending_actions,
+            suggested_prompts: res.suggested_prompts,
           },
         ],
-        toolLog: [...toolEntries, ...session.toolLog].slice(0, 30),
       });
 
-      applyActions(res.suggested_actions);
+      applySafeActions(res.suggested_actions);
       if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
     } catch (error) {
       setPilotOnline(false);
@@ -168,6 +227,12 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   };
 
   const deleteSession = (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (!target) return;
+    if (target.messages.length > 0) {
+      const ok = window.confirm(`Delete chat “${target.title}”? This cannot be undone.`);
+      if (!ok) return;
+    }
     setSessions((prev) => {
       const next = prev.filter((s) => s.id !== id);
       if (!next.length) {
@@ -179,6 +244,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       return next;
     });
   };
+
+  const recentChats = sessions.filter((s) => s.messages.length > 0 || s.id === activeId);
+  const canDeleteActive = Boolean(session?.messages.length);
 
   const pilotInsightPill =
     pilotOnline === false ? "Offline" : pilotOnline && modelCapabilities && !anyCloudReady ? "Local engine" : pilotOnline ? "Online" : "Connecting…";
@@ -203,11 +271,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 type="button"
                 className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-reopen"
                 onClick={() => setAsideOpen(true)}
-                aria-label="Open sessions panel"
-                title="Open sessions"
+                aria-label="Open recent chats"
+                title="Open recent chats"
               >
                 <DtIcon name="menu" size={14} />
-                Sessions
+                Chats
               </button>
             )}
             <span className={`df2-pilot-status-pill ${pilotStatusClass}`.trim()}>
@@ -243,6 +311,17 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 Models
               </button>
             )}
+            {canDeleteActive && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm"
+                onClick={() => deleteSession(activeId)}
+                title="Delete this chat"
+              >
+                <DtIcon name="trash" size={14} />
+                Delete chat
+              </button>
+            )}
             <button
               type="button"
               className="df2-btn df2-btn-ghost df2-btn-sm"
@@ -257,7 +336,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       <div className="df2-pilot-body">
       <aside
         className={`df2-pilot-aside${asideOpen ? "" : " is-collapsed"}`}
-        aria-label="Pilot sessions"
+        aria-label="Recent chats"
         aria-hidden={!asideOpen}
       >
         {asideOpen ? (
@@ -270,8 +349,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 type="button"
                 className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-close"
                 onClick={() => setAsideOpen(false)}
-                aria-label="Close sessions panel"
-                title="Close sessions panel"
+                aria-label="Close recent chats"
+                title="Close recent chats"
               >
                 <DtIcon name="x" size={14} />
               </button>
@@ -291,56 +370,57 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               />
 
               <div className="df2-pilot-section-label">
-                Sessions
-                <span className="df2-pilot-session-count">{sessions.filter((s) => s.messages.length).length || sessions.length}</span>
+                Recent chats
+                <span className="df2-pilot-session-count">
+                  {sessions.filter((s) => s.messages.length > 0).length}
+                </span>
               </div>
               <div className="df2-pilot-session-list">
-                {sessions.map((s) => (
-                  <div key={s.id} className={`df2-pilot-session-row ${s.id === activeId ? "active" : ""}`}>
-                    <button
-                      type="button"
-                      className="df2-pilot-session"
-                      onClick={() => setActiveId(s.id)}
-                      title={s.title}
-                    >
-                      {s.title}
-                    </button>
-                    {s.messages.length > 0 && (
-                      <button
-                        type="button"
-                        className="df2-pilot-session-delete"
-                        aria-label={`Delete ${s.title}`}
-                        title="Delete chat"
-                        onClick={() => deleteSession(s.id)}
-                      >
-                        <DtIcon name="x" size={12} />
-                      </button>
-                    )}
-                  </div>
-                ))}
+                {recentChats.length === 0 ? (
+                  <p className="df2-pilot-recent-empty">No recent chats yet — send a message to save one here.</p>
+                ) : (
+                  recentChats.map((s) => {
+                    const showDelete = s.messages.length > 0 || recentChats.length > 1;
+                    return (
+                      <div key={s.id} className={`df2-pilot-session-row ${s.id === activeId ? "active" : ""}`}>
+                        <button
+                          type="button"
+                          className="df2-pilot-session"
+                          onClick={() => setActiveId(s.id)}
+                          title={s.title}
+                        >
+                          {s.title}
+                        </button>
+                        {showDelete && (
+                          <button
+                            type="button"
+                            className="df2-pilot-session-delete"
+                            aria-label={`Delete ${s.title}`}
+                            title="Delete chat"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteSession(s.id);
+                            }}
+                          >
+                            <DtIcon name="trash" size={12} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
               </div>
 
-              {session.toolLog.length > 0 && (
-                <>
-                  <div className="df2-pilot-section-label">Recent tools</div>
-                  {session.toolLog.slice(0, 8).map((t, i) => (
-                    <div key={i} className={`df2-pilot-tool-log ${t.success ? "ok" : "err"}`}>
-                      <code>{t.name}</code>
-                      <span>{t.summary}</span>
-                    </div>
-                  ))}
-                </>
-              )}
             </div>
           </>
         ) : (
-          <div className="df2-pilot-aside-rail" aria-label="Collapsed sessions">
+          <div className="df2-pilot-aside-rail" aria-label="Collapsed recent chats">
             <button
               type="button"
               className="df2-pilot-aside-icon-btn"
               onClick={() => setAsideOpen(true)}
-              aria-label="Expand sessions panel"
-              title="Open sessions"
+              aria-label="Expand recent chats"
+              title="Open recent chats"
             >
               <DtIcon name="menu" size={16} />
             </button>
@@ -396,12 +476,26 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               {session.messages.map((msg, i) => (
                 <div key={i} className={`df2-pilot-msg ${msg.role}`}>
                   <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
-                  {msg.tools_used && msg.tools_used.length > 0 && (
-                    <div className="df2-pilot-tool-badges">
-                      {msg.tools_used.map((t) => (
-                        <span key={t.name} className={`df2-badge ${t.success ? "df2-badge-live" : "df2-badge-error"}`}>
-                          {t.name}
-                        </span>
+                  {msg.pending_actions && msg.pending_actions.length > 0 && (
+                    <div className="df2-pilot-pending">
+                      {msg.pending_actions.map((pa) => (
+                        <div key={pa.id} className="df2-pilot-pending-row">
+                          <span className="df2-pilot-pending-label">{pa.label || pa.type}</span>
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-primary df2-btn-sm"
+                            onClick={() => confirmPending(i, pa)}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-ghost df2-btn-sm"
+                            onClick={() => dismissPending(i, pa.id)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -409,16 +503,25 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                     const screen = a.screen || a.route;
                     return screen ? (
                       <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen as Screen)}>
-                        Open {screen}
+                        {a.label || `Open ${SCREEN_LABELS[screen] || screen}`}
                       </button>
                     ) : null;
                   })}
+                  {msg.suggested_prompts && msg.suggested_prompts.length > 0 && (
+                    <div className="df2-pilot-followups">
+                      {msg.suggested_prompts.map((p) => (
+                        <button key={p} type="button" className="df2-pilot-followup" onClick={() => send(p)} disabled={loading}>
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
               {loading && (
                 <div className="df2-pilot-msg assistant df2-pilot-thinking">
                   <span className="df2-loader-bars" aria-hidden><i /><i /><i /></span>
-                  Running tools on your data…
+                  Looking that up…
                 </div>
               )}
               <div ref={endRef} />

@@ -23,6 +23,7 @@ except ImportError:
     from services.mongodb_service import get_mongodb_service
 
 STORE_PATH = data_dir() / "schedules.json"
+STORE_MIGRATED_PATH = data_dir() / "schedules.json.migrated"
 
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
 SYNC_MODES = {
@@ -43,6 +44,55 @@ SCHEMA_POLICIES = {
 }
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
+
+_file_import_attempted = False
+
+
+def _load_schedules_from_file(path=STORE_PATH) -> list[PipelineSchedule]:
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return [PipelineSchedule.from_dict(s) for s in raw.get("schedules", [])]
+    except Exception:
+        return []
+
+
+def import_file_schedules_into_mongo(*, force: bool = False) -> int:
+    """One-shot recovery: if Mongo is empty but ``schedules.json`` has rows, import them.
+
+    Prevents the silent “Next run shown / Runs=0 / scheduler idle” failure mode when
+    the API switches from file persistence to a real MongoDB with an empty collection.
+    Returns the number of schedules imported.
+    """
+    global _file_import_attempted
+    if _file_import_attempted and not force:
+        return 0
+
+    svc = _mongo_backend()
+    if not svc:
+        # Do not latch attempted — Mongo may come up later in the same process.
+        return 0
+    _file_import_attempted = True
+
+    existing = _load_mongo(svc)
+    if existing:
+        return 0
+
+    file_schedules = _load_schedules_from_file(STORE_PATH)
+    if not file_schedules and STORE_MIGRATED_PATH.exists():
+        # Allow re-import from the backup if the primary file was already renamed.
+        file_schedules = _load_schedules_from_file(STORE_MIGRATED_PATH)
+    if not file_schedules:
+        return 0
+
+    _save_mongo(svc, file_schedules)
+    try:
+        if STORE_PATH.exists():
+            STORE_PATH.replace(STORE_MIGRATED_PATH)
+    except Exception:
+        pass
+    return len(file_schedules)
 
 
 @dataclass
@@ -159,9 +209,10 @@ def compute_next_run(
 ) -> str:
     """Compute the next due time as an ISO-8601 UTC timestamp.
 
-    A cron expression (5-field) takes precedence over the interval preset. Both
-    cron and preset cadences are evaluated in the schedule's IANA ``tz`` so DST
-    boundaries are respected.
+    A cron expression (5-field) takes precedence over the interval preset and is
+    evaluated in the schedule's IANA ``tz``. Preset cadences (hourly/daily/weekly)
+    are **rolling** offsets from ``from_time`` (typically last run), not fixed
+    wall-clock times — use cron for “every day at 10:10”.
     """
     base = from_time or datetime.now(timezone.utc)
     if base.tzinfo is None:
@@ -208,7 +259,10 @@ def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
     for s in schedules:
         seen.add(s.id)
         payload = s.to_dict()
-        payload["_id"] = s.id
+        # Mongo forbids updating ``_id``. Never put it in $set / $setOnInsert —
+        # the query filter ``{_id: s.id}`` already supplies identity on upsert.
+        payload.pop("_id", None)
+        payload["id"] = s.id
         for attempt in range(5):
             existing = coll.find_one({"_id": s.id})
             version = int((existing or {}).get("version") or 0)
@@ -217,10 +271,7 @@ def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
                 filt = {"_id": s.id}
             result = coll.find_one_and_update(
                 filt,
-                {
-                    "$set": {**payload, "version": version + 1},
-                    "$setOnInsert": {"_id": s.id},
-                },
+                {"$set": {**payload, "version": version + 1}},
                 upsert=True,
                 return_document=True,
             )
@@ -228,7 +279,7 @@ def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
                 break
         else:
             # Last writer wins for this schedule id after CAS retries.
-            coll.replace_one({"_id": s.id}, {**payload, "version": 1}, upsert=True)
+            coll.replace_one({"_id": s.id}, {"_id": s.id, **payload, "version": 1}, upsert=True)
     # Remove schedules deleted from the in-memory snapshot.
     if seen:
         coll.delete_many({"_id": {"$nin": list(seen)}})
@@ -238,13 +289,7 @@ def _load_all() -> list[PipelineSchedule]:
     svc = _mongo_backend()
     if svc:
         return _load_mongo(svc)
-    if not STORE_PATH.exists():
-        return []
-    try:
-        raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        return [PipelineSchedule.from_dict(s) for s in raw.get("schedules", [])]
-    except Exception:
-        return []
+    return _load_schedules_from_file(STORE_PATH)
 
 
 def _save_all(schedules: list[PipelineSchedule]) -> None:

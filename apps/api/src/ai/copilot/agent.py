@@ -33,6 +33,9 @@ class CopilotResponse:
     method: str
     reasoning: str = ""
     suggested_actions: list[dict] = field(default_factory=list)
+    # Mutations / run-now style actions — UI must Confirm before applying.
+    pending_actions: list[dict] = field(default_factory=list)
+    needs_clarification: str = ""
     suggested_prompts: list[str] = field(default_factory=list)
     sources: list[dict] = field(default_factory=list)
     data_insight: dict | None = None

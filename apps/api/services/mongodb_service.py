@@ -65,7 +65,15 @@ class MongoDBService:
     def connect(self) -> bool:
         """Establish connection to MongoDB"""
         try:
-            self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=5000)
+            # Fail hung sockets instead of freezing the asyncio event loop
+            # when sync pymongo is called from request handlers.
+            self.client = MongoClient(
+                self.connection_string,
+                serverSelectionTimeoutMS=5000,
+                socketTimeoutMS=20000,
+                connectTimeoutMS=5000,
+                waitQueueTimeoutMS=10000,
+            )
             self.client.admin.command('ping')
             return True
         except Exception as e:

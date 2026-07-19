@@ -209,7 +209,13 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         </div>
 
         {cadenceMode === "preset" ? (
-          <CadenceTiles value={interval} onChange={setIntervalValue} />
+          <>
+            <CadenceTiles value={interval} onChange={setIntervalValue} />
+            <p className="df2-field-hint df2-sched-preset-hint">
+              Presets are rolling intervals from the last run (or create) — Daily means ~24 hours later, not a fixed clock time.
+              Use <strong>Cron</strong> for “every day at 10:10” (example: <code>10 10 * * *</code>).
+            </p>
+          </>
         ) : (
           <div className="df2-form-row df2-sched-cron-row">
             <div className="df2-field">
@@ -219,18 +225,18 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                 className="df2-input df2-input-mono"
                 value={cron}
                 onChange={(e) => setCron(e.target.value)}
-                placeholder="0 3 * * *"
+                placeholder="10 10 * * *"
                 spellCheck={false}
                 required
               />
-              <span className="df2-field-hint">5-field cron (min hour day month weekday). Overrides the preset.</span>
+              <span className="df2-field-hint">5-field cron (min hour day month weekday). Example: <code>10 10 * * *</code> = 10:10 every day.</span>
             </div>
             <div className="df2-field">
               <label className="df2-label" htmlFor="sched-tz">Timezone</label>
               <select id="sched-tz" className="df2-input" value={timezone} onChange={(e) => setTimezone(e.target.value)}>
                 {timezoneOptions.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
               </select>
-              <span className="df2-field-hint">IANA timezone used to evaluate the cron schedule.</span>
+              <span className="df2-field-hint">IANA timezone for the cron wall clock (e.g. America/New_York).</span>
             </div>
           </div>
         )}
@@ -238,7 +244,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <p className="df2-sched-nextrun">
           <DtIcon name="activity" size={13} />
           {initial?.next_run_at
-            ? <>Next run: <strong>{formatWhen(initial.next_run_at)}</strong>{cadenceMode === "cron" ? ` (${timezone})` : ""}</>
+            ? <>Next run: <strong>{formatWhen(initial.next_run_at)}</strong>{cadenceMode === "cron" ? ` (${timezone})` : " · rolling interval"}</>
             : "Next run is computed once the pipeline is saved."}
         </p>
       </section>

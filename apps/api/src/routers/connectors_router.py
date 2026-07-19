@@ -418,7 +418,7 @@ async def list_transfer_jobs(
     workspace_id = _resolve_workspace(request, workspace_id)
     try:
         mongo = get_mongodb_service()
-        jobs = mongo.list_jobs(workspace_id=workspace_id)
+        jobs = await asyncio.to_thread(mongo.list_jobs, workspace_id=workspace_id)
         return {"jobs": jobs, "count": len(jobs), "degraded": False}
     except (PyMongoError, ConnectionError) as e:
         return {

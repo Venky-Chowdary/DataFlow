@@ -324,7 +324,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
 def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     """Build and submit the transfer for a schedule attempt (used for retries too)."""
-    from services.schedule_store import get_schedule
+    from services.schedule_store import get_schedule, mark_schedule_run
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
@@ -335,6 +335,24 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     dst = _resolve_connector(sched.dest_connector_id)
     if not src or not dst:
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
+        now = datetime.now(timezone.utc)
+        mark_schedule_run(
+            schedule_id,
+            "",
+            status="failed",
+            run_entry={
+                "job_id": "",
+                "status": "failed",
+                "attempt": attempt,
+                "started_at": now.isoformat(),
+                "finished_at": now.isoformat(),
+                "duration_seconds": 0,
+                "records_transferred": 0,
+                "rejected_rows": 0,
+                "coerced_null_rows": 0,
+                "error": "Schedule skipped — source or destination connector is missing or unavailable",
+            },
+        )
         return None
 
     try:
@@ -371,7 +389,7 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
 
 
 def _run_schedule(schedule_id: str) -> str | None:
-    from services.schedule_store import get_schedule, mark_schedule_running
+    from services.schedule_store import clear_schedule_running, get_schedule, mark_schedule_running
 
     sched = get_schedule(schedule_id)
     if not sched or not sched.enabled:
@@ -385,9 +403,8 @@ def _run_schedule(schedule_id: str) -> str | None:
 
     job_id = _dispatch_transfer(schedule_id, attempt=0)
     if job_id is None:
-        # Nothing was dispatched (missing connector); release the running guard.
-        from services.schedule_store import clear_schedule_running
-
+        # Fail-closed paths (missing connector / contract) already call
+        # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
         clear_schedule_running(schedule_id)
     return job_id
 
@@ -437,6 +454,16 @@ async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
     await asyncio.get_event_loop().run_in_executor(_executor, _clear_stale_running_schedules)
+    try:
+        from services.schedule_store import import_file_schedules_into_mongo
+
+        imported = await asyncio.get_event_loop().run_in_executor(
+            _executor, import_file_schedules_into_mongo
+        )
+        if imported:
+            logger.info("Imported %s schedule(s) from schedules.json into MongoDB", imported)
+    except Exception:
+        logger.exception("Schedule file→Mongo import failed")
     while True:
         try:
             count = await asyncio.get_event_loop().run_in_executor(_executor, _run_due_schedules)

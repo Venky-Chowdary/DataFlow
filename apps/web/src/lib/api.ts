@@ -327,6 +327,19 @@ export interface CopilotAction {
   /** Studio remediation kind when type === "studio". */
   kind?: string;
   run_id?: string;
+  risk?: "safe" | "mutate" | string;
+  job_id?: string;
+  schedule_id?: string;
+}
+
+export interface CopilotPendingAction {
+  id: string;
+  type: string;
+  label?: string;
+  risk?: string;
+  kind?: string;
+  run_id?: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface CopilotChatResponse {
@@ -336,6 +349,8 @@ export interface CopilotChatResponse {
   method: string;
   reasoning?: string;
   suggested_actions?: CopilotAction[];
+  pending_actions?: CopilotPendingAction[];
+  needs_clarification?: string;
   suggested_prompts?: string[];
   data_insight?: {
     dataset: string;
@@ -390,21 +405,21 @@ export function formatPilotReachError(error: unknown, apiBase: string = API_BASE
   const raw = error instanceof Error ? error.message : String(error || "Unknown error");
   const lower = raw.toLowerCase();
   if (lower.includes("timed out") || lower.includes("abort")) {
-    return "Data Pilot timed out waiting for the API. Retry once — if it keeps happening, set ANTHROPIC_API_KEY or OPENAI_API_KEY on the API service (or leave them unset so the local Pilot agent answers immediately), then redeploy.";
+    return "Data Pilot took too long to respond. Please try again in a moment.";
   }
   if (lower.includes("401") || lower.includes("authentication required") || lower.includes("not authenticated")) {
-    return "Sign-in required or session expired. Sign in again, then retry Data Pilot.";
+    return "Your session expired. Sign in again, then retry.";
   }
   if (lower.includes("403") || lower.includes("forbidden")) {
-    return "Your account is not allowed to use Data Pilot. Check workspace role / RBAC.";
+    return "You don’t have permission to use Data Pilot in this workspace.";
   }
   if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
-    return `Could not reach the API at ${apiBase}. On Railway, set DATAFLOW_API_BASE (or VITE_API_BASE) on the web service to your API URL ending in /api/v1, redeploy web, and set DATAFLOW_WEB_DOMAIN on the API for CORS.`;
+    return "Couldn’t reach Data Pilot right now. Check that the app is online, then try again.";
   }
   if (lower.includes("503") || lower.includes("no ai") || lower.includes("provider")) {
-    return raw;
+    return "Data Pilot isn’t available right now. Please try again shortly.";
   }
-  return `Data Pilot error: ${raw}`;
+  return "Something went wrong with Data Pilot. Please try again.";
 }
 
 export async function copilotChat(

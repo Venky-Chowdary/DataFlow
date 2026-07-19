@@ -3,14 +3,11 @@ import { DtIcon } from "./DtIcon";
 import {
   copilotChat,
   fetchCopilotPrompts,
-  fetchPilotTools,
   formatPilotReachError,
   CopilotAction,
   CopilotChatMessage,
-  PilotToolRegistry,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
-import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import { loadRailChat, PilotMessage, saveRailChat } from "../lib/pilotChatStore";
@@ -23,7 +20,6 @@ interface Message extends PilotMessage {
     pii_count: number;
     quality_score: number;
   };
-  toolsUsed?: { name: string; success: boolean; summary: string }[];
 }
 
 const DEFAULT_GREETING: Message = {
@@ -46,30 +42,14 @@ const SCREEN_LABELS: Record<string, string> = {
   settings: "Settings",
 };
 
-const FALLBACK_TOOL_REGISTRY: PilotToolRegistry = {
-  tool_count: 15,
-  generated_action_count: 1740,
-  total_routable_actions: 1755,
-  families: [
-    { id: "discover", label: "Discover", tools: ["list_datasets", "search_data", "search_connectors"], tool_count: 3, generated_actions: 620 },
-    { id: "profile", label: "Profile", tools: ["analyze_dataset", "compare_datasets", "profile_quality_rules"], tool_count: 3, generated_actions: 180 },
-    { id: "move", label: "Move", tools: ["plan_transfer_route", "get_transfer_capabilities", "recommend_sync_mode"], tool_count: 3, generated_actions: 720 },
-    { id: "govern", label: "Govern", tools: ["explain_mapping_assurance", "inspect_schema_policy"], tool_count: 2, generated_actions: 140 },
-    { id: "operate", label: "Operate", tools: ["list_jobs", "navigate"], tool_count: 2, generated_actions: 80 },
-  ],
-  tools: [],
-};
-
 export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotProps) {
   const { activeData } = useActiveData();
-  const { dispatchStudioAction } = useStudioActions();
   const [open, setOpen] = useState(variant === "rail");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [prompts, setPrompts] = useState<string[]>([]);
   const restored = useRef(loadRailChat());
   const [history, setHistory] = useState<CopilotChatMessage[]>(() => restored.current?.history ?? []);
-  const [toolRegistry, setToolRegistry] = useState<PilotToolRegistry | null>(null);
   const [messages, setMessages] = useState<Message[]>(() => {
     const saved = restored.current?.messages;
     return saved && saved.length > 0 ? saved : [DEFAULT_GREETING];
@@ -80,10 +60,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     if ((open || variant === "rail") && prompts.length === 0) {
       fetchCopilotPrompts().then(setPrompts).catch(() => {});
     }
-    if ((open || variant === "rail") && !toolRegistry) {
-      fetchPilotTools().then(setToolRegistry).catch(() => setToolRegistry(FALLBACK_TOOL_REGISTRY));
-    }
-  }, [open, variant, prompts.length, toolRegistry]);
+  }, [open, variant, prompts.length]);
 
   useEffect(() => {
     // Persist rail chat so close/refresh does not wipe the conversation.
@@ -99,13 +76,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   const applyActions = (actions?: CopilotAction[]) => {
     if (!actions?.length) return;
     for (const action of actions) {
-      if (action.type === "studio" && action.kind) {
-        dispatchStudioAction({
-          kind: action.kind,
-          label: action.label,
-          run_id: action.run_id,
-        });
-      }
+      if (action.risk === "mutate" || action.type === "studio") continue;
       if (action.type === "navigate" && action.screen && onNavigate) {
         onNavigate(action.screen as Screen);
       } else if (action.route && onNavigate) {
@@ -134,10 +105,8 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {
           role: "assistant",
           text: res.answer,
-          method: res.method,
           actions: res.suggested_actions,
           dataInsight: res.data_insight,
-          toolsUsed: res.tools_used,
         },
       ]);
       applyActions(res.suggested_actions);
@@ -188,23 +157,6 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         </div>
       )}
 
-      {toolRegistry && (
-        <div className="df2-copilot-console">
-          <div>
-            <span>Tools</span>
-            <strong>{toolRegistry.tool_count}</strong>
-          </div>
-          <div>
-            <span>Actions</span>
-            <strong>{toolRegistry.total_routable_actions}</strong>
-          </div>
-          <div>
-            <span>Families</span>
-            <strong>{toolRegistry.families.length}</strong>
-          </div>
-        </div>
-      )}
-
       {prompts.length > 0 && messages.length <= 2 && (
         <div className="df2-copilot-suggestions">
           {prompts.slice(0, 3).map((p) => (
@@ -217,14 +169,6 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {messages.map((msg, i) => (
           <div key={i} className={`df2-copilot-msg ${msg.role}`}>
             <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
-            {(msg.method || msg.toolsUsed?.length || msg.tools_used?.length) && (
-              <div className="df2-copilot-evidence">
-                {msg.method && <span>{msg.method}</span>}
-                {(msg.toolsUsed || msg.tools_used)?.slice(0, 3).map((tool) => (
-                  <span key={tool.name} className={tool.success ? "ok" : "err"}>{tool.name}</span>
-                ))}
-              </div>
-            )}
             {msg.actions && msg.actions.length > 0 && (
               <div className="df2-copilot-actions">
                 {msg.actions.map((action, j) => {
@@ -248,7 +192,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {loading && (
           <div className="df2-copilot-msg assistant df2-copilot-thinking">
             <span className="df2-loader-bars" aria-label="Data Pilot is working"><i /><i /><i /></span>
-            <span>Routing tools</span>
+            <span>Looking that up…</span>
           </div>
         )}
         <div ref={messagesEndRef} />

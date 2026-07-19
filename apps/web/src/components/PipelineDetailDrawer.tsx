@@ -125,7 +125,12 @@ export function PipelineDetailDrawer({
   if (!sched) return null;
 
   const isRunning = Boolean(running || sched.running);
-  const cadence = sched.cron ? `Cron ${sched.cron}` : (INTERVAL_LABEL[sched.interval] ?? sched.interval);
+  const cadence = sched.cron
+    ? `Cron ${sched.cron}`
+    : (INTERVAL_LABEL[sched.interval] ?? sched.interval);
+  const cadenceDetail = sched.cron
+    ? `Wall clock in ${sched.timezone || "UTC"}`
+    : "Rolling interval from last run — use Cron for a fixed daily time";
   const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
   const rejected = Number(lastJob?.rejected_rows ?? 0);
   const coerced = Number(lastJob?.coerced_null_rows ?? 0);
@@ -212,7 +217,7 @@ export function PipelineDetailDrawer({
       <div className="df2-drawer-facts" aria-label="Pipeline summary">
         <div className="df2-drawer-fact">
           <span>Cadence</span>
-          <strong title={cadence}>{cadence}</strong>
+          <strong title={cadenceDetail}>{cadence}</strong>
         </div>
         <div className="df2-drawer-fact">
           <span>Sync mode</span>
@@ -224,7 +229,7 @@ export function PipelineDetailDrawer({
         </div>
         <div className="df2-drawer-fact">
           <span>Next run</span>
-          <strong>{formatWhen(sched.next_run_at)}</strong>
+          <strong title={cadenceDetail}>{formatWhen(sched.next_run_at)}</strong>
         </div>
       </div>
 
@@ -289,7 +294,11 @@ export function PipelineDetailDrawer({
               </div>
             </div>
             <dl className="df2-drawer-kv">
-              <div><dt>Timezone</dt><dd>{sched.timezone || "UTC"}</dd></div>
+              <div>
+                <dt>Cadence detail</dt>
+                <dd>{cadenceDetail}</dd>
+              </div>
+              <div><dt>Timezone</dt><dd>{sched.cron ? (sched.timezone || "UTC") : "N/A (rolling preset)"}</dd></div>
               <div><dt>Validation</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
               <div><dt>Runs</dt><dd>{sched.run_count.toLocaleString()}</dd></div>

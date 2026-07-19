@@ -71,15 +71,73 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"{o.get('count', 0)} knowledge hits"
     if tr.name == "list_jobs":
         return f"{o.get('count', 0)} jobs"
+    if tr.name == "list_schedules":
+        return f"{o.get('count', 0)} schedules"
+    if tr.name == "list_contracts":
+        return f"{o.get('count', 0)} contracts"
     if tr.name == "navigate":
         return f"→ {o.get('screen')}"
+    if tr.name == "run_schedule_now":
+        return f"run {o.get('name') or o.get('schedule_id')}"
+    if tr.name == "list_connector_objects":
+        return f"{o.get('count', 0)} objects on {o.get('connector_name')}"
+    if tr.name == "introspect_connector_schema":
+        return f"{o.get('column_count', 0)} cols on {o.get('table')}"
+    if tr.name == "diff_schemas":
+        return f"severity={o.get('severity')}"
+    if tr.name == "map_connector_schemas":
+        return f"{o.get('mapping_count', 0)} mappings"
     return "ok"
+
+
+def _score_response(resp: CopilotResponse | None) -> float:
+    """Prefer grounded workspace answers over fluent ungrounded LLM prose."""
+    if not isinstance(resp, CopilotResponse):
+        return -1.0
+    score = float(resp.confidence or 0)
+    tools = resp.tools_used or []
+    ok = sum(1 for t in tools if t.get("success"))
+    fail = sum(1 for t in tools if not t.get("success"))
+    method = (resp.method or "").lower()
+    answer = resp.answer or ""
+
+    # Grounded evidence is the primary signal
+    score += ok * 0.55
+    if ok > 0:
+        score += 1.0
+    else:
+        # Cloud prose with zero workspace checks loses to local tool answers
+        if any(m in method for m in ("anthropic", "openai", "ollama", "llm")):
+            score -= 1.35
+        score -= fail * 0.1
+
+    if resp.pending_actions:
+        score += 0.45
+    if resp.suggested_actions:
+        score += 0.12
+
+    # Clarification only helps when we have nothing better — never beat grounded success
+    if resp.needs_clarification:
+        score += 0.25 if ok == 0 else 0.05
+
+    if "error" in method or method == "greeting":
+        score -= 1.0
+    if len(answer.strip()) < 40:
+        score -= 0.3
+    if "Upload a file" in answer and ok == 0:
+        score -= 0.7
+    # Prefer plain-language clarification questions over wrong confident answers
+    if fail > 0 and ok == 0 and ("Which " in answer or "which " in answer):
+        score += 0.4
+    return score
 
 
 @dataclass
 class PilotTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
     actions: list[dict] = field(default_factory=list)
+    pending_actions: list[dict] = field(default_factory=list)
+    needs_clarification: str = ""
 
 
 class DataPilotAgent:
@@ -188,6 +246,7 @@ class DataPilotAgent:
         pending = {local_fut, *llm_futs}
         deadline = _time.monotonic() + _LLM_TOTAL_BUDGET_S
         local_result: CopilotResponse | None = None
+        best_llm: CopilotResponse | None = None
 
         while pending and _time.monotonic() < deadline:
             timeout = max(0.1, min(1.0, deadline - _time.monotonic()))
@@ -204,10 +263,12 @@ class DataPilotAgent:
                     deadline = min(deadline, _time.monotonic() + 0.4)
                     continue
                 if isinstance(result, CopilotResponse):
-                    return result
+                    if best_llm is None or _score_response(result) > _score_response(best_llm):
+                        best_llm = result
 
-        if local_result is not None:
-            return local_result
+        candidates = [c for c in (best_llm, local_result) if isinstance(c, CopilotResponse)]
+        if candidates:
+            return max(candidates, key=_score_response)
         try:
             return local_fut.result(timeout=5)
         except Exception as exc:
@@ -234,18 +295,100 @@ class DataPilotAgent:
 
     @staticmethod
     def _append_tool_actions(turn: PilotTurn, tr: ToolResult) -> None:
-        if not tr.success:
+        if not tr.success or not isinstance(tr.output, dict):
+            err = (tr.error or "").strip()
+            if err and (
+                err.startswith("Which ")
+                or "did you mean" in err.lower()
+                or tr.name in ("run_schedule_now", "get_schedule", "open_schedule")
+            ):
+                turn.needs_clarification = err
             return
-        if tr.name == "navigate" and isinstance(tr.output, dict):
-            turn.actions.append({"type": "navigate", "screen": tr.output.get("screen")})
-        if tr.name == "remediate_validation" and isinstance(tr.output, dict):
+        out = tr.output
+        risk = out.get("risk") or "safe"
+
+        if tr.name == "navigate":
+            labels = {
+                "transfer": "Transfer Studio",
+                "jobs": "Jobs",
+                "connectors": "Connectors",
+                "dashboard": "Overview",
+                "settings": "Settings",
+                "schedules": "Pipelines",
+                "contracts": "Contracts",
+                "query": "Query",
+                "mcp": "MCP",
+                "docs": "Docs",
+                "benchmarks": "Proofs",
+                "pilot": "Data Pilot",
+            }
+            screen = out.get("screen")
             turn.actions.append({
-                "type": "studio",
-                "kind": tr.output.get("kind"),
-                "label": tr.output.get("label"),
-                "run_id": tr.output.get("run_id"),
+                "type": "navigate",
+                "screen": screen,
+                "risk": "safe",
+                "label": f"Open {labels.get(screen, screen)}",
             })
-            turn.actions.append({"type": "navigate", "screen": "transfer"})
+            return
+
+        if tr.name in ("open_job", "open_schedule", "start_transfer_studio"):
+            turn.actions.append({
+                "type": "navigate",
+                "screen": out.get("screen"),
+                "job_id": out.get("job_id"),
+                "schedule_id": out.get("schedule_id"),
+                "risk": "safe",
+                "label": out.get("label") or f"Open {out.get('screen')}",
+            })
+            return
+
+        if tr.name == "remediate_validation":
+            turn.pending_actions.append({
+                "id": f"studio:{out.get('kind')}:{out.get('run_id') or ''}",
+                "type": "studio",
+                "kind": out.get("kind"),
+                "label": out.get("label"),
+                "run_id": out.get("run_id"),
+                "risk": "mutate",
+                "payload": {"kind": out.get("kind"), "run_id": out.get("run_id")},
+            })
+            # Ensure Transfer is ready; safe navigate can auto-apply.
+            turn.actions.append({
+                "type": "navigate",
+                "screen": "transfer",
+                "risk": "safe",
+                "label": "Open Transfer Studio",
+            })
+            return
+
+        if tr.name == "run_schedule_now":
+            turn.pending_actions.append({
+                "id": f"run_schedule:{out.get('schedule_id')}",
+                "type": "run_schedule",
+                "label": out.get("label") or "Run pipeline now",
+                "risk": "mutate",
+                "payload": {
+                    "schedule_id": out.get("schedule_id"),
+                    "name": out.get("name"),
+                },
+            })
+            turn.actions.append({
+                "type": "navigate",
+                "screen": "schedules",
+                "schedule_id": out.get("schedule_id"),
+                "risk": "safe",
+                "label": "Open Pipelines",
+            })
+            return
+
+        if risk == "mutate" or out.get("requires_confirm"):
+            turn.pending_actions.append({
+                "id": f"{tr.name}:{out.get('kind') or out.get('schedule_id') or out.get('id') or len(turn.pending_actions)}",
+                "type": out.get("action") or tr.name,
+                "label": out.get("label") or "Confirm this change",
+                "risk": "mutate",
+                "payload": out,
+            })
 
     def _anthropic_agent_loop(
         self,
@@ -284,6 +427,8 @@ class DataPilotAgent:
                         method="anthropic_agent",
                         reasoning=f"Agent loop, {len(turn.tool_results)} tool calls",
                         suggested_actions=turn.actions,
+                        pending_actions=turn.pending_actions,
+                        needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
                         tools_used=_tools_used(turn),
@@ -361,6 +506,8 @@ Respond as Data Pilot in natural language. Ground your answer in tool results an
             confidence=0.9,
             method="openai_agent",
             suggested_actions=turn.actions,
+            pending_actions=turn.pending_actions,
+            needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
             tools_used=_tools_used(turn),
@@ -411,6 +558,8 @@ Respond as Data Pilot — grounded in tool results."""
             confidence=0.85,
             method="ollama_agent",
             suggested_actions=turn.actions,
+            pending_actions=turn.pending_actions,
+            needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
             tools_used=_tools_used(turn),
@@ -460,12 +609,23 @@ Respond as Data Pilot — grounded in tool results."""
         has_knowledge = any(tr.name == "search_knowledge" for tr in turn.tool_results)
         has_connector = any(tr.name == "search_connectors" for tr in turn.tool_results)
         described = any(tr.name == "describe_pilot" for tr in turn.tool_results)
+        live_schema = any(
+            tr.name in (
+                "list_connector_objects",
+                "introspect_connector_schema",
+                "diff_schemas",
+                "map_connector_schemas",
+                "list_connectors",
+            )
+            for tr in turn.tool_results
+        )
         insight = None
         if (
             not list_only
             and not has_knowledge
             and not has_connector
             and not described
+            and not live_schema
             and not (navigated and not self.analyst.wants_data_analysis(message, intent))
         ):
             insight = self.analyst.analyze_context(data_context, self.analyst.extract_dataset_hint(message))
@@ -478,13 +638,28 @@ Respond as Data Pilot — grounded in tool results."""
 
         # Compose from tool results + analyst
         answer = self._compose_local_answer(message, intent, turn, insight, ctx)
+        if turn.needs_clarification and turn.needs_clarification not in answer:
+            answer = f"{turn.needs_clarification}\n\n{answer}".strip()
+        if turn.pending_actions:
+            labels = ", ".join(f"**{a.get('label')}**" for a in turn.pending_actions if a.get("label"))
+            if labels and "Confirm" not in answer:
+                answer = f"{answer}\n\nConfirm to proceed: {labels}.".strip()
+        ok_tools = sum(1 for tr in turn.tool_results if tr.success)
+        if ok_tools:
+            confidence = 0.96
+        elif turn.needs_clarification:
+            confidence = 0.78
+        else:
+            confidence = 0.84
         return CopilotResponse(
             answer=answer,
             intent=intent,
-            confidence=0.88,
+            confidence=confidence,
             method="pilot_local_agent",
             reasoning=f"Local agent with {len(turn.tool_results)} tools",
             suggested_actions=turn.actions,
+            pending_actions=turn.pending_actions,
+            needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn) or (
                 {
@@ -505,13 +680,57 @@ Respond as Data Pilot — grounded in tool results."""
             if tr.name == "navigate" and tr.success:
                 screen = tr.output.get("screen", "")
                 labels = {
-                    "transfer": "New Transfer",
+                    "transfer": "Transfer Studio",
                     "jobs": "Jobs",
                     "connectors": "Connectors",
-                    "dashboard": "Dashboard",
+                    "dashboard": "Overview",
                     "settings": "Settings",
+                    "schedules": "Pipelines",
+                    "contracts": "Contracts",
+                    "query": "Query",
+                    "mcp": "MCP",
+                    "docs": "Docs",
+                    "benchmarks": "Proofs",
+                    "pilot": "Data Pilot",
                 }
                 parts.append(f"Opening **{labels.get(screen, screen)}** for you.")
+            elif tr.name in ("open_job", "open_schedule", "start_transfer_studio") and tr.success:
+                parts.append(f"{tr.output.get('label') or 'Opening that screen'} for you.")
+            elif tr.name == "list_schedules" and tr.success:
+                rows = tr.output.get("schedules", [])
+                if rows:
+                    lines = [f"You have **{len(rows)} pipeline schedule(s)**:"]
+                    for s in rows[:8]:
+                        lines.append(
+                            f"• **{s.get('name')}** · {s.get('interval')}"
+                            f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
+                            f" · next `{s.get('next_run_at') or '—'}`"
+                            f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
+                        )
+                    parts.append("\n".join(lines))
+                else:
+                    parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
+            elif tr.name == "get_schedule" and tr.success:
+                s = tr.output or {}
+                parts.append(
+                    f"Pipeline **{s.get('name')}** (`{s.get('id')}`) · {s.get('interval')} · "
+                    f"enabled={s.get('enabled')} · next `{s.get('next_run_at') or '—'}` · "
+                    f"last **{s.get('last_status') or 'never'}**."
+                )
+            elif tr.name == "run_schedule_now" and tr.success:
+                parts.append(
+                    f"Ready to run pipeline **{tr.output.get('name')}**. "
+                    "Confirm below to start an immediate run (does not change the regular cadence)."
+                )
+            elif tr.name == "list_contracts" and tr.success:
+                rows = tr.output.get("contracts", [])
+                if rows:
+                    lines = [f"**{len(rows)} data contract(s):**"]
+                    for c in rows[:8]:
+                        lines.append(f"• **{c.get('name') or c.get('id')}** ({c.get('status') or '—'})")
+                    parts.append("\n".join(lines))
+                else:
+                    parts.append("No data contracts yet. Open **Contracts** to define one.")
             elif tr.name == "list_datasets" and tr.success:
                 datasets = tr.output.get("datasets", [])
                 if datasets:
@@ -544,6 +763,26 @@ Respond as Data Pilot — grounded in tool results."""
                     f"rejected: {job.get('rejected_rows') or 0} · "
                     f"coerced NULL: {job.get('coerced_null_rows') or 0}.",
                 ]
+                route = job.get("route") or {}
+                if route.get("source_table") or route.get("dest_table"):
+                    lines.append(
+                        f"Route: `{route.get('source_table') or '?'}` "
+                        f"({route.get('source_type') or '?'}) → "
+                        f"`{route.get('dest_table') or '?'}` "
+                        f"({route.get('dest_type') or '?'})"
+                        + (f" · {route.get('mappings_count', 0)} mappings" if route.get("mappings_count") is not None else "")
+                        + (f" · sync `{route.get('sync_mode')}`" if route.get("sync_mode") else "")
+                    )
+                live = job.get("live_source_schema") or {}
+                if live.get("columns"):
+                    preview = ", ".join(
+                        f"`{c.get('name')}`:{c.get('inferred_type')}"
+                        for c in live["columns"][:8]
+                    )
+                    lines.append(
+                        f"Live source schema **{live.get('connector_name')}**.`{live.get('table')}` "
+                        f"({live.get('column_count')} cols): {preview}"
+                    )
                 if job.get("error"):
                     lines.append(f"Error: {job['error']}")
                 for rem in (job.get("suggested_remediations") or [])[:4]:
@@ -572,9 +811,135 @@ Respond as Data Pilot — grounded in tool results."""
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
                 parts.append(
-                    f"Applying Studio remediation: **{tr.output.get('label')}**. "
-                    "Opening Transfer Studio so the Validate step can run the fix."
+                    f"Proposed Studio remediation: **{tr.output.get('label')}**. "
+                    "Confirm to apply it in Transfer Studio (Validate step)."
                 )
+            elif tr.name == "plan_transfer_route" and tr.success:
+                o = tr.output or {}
+                parts.append(
+                    f"**Route plan** ({o.get('route_type')}): {o.get('source')} → {o.get('destination')}\n"
+                    f"• Sync: **{o.get('recommended_sync')}**\n"
+                    f"• Schema policy: {o.get('schema_policy')}\n"
+                    f"• Gates: {', '.join(o.get('required_gates') or [])}"
+                )
+            elif tr.name == "explain_mapping_assurance" and tr.success:
+                o = tr.output or {}
+                parts.append(
+                    "**Mapping assurance**\n"
+                    f"• Assignment: `{o.get('assignment')}`\n"
+                    f"• Scoring layers: {', '.join(o.get('scoring_layers') or [])}\n"
+                    f"• Guarantees: {'; '.join(o.get('guarantees') or [])}\n"
+                    f"• Honesty: {o.get('not_claimed')}"
+                )
+            elif tr.name == "recommend_sync_mode" and tr.success:
+                o = tr.output or {}
+                parts.append(
+                    f"Recommended sync mode: **{o.get('recommended_mode')}** — {o.get('reason')}"
+                )
+            elif tr.name == "inspect_schema_policy" and tr.success:
+                o = tr.output or {}
+                parts.append(
+                    f"Schema change `{o.get('change_type')}` → severity **{o.get('severity')}**: {o.get('action')} "
+                    f"(operator review: {o.get('operator_review')})."
+                )
+            elif tr.name == "profile_quality_rules" and tr.success:
+                o = tr.output or {}
+                rules = o.get("rules") or []
+                parts.append(
+                    f"Quality rules for **{o.get('dataset')}** ({o.get('column_count', 0)} columns):\n"
+                    + "\n".join(f"• {r}" for r in rules)
+                )
+            elif tr.name == "list_connector_objects" and tr.success:
+                o = tr.output or {}
+                objs = o.get("objects") or []
+                lines = [
+                    f"**{o.get('connector_name')}** ({o.get('type')}) — "
+                    f"{'connected' if o.get('connected') else 'probe returned'} · "
+                    f"**{o.get('count', len(objs))}** tables/collections:"
+                ]
+                for name in objs[:20]:
+                    lines.append(f"• `{name}`")
+                if len(objs) > 20:
+                    lines.append(f"• …and {len(objs) - 20} more")
+                if o.get("message"):
+                    lines.append(f"_{o['message']}_")
+                parts.append("\n".join(lines))
+            elif tr.name == "introspect_connector_schema" and tr.success:
+                o = tr.output or {}
+                cols = o.get("columns") or []
+                lines = [
+                    f"Live schema **{o.get('connector_name')}**.`{o.get('table')}` "
+                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**:"
+                ]
+                for c in cols[:40]:
+                    null = "NULL" if c.get("nullable", True) else "NOT NULL"
+                    lines.append(
+                        f"• `{c.get('name')}` → **{c.get('inferred_type')}**"
+                        + (f" ({c.get('data_type')})" if c.get("data_type") else "")
+                        + f" · {null}"
+                    )
+                if len(cols) > 40:
+                    lines.append(f"• …and {len(cols) - 40} more columns")
+                for w in (o.get("warnings") or [])[:3]:
+                    lines.append(f"⚠ {w}")
+                parts.append("\n".join(lines))
+            elif tr.name == "diff_schemas" and tr.success:
+                o = tr.output or {}
+                src = o.get("source") or {}
+                dst = o.get("destination") or {}
+                lines = [
+                    f"Schema diff **{src.get('connector')}.{src.get('table')}** "
+                    f"→ **{dst.get('connector')}.{dst.get('table')}** · "
+                    f"severity **{o.get('severity')}**",
+                    f"• Shared: {len(o.get('shared_columns') or [])} columns",
+                    f"• Only in source: {', '.join(f'`{c}`' for c in (o.get('only_in_source') or [])[:12]) or 'none'}",
+                    f"• Only in dest: {', '.join(f'`{c}`' for c in (o.get('only_in_destination') or [])[:12]) or 'none'}",
+                ]
+                for m in (o.get("type_mismatches") or [])[:8]:
+                    lines.append(
+                        f"• Type mismatch `{m.get('column')}`: "
+                        f"{m.get('source_type')} → {m.get('dest_type')}"
+                    )
+                for b in (o.get("breaking") or [])[:6]:
+                    lines.append(f"• Breaking: `{b.get('kind')}` on `{b.get('column') or b}`")
+                for a in (o.get("additive") or [])[:6]:
+                    lines.append(f"• Additive: `{a.get('kind')}` on `{a.get('column')}`")
+                parts.append("\n".join(lines))
+            elif tr.name == "map_connector_schemas" and tr.success:
+                o = tr.output or {}
+                src = o.get("source") or {}
+                dst = o.get("destination") or {}
+                lines = [
+                    f"**Semantic mapping** {src.get('connector')}.`{src.get('table')}` → "
+                    f"{dst.get('connector') or 'passthrough'}"
+                    + (f".`{dst.get('table')}`" if dst.get("table") else "")
+                    + f" — **{o.get('mapping_count', 0)} mappings**"
+                    + (" (identity passthrough)" if dst.get("passthrough") else "")
+                    + ":",
+                ]
+                for m in (o.get("mappings") or [])[:20]:
+                    conf = m.get("confidence")
+                    conf_s = f"{float(conf):.0%}" if conf is not None else "?"
+                    lines.append(
+                        f"• `{m.get('source')}` → `{m.get('target')}` ({conf_s})"
+                        + (
+                            f" · {m.get('source_type')}→{m.get('target_type')}"
+                            if m.get("source_type") and m.get("target_type")
+                            else ""
+                        )
+                    )
+                if o.get("unmapped_source"):
+                    lines.append(
+                        "• Unmapped source: "
+                        + ", ".join(f"`{c}`" for c in o["unmapped_source"][:12])
+                    )
+                if o.get("low_confidence"):
+                    lines.append(
+                        f"• Low-confidence pairs needing review: {len(o['low_confidence'])}"
+                    )
+                if o.get("type_risks"):
+                    lines.append(f"• Type risks: {len(o['type_risks'])}")
+                parts.append("\n".join(lines))
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
                 if conns:
@@ -618,7 +983,7 @@ Respond as Data Pilot — grounded in tool results."""
                 )
             elif tr.name == "search_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])[:8]
-                lines = [f"Found **{tr.output.get('filtered', len(conns))}** connectors in our 620+ catalog:"]
+                lines = [f"Found **{tr.output.get('filtered', len(conns))}** matching connector(s):"]
                 for c in conns:
                     status = c.get("status", "planned")
                     badge = "live" if status == "live" else status
@@ -627,9 +992,8 @@ Respond as Data Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Data Pilot** — a local-first agent for DataFlow (routes, schema risk, "
-                    "mappings, jobs, and remediation). I answer from your workspace tools first; "
-                    "I do not dump raw training shards as chat.",
+                    "I'm **Data Pilot** — I help with routes, schema risk, "
+                    "mappings, jobs, and fixes inside DataFlow. I answer from your workspace first.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:6]:
@@ -672,11 +1036,34 @@ Respond as Data Pilot — grounded in tool results."""
                     )
 
         if insight and not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
-            if not any(tr.name == "navigate" for tr in turn.tool_results):
+            if not any(
+                tr.name in (
+                    "navigate",
+                    "introspect_connector_schema",
+                    "list_connector_objects",
+                    "diff_schemas",
+                    "map_connector_schemas",
+                )
+                for tr in turn.tool_results
+            ):
                 parts.append(self.analyst.compose_response(insight, message, intent))
+
+        # Surface failures in plain language — never name internal tools.
+        failed = [tr for tr in turn.tool_results if not tr.success and tr.error]
+        if failed and not parts:
+            lines = ["I couldn't complete that lookup:"]
+            for tr in failed[:4]:
+                lines.append(f"• {tr.error}")
+            parts.append("\n".join(lines))
+        elif failed and parts:
+            # Mixed success+failure: append the failure so users see what was wrong
+            clarify = [tr.error for tr in failed if tr.error and ("Which " in tr.error or "did you mean" in tr.error.lower())]
+            if clarify:
+                parts.append(clarify[0])
 
         if not parts:
             datasets = ctx.get("datasets", [])
+            connectors = ctx.get("connectors") or ctx.get("saved_connectors") or []
             if datasets:
                 names = ", ".join(d["name"] for d in datasets[:4])
                 parts.append(
@@ -684,10 +1071,20 @@ Respond as Data Pilot — grounded in tool results."""
                     "Try: \"Analyze logistics data\", \"Show my jobs\", \"What PII is in HR?\", "
                     "or \"Take me to transfer\"."
                 )
+            elif connectors:
+                names = ", ".join(
+                    str(c.get("name") or c) for c in connectors[:4] if c
+                )
+                parts.append(
+                    "I can look up live schemas and jobs on your saved connectors"
+                    + (f" ({names})" if names else "")
+                    + '. Try: "schema of airports on Local Postgres" or "show my pipelines".'
+                )
             else:
                 parts.append(
-                    "Upload a file in **New Transfer** and I'll analyze everything — "
-                    "columns, PII, quality, and mapping suggestions."
+                    "I can help with connectors, jobs, pipelines, and live schemas. "
+                    "Save a connector in **Connectors**, or upload a file in **New Transfer** "
+                    "and I'll profile columns, PII, and quality."
                 )
 
         return "\n\n".join(parts)
@@ -713,12 +1110,17 @@ Respond as Data Pilot — grounded in tool results."""
         return "\n".join(lines)
 
     def _build_system_prompt(self, ctx: dict) -> str:
+        tool_names = ", ".join(t["name"] for t in TOOL_DEFINITIONS)
         return f"""{DATA_PILOT_PERSONA}
 
 {self.context_builder.to_system_context(ctx)}
 
-You have tools to list/analyze datasets, search data, list connectors and jobs, navigate the app, and check transfer capabilities.
-Use tools whenever you need fresh data. Never guess — call the tool first."""
+You are Data Pilot for DataFlow only — data knowledge, product capabilities, and in-app actions.
+Available tools (internal — never name these in user-facing answers): {tool_names}.
+Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
+Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.
+For mutating actions (remediate, run schedule), propose and wait for UI confirm — do not claim they already ran.
+Navigate to any screen when asked (including schedules/pipelines, contracts, query, docs, proofs)."""
 
     def _detect_intent(self, message: str) -> str:
         from ..knowledge.copilot_knowledge import INTENT_PATTERNS
@@ -747,12 +1149,15 @@ Use tools whenever you need fresh data. Never guess — call the tool first."""
 
     def _follow_ups(self, message: str, turn: PilotTurn) -> list[str]:
         prompts = []
+        if turn.pending_actions:
+            prompts.append("What happens if I confirm?")
         if not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
             prompts.append("Analyze my logistics data")
         prompts.extend([
+            "Show my pipelines",
             "Show my transfer jobs",
-            "What PII is in my data?",
-            "Take me to new transfer",
+            "Take me to contracts",
+            "How does mapping assurance work?",
         ])
         return prompts[:4]
 

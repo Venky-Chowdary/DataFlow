@@ -213,12 +213,17 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
 
 @router.get("/", response_model=list[ScheduleSummaryResponse])
 async def list_pipeline_schedules():
-    return [ScheduleSummaryResponse.from_schedule(s) for s in list_schedules()]
+    import asyncio
+
+    schedules = await asyncio.to_thread(list_schedules)
+    return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 
 @router.get("/{schedule_id}", response_model=ScheduleResponse)
 async def get_pipeline_schedule(schedule_id: str):
-    sched = get_schedule(schedule_id)
+    import asyncio
+
+    sched = await asyncio.to_thread(get_schedule, schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
     return ScheduleResponse.from_schedule(sched)
@@ -304,7 +309,9 @@ async def remove_pipeline_schedule(schedule_id: str):
 @router.get("/{schedule_id}/history")
 async def get_pipeline_history(schedule_id: str, limit: int = 25):
     """Return the persisted run history (most recent first)."""
-    sched = get_schedule(schedule_id)
+    import asyncio
+
+    sched = await asyncio.to_thread(get_schedule, schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
     history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]

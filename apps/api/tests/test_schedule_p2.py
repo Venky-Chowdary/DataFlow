@@ -350,3 +350,158 @@ def test_finalize_run_success_records_and_notifies(temp_store, monkeypatch):
     assert reloaded.last_status == "completed"
     assert reloaded.run_history[-1]["records_transferred"] == 100
     assert notified["status"] == "completed"
+
+
+def test_missing_connector_records_failed_history(temp_store, monkeypatch):
+    sched = _make(store)
+    before = sched.run_count
+    monkeypatch.setattr(runner, "_resolve_connector", lambda _id: None)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+
+    job_id = runner._run_schedule(sched.id)
+    assert job_id is None
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.run_count == before + 1
+    assert reloaded.last_status == "failed"
+    assert reloaded.running is False
+    assert "connector" in (reloaded.run_history[-1].get("error") or "").lower()
+    assert reloaded.next_run_at is not None
+
+
+def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
+    path = tmp_path / "schedules.json"
+    migrated = tmp_path / "schedules.json.migrated"
+    path.write_text(
+        '{"schedules":[{"id":"s1","name":"Recovered","source_connector_id":"a","source_table":"t",'
+        '"dest_connector_id":"b","dest_table":"d","interval":"daily","enabled":true,'
+        '"cron":"","timezone":"UTC","run_count":2,"next_run_at":"2026-07-19T14:10:00+00:00"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(store, "STORE_PATH", path)
+    monkeypatch.setattr(store, "STORE_MIGRATED_PATH", migrated)
+    store._file_import_attempted = False
+
+    mem: dict[str, dict] = {}
+
+    class FakeColl:
+        def find(self, *_a, **_k):
+            return list(mem.values())
+
+        def find_one(self, filt, *_a, **_k):
+            if filt.get("_id") == "primary":
+                return None
+            return mem.get(filt.get("_id"))
+
+        def find_one_and_update(self, filt, update, upsert=False, return_document=True):
+            oid = filt.get("_id")
+            set_doc = dict(update.get("$set") or {})
+            set_on_insert = dict(update.get("$setOnInsert") or {})
+            # Mirror Mongo ConflictingUpdateOperators for `_id`
+            if "_id" in set_doc or "_id" in set_on_insert:
+                raise AssertionError(
+                    "Updating the path '_id' would create a conflict at '_id' "
+                    f"(set={'_id' in set_doc}, setOnInsert={'_id' in set_on_insert})"
+                )
+            payload = {**set_doc, "_id": oid}
+            mem[oid] = payload
+            return payload
+
+        def replace_one(self, filt, doc, upsert=False):
+            mem[filt["_id"]] = doc
+
+        def delete_many(self, filt):
+            keep = set(filt.get("_id", {}).get("$nin") or [])
+            for k in list(mem):
+                if k not in keep:
+                    del mem[k]
+
+    class FakeDB:
+        def __getitem__(self, name):
+            return FakeColl()
+
+    class FakeMongo:
+        client = object()
+
+        def get_database(self):
+            return FakeDB()
+
+    monkeypatch.setattr(store, "_mongo_backend", lambda: FakeMongo())
+    imported = store.import_file_schedules_into_mongo(force=True)
+    assert imported == 1
+    assert "s1" in mem
+    assert mem["s1"]["name"] == "Recovered"
+    assert mem["s1"]["run_count"] == 2
+    assert migrated.exists() or not path.exists()
+    # Second call is a no-op once mongo has schedules.
+    assert store.import_file_schedules_into_mongo(force=True) == 0
+
+
+def test_save_mongo_never_sets_id_path(monkeypatch):
+    """Regression: $set/_id + $setOnInsert/_id → ConflictingUpdateOperators."""
+    mem: dict[str, dict] = {}
+    updates: list[dict] = []
+
+    class FakeColl:
+        def find_one(self, filt, *_a, **_k):
+            return mem.get(filt.get("_id"))
+
+        def find_one_and_update(self, filt, update, upsert=False, return_document=True):
+            updates.append(update)
+            set_doc = dict(update.get("$set") or {})
+            set_on_insert = dict(update.get("$setOnInsert") or {})
+            if "_id" in set_doc or "_id" in set_on_insert:
+                raise RuntimeError(
+                    "Updating the path '_id' would create a conflict at '_id'"
+                )
+            oid = filt["_id"]
+            mem[oid] = {**set_doc, "_id": oid}
+            return mem[oid]
+
+        def replace_one(self, filt, doc, upsert=False):
+            mem[filt["_id"]] = doc
+
+        def delete_many(self, filt):
+            keep = set(filt.get("_id", {}).get("$nin") or [])
+            for k in list(mem):
+                if k not in keep:
+                    del mem[k]
+
+        def find(self, *_a, **_k):
+            return list(mem.values())
+
+    class FakeDB:
+        def __getitem__(self, name):
+            return FakeColl()
+
+    class FakeMongo:
+        client = object()
+
+        def get_database(self):
+            return FakeDB()
+
+    sched = store.PipelineSchedule(
+        id="8b15732d-98f3-4a2d-97ab-cf5e600fd61b",
+        name="Test",
+        source_connector_id="src",
+        source_table="t",
+        dest_connector_id="dst",
+        dest_table="u",
+        interval="daily",
+        running=True,
+        running_instance="inst-1",
+    )
+    # Simulate a payload that historically leaked mongo `_id` into $set.
+    original_to_dict = sched.to_dict
+
+    def leaky_to_dict():
+        d = original_to_dict()
+        d["_id"] = sched.id
+        return d
+
+    sched.to_dict = leaky_to_dict  # type: ignore[method-assign]
+    store._save_mongo(FakeMongo(), [sched])
+    assert updates, "expected find_one_and_update"
+    assert "_id" not in (updates[0].get("$set") or {})
+    assert "_id" not in (updates[0].get("$setOnInsert") or {})
+    assert mem[sched.id]["running"] is True
+    assert mem[sched.id]["id"] == sched.id

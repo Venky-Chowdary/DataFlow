@@ -39,6 +39,8 @@ class CopilotChatResponse(BaseModel):
     method: str
     reasoning: str = ""
     suggested_actions: list[dict] = []
+    pending_actions: list[dict] = []
+    needs_clarification: str = ""
     suggested_prompts: list[str] = []
     sources: list[dict] = []
     data_insight: Optional[dict] = None
@@ -92,6 +94,8 @@ async def copilot_chat(request: CopilotChatRequest):
             method=result.method,
             reasoning=result.reasoning,
             suggested_actions=result.suggested_actions,
+            pending_actions=getattr(result, "pending_actions", None) or [],
+            needs_clarification=getattr(result, "needs_clarification", "") or "",
             suggested_prompts=result.suggested_prompts,
             sources=result.sources,
             data_insight=result.data_insight,

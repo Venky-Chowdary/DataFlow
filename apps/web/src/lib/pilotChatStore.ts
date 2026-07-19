@@ -3,13 +3,15 @@
  * Scoped per browser profile (localStorage) — not a server transcript store.
  */
 
-import type { CopilotAction, CopilotChatMessage } from "./api";
+import type { CopilotAction, CopilotChatMessage, CopilotPendingAction } from "./api";
 
 export interface PilotMessage {
   role: "user" | "assistant";
   text: string;
   method?: string;
   actions?: CopilotAction[];
+  pending_actions?: CopilotPendingAction[];
+  suggested_prompts?: string[];
   tools_used?: { name: string; success: boolean; summary: string }[];
 }
 
