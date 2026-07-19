@@ -41,9 +41,9 @@ def get_connection(
         default_port=5432,
     )
 
-    # Prefer discrete fields (merged from URL + form). Pure DSN connect is used
-    # only when we have a URL and no discrete host was resolved beyond localhost
-    # with empty user — but merged fields cover all normal cases.
+    # Prefer discrete fields (merged from URL + form). For public cloud proxies
+    # (Railway *.proxy.rlwy.net, etc.) try SSL require if prefer fails — many
+    # managed proxies expect TLS on the public port.
     sslmode = "require" if ssl else "prefer"
     kwargs: dict[str, Any] = {
         "host": ep["host"],
@@ -57,8 +57,22 @@ def get_connection(
 
     try:
         return psycopg2.connect(**kwargs)
-    except Exception as exc:
+    except Exception as first_exc:
+        host_l = (ep["host"] or "").lower()
+        looks_public_proxy = (
+            "proxy.rlwy.net" in host_l
+            or host_l.endswith(".rlwy.net")
+            or "amazonaws.com" in host_l
+            or "azure.com" in host_l
+            or "neon.tech" in host_l
+            or "supabase.co" in host_l
+        )
+        if not ssl and looks_public_proxy and sslmode != "require":
+            try:
+                return psycopg2.connect(**{**kwargs, "sslmode": "require"})
+            except Exception:
+                pass
         hint = private_cloud_host_hint(ep["host"], connection_string)
         if hint:
-            raise RuntimeError(f"{exc}{hint}") from exc
+            raise RuntimeError(f"{first_exc}{hint}") from first_exc
         raise

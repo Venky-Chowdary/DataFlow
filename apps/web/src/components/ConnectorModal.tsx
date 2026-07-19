@@ -50,9 +50,23 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   return "user_pass";
 }
 
-function parseUriIfPossible(connectionString: string): { host?: string; port?: number; username?: string; password?: string; database?: string } | null {
+function normalizeSqlDsn(connectionString: string, type: string): string {
+  const raw = connectionString.trim();
+  if (!raw) return "";
+  if (raw.includes("://")) return raw;
+  // user:pass@host:port/db — common Railway paste without scheme
+  if (/^[^:/@\s]+:[^@\s]+@[^:/?\s]+/.test(raw)) {
+    const t = type.toLowerCase();
+    const scheme = t.includes("mysql") || t.includes("maria") ? "mysql://" : "postgresql://";
+    return scheme + raw;
+  }
+  return raw;
+}
+
+function parseUriIfPossible(connectionString: string, typeHint = "postgresql"): { host?: string; port?: number; username?: string; password?: string; database?: string } | null {
+  const normalized = normalizeSqlDsn(connectionString, typeHint);
   try {
-    const url = new URL(connectionString);
+    const url = new URL(normalized);
     const database = url.pathname.replace(/^\//, "").split("?")[0];
     return {
       host: url.hostname || undefined,
@@ -133,7 +147,9 @@ export function ConnectorModal({
   // Auto-parse connection strings for SFTP / Email / MongoDB / Redis / Elasticsearch / Azure
   useEffect(() => {
     if (authMode !== "connection_string" || !connectionString.trim()) return;
-    const parsed = isMongo ? parseMongoUri(connectionString) : parseUriIfPossible(connectionString);
+    const parsed = isMongo
+      ? parseMongoUri(connectionString)
+      : parseUriIfPossible(connectionString, resolvedType);
     if (!parsed) return;
     if (parsed.host && !host) setHost(parsed.host);
     if (parsed.port && !port) setPort(parsed.port);
@@ -143,11 +159,16 @@ export function ConnectorModal({
     if (isMongo && (parsed as Record<string, unknown>).authSource && !authSource) {
       setAuthSource((parsed as Record<string, string>).authSource || "");
     }
+    // Normalize scheme-less SQL DSNs in the field so Test/Save send a real URL
+    if (!isMongo && !connectionString.includes("://") && /^[^:/@\s]+:[^@\s]+@/.test(connectionString.trim())) {
+      const normalized = normalizeSqlDsn(connectionString, resolvedType);
+      if (normalized !== connectionString) setConnectionString(normalized);
+    }
     // Try to detect TLS from scheme
     if (connectionString.toLowerCase().startsWith("smtps://") || connectionString.toLowerCase().startsWith("rediss://") || connectionString.toLowerCase().startsWith("https://")) {
       setSsl(true);
     }
-  }, [isMongo, authMode, connectionString, host, port, username, password, database, authSource]);
+  }, [isMongo, authMode, connectionString, host, port, username, password, database, authSource, resolvedType]);
 
   const applyType = (nextType: string) => {
     const d = getConnectorDefaults(nextType);
@@ -264,7 +285,19 @@ export function ConnectorModal({
       }
     }
     if (authMode === "connection_string" || authMode === "file_path") {
-      payload.connection_string = connectionString || undefined;
+      const cs = (!isMongo && (resolvedType === "postgresql" || resolvedType === "mysql" || resolvedType === "mariadb"))
+        ? normalizeSqlDsn(connectionString, resolvedType)
+        : connectionString;
+      payload.connection_string = cs || undefined;
+      // Ensure discrete fields are filled from the DSN so probes never fall back to localhost.
+      if (cs && (resolvedType === "postgresql" || resolvedType === "mysql" || resolvedType === "mariadb")) {
+        const parsed = parseUriIfPossible(cs, resolvedType);
+        if (parsed?.host) payload.host = parsed.host;
+        if (parsed?.port) payload.port = parsed.port;
+        if (parsed?.username) payload.username = parsed.username;
+        if (parsed?.password) payload.password = parsed.password;
+        if (parsed?.database) payload.database = parsed.database;
+      }
       if (resolvedType === "sftp" && privateKey.trim()) {
         payload.private_key = privateKey || undefined;
       }
@@ -296,25 +329,28 @@ export function ConnectorModal({
     setTesting(true);
     setTestResult(null);
     try {
+      // Always use buildPayload so connection-string mode fills host/port/user
+      // from the DSN — never send stale localhost:5432 defaults that override the URL.
+      const built = buildPayload();
       const result = await testConnection({
-        type,
-        host: isGcpConnector(resolvedType) ? undefined : host,
-        port: isGcpConnector(resolvedType) ? undefined : port,
-        database,
-        schema: resolvedType === "bigquery" || resolvedType === "snowflake" ? schema : undefined,
-        username: authMode === "user_pass" || authMode === "aws_keys" ? username : undefined,
-        password: authMode === "user_pass" || authMode === "aws_keys" ? password : undefined,
-        connection_string: authMode === "connection_string" || authMode === "file_path" ? connectionString : undefined,
-        service_account: authMode === "service_account" ? serviceAccount : undefined,
-        api_key: authMode === "api_key" ? apiKey : undefined,
-        warehouse: resolvedType === "snowflake" ? warehouse : undefined,
-        auth_role: resolvedType === "snowflake" ? authRole : undefined,
-        auth_mode: authMode,
-        auth_source: resolvedType === "mongodb" || resolvedType === "email" ? authSource : undefined,
-        private_key: resolvedType === "sftp" && privateKey.trim() ? privateKey : undefined,
-        endpoint_url: (resolvedType === "s3" || resolvedType === "dynamodb") && endpointUrl.trim() ? endpointUrl : undefined,
-        path_style: resolvedType === "s3" && pathStyle ? pathStyle : undefined,
-        ssl,
+        type: String(built.type || type),
+        host: built.host as string | undefined,
+        port: built.port as number | undefined,
+        database: String(built.database || ""),
+        schema: built.schema as string | undefined,
+        username: built.username as string | undefined,
+        password: built.password as string | undefined,
+        connection_string: built.connection_string as string | undefined,
+        service_account: built.service_account as string | undefined,
+        api_key: built.api_key as string | undefined,
+        warehouse: built.warehouse as string | undefined,
+        auth_role: built.auth_role as string | undefined,
+        auth_mode: String(built.auth_mode || authMode),
+        auth_source: built.auth_source as string | undefined,
+        private_key: built.private_key as string | undefined,
+        endpoint_url: built.endpoint_url as string | undefined,
+        path_style: built.path_style as boolean | undefined,
+        ssl: Boolean(built.ssl),
       });
       setTestResult(result);
       if (resolvedType === "mongodb" && result.success) {

@@ -232,13 +232,50 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     """Convert low-level driver/connection errors into user-friendly messages."""
     text = str(raw).lower()
     driver = (driver or "").lower()
+    raw_s = str(raw)
 
-    # Private cloud hostnames (Railway etc.) — tell users to use the public proxy.
+    # Railway private DNS — guidance depends on whether THIS API is on Railway.
     if ".railway.internal" in text:
+        try:
+            from connectors.sql_dsn import is_running_on_railway, private_cloud_host_hint
+
+            on_railway = is_running_on_railway()
+        except Exception:
+            on_railway = False
+        if on_railway:
+            # Keep the real cause when present; append railway-internal guidance.
+            base = raw_s
+            # Strip our previously-injected hint if nested
+            hint = private_cloud_host_hint("x.railway.internal", "")
+            if hint and hint.strip() not in base:
+                # Prefer a concise primary message over dumping raw driver noise
+                if re.search(
+                    r"name or service not known|nodename|getaddrinfo|cannot resolve|not known|"
+                    r"could not translate host name|temporary failure in name resolution|unknown host",
+                    text,
+                ):
+                    return (
+                        "Railway private hostname did not resolve from this API service. "
+                        "Confirm the database service is in the same Railway project and the "
+                        "host matches its private domain (e.g. mysql.railway.internal). "
+                        "Use private port 3306 (MySQL) or 5432 (Postgres)."
+                    )
+                if re.search(r"timed out|timeout|connection refused|unreachable", text):
+                    return (
+                        "Cannot reach the Railway private database host from this API service. "
+                        "Check the service is running, use private port 3306/5432, and that both "
+                        "services share the same Railway project/network."
+                    )
+                return f"Connection failed on Railway private network: {raw_s.split(hint)[0].strip()}"
+            return (
+                "Cannot reach the Railway private database host from this API service. "
+                "Check project linking, private hostname, and private port (3306/5432)."
+            )
         return (
             "Cannot reach this Railway private hostname from here. "
-            "Use the public proxy host (*.proxy.rlwy.net) and public port from Railway, "
-            "unless DataFlow is running inside the same Railway project."
+            "In Connectors, use the *public* proxy host (*.proxy.rlwy.net) and the "
+            "*public* TCP port from Railway — not mysql.railway.internal / postgres.railway.internal "
+            "and not ports 3306/5432."
         )
 
     # Auth / credentials — first because it is the most common and sensitive.
