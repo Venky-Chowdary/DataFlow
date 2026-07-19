@@ -153,7 +153,13 @@
 
   /* Keep the toggle reachable so the user can expand again */
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-collapse-btn {
-    margin: 0 auto;
+    display: inline-flex !important;
+    margin: 6px auto 0;
+    width: 36px;
+    height: 36px;
+    border-color: #99f6e4;
+    background: #f0fdfa;
+    color: #0f766e;
   }
 
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-env {

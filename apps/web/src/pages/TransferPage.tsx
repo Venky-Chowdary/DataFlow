@@ -546,7 +546,8 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
     target_columns: destColumns,
     target_schema: destSchemaMap,
     row_count_estimate: parsed?.row_count ?? sourceRowEstimate ?? 0,
-    sample_rows: (parsed?.data ?? parsed?.sample_data)?.slice(0, 100) ?? [],
+    // Cap samples — large Mongo/document rows were timing out plan persistence (15s).
+    sample_rows: (parsed?.data ?? parsed?.sample_data)?.slice(0, 25) ?? [],
     policies: {
       sync_mode: syncMode,
       schema_policy: schemaPolicy,
@@ -1488,22 +1489,22 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
       case "change_target_type": {
         if (!action.to_type) return;
         let hit = false;
-        setColumnMappings((prev) =>
-          prev.map((m) => {
-            if (matches(m)) {
-              hit = true;
-              return { ...m, destType: action.to_type, approved: true };
-            }
-            return m;
-          }),
-        );
+        const next = columnMappings.map((m) => {
+          if (matches(m)) {
+            hit = true;
+            return { ...m, destType: action.to_type, approved: true };
+          }
+          return m;
+        });
+        setColumnMappings(next);
         toast({
-          title: hit ? "Target type updated" : "Column not found",
+          title: hit ? "Target type updated — re-validating" : "Column not found",
           message: hit
-            ? `${action.column ?? action.target} → ${action.to_type}. Re-run preflight to apply the change.`
+            ? `Changed ${action.column ?? action.target} → type ${action.to_type}. Re-running Validate now so you can see if the block cleared.`
             : `Couldn't find '${action.column ?? action.target}' in the current mappings.`,
           tone: hit ? "success" : "warning",
         });
+        if (hit) void executePreflight(next);
         break;
       }
       case "normalize_control_chars": {
@@ -1514,7 +1515,9 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
         // ValidateDashboard opens the drawer; keep as no-op fallback.
         break;
       case "add_transform": {
-        const uiTransform = action.transform ? ENGINE_TO_UI_TRANSFORM[action.transform] : undefined;
+        const uiTransform = action.transform
+          ? ENGINE_TO_UI_TRANSFORM[action.transform] || (action.transform as MappingTransform)
+          : undefined;
         if (!uiTransform) {
           toast({
             title: "Transform unavailable",
@@ -1525,22 +1528,22 @@ export function TransferPage({ connectors, connectorsLoading = false, onTransfer
           return;
         }
         let hit = false;
-        setColumnMappings((prev) =>
-          prev.map((m) => {
-            if (matches(m)) {
-              hit = true;
-              return { ...m, transform: uiTransform };
-            }
-            return m;
-          }),
-        );
+        const next = columnMappings.map((m) => {
+          if (matches(m)) {
+            hit = true;
+            return { ...m, transform: uiTransform, approved: true };
+          }
+          return m;
+        });
+        setColumnMappings(next);
         toast({
-          title: hit ? "Transform applied" : "Column not found",
+          title: hit ? "Transform applied — re-validating" : "Column not found",
           message: hit
-            ? `Applied ${uiTransform} to '${action.column ?? action.target}'. Re-run preflight to apply.`
+            ? `Applied ${uiTransform} to '${action.column ?? action.target}'. Re-running Validate so you can confirm the fix.`
             : `Couldn't find '${action.column ?? action.target}' in the current mappings.`,
           tone: hit ? "success" : "warning",
         });
+        if (hit) void executePreflight(next);
         break;
       }
       case "review_mappings":

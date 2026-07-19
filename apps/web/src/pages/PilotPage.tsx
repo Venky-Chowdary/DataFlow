@@ -20,51 +20,27 @@ import { CopyIdChip } from "../components/ui/CopyIdChip";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageShell } from "../components/ui/PageShell";
+import {
+  createEmptySession,
+  loadAsideOpen,
+  loadPilotWorkspace,
+  PilotSession,
+  saveAsideOpen,
+  savePilotWorkspace,
+} from "../lib/pilotChatStore";
 
 interface PilotPageProps {
   onNavigate: (screen: Screen) => void;
-}
-
-interface Session {
-  id: string;
-  title: string;
-  messages: Message[];
-  history: CopilotChatMessage[];
-  toolLog: ToolLogEntry[];
-}
-
-interface Message {
-  role: "user" | "assistant";
-  text: string;
-  method?: string;
-  actions?: CopilotAction[];
-  tools_used?: { name: string; success: boolean; summary: string }[];
-}
-
-interface ToolLogEntry {
-  name: string;
-  success: boolean;
-  summary: string;
-  at: string;
-}
-
-
-function newSession(): Session {
-  return {
-    id: crypto.randomUUID(),
-    title: "New conversation",
-    messages: [],
-    history: [],
-    toolLog: [],
-  };
 }
 
 export function PilotPage({ onNavigate }: PilotPageProps) {
   const { toast } = useToast();
   const { activeData } = useActiveData();
   const { dispatchStudioAction } = useStudioActions();
-  const [sessions, setSessions] = useState<Session[]>([newSession()]);
-  const [activeId, setActiveId] = useState(sessions[0].id);
+  const boot = useRef(loadPilotWorkspace());
+  const [sessions, setSessions] = useState<PilotSession[]>(boot.current.sessions);
+  const [activeId, setActiveId] = useState(boot.current.activeId);
+  const [asideOpen, setAsideOpen] = useState(() => loadAsideOpen(true));
   const [input, setInput] = useState("");
   const [category, setCategory] = useState("all");
   const [loading, setLoading] = useState(false);
@@ -93,6 +69,15 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     });
   }, []);
 
+  // Persist chats + active session across refresh.
+  useEffect(() => {
+    savePilotWorkspace(sessions, activeId);
+  }, [sessions, activeId]);
+
+  useEffect(() => {
+    saveAsideOpen(asideOpen);
+  }, [asideOpen]);
+
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
@@ -116,8 +101,10 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     });
   };
 
-  const updateSession = (id: string, patch: Partial<Session>) => {
-    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  const updateSession = (id: string, patch: Partial<PilotSession>) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, ...patch, updatedAt: Date.now() } : s)),
+    );
   };
 
   const send = async (text?: string) => {
@@ -126,7 +113,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     setInput("");
     setLoading(true);
 
-    const userMsg: Message = { role: "user", text: q };
+    const userMsg = { role: "user" as const, text: q };
     const nextMessages = [...session.messages, userMsg];
     const title = session.title === "New conversation" ? q.slice(0, 48) : session.title;
     updateSession(activeId, { messages: nextMessages, title });
@@ -139,7 +126,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         { role: "assistant" as const, content: res.answer },
       ].slice(-20);
 
-      const toolEntries: ToolLogEntry[] = (res.tools_used || []).map((t) => ({
+      const toolEntries = (res.tools_used || []).map((t) => ({
         ...t,
         at: new Date().toLocaleTimeString(),
       }));
@@ -173,10 +160,24 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   };
 
   const startNewChat = () => {
-    const s = newSession();
+    const s = createEmptySession();
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
     setInput("");
+    setAsideOpen(true);
+  };
+
+  const deleteSession = (id: string) => {
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      if (!next.length) {
+        const empty = createEmptySession();
+        setActiveId(empty.id);
+        return [empty];
+      }
+      if (id === activeId) setActiveId(next[0].id);
+      return next;
+    });
   };
 
   const pilotInsightPill =
@@ -194,9 +195,21 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       showHeader={false}
       className="df2-page-pilot"
     >
-      <PageFrame className="df2-pilot-workspace df2-pilot-v2">
+      <PageFrame className={`df2-pilot-workspace df2-pilot-v2 ${asideOpen ? "" : "is-aside-collapsed"}`.trim()}>
         <div className="df2-pilot-status-bar" role="status">
           <div className="df2-pilot-status-brand">
+            {!asideOpen && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-reopen"
+                onClick={() => setAsideOpen(true)}
+                aria-label="Open sessions panel"
+                title="Open sessions"
+              >
+                <DtIcon name="menu" size={14} />
+                Sessions
+              </button>
+            )}
             <span className={`df2-pilot-status-pill ${pilotStatusClass}`.trim()}>
               <span className="df2-pilot-status-dot" aria-hidden />
               {pilotInsightPill}
@@ -218,8 +231,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               </div>
             )}
           </div>
-          {pilotOnline && modelCapabilities && !anyCloudReady && (
-            <div className="df2-page-actions-group">
+          <div className="df2-page-actions-group">
+            {pilotOnline && modelCapabilities && !anyCloudReady && (
               <button
                 type="button"
                 className="df2-btn df2-btn-ghost df2-btn-sm"
@@ -229,14 +242,35 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 <DtIcon name="settings" size={14} />
                 Models
               </button>
-            </div>
-          )}
+            )}
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm"
+              onClick={startNewChat}
+              title="Start a new chat"
+            >
+              <DtIcon name="plus" size={14} />
+              New chat
+            </button>
+          </div>
         </div>
       <div className="df2-pilot-body">
-      <aside className="df2-pilot-aside">
-        <button type="button" className="df2-btn df2-btn-primary df2-btn-sm df2-btn-block" onClick={startNewChat}>
-          <DtIcon name="plus" size={14} /> New chat
-        </button>
+      {asideOpen ? (
+      <aside className="df2-pilot-aside" aria-label="Pilot sessions">
+        <div className="df2-pilot-aside-toolbar">
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={startNewChat}>
+            <DtIcon name="plus" size={14} /> New chat
+          </button>
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-close"
+            onClick={() => setAsideOpen(false)}
+            aria-label="Close sessions panel"
+            title="Close sessions panel"
+          >
+            <DtIcon name="x" size={14} />
+          </button>
+        </div>
 
         <div className="df2-pilot-aside-scroll">
           <div className="df2-pilot-section-label">Categories</div>
@@ -251,16 +285,32 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             ]}
           />
 
-          <div className="df2-pilot-section-label">Sessions</div>
+          <div className="df2-pilot-section-label">
+            Sessions
+            <span className="df2-pilot-session-count">{sessions.filter((s) => s.messages.length).length || sessions.length}</span>
+          </div>
           {sessions.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              className={`df2-pilot-session ${s.id === activeId ? "active" : ""}`}
-              onClick={() => setActiveId(s.id)}
-            >
-              {s.title}
-            </button>
+            <div key={s.id} className={`df2-pilot-session-row ${s.id === activeId ? "active" : ""}`}>
+              <button
+                type="button"
+                className="df2-pilot-session"
+                onClick={() => setActiveId(s.id)}
+                title={s.title}
+              >
+                {s.title}
+              </button>
+              {s.messages.length > 0 && (
+                <button
+                  type="button"
+                  className="df2-pilot-session-delete"
+                  aria-label={`Delete ${s.title}`}
+                  title="Delete chat"
+                  onClick={() => deleteSession(s.id)}
+                >
+                  <DtIcon name="x" size={12} />
+                </button>
+              )}
+            </div>
           ))}
 
           {session.toolLog.length > 0 && (
@@ -276,6 +326,29 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           )}
         </div>
       </aside>
+      ) : (
+        <div className="df2-pilot-aside-rail" aria-label="Collapsed sessions">
+          <button
+            type="button"
+            className="df2-pilot-aside-expand"
+            onClick={() => setAsideOpen(true)}
+            aria-label="Expand sessions panel"
+            title="Expand sessions"
+          >
+            <DtIcon name="chevron-right" size={16} />
+            <span>Sessions</span>
+          </button>
+          <button
+            type="button"
+            className="df2-pilot-aside-expand is-secondary"
+            onClick={startNewChat}
+            aria-label="New chat"
+            title="New chat"
+          >
+            <DtIcon name="plus" size={16} />
+          </button>
+        </div>
+      )}
 
       <div className="df2-pilot-main">
         <div className="df2-pilot-main-scroll">
@@ -286,6 +359,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 <h1 className="df2-pilot-title">Ask Data Pilot to move, inspect, or govern data.</h1>
                 <p className="df2-pilot-subtitle">
                   Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
+                  Chats are saved in this browser so a refresh does not wipe your thread.
                 </p>
               </div>
 

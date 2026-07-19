@@ -21,6 +21,19 @@
   line-height: 1.5;
 }
 
+.df2-page-benchmarks-workload {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 0 0 16px;
+}
+
+.df2-page-benchmarks-workload p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .df2-page-benchmarks-toolbar {
   display: flex;
   align-items: center;

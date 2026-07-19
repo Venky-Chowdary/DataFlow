@@ -146,6 +146,29 @@ export function TransferResultDashboard({
             <strong>{targetRows.toLocaleString()}</strong>
             <span>At destination</span>
           </div>
+          {(result.records_per_second != null || ds?.records_per_second != null) && (
+            <div
+              className="df2-result-stat-card"
+              title={`${sourceType} → ${destType} — this job only, not Proofs CSV→SQLite`}
+            >
+              <strong>
+                {Math.round(Number(result.records_per_second ?? ds?.records_per_second ?? 0)).toLocaleString()}
+              </strong>
+              <span>This job rows/s</span>
+            </div>
+          )}
+          {ds?.load_method && (
+            <div className="df2-result-stat-card" title="Writer load path for this job">
+              <strong>{ds.load_method}</strong>
+              <span>Load method</span>
+            </div>
+          )}
+          {ds?.chunk_size != null && Number(ds.chunk_size) > 0 && (
+            <div className="df2-result-stat-card">
+              <strong>{Number(ds.chunk_size).toLocaleString()}</strong>
+              <span>Batch size</span>
+            </div>
+          )}
           {sourceRows !== rec && sourceRows > 0 && (
             <div className="df2-result-stat-card">
               <strong>{sourceRows.toLocaleString()}</strong>
@@ -224,6 +247,21 @@ export function TransferResultDashboard({
                 <dt>Route</dt>
                 <dd>{sourceLabel} → {destLabel}</dd>
               </div>
+              {(result.records_per_second != null || ds?.records_per_second != null) && (
+                <div>
+                  <dt>This job throughput</dt>
+                  <dd>
+                    {Math.round(Number(result.records_per_second ?? ds?.records_per_second ?? 0)).toLocaleString()} rows/s
+                    {" "}({sourceType} → {destType}) — not Proofs CSV→SQLite
+                  </dd>
+                </div>
+              )}
+              {ds?.load_method && (
+                <div>
+                  <dt>Load method</dt>
+                  <dd>{ds.load_method}{ds.chunk_size ? ` · batch ${Number(ds.chunk_size).toLocaleString()}` : ""}</dd>
+                </div>
+              )}
               <div>
                 <dt>Reconciliation</dt>
                 <dd>

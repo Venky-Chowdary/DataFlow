@@ -123,6 +123,10 @@
   overflow: hidden !important;
 }
 
+.df2-pilot-v2.is-aside-collapsed .df2-pilot-body {
+  grid-template-columns: 52px minmax(0, 1fr) !important;
+}
+
 .df2-pilot-v2 .df2-pilot-aside {
   min-height: 0;
   overflow: hidden;
@@ -132,6 +136,110 @@
   padding: 12px;
   border-right: 1px solid var(--df-border, #e5e7eb);
   background: #fff;
+}
+
+.df2-pilot-aside-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.df2-pilot-aside-toolbar .df2-btn-primary {
+  flex: 1 1 auto;
+}
+
+.df2-pilot-aside-close {
+  flex: 0 0 auto;
+}
+
+.df2-pilot-aside-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 6px;
+  border-right: 1px solid var(--df-border, #e5e7eb);
+  background: #f8fafc;
+  min-height: 0;
+}
+
+.df2-pilot-aside-expand {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 72px;
+  padding: 10px 4px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 10px;
+  background: #fff;
+  color: #0f766e;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.df2-pilot-aside-expand.is-secondary {
+  min-height: 40px;
+  color: #475569;
+}
+
+.df2-pilot-aside-expand:hover {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.df2-pilot-aside-reopen {
+  margin-right: 4px;
+}
+
+.df2-pilot-session-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.df2-pilot-session-row .df2-pilot-session {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.df2-pilot-session-delete {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.df2-pilot-session-row:hover .df2-pilot-session-delete,
+.df2-pilot-session-row.active .df2-pilot-session-delete {
+  opacity: 1;
+}
+
+.df2-pilot-session-delete:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.df2-pilot-session-count {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .df2-pilot-v2 .df2-pilot-aside-scroll {
@@ -230,13 +338,59 @@
     grid-template-columns: 1fr !important;
   }
 
-  .df2-pilot-v2 .df2-pilot-aside {
+  .df2-pilot-v2:not(.is-aside-collapsed) .df2-pilot-body {
+    grid-template-columns: 1fr !important;
+    position: relative;
+  }
+
+  .df2-pilot-v2:not(.is-aside-collapsed) .df2-pilot-aside {
+    position: absolute;
+    z-index: 20;
+    inset: 0 auto 0 0;
+    width: min(300px, 88vw);
+    display: flex;
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+  }
+
+  .df2-pilot-v2.is-aside-collapsed .df2-pilot-body {
+    grid-template-columns: 1fr !important;
+  }
+
+  .df2-pilot-v2.is-aside-collapsed .df2-pilot-aside-rail {
     display: none;
   }
 
   .df2-pilot-v2 .df2-pilot-ideas {
     grid-template-columns: 1fr;
   }
+}
+
+.df2-copilot-edge-open {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: 40;
+  transform: translateY(-50%);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-right: none;
+  border-radius: 10px 0 0 10px;
+  background: #0f766e;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: -4px 0 16px rgba(15, 23, 42, 0.12);
+}
+
+.df2-copilot-edge-open:hover {
+  background: #0d9488;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -3044,6 +3198,18 @@
   justify-content: center;
 }
 
+.df2-theater-v3-phase-elapsed {
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.df2-theater-v3-fail-meta {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.92;
+}
+
 .df2-theater-v3-alert {
   display: flex;
   align-items: flex-start;
@@ -3162,9 +3328,27 @@
 }
 
 .df2-job-log-empty {
-  color: #94a3b8;
+  color: #cbd5e1;
   font-style: italic;
   padding: 12px 0;
+}
+
+/* Ensure log lines stay high-contrast on the dark panel */
+.df2-job-log-panel-body,
+.df2-job-log-panel-body .df2-job-log-line,
+.df2-job-log-panel-body code {
+  color: #e2e8f0 !important;
+}
+
+.df2-job-log-panel .df2-query-table th {
+  background: #1f2937 !important;
+  color: #f8fafc !important;
+  border-bottom-color: #374151 !important;
+}
+
+.df2-job-log-panel .df2-query-table td {
+  color: #e5e7eb !important;
+  border-bottom-color: rgba(148, 163, 184, 0.2) !important;
 }
 
 .df2-job-log-panel:not(.is-open) {
@@ -3318,6 +3502,85 @@
   flex-direction: column;
   gap: 12px;
   width: 100%;
+}
+
+/* Light inspect surface — never reuse dark job-log colors for tabular findings */
+.df2-quarantine-inspect {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #fcd34d;
+  border-radius: 12px;
+  background: #fffbeb;
+  overflow: hidden;
+  min-height: 200px;
+}
+
+.df2-quarantine-inspect-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #fef3c7;
+  border-bottom: 1px solid #fde68a;
+}
+
+.df2-quarantine-inspect-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #78350f;
+  font-size: 12.5px;
+}
+
+.df2-quarantine-inspect-title strong {
+  color: #92400e;
+}
+
+.df2-quarantine-inspect-count {
+  color: #a16207;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.df2-quarantine-inspect-body {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 0;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.df2-quarantine-inspect-empty {
+  color: #64748b;
+  font-style: italic;
+  padding: 16px 14px;
+}
+
+.df2-quarantine-table {
+  width: 100%;
+}
+
+.df2-quarantine-table th {
+  background: #f8fafc !important;
+  color: #334155 !important;
+  border-bottom-color: #e2e8f0 !important;
+}
+
+.df2-quarantine-table td {
+  color: #0f172a !important;
+  background: #ffffff;
+  border-bottom-color: #e2e8f0 !important;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.df2-quarantine-table .df2-quarantine-value {
+  color: #1e293b !important;
+  max-width: 280px;
 }
 
 .df2-quarantine-explainer {
@@ -3854,23 +4117,42 @@
   min-width: 0;
 }
 
-/* Pilot FAB — was unstyled and colliding with page actions */
+/* Pilot FAB — reopen after closing the rail (including Transfer) */
 .df2-copilot-fab {
   position: fixed;
   right: 20px;
   bottom: 20px;
   z-index: var(--df-z-toast, 1100);
-  width: 52px;
+  min-width: 52px;
   height: 52px;
+  padding: 0 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   border: none;
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--df-brand, #0d9488);
   color: #fff;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
   cursor: pointer;
+}
+
+.df2-copilot-fab-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 720px) {
+  .df2-copilot-fab {
+    width: 52px;
+    padding: 0;
+  }
+
+  .df2-copilot-fab-label {
+    display: none;
+  }
 }
 
 .df2-copilot-fab:hover {
@@ -4712,6 +4994,78 @@
   gap: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--df-border, #e6e9ee);
+}
+
+/* Jobs detail — quarantine must stay a light, readable surface above Resume */
+.df2-jobs-v3-quarantine,
+.df2-theater-v3-quarantine {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  color: #78350f;
+}
+
+.df2-jobs-v3-quarantine-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.df2-jobs-v3-quarantine-head h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #92400e;
+}
+
+.df2-jobs-v3-quarantine-head p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #78350f;
+}
+
+.df2-jobs-v3-quarantine-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.df2-jobs-v3-quarantine .df2-quarantine-panel,
+.df2-theater-v3-quarantine .df2-quarantine-panel {
+  color: #0f172a;
+}
+
+.df2-jobs-v3-quarantine .df2-quarantine-inspect,
+.df2-theater-v3-quarantine .df2-quarantine-inspect {
+  background: #ffffff;
+  border-color: #fde68a;
+}
+
+.df2-jobs-v3-quarantine .df2-quarantine-table td,
+.df2-theater-v3-quarantine .df2-quarantine-table td {
+  color: #0f172a !important;
+  background: #ffffff;
+}
+
+.df2-jobs-v3-quarantine .df2-quarantine-table th,
+.df2-theater-v3-quarantine .df2-quarantine-table th {
+  color: #334155 !important;
+  background: #f8fafc !important;
 }
 
 .df2-jobs-v3-alert {
@@ -5662,7 +6016,8 @@
 
 .df2-jobs-v3-log,
 .df2-jobs-v3-notifications,
-.df2-jobs-v3-actions {
+.df2-jobs-v3-actions,
+.df2-jobs-v3-quarantine {
   flex: 0 0 auto;
   width: 100%;
   min-width: 0;

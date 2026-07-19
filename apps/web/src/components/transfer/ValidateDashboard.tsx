@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
@@ -342,9 +342,26 @@ export function ValidateDashboard({
   const [remediating, setRemediating] = useState(false);
   const [assistExpanded, setAssistExpanded] = useState(true);
   const [copiedRunId, setCopiedRunId] = useState(false);
+  const [remediationLog, setRemediationLog] = useState<
+    Array<{ at: string; action: string; detail: string; outcome: string }>
+  >([]);
+  const pendingVerifyRef = useRef(false);
+  const verifiedRunRef = useRef<string | null>(null);
   const badDataIssues = useMemo(() => extractBadDataIssues(preflight), [preflight]);
   const hasEncodingIssue = badDataIssues.length > 0;
   const runId = preflight?.run_id;
+
+  const pushRemediation = (action: string, detail: string, outcome: string) => {
+    setRemediationLog((prev) => [
+      {
+        at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        action,
+        detail,
+        outcome,
+      },
+      ...prev,
+    ].slice(0, 8));
+  };
   const encodingBlocks = Boolean(
     preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
     || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
@@ -362,7 +379,24 @@ export function ValidateDashboard({
     setExplain(null);
     setExplainError(null);
     setAssistExpanded(true);
-  }, [preflight]);
+  }, [preflight?.run_id]);
+
+  // After a remediation re-run, record whether dry-run cleared — once per run_id.
+  useEffect(() => {
+    if (!preflight?.run_id || running || !pendingVerifyRef.current) return;
+    if (verifiedRunRef.current === preflight.run_id) return;
+    verifiedRunRef.current = preflight.run_id;
+    pendingVerifyRef.current = false;
+    const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
+    const cleared = Boolean(preflight.passed || dry?.status === "pass");
+    pushRemediation(
+      "Re-validation result",
+      cleared
+        ? "Dry-run / integrity now passes — Execute unlocks when all gates pass."
+        : `Dry-run still blocked: ${dry?.message || "see Validation rules"}`,
+      cleared ? "Verified OK" : "Still blocked — review rules below",
+    );
+  }, [preflight?.run_id, preflight?.passed, preflight?.gates, running]);
 
   const copyRunId = async () => {
     if (!runId) return;
@@ -460,6 +494,12 @@ export function ValidateDashboard({
   const runStrip = async () => {
     if (!onStripControlChars) return;
     setRemediating(true);
+    pendingVerifyRef.current = true;
+    pushRemediation(
+      "Strip control characters",
+      "Applied strip_controls on text mappings and re-running validation (removes U+200B / format-control chars before Snowflake write).",
+      "Applied — waiting for re-validation",
+    );
     try {
       await onStripControlChars();
       setBadDataOpen(false);
@@ -471,6 +511,12 @@ export function ValidateDashboard({
   const runQuarantine = async () => {
     if (!onQuarantineAndRerun) return;
     setRemediating(true);
+    pendingVerifyRef.current = true;
+    pushRemediation(
+      "Quarantine + strip controls",
+      "Balanced validation + strip_controls. After Run, quarantined rows appear on the job (Inspect Quarantine) and can be exported as CSV — they are never silently dropped.",
+      "Applied — waiting for re-validation",
+    );
     try {
       await onQuarantineAndRerun();
       setBadDataOpen(false);
@@ -488,6 +534,17 @@ export function ValidateDashboard({
       setBadDataOpen(true);
       return;
     }
+    pendingVerifyRef.current = true;
+    pushRemediation(
+      action.label || action.kind,
+      [
+        action.column ? `Column: ${action.column}` : null,
+        action.target ? `Target: ${action.target}` : null,
+        action.transform ? `Transform: ${action.transform}` : null,
+        action.to_type ? `Type → ${action.to_type}` : null,
+      ].filter(Boolean).join(" · ") || "AI suggested fix applied to mappings.",
+      "Applied — re-running validation",
+    );
     onApplyAction?.(action);
   };
 
@@ -550,6 +607,28 @@ export function ValidateDashboard({
         </div>
       </header>
 
+      {remediationLog.length > 0 && (
+        <div className="df2-vd-remediation-log" aria-label="What was fixed">
+          <div className="df2-vd-remediation-log-head">
+            <DtIcon name="check" size={14} />
+            <strong>What we changed</strong>
+            <span>Exact remediations applied in this Validate session</span>
+          </div>
+          <ol>
+            {remediationLog.map((entry, i) => (
+              <li key={`${entry.at}-${entry.action}-${i}`}>
+                <time>{entry.at}</time>
+                <div>
+                  <strong>{entry.action}</strong>
+                  <p>{entry.detail}</p>
+                  <em>{entry.outcome}</em>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
       {cellPreview && (cellPreview.quarantine_count > 0 || cellPreview.coerce_count > 0) && (
         <div className="df2-vd-cell-preview" aria-label="Sample cell quarantine preview">
           <div className="df2-vd-cell-preview-head">
@@ -559,6 +638,10 @@ export function ValidateDashboard({
               {cellPreview.sample_rows_scanned} rows scanned
             </span>
           </div>
+          <p className="df2-vd-cell-preview-hint">
+            Quarantine means bad cells are kept on the job for Inspect / CSV export after Run — not deleted.
+            Use <strong>Strip controls</strong> for U+200B, or open Jobs → the completed/failed job → Inspect Quarantine.
+          </p>
           <ul className="df2-vd-cell-preview-list">
             {cellPreview.cells.slice(0, 8).map((cell, i) => (
               <li key={`${cell.source}-${cell.row}-${i}`} className={`df2-vd-cell-preview-item is-${cell.status}`}>

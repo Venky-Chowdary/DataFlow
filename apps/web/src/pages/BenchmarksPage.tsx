@@ -340,6 +340,18 @@ export function BenchmarksPage() {
 
           {tab === "scale" && (
             <PageSection title="Reproducible scale proof">
+              <div className="df2-alert df2-alert-info df2-page-benchmarks-workload" role="note">
+                <DtIcon name="alert" size={16} />
+                <div>
+                  <strong>Workload class: synthetic CSV → SQLite on this API host</strong>
+                  <p>
+                    These numbers measure local file→SQLite throughput (often ~10k rows in under a second).
+                    They are <em>not</em> MongoDB→Snowflake or other warehouse runs — those depend on network RTT,
+                    warehouse size, COPY vs INSERT, and transform/quarantine work. Always trust the rows/sec shown
+                    on the live job theater for a real transfer.
+                  </p>
+                </div>
+              </div>
               <p className="df2-page-benchmarks-intro">
                 Secondary to integrity: synthetic CSV → SQLite throughput vs public Fivetran / Airbyte / Stitch
                 baselines. Speed without quarantine and checksums is not a migration proof.
@@ -393,8 +405,9 @@ export function BenchmarksPage() {
                   <div className="df2-page-benchmarks-section">
                     <h3>Throughput baselines (public figures)</h3>
                     <p className="df2-page-benchmarks-note">
-                      Competitor RPS figures are representative public baselines. DataFlow numbers are measured live.
-                      Prefer the Integrity ledger for migration trust.
+                      Competitor RPS figures are representative public baselines. DataFlow numbers here are measured
+                      live for <strong>CSV → SQLite only</strong> — not warehouse routes (Mongo→Snowflake, etc.).
+                      Prefer the Integrity ledger for migration trust, and the job theater for this-job throughput.
                     </p>
                     <div className="df2-page-benchmarks-table-wrap">
                       <table className="df2-page-benchmarks-table">

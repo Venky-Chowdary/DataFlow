@@ -605,7 +605,22 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                     )}
 
                     {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0 || selected.status === "completed_with_quarantine") && (
-                      <div className="df2-jobs-v3-actions">
+                      <section className="df2-jobs-v3-quarantine" aria-label="Quarantined rows">
+                        <header className="df2-jobs-v3-quarantine-head">
+                          <div>
+                            <h3>Quarantined rows</h3>
+                            <p>
+                              {(liveJob.rejected_rows ?? 0) > 0
+                                ? `${(liveJob.rejected_rows ?? 0).toLocaleString()} row(s) isolated — inspect columns, values, and reasons below. Export CSV downloads to your machine.`
+                                : "Inspect preflight / integrity findings for this job. Export CSV downloads to your machine."}
+                            </p>
+                          </div>
+                          {(liveJob.rejected_rows ?? 0) > 0 && (
+                            <span className="df2-jobs-v3-quarantine-badge">
+                              {(liveJob.rejected_rows ?? 0).toLocaleString()} quarantined
+                            </span>
+                          )}
+                        </header>
                         <QuarantinePanel
                           jobId={selected._id}
                           rejectedRows={liveJob.rejected_rows}
@@ -613,7 +628,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                           autoLoad
                           initiallyOpen={selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0}
                         />
-                      </div>
+                      </section>
                     )}
 
                     {selected.status === "failed" && (

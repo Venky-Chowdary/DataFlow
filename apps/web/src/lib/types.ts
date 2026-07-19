@@ -157,6 +157,9 @@ export interface JobPhase {
   name: string;
   status: "pending" | "active" | "done" | "failed" | "skipped";
   message?: string;
+  started_at?: string;
+  ended_at?: string;
+  elapsed_ms?: number;
 }
 
 export interface JobNotificationResult {
@@ -181,6 +184,8 @@ export interface JobProgress extends TransferJob {
   preflight?: PreflightResult;
   phases?: JobPhase[];
   notifications?: JobNotificationResult[];
+  records_per_second?: number;
+  chunk_size?: number;
 }
 
 export interface CsvValidationReport {
@@ -410,7 +415,12 @@ export interface TransferResult {
     error_policy?: string;
     filename?: string;
     download_url?: string;
+    load_method?: string;
+    chunk_size?: number;
+    batches?: number;
+    records_per_second?: number;
   };
+  records_per_second?: number;
   ddl_executed?: string[];
   operation?: string;
   error?: string;

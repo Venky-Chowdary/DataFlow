@@ -115,7 +115,8 @@ class DataPilotAgent:
         data_context: dict | None = None,
     ) -> CopilotResponse:
         message = message.strip()
-        if not message or message.lower() in {
+        lower_msg = message.lower()
+        if not message or lower_msg in {
             "hi",
             "hello",
             "hey",
@@ -136,6 +137,13 @@ class DataPilotAgent:
                 method="greeting",
                 suggested_prompts=self._starter_prompts()[:4],
             )
+
+        # Meta questions stay on the local agent — never RAG-dump ontology shards
+        # and never race cloud LLMs for a "who are you" answer.
+        from .tools import _is_meta_pilot_question
+        if _is_meta_pilot_question(lower_msg):
+            ctx = self.context_builder.build(data_context, message)
+            return self._local_agent(message, history or [], ctx, data_context)
 
         ctx = self.context_builder.build(data_context, message)
         system = self._build_system_prompt(ctx)
@@ -451,8 +459,15 @@ Respond as Data Pilot — grounded in tool results."""
         navigated = any(tr.name == "navigate" for tr in turn.tool_results)
         has_knowledge = any(tr.name == "search_knowledge" for tr in turn.tool_results)
         has_connector = any(tr.name == "search_connectors" for tr in turn.tool_results)
+        described = any(tr.name == "describe_pilot" for tr in turn.tool_results)
         insight = None
-        if not list_only and not has_knowledge and not has_connector and not (navigated and not self.analyst.wants_data_analysis(message, intent)):
+        if (
+            not list_only
+            and not has_knowledge
+            and not has_connector
+            and not described
+            and not (navigated and not self.analyst.wants_data_analysis(message, intent))
+        ):
             insight = self.analyst.analyze_context(data_context, self.analyst.extract_dataset_hint(message))
             if not insight and self.analyst.wants_data_analysis(message, intent):
                 hint = self.analyst.extract_dataset_hint(message)
@@ -609,19 +624,52 @@ Respond as Data Pilot — grounded in tool results."""
                     badge = "live" if status == "live" else status
                     lines.append(f"• **{c['name']}** ({badge}) — {c.get('description', '')[:60]}")
                 parts.append("\n".join(lines))
+            elif tr.name == "describe_pilot" and tr.success:
+                o = tr.output or {}
+                lines = [
+                    "I'm **Data Pilot** — a local-first agent for DataFlow (routes, schema risk, "
+                    "mappings, jobs, and remediation). I answer from your workspace tools first; "
+                    "I do not dump raw training shards as chat.",
+                    "**I can:**",
+                ]
+                for item in (o.get("can") or [])[:6]:
+                    lines.append(f"• {item}")
+                ds = o.get("datasets") or []
+                if ds:
+                    lines.append(
+                        "**Indexed datasets:** "
+                        + ", ".join(f"**{d.get('name')}**" for d in ds[:6] if d.get("name"))
+                    )
+                else:
+                    lines.append(
+                        "**Indexed datasets:** none yet — upload in **New Transfer** and I can profile them."
+                    )
+                conns = o.get("connectors") or []
+                if conns:
+                    lines.append(
+                        "**Saved connectors:** "
+                        + ", ".join(
+                            f"{c.get('name')} ({c.get('type')})" for c in conns[:6] if c.get("name")
+                        )
+                    )
+                examples = o.get("ask_examples") or []
+                if examples:
+                    lines.append("Try: " + " · ".join(f'"{e}"' for e in examples[:4]))
+                parts.append("\n".join(lines))
             elif tr.name == "search_knowledge" and tr.success:
                 hits = tr.output.get("hits", [])
                 if hits:
-                    best = hits[0]["text"]
-                    if "Assistant:" in best:
-                        answer = best.split("Assistant:", 1)[1].strip()
-                        parts.append(answer[:1200])
-                    else:
-                        parts.append(best[:800])
-                    if len(hits) > 1:
-                        parts.append(f"_({len(hits)} trained knowledge matches)_")
+                    lines = ["Here's what matches your question:"]
+                    for h in hits[:3]:
+                        summary = (h.get("summary") or h.get("text") or "").strip()
+                        if summary:
+                            lines.append(f"• {summary[:400]}")
+                    parts.append("\n".join(lines))
                 else:
-                    parts.append("No trained knowledge matched — try listing datasets or analyzing a specific file.")
+                    parts.append(
+                        "No solid knowledge match for that. Ask about a dataset, a job ID, "
+                        "or say **what can you do** for my capabilities."
+                    )
 
         if insight and not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
             if not any(tr.name == "navigate" for tr in turn.tool_results):

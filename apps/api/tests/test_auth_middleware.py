@@ -69,6 +69,26 @@ def test_public_route_without_token(auth_env):
     assert response.status_code == 200
 
 
+def test_catalog_is_public_without_token(auth_env):
+    """Landing/docs call /catalog/stats before sign-in — must not 401."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.middleware.auth_middleware import AuthMiddleware
+
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.get("/api/v1/catalog/stats")
+    def stats():
+        return {"connector_count": 1}
+
+    client = TestClient(app)
+    response = client.get("/api/v1/catalog/stats")
+    assert response.status_code == 200
+    assert response.json()["connector_count"] == 1
+
+
 def test_auth_login_alias_is_public(auth_env):
     """Mis-set VITE_API_BASE hits /auth/login — must not require a bearer token."""
     from fastapi import FastAPI

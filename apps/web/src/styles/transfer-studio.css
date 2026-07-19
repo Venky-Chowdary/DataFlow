@@ -4131,21 +4131,67 @@
   gap: 12px !important;
 }
 
-/* VALIDATE — Proof + rules dashboard */
+/* VALIDATE — Proof + rules dashboard (scroll chain must not trap) */
+.df2-content-studio:has(.is-validate-step),
+.df2-content-studio:has(.df2-validate-dashboard-host) {
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.df2-content-studio:has(.is-validate-step) > .df2-screen-panel,
+.df2-content-studio:has(.df2-validate-dashboard-host) > .df2-screen-panel {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.df2-content-studio:has(.is-validate-step) .df2-page-transfer-studio,
+.df2-content-studio:has(.df2-validate-dashboard-host) .df2-page-transfer-studio {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.df2-content-studio:has(.is-validate-step) .df2-transfer-studio-shell,
+.df2-content-studio:has(.df2-validate-dashboard-host) .df2-transfer-studio-shell {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.df2-transfer-studio-body.is-validate-step {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) clamp(280px, 26vw, 340px) !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  align-items: stretch !important;
+}
+.df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
 .df2-transfer-step-viewport.df2-validate-dashboard-host,
-.df2-transfer-step-viewport.df2-validate-split {
+.df2-transfer-step-viewport.df2-validate-split,
+.df2-validate-dashboard-host {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  height: auto !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable;
-  min-height: 0 !important;
-  max-height: 100%;
-  padding: 0 !important;
-}
-.df2-validate-dashboard-host {
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
   padding: 0 !important;
 }
 .df2-vd {
@@ -4155,13 +4201,64 @@
   padding: 18px;
   width: 100%;
   box-sizing: border-box;
+  /* Content grows; the HOST scrolls — do not set overflow:hidden here */
   min-height: min-content;
+  overflow: visible;
 }
 .df2-transfer-studio-body.is-validate-step .df2-validate-rail {
+  min-height: 0 !important;
+  max-height: 100% !important;
   overflow-y: auto !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable;
+}
+
+/* Remediation audit — what AI / operator fixed */
+.df2-vd-remediation-log {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid #bbf7d0;
+  border-radius: 12px;
+  background: #f0fdf4;
+}
+.df2-vd-remediation-log-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+  color: #166534;
+}
+.df2-vd-remediation-log-head strong { font-size: 13px; }
+.df2-vd-remediation-log-head span { font-size: 12px; color: #15803d; }
+.df2-vd-remediation-log ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.df2-vd-remediation-log li {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  font-size: 12px;
+  color: #334155;
+}
+.df2-vd-remediation-log time {
+  font-variant-numeric: tabular-nums;
+  color: #64748b;
+  padding-top: 2px;
+}
+.df2-vd-remediation-log strong { display: block; color: #0f172a; margin-bottom: 2px; }
+.df2-vd-remediation-log p { margin: 0 0 4px; line-height: 1.4; }
+.df2-vd-remediation-log em {
+  font-style: normal;
+  font-weight: 600;
+  color: #15803d;
+  font-size: 11px;
 }
 
 /* Cell quarantine preview (operator feel-good vs silent loads) */
@@ -4181,6 +4278,12 @@
 }
 .df2-vd-cell-preview-head strong { font-size: 13px; color: #92400e; }
 .df2-vd-cell-preview-head span { font-size: 12px; color: #78350f; }
+.df2-vd-cell-preview-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #78350f;
+}
 .df2-vd-cell-preview-list {
   list-style: none;
   margin: 0;

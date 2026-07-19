@@ -114,8 +114,9 @@ export function BadDataFixDrawer({
           <article>
             <h4><DtIcon name="alert" size={14} /> Quarantine &amp; continue</h4>
             <p>
-              Keep the transfer gated on quarantine policy — bad cells are recorded and surfaced in Job
-              Theater, never dropped without a trail. Switches error policy to quarantine and re-runs.
+              Applies strip_controls + balanced validation, then re-runs gates. After you Execute,
+              any remaining bad rows land on that job under <strong>Inspect Quarantine</strong>
+              (Jobs page) — downloadable as CSV. Nothing is silently deleted.
             </p>
             <Button variant="secondary" onClick={onQuarantineContinue} disabled={applying}>
               Quarantine bad cells &amp; re-run

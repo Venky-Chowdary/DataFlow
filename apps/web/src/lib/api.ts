@@ -1,10 +1,27 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
-import { getAuthToken } from "./session";
+import { clearSession, getAuthToken } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 120000;
 
 type TimedRequestInit = RequestInit & { timeoutMs?: number };
+
+/** Fired when the API rejects a request with 401 — AppShell should return to login. */
+export const AUTH_REQUIRED_EVENT = "df2:auth-required";
+
+let _authNotifyAt = 0;
+
+function notifyAuthRequired(requestUrl: string) {
+  if (/\/auth\/(login|bootstrap|sso)/i.test(requestUrl)) return;
+  // Debounce so a burst of 401s (connectors + catalog + jobs) only redirects once.
+  const now = Date.now();
+  if (now - _authNotifyAt < 1500) return;
+  _authNotifyAt = now;
+  clearSession();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT, { detail: { url: requestUrl } }));
+  }
+}
 
 async function parseApiError(res: Response, fallback: string): Promise<string> {
   try {
@@ -40,7 +57,11 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   }
 
   try {
-    return await fetch(input, { ...mergedInit, signal: controller.signal });
+    const res = await fetch(input, { ...mergedInit, signal: controller.signal });
+    if (res.status === 401) {
+      notifyAuthRequired(typeof input === "string" ? input : String(input));
+    }
+    return res;
   } catch (error) {
     if (controller.signal.aborted) throw new Error("Request timed out");
     throw error;
@@ -533,30 +554,27 @@ export async function fetchConnectors(): Promise<Connector[]> {
   };
 
   // File-backed store is canonical — always prefer /connectors/saved
-  try {
-    const res = await apiFetch(`${API_BASE}/connectors/saved`);
-    if (res.ok) {
-      const data = await res.json();
-      const list = (data.connectors || [])
-        .map((raw: Record<string, unknown>) => normalize(raw))
-        .filter(Boolean) as Connector[];
-      return list;
-    }
-  } catch {
-    /* fall through */
+  const savedRes = await apiFetch(`${API_BASE}/connectors/saved`);
+  if (savedRes.status === 401) {
+    throw new Error("Authentication required — sign in again to load connectors");
+  }
+  if (savedRes.ok) {
+    const data = await savedRes.json();
+    return (data.connectors || [])
+      .map((raw: Record<string, unknown>) => normalize(raw))
+      .filter(Boolean) as Connector[];
   }
 
   // Legacy MongoDB list (optional fallback when saved route unavailable)
-  try {
-    const res = await apiFetch(`${API_BASE}/connectors/`);
-    if (res.ok) {
-      const data = await res.json();
-      return (data.connectors || [])
-        .map((raw: Record<string, unknown>) => normalize(raw))
-        .filter(Boolean) as Connector[];
-    }
-  } catch {
-    /* empty */
+  const legacyRes = await apiFetch(`${API_BASE}/connectors/`);
+  if (legacyRes.status === 401) {
+    throw new Error("Authentication required — sign in again to load connectors");
+  }
+  if (legacyRes.ok) {
+    const data = await legacyRes.json();
+    return (data.connectors || [])
+      .map((raw: Record<string, unknown>) => normalize(raw))
+      .filter(Boolean) as Connector[];
   }
   return [];
 }
@@ -1099,6 +1117,7 @@ export async function createTransferPlan(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create transfer plan"));
   return res.json();
@@ -1142,6 +1161,7 @@ export async function updateTransferPlan(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to update transfer plan"));
   return res.json();
@@ -1155,6 +1175,7 @@ export async function syncTransferPlanMappings(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mappings }),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to sync plan mappings"));
   return res.json();
@@ -1614,8 +1635,15 @@ export async function executeQuery(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error(await parseApiError(res, "Query failed"));
+  if (!res.ok) {
+    const detail = await parseApiError(res, "Query failed");
+    if (res.status === 400) {
+      throw new Error(detail || "Query rejected — use a safe read-only SQL / Mongo filter");
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -1670,6 +1698,78 @@ export async function exportJobQuarantine(jobId: string): Promise<{ success: boo
   const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/quarantine/export`, { method: "POST" });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export quarantine"));
   return res.json();
+}
+
+/** Resolve API-relative download paths (e.g. /api/v1/transfer/download/x.csv) to an absolute URL. */
+export function resolveApiAssetUrl(pathOrUrl: string): string {
+  if (!pathOrUrl) return "";
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  if (pathOrUrl.startsWith("/api/")) {
+    if (API_BASE.startsWith("http")) {
+      const origin = API_BASE.replace(/\/api\/v1\/?$/, "");
+      return `${origin}${pathOrUrl}`;
+    }
+    return `${window.location.origin}${pathOrUrl}`;
+  }
+  const base = resolveApiBase().replace(/\/$/, "");
+  return `${base}/${pathOrUrl.replace(/^\//, "")}`;
+}
+
+/**
+ * Download quarantine CSV as a browser Blob.
+ * Prefers an authenticated fetch of the export file (fixes "file wasn't available on site"
+ * when the web app and API are on different origins). Falls back to client-built CSV.
+ */
+export async function downloadJobQuarantineCsv(
+  jobId: string,
+  fallbackRows?: QuarantineInfo["quarantine"],
+): Promise<{ filename: string; row_count: number; blob: Blob }> {
+  const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const toCsv = (rows: QuarantineInfo["quarantine"]) => {
+    const lines = ["row,column,target,value,reason,policy"];
+    for (const r of rows) {
+      lines.push(
+        [r.row, r.column, r.target, r.value, r.reason, r.policy].map(escape).join(","),
+      );
+    }
+    return `${lines.join("\n")}\n`;
+  };
+
+  // 1) Client-side CSV when rows are already loaded — never depends on download_url origin.
+  if (fallbackRows && fallbackRows.length > 0) {
+    const filename = `quarantine-${jobId}.csv`;
+    return {
+      filename,
+      row_count: fallbackRows.length,
+      blob: new Blob([toCsv(fallbackRows)], { type: "text/csv;charset=utf-8" }),
+    };
+  }
+
+  // 2) Server export + authenticated fetch of the file from the API host.
+  const meta = await exportJobQuarantine(jobId);
+  if (meta.download_url) {
+    const url = resolveApiAssetUrl(meta.download_url);
+    const fileRes = await apiFetch(url);
+    if (fileRes.ok) {
+      return {
+        filename: meta.filename || `quarantine-${jobId}.csv`,
+        row_count: meta.row_count ?? 0,
+        blob: await fileRes.blob(),
+      };
+    }
+  }
+
+  // 3) Last resort: fetch quarantine JSON and build CSV locally.
+  const data = await fetchJobQuarantine(jobId);
+  const rows = data.quarantine || [];
+  if (!rows.length) {
+    throw new Error("No quarantine findings to export for this job");
+  }
+  return {
+    filename: `quarantine-${jobId}.csv`,
+    row_count: rows.length,
+    blob: new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }),
+  };
 }
 
 export interface QuarantineReplayResult {

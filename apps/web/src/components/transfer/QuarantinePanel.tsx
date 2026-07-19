@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
-import { exportJobQuarantine, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
+import { downloadJobQuarantineCsv, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
 
 export interface QuarantinePanelProps {
   jobId: string;
@@ -43,6 +43,18 @@ function summarizeColumns(rows: QuarantineRow[]) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
 }
 
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
 export function QuarantinePanel({
   jobId,
   rejectedRows,
@@ -54,6 +66,7 @@ export function QuarantinePanel({
   const [open, setOpen] = useState(initiallyOpen || autoLoad);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [rows, setRows] = useState<QuarantineRow[]>([]);
   const [issueCount, setIssueCount] = useState(0);
@@ -73,7 +86,7 @@ export function QuarantinePanel({
       const data = await fetchJobQuarantine(jobId);
       setRows(data.quarantine || []);
       setIssueCount(data.issue_count ?? data.quarantine?.length ?? 0);
-      setRowCount(data.rejected_rows ?? 0);
+      setRowCount(data.rejected_rows ?? rejectedRows ?? 0);
       setSource(data.source || "none");
       setOpen(true);
       setLoaded(true);
@@ -91,19 +104,26 @@ export function QuarantinePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per job
   }, [jobId, autoLoad, initiallyOpen]);
 
+  useEffect(() => {
+    if (rejectedRows != null && rejectedRows > 0 && !loaded) {
+      setRowCount(rejectedRows);
+    }
+  }, [rejectedRows, loaded]);
+
   const download = async () => {
+    setExporting(true);
     try {
-      const data = await exportJobQuarantine(jobId);
-      if (data.download_url) {
-        const a = document.createElement("a");
-        a.href = data.download_url;
-        a.download = data.filename || `quarantine-${jobId}.csv`;
-        a.click();
-      } else {
-        toast({ title: "Export returned no file", tone: "warning" });
-      }
+      const data = await downloadJobQuarantineCsv(jobId, rows.length ? rows : undefined);
+      triggerBlobDownload(data.blob, data.filename);
+      toast({
+        title: "Quarantine CSV downloaded",
+        message: `${data.row_count.toLocaleString()} finding(s) saved as ${data.filename}`,
+        tone: "success",
+      });
     } catch (e) {
       toast({ title: "Could not export quarantine", message: (e as Error).message, tone: "error" });
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -151,6 +171,7 @@ export function QuarantinePanel({
   const topReasons = summarizeReasons(rows);
   const topColumns = summarizeColumns(rows);
   const displayRowCount = rowCount || (rejectedRows ?? 0) || issueCount;
+  const displayFindings = loaded ? issueCount : (rejectedRows ?? 0) || issueCount;
   const canReplay = source === "write" && rows.length > 0;
 
   return (
@@ -160,15 +181,15 @@ export function QuarantinePanel({
         <div>
           <strong>Quarantine / bad-data findings</strong>
           <p>
-            Bad cells are never silently dropped. Each finding records row, column, sample value, and reason
-            so you can strip controls, fix mappings, or edit and replay.
+            Bad cells are never silently dropped. Each finding records row, column, sample value, reason,
+            and policy so you can strip controls, fix mappings, or edit and replay.
           </p>
           <div className="df2-quarantine-explainer-metrics" aria-label="Quarantine counts">
             <span className="df2-quarantine-explainer-count">
-              <strong>{displayRowCount.toLocaleString()}</strong> row{displayRowCount === 1 ? "" : "s"} with issues
+              <strong>{displayRowCount.toLocaleString()}</strong> row{displayRowCount === 1 ? "" : "s"} quarantined
             </span>
             <span className="df2-quarantine-explainer-count">
-              <strong>{(loaded ? issueCount : rejectedRows ?? 0).toLocaleString()}</strong> finding{(loaded ? issueCount : rejectedRows ?? 0) === 1 ? "" : "s"}
+              <strong>{displayFindings.toLocaleString()}</strong> finding{displayFindings === 1 ? "" : "s"}
             </span>
             {coercedNullRows != null && coercedNullRows > 0 && (
               <span className="df2-quarantine-explainer-count">
@@ -195,19 +216,19 @@ export function QuarantinePanel({
           {loading
             ? "Loading…"
             : displayRowCount > 0
-              ? `Inspect ${displayRowCount.toLocaleString()} problem row${displayRowCount === 1 ? "" : "s"}`
+              ? `Inspect ${displayRowCount.toLocaleString()} quarantined row${displayRowCount === 1 ? "" : "s"}`
               : "Inspect quarantine / findings"}
         </button>
       )}
 
       {open && (
-        <section className="df2-job-log-panel is-result is-open" aria-label="Quarantine">
-          <header className="df2-job-log-panel-head">
-            <div className="df2-job-log-panel-title">
+        <section className="df2-quarantine-inspect is-open" aria-label="Quarantine findings">
+          <header className="df2-quarantine-inspect-head">
+            <div className="df2-quarantine-inspect-title">
               <DtIcon name="warning" size={14} />
-              <strong>Inspect findings</strong>
-              <span className="df2-job-log-count">
-                {issueCount.toLocaleString()} finding{issueCount === 1 ? "" : "s"}
+              <strong>Quarantined rows</strong>
+              <span className="df2-quarantine-inspect-count">
+                {displayFindings.toLocaleString()} finding{displayFindings === 1 ? "" : "s"}
                 {displayRowCount > 0 ? ` · ${displayRowCount.toLocaleString()} rows` : ""}
               </span>
             </div>
@@ -222,8 +243,13 @@ export function QuarantinePanel({
                   <DtIcon name="transfer" size={14} /> {replaying ? "Replaying…" : "Replay"}
                 </button>
               )}
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={() => void download()} disabled={rows.length === 0}>
-                <DtIcon name="download" size={14} /> Export CSV
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm df2-btn-secondary"
+                onClick={() => void download()}
+                disabled={exporting || (!rows.length && !displayFindings)}
+              >
+                <DtIcon name="download" size={14} /> {exporting ? "Exporting…" : "Export CSV"}
               </button>
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void load()} disabled={loading}>
                 Refresh
@@ -258,16 +284,17 @@ export function QuarantinePanel({
             </div>
           )}
 
-          <div className="df2-job-log-panel-body" role="log">
+          <div className="df2-quarantine-inspect-body" role="region" aria-label="Quarantine table">
             {loading && !loaded ? (
-              <div className="df2-job-log-empty">Loading findings…</div>
+              <div className="df2-quarantine-inspect-empty">Loading quarantined rows…</div>
             ) : rows.length === 0 ? (
-              <div className="df2-job-log-empty">
-                No row-level findings were stored for this job. If Validate blocked on encoding, re-run after
-                deploying the latest API so preflight issues are saved into quarantine.
+              <div className="df2-quarantine-inspect-empty">
+                {displayRowCount > 0
+                  ? `${displayRowCount.toLocaleString()} row(s) were marked quarantined on this job, but row-level findings were not stored. Re-run after the latest API deploy so findings are persisted.`
+                  : "No row-level findings were stored for this job. If Validate blocked on encoding, re-run after deploying the latest API so preflight issues are saved into quarantine."}
               </div>
             ) : (
-              <table className="df2-query-table">
+              <table className="df2-query-table df2-quarantine-table">
                 <thead>
                   <tr>
                     <th>Row</th>

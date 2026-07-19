@@ -13,12 +13,9 @@ import { useActiveData } from "../lib/DataContext";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
 import { renderSafeMarkdown } from "../lib/safeMarkdown";
+import { loadRailChat, PilotMessage, saveRailChat } from "../lib/pilotChatStore";
 
-interface Message {
-  role: "user" | "assistant";
-  text: string;
-  method?: string;
-  actions?: CopilotAction[];
+interface Message extends PilotMessage {
   dataInsight?: {
     dataset: string;
     columns: number;
@@ -28,6 +25,11 @@ interface Message {
   };
   toolsUsed?: { name: string; success: boolean; summary: string }[];
 }
+
+const DEFAULT_GREETING: Message = {
+  role: "assistant",
+  text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
+};
 
 interface AICopilotProps {
   onNavigate?: (screen: Screen) => void;
@@ -65,14 +67,13 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [prompts, setPrompts] = useState<string[]>([]);
-  const [history, setHistory] = useState<CopilotChatMessage[]>([]);
+  const restored = useRef(loadRailChat());
+  const [history, setHistory] = useState<CopilotChatMessage[]>(() => restored.current?.history ?? []);
   const [toolRegistry, setToolRegistry] = useState<PilotToolRegistry | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "assistant",
-      text: "I'm **Data Pilot** — I can plan routes, inspect schema risk, explain mappings, and take you to the right workspace. Paste a `pf_…` validation run ID or a job ID to triage failures.",
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const saved = restored.current?.messages;
+    return saved && saved.length > 0 ? saved : [DEFAULT_GREETING];
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -83,6 +84,13 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       fetchPilotTools().then(setToolRegistry).catch(() => setToolRegistry(FALLBACK_TOOL_REGISTRY));
     }
   }, [open, variant, prompts.length, toolRegistry]);
+
+  useEffect(() => {
+    // Persist rail chat so close/refresh does not wipe the conversation.
+    if (messages.length > 1 || history.length > 0) {
+      saveRailChat({ messages, history });
+    }
+  }, [messages, history]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -209,10 +217,10 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         {messages.map((msg, i) => (
           <div key={i} className={`df2-copilot-msg ${msg.role}`}>
             <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
-            {(msg.method || msg.toolsUsed?.length) && (
+            {(msg.method || msg.toolsUsed?.length || msg.tools_used?.length) && (
               <div className="df2-copilot-evidence">
                 {msg.method && <span>{msg.method}</span>}
-                {msg.toolsUsed?.slice(0, 3).map((tool) => (
+                {(msg.toolsUsed || msg.tools_used)?.slice(0, 3).map((tool) => (
                   <span key={tool.name} className={tool.success ? "ok" : "err"}>{tool.name}</span>
                 ))}
               </div>

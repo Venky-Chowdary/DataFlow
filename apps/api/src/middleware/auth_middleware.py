@@ -15,6 +15,9 @@ _PUBLIC_PREFIXES = (
     "/auth/login",
     "/auth/bootstrap",
     "/auth/sso/providers",
+    # Marketing / docs / landing need catalog stats without a session.
+    "/api/v1/catalog",
+    "/catalog",
     # MCP discovery + Streamable HTTP handshake (tools/call still checks auth in-handler)
     "/api/v1/mcp",
 )

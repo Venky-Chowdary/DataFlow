@@ -240,13 +240,18 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "describe_pilot",
+        "description": "Explain what Data Pilot knows and can do locally — capabilities, not raw RAG dumps.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 TOOL_FAMILIES: list[dict] = [
     {
         "id": "discover",
         "label": "Discover",
-        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge"],
+        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
         "generated_actions": 620,
     },
     {
@@ -326,6 +331,7 @@ class DataPilotTools:
             "compare_datasets": self._compare_datasets,
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
+            "describe_pilot": self._describe_pilot,
             "plan_transfer_route": self._plan_transfer_route,
             "explain_mapping_assurance": self._explain_mapping_assurance,
             "recommend_sync_mode": self._recommend_sync_mode,
@@ -570,6 +576,56 @@ class DataPilotTools:
         result = search_catalog(query, role, limit=20)
         return ToolResult(name="search_connectors", success=True, output=result)
 
+    def _describe_pilot(self) -> ToolResult:
+        """Local capability card — never dump raw semantic-type training shards."""
+        datasets = []
+        connectors = []
+        try:
+            ds = self._list_datasets()
+            if ds.success:
+                datasets = (ds.output or {}).get("datasets", [])[:8]
+        except Exception:
+            pass
+        try:
+            lc = self._list_connectors()
+            if lc.success:
+                connectors = (lc.output or {}).get("connectors", [])[:8]
+        except Exception:
+            pass
+        return ToolResult(
+            name="describe_pilot",
+            success=True,
+            output={
+                "role": "Data Pilot",
+                "runtime": "local_first",
+                "can": [
+                    "Plan source→destination routes and sync modes",
+                    "Inspect schema risk, mappings, and validation failures",
+                    "Triage jobs by ID (pf_… validation runs or Mongo job IDs)",
+                    "Search your uploaded datasets for columns, PII, and quality",
+                    "Navigate you to Transfer, Jobs, Connectors, or Settings",
+                ],
+                "does_not": [
+                    "Invent warehouse facts without tools",
+                    "Dump raw training shards as chat answers",
+                ],
+                "datasets": [
+                    {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
+                    for d in datasets
+                ],
+                "connectors": [
+                    {"name": c.get("name"), "type": c.get("type")}
+                    for c in connectors
+                ],
+                "ask_examples": [
+                    "Analyze logistics data",
+                    "Why did job <id> fail?",
+                    "Move MongoDB jobs to Snowflake",
+                    "Show my connectors",
+                ],
+            },
+        )
+
     def _search_knowledge(self, query: str = "") -> ToolResult:
         if not query.strip():
             return ToolResult(name="search_knowledge", success=False, output=None, error="query required")
@@ -577,12 +633,29 @@ class DataPilotTools:
             from ..rag.pipeline import get_rag_pipeline
             rag = get_rag_pipeline()
             rag.ingestion.ensure_knowledge_loaded()
-            result = rag.retriever.retrieve(query, n_results=6)
-            hits = [
-                {"text": d.text[:600], "score": round(d.score, 3), "type": d.metadata.get("type", "")}
-                for d in result.documents
-            ]
-            return ToolResult(name="search_knowledge", success=True, output={"query": query, "hits": hits, "count": len(hits)})
+            result = rag.retriever.retrieve(query, n_results=8)
+            hits = []
+            for d in result.documents:
+                text = (d.text or "").strip()
+                score = float(d.score or 0)
+                # Drop low-score noise and raw ontology shards that read like debug dumps.
+                if score < 0.28:
+                    continue
+                if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
+                    continue
+                hits.append({
+                    "text": text[:600],
+                    "score": round(score, 3),
+                    "type": d.metadata.get("type", ""),
+                    "summary": _summarize_knowledge_hit(text),
+                })
+                if len(hits) >= 4:
+                    break
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output={"query": query, "hits": hits, "count": len(hits)},
+            )
         except Exception as e:
             return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
 
@@ -719,10 +792,99 @@ class DataPilotTools:
         })
 
 
+_META_PILOT_PHRASES = (
+    "what knowledge",
+    "what do you know",
+    "your knowledge",
+    "what can you",
+    "what do you do",
+    "who are you",
+    "what are you",
+    "how do you work",
+    "your capabilities",
+    "what knowledge you have",
+    "knowledge you have",
+    "trained knowledge",
+    "what can pilot",
+)
+
+
+def _is_meta_pilot_question(lower: str) -> bool:
+    if any(p in lower for p in _META_PILOT_PHRASES):
+        return True
+    if lower.strip() in {"capabilities", "help", "about", "about you"}:
+        return True
+    return bool(re.search(r"\b(what|which)\s+(knowledge|skills|tools)\b", lower))
+
+
+def _is_raw_knowledge_shard(text: str) -> bool:
+    t = text.strip()
+    if t.startswith("Semantic type:"):
+        return True
+    markers = ("Category:", "Patterns:", "PII:", "Data type:")
+    return sum(1 for m in markers if m in t) >= 3
+
+
+def _query_targets_semantic_type(query: str, text: str) -> bool:
+    q = query.lower()
+    # Only keep ontology shards when the user clearly asked about that concept.
+    m = re.search(r"Semantic type:\s*([^.]+)", text, re.I)
+    if not m:
+        return False
+    label = m.group(1).strip().lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", label) if len(t) > 2]
+    return bool(tokens) and any(t in q for t in tokens)
+
+
+def _summarize_knowledge_hit(text: str) -> str:
+    """Turn a hit into a short natural sentence (local, no LLM)."""
+    if "Assistant:" in text:
+        return text.split("Assistant:", 1)[1].strip()[:400]
+    if text.startswith("Semantic type:"):
+        m = re.search(
+            r"Semantic type:\s*([^.]+)\.\s*Category:\s*([^.]+)\.\s*Patterns:\s*([^.]+)",
+            text,
+            re.I,
+        )
+        if m:
+            return (
+                f"**{m.group(1).strip()}** is a {m.group(2).strip()} semantic type "
+                f"(column patterns: {m.group(3).strip()})."
+            )
+    # Prefer the first prose sentence over key:value dumps.
+    for line in text.splitlines():
+        line = line.strip()
+        if line and ":" not in line[:24]:
+            return line[:400]
+    return text[:280]
+
+
+def _looks_like_domain_knowledge_query(lower: str) -> bool:
+    """RAG fallback only for substantive domain questions — never chat fluff."""
+    if _is_meta_pilot_question(lower):
+        return False
+    if len(lower.strip()) < 16:
+        return False
+    fluff = ("thank", "thanks", "ok", "okay", "sure", "cool", "great", "nice", "lol")
+    if lower.strip() in fluff or any(lower.startswith(f + " ") for f in fluff):
+        return False
+    signals = (
+        "what is", "what's", "whats", "how do", "how does", "explain", "mean",
+        "pallet", "schema", "mapping", "pii", "cdc", "sync", "transfer",
+        "column", "type", "connector", "warehouse", "mongodb", "snowflake",
+        "postgres", "quality", "quarantine", "checksum", "reconcile",
+    )
+    return any(s in lower for s in signals)
+
+
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     """Local tool routing when no LLM tool-use is available."""
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
+
+    if _is_meta_pilot_question(lower):
+        planned.append(("describe_pilot", {}))
+        return planned
 
     nav_map = {
         "pilot": ["data pilot", "automate", "new chat", "go to pilot"],
@@ -827,7 +989,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if hint and any(s in lower for s in data_signals):
         planned.append(("analyze_dataset", {"dataset_name": hint}))
 
-    if not planned and len(message) > 12:
+    if not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
 
     return planned

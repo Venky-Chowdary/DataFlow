@@ -766,18 +766,16 @@ def dry_run_sample(
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
+    from services.transform_resolver import resolve_transform
+
     for m in mappings:
         idx = source_idx.get(m["source"])
         if idx is None:
             errors.append(f"Source column missing: {m['source']}")
             continue
-        transform = m.get("transform") or infer_transform_for_mapping(
-            m["source"],
-            m["target"],
-            column_types.get(m["source"], "VARCHAR"),
-            m.get("target_type") or column_types.get(m["target"]),
-            source_samples=[str(r[idx]) for r in sample_rows[:sample_size] if idx < len(r)],
-        )
+        # Resolve UI aliases (cast_number → decimal) before dry-run — never leave
+        # Unknown transform: 'cast_number' as a false quarantine signal.
+        transform = resolve_transform(m, column_types=column_types)
         for row in sample_rows[:sample_size]:
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
@@ -808,20 +806,15 @@ def preview_quarantine_cells(
     coerce_count = 0
     ok_count = 0
 
+    from services.transform_resolver import resolve_transform
+
     for m in mappings:
         src = m.get("source") or ""
         tgt = m.get("target") or src
         idx = source_idx.get(src)
         if idx is None:
             continue
-        samples = [str(r[idx]) for r in sample_rows[:sample_size] if idx < len(r)]
-        transform = m.get("transform") or infer_transform_for_mapping(
-            src,
-            tgt,
-            column_types.get(src, "VARCHAR"),
-            m.get("target_type") or column_types.get(tgt),
-            source_samples=samples,
-        )
+        transform = resolve_transform(m, column_types=column_types)
         for row_i, row in enumerate(sample_rows[:sample_size]):
             if len(cells) >= max_cells:
                 break

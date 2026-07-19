@@ -287,6 +287,11 @@ export function JobTheaterView({
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
+  const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
+  const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
+  const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
+  const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
+  const routeLabel = [sourceType, destType].filter(Boolean).join(" → ") || "this job";
 
   const timelinePhases = useMemo(() => {
     if (job.phases?.length) {
@@ -294,6 +299,7 @@ export function JobTheaterView({
         id: phase.name,
         label: PHASE_LABELS[phase.name] ?? phase.name,
         state: phase.status,
+        elapsedMs: typeof phase.elapsed_ms === "number" ? phase.elapsed_ms : null,
       }));
     }
 
@@ -302,7 +308,7 @@ export function JobTheaterView({
         : i < currentPhase || isComplete ? "done"
         : i === currentPhase ? "active"
         : "pending";
-      return { id: phase.id, label: phase.label, state };
+      return { id: phase.id, label: phase.label, state, elapsedMs: null as number | null };
     });
   }, [job.phases, isFailed, isCancelled, currentPhase, isComplete]);
 
@@ -311,10 +317,17 @@ export function JobTheaterView({
     || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed" : "Queued");
 
   const eta = useMemo(() => {
-    if (!isRunning || throughput <= 0 || total <= processed) return null;
-    const secs = Math.ceil((total - processed) / throughput);
+    const rps = displayRps;
+    if (!isRunning || rps <= 0 || total <= processed) return null;
+    const secs = Math.ceil((total - processed) / rps);
     return secs < 60 ? `${secs}s` : `${Math.ceil(secs / 60)}m`;
-  }, [isRunning, throughput, total, processed]);
+  }, [isRunning, displayRps, total, processed]);
+
+  const slowSnowflakeTip =
+    destType === "snowflake"
+    && displayRps > 0
+    && displayRps < 100
+    && (loadMethod === "insert" || !loadMethod);
 
   const ringCircumference = 2 * Math.PI * 24;
 
@@ -377,6 +390,26 @@ export function JobTheaterView({
           <div>
             <strong>Transfer failed{job.phase ? ` during ${job.phase}` : ""}</strong>
             <p>{job.error || job.message || "The job stopped before completing. Review the event log below and re-run."}</p>
+            <p className="df2-theater-v3-fail-meta">
+              {processed > 0 ? `${processed.toLocaleString()} rows written before failure. ` : "No rows committed. "}
+              {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined. ` : ""}
+              {job.chunk_current != null
+                ? `Resume from batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""} on Jobs.`
+                : "Use Resume on Jobs if a checkpoint was saved."}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {slowSnowflakeTip && (
+        <div className="df2-theater-v3-alert warn" role="note">
+          <DtIcon name="zap" size={18} />
+          <div>
+            <strong>Low Snowflake throughput on this job</strong>
+            <p>
+              ~{displayRps.toLocaleString()} rows/s with load method {loadMethod || "insert"}.
+              Prefer COPY INTO / larger batches (warehouse stream path) after redeploy if you still see INSERT-only loads.
+            </p>
           </div>
         </div>
       )}
@@ -453,13 +486,31 @@ export function JobTheaterView({
             </div>
           </article>
         )}
-        <article className="df2-theater-v3-metric">
+        <article className="df2-theater-v3-metric" title={`${routeLabel} — live job throughput, not Proofs CSV→SQLite`}>
           <DtIcon name="activity" size={16} />
           <div>
-            <strong>{throughput > 0 ? `${throughput.toLocaleString()}/s` : "—"}</strong>
-            <span>Throughput</span>
+            <strong>{displayRps > 0 ? `${displayRps.toLocaleString()}/s` : "—"}</strong>
+            <span>This job rows/s</span>
           </div>
         </article>
+        {loadMethod && (
+          <article className="df2-theater-v3-metric" title="Snowflake/warehouse load path for this job">
+            <DtIcon name="transfer" size={16} />
+            <div>
+              <strong>{loadMethod}</strong>
+              <span>Load method</span>
+            </div>
+          </article>
+        )}
+        {batchSize > 0 && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>{batchSize.toLocaleString()}</strong>
+              <span>Batch size</span>
+            </div>
+          </article>
+        )}
         {eta && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="gate" size={16} />
@@ -521,6 +572,10 @@ export function JobTheaterView({
       <div className="df2-theater-v3-phases" aria-label="Pipeline phases">
         {timelinePhases.map((phase) => {
           const state = phase.state;
+          const elapsedLabel =
+            phase.elapsedMs != null && phase.elapsedMs >= 0
+              ? formatDuration(phase.elapsedMs)
+              : null;
           return (
             <div key={phase.id} className={`df2-theater-v3-phase ${state}`}>
               <span className="df2-theater-v3-phase-dot" aria-hidden>
@@ -530,6 +585,9 @@ export function JobTheaterView({
                 {state === "skipped" && <span>—</span>}
               </span>
               <span className="df2-theater-v3-phase-label">{phase.label}</span>
+              {elapsedLabel && (
+                <span className="df2-theater-v3-phase-elapsed">{elapsedLabel}</span>
+              )}
             </div>
           );
         })}
@@ -583,23 +641,25 @@ export function JobTheaterView({
       )}
 
       {(rejectedRows > 0 || isFailed || isQuarantine) && (
-        <div className="df2-theater-v3-alert warn">
-          <DtIcon name="alert" size={18} />
-          <div>
-            <strong>
-              {isFailed
-                ? (rejectedRows > 0
-                  ? `${rejectedRows.toLocaleString()} problem row(s) — inspect findings`
-                  : "Inspect preflight / quarantine findings")
-                : droppedRows > 0
-                  ? `${droppedRows.toLocaleString()} rows rejected`
-                  : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
-            </strong>
-            <p>
-              {isFailed
-                ? "Open Inspect to see exact columns, sample values, and reasons (including format-control findings)."
-                : "Review the quarantine details below and export them for remediation."}
-            </p>
+        <section className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
+          <div className="df2-theater-v3-alert warn">
+            <DtIcon name="alert" size={18} />
+            <div>
+              <strong>
+                {isFailed
+                  ? (rejectedRows > 0
+                    ? `${rejectedRows.toLocaleString()} quarantined row(s) — inspect findings`
+                    : "Inspect preflight / quarantine findings")
+                  : droppedRows > 0
+                    ? `${droppedRows.toLocaleString()} rows quarantined`
+                    : `${coercedNullRows.toLocaleString()} value(s) coerced to NULL`}
+              </strong>
+              <p>
+                {isFailed
+                  ? "Exact columns, sample values, reasons, and policies are listed below. Export CSV saves the file to your downloads."
+                  : "Review the quarantine details below and export them for remediation."}
+              </p>
+            </div>
           </div>
           <QuarantinePanel
             jobId={jobId}
@@ -608,7 +668,7 @@ export function JobTheaterView({
             autoLoad
             initiallyOpen={isFailed || rejectedRows > 0}
           />
-        </div>
+        </section>
       )}
 
       </div>

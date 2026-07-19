@@ -12,8 +12,9 @@ import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/Work
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
-import { deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
+import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules } from "./lib/api";
 import { clearSession, readSession, writeSession } from "./lib/session";
+import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
@@ -107,7 +108,7 @@ function AppShell({
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [sidebarNavCompact, setSidebarNavCompact] = useState(false);
+  const [sidebarNavCompact, setSidebarNavCompact] = useState(() => loadSidebarNavCompact());
   const [searchQuery, setSearchQuery] = useState("");
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
   const [connectorsViewToken, setConnectorsViewToken] = useState(0);
@@ -218,6 +219,19 @@ function AppShell({
     return () => window.clearInterval(poll);
   }, [loadConnectors]);
 
+  useEffect(() => {
+    const onAuthRequired = () => {
+      toast({
+        title: "Session expired",
+        message: "Sign in again to load connectors, jobs, and transfers.",
+        tone: "warning",
+      });
+      onSignOut();
+    };
+    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+  }, [onSignOut, toast]);
+
   const navigateFromSearch = (target: SearchNavigateTarget) => {
     setScreen(target.screen);
     setSearchFocus(target);
@@ -299,9 +313,15 @@ function AppShell({
           <button
             type="button"
             className="df2-sidebar-collapse-btn"
-            onClick={() => setSidebarNavCompact((c) => !c)}
-            aria-label={sidebarNavCompact ? "Expand menu labels" : "Compact menu icons"}
-            title={sidebarNavCompact ? "Expand menu labels" : "Compact menu icons"}
+            onClick={() => {
+              setSidebarNavCompact((c) => {
+                const next = !c;
+                saveSidebarNavCompact(next);
+                return next;
+              });
+            }}
+            aria-label={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
+            title={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
           >
             <DtIcon name={sidebarNavCompact ? "chevron-right" : "chevron-left"} size={16} />
           </button>
@@ -632,15 +652,31 @@ function AppShell({
         />
       )}
 
-      {screen !== "pilot" && screen !== "transfer" && !copilotOpen && (
+      {/* Always offer a reopen control when the rail is closed (including Transfer). */}
+      {screen !== "pilot" && !copilotOpen && (
         <button
           type="button"
           className="df2-copilot-fab"
           onClick={() => setCopilotOpen(true)}
           aria-label="Open Data Pilot"
-          title="Data Pilot"
+          title="Open Data Pilot"
         >
           <DtIcon name="sparkle" size={22} />
+          <span className="df2-copilot-fab-label">Pilot</span>
+        </button>
+      )}
+
+      {/* Extra expand tab when rail closed — visible even if FAB is obscured */}
+      {screen !== "pilot" && !copilotOpen && (
+        <button
+          type="button"
+          className="df2-copilot-edge-open"
+          onClick={() => setCopilotOpen(true)}
+          aria-label="Expand Data Pilot"
+          title="Expand Data Pilot"
+        >
+          <DtIcon name="chevron-left" size={14} />
+          <span>Pilot</span>
         </button>
       )}
     </div>
