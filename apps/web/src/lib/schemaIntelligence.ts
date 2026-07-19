@@ -90,7 +90,7 @@ export function buildCompetitiveAdvantages(ctx: {
       title: "Any source → any destination",
       detail: ctx.destType
         ? `Route to ${ctx.destType} with native DDL — not limited to loading JSON into one MongoDB collection.`
-        : "File, MongoDB, S3, Snowflake, Postgres, and 600+ catalog connectors in one governed path.",
+        : "File, MongoDB, S3, Snowflake, Postgres, SQL Server, Oracle, and Iceberg in one governed path.",
       icon: "connectors",
     },
     {

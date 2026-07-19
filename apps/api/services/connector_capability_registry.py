@@ -94,8 +94,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Query-based CDC: the source table must have a monotonic cursor column. Log-based CDC (SQL Server CDC capture jobs) is not implemented.",
-        "common_issues": ["MERGE requires a unique key on the target.", "IDENTITY inserts may need SET IDENTITY_INSERT."],
+        "cdc_prerequisites": "Prefer native SQL Server CDC (cdc.*). Change Tracking is the fallback. Query-based CDC requires a monotonic cursor column.",
+        "common_issues": ["MERGE requires a unique key on the target.", "IDENTITY inserts may need SET IDENTITY_INSERT.", "Enable CDC on the database and table before log capture."],
         "recommended_batch_size": 2000,
     },
     "oracle": {
@@ -110,8 +110,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Query-based CDC: the source table must have a monotonic cursor column. Log-based CDC (GoldenGate/LogMiner) is not implemented.",
-        "common_issues": ["Table names may be case-sensitive. Use uppercase unless quoted.", "NUMBER with no precision maps to a wide decimal."],
+        "cdc_prerequisites": "Prefer LogMiner CDC when privileges allow; Flashback Query is the fallback. Query-based CDC requires a monotonic cursor column.",
+        "common_issues": ["Table names may be case-sensitive. Use uppercase unless quoted.", "NUMBER with no precision maps to a wide decimal.", "LogMiner needs supplemental logging."],
         "recommended_batch_size": 2000,
     },
     "sqlite": {
@@ -472,10 +472,11 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "cdc_prerequisites": "Query-based CDC only. Kafka Connect/Debezium log-based CDC is not implemented.",
+        "cdc_prerequisites": "Kafka is a destination (JSON produce). Optional Schema Registry hook. Native DB CDC does not require Kafka; Debezium envelope bridge is available for existing Connect estates.",
         "common_issues": [
-            "Exactly-once requires idempotent producers and transactional IDs.",
-            "Schema Registry is recommended for Avro/Protobuf/JSON Schema.",
+            "At-least-once produce with acks=all; exactly-once needs transactional IDs.",
+            "Vault SASL username/password via connector secret fields.",
+            "Schema Registry URL may be passed as schema_registry_url or an http(s) connection_string.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -847,10 +848,12 @@ def _normalize_connector_id(key: str) -> str:
 def _align_registry_honesty() -> None:
     """Demote transfer_ready on registry entries that have no real driver modules."""
     fiction = {
-        "kafka", "kinesis", "pubsub", "iceberg", "delta", "hudi",
+        # Still demoted: no production writer/driver modules yet.
+        "kinesis", "pubsub", "delta", "hudi",
         "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
         "dynamics365", "msgraph", "google_workspace", "sharepoint",
-        "shopify", "zendesk", "oracle", "sqlserver", "duckdb",
+        "shopify", "zendesk", "duckdb",
+        # kafka + iceberg + oracle + sqlserver promoted to first-class modules.
     }
     for key in fiction:
         if key in CAPABILITY_REGISTRY:
@@ -872,10 +875,10 @@ def get_connector_capability(key: str) -> dict[str, Any]:
     cap["requested_key"] = key
     cap["normalized_key"] = normalized
     _FICTION = {
-        "kafka", "kinesis", "pubsub", "iceberg", "delta", "hudi",
+        "kinesis", "pubsub", "delta", "hudi",
         "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
         "dynamics365", "msgraph", "google_workspace", "sharepoint",
-        "shopify", "zendesk", "oracle", "sqlserver", "duckdb",
+        "shopify", "zendesk", "duckdb",
     }
     try:
         from src.transfer.connector_capabilities import (

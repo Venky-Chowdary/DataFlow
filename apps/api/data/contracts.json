@@ -1,0 +1,1692 @@
+{
+  "contracts": {
+    "dfc-4602f1fbf8b64808": {
+      "id": "dfc-4602f1fbf8b64808",
+      "name": "sqlite-to-sqlite-e5e67f2a",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "trim"
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:01:56.741820+00:00",
+      "updated_at": "2026-07-19T04:01:56.741820+00:00",
+      "metadata": {
+        "sync_mode": "scd2",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-dffccae6378d4269": {
+      "id": "dfc-dffccae6378d4269",
+      "name": "sqlite-to-sqlite-21ee22d8",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.185,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "name",
+              "confidence": 0.06,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.805,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.324,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.11,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.666,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.185,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:01:58.145179+00:00",
+      "updated_at": "2026-07-19T04:01:58.145179+00:00",
+      "metadata": {
+        "sync_mode": "mirror",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-5ceebf600c65437b": {
+      "id": "dfc-5ceebf600c65437b",
+      "name": "sqlite-to-sqlite-8363d830",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "trim"
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:10.585097+00:00",
+      "updated_at": "2026-07-19T04:02:10.585097+00:00",
+      "metadata": {
+        "sync_mode": "scd2",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-0626f9f50c1b4f34": {
+      "id": "dfc-0626f9f50c1b4f34",
+      "name": "sqlite-to-sqlite-5d3a64f3",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "valid_from",
+              "confidence": 0.97,
+              "reasoning": "Semantic role match: identifier \u2192 identifier"
+            },
+            {
+              "target": "valid_to",
+              "confidence": 0.97,
+              "reasoning": "Semantic role match: identifier \u2192 identifier"
+            }
+          ],
+          "score_gap": 0.02,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "valid_to",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "row_hash",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.755,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:12.074588+00:00",
+      "updated_at": "2026-07-19T04:02:12.074588+00:00",
+      "metadata": {
+        "sync_mode": "scd2",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-6bc7070903614bc1": {
+      "id": "dfc-6bc7070903614bc1",
+      "name": "sqlite-to-sqlite-9d127d30",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.185,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "name",
+              "confidence": 0.06,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.805,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.324,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.11,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.666,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.185,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:12.273938+00:00",
+      "updated_at": "2026-07-19T04:02:12.273938+00:00",
+      "metadata": {
+        "sync_mode": "mirror",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-988c52b450d74a06": {
+      "id": "dfc-988c52b450d74a06",
+      "name": "sqlite-to-sqlite-f78d3484",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "_deleted",
+              "confidence": 0.11,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.755,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": -0.116,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "_deleted",
+              "confidence": -0.143,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 1.106,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:12.470564+00:00",
+      "updated_at": "2026-07-19T04:02:12.470564+00:00",
+      "metadata": {
+        "sync_mode": "mirror",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-fadabfde4b20486f": {
+      "id": "dfc-fadabfde4b20486f",
+      "name": "sqlite-to-sqlite-105c0f3c",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "trim"
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.95,
+          "reason": "Direct mapping",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:30.438292+00:00",
+      "updated_at": "2026-07-19T04:02:30.438292+00:00",
+      "metadata": {
+        "sync_mode": "scd2",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-4013540d57c04f60": {
+      "id": "dfc-4013540d57c04f60",
+      "name": "sqlite-to-sqlite-dad2b296",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "valid_from",
+              "confidence": 0.97,
+              "reasoning": "Semantic role match: identifier \u2192 identifier"
+            },
+            {
+              "target": "valid_to",
+              "confidence": 0.97,
+              "reasoning": "Semantic role match: identifier \u2192 identifier"
+            }
+          ],
+          "score_gap": 0.02,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "valid_to",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "row_hash",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.755,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:31.888134+00:00",
+      "updated_at": "2026-07-19T04:02:31.888134+00:00",
+      "metadata": {
+        "sync_mode": "scd2",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-ac1013d069a0413c": {
+      "id": "dfc-ac1013d069a0413c",
+      "name": "sqlite-to-sqlite-044a607c",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.185,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "name",
+              "confidence": 0.06,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.805,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.324,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.11,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.666,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.185,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:32.088368+00:00",
+      "updated_at": "2026-07-19T04:02:32.088368+00:00",
+      "metadata": {
+        "sync_mode": "mirror",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-0a11a7f16dd2469d": {
+      "id": "dfc-0a11a7f16dd2469d",
+      "name": "sqlite-to-sqlite-4c847a7c",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "src",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "dst",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "name",
+          "target_name": "name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "transform": "trim",
+          "nullable": true,
+          "primary_key": false
+        },
+        {
+          "source_name": "price",
+          "target_name": "price",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Generic record identifier \u00b7 sample-validated (100%) \u00b7 quality: high-cardinality identifier aligned",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "id",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "_deleted",
+              "confidence": 0.11,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.755,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        },
+        {
+          "source": "name",
+          "target": "name",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Person or entity full name \u00b7 sample-validated (100%)",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "name",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "price",
+              "confidence": -0.116,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "_deleted",
+              "confidence": -0.143,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 1.106,
+          "requires_review": false,
+          "transform": "trim",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 0.0
+          }
+        },
+        {
+          "source": "price",
+          "target": "price",
+          "confidence": 0.99,
+          "reasoning": "Exact name match \u00b7 enriched: Unit price or sale price \u00b7 sample-validated (100%) \u00b7 quality: numeric samples on numeric target",
+          "user_override": false,
+          "assignment_strategy": "optimal_bipartite_hungarian",
+          "alternatives": [
+            {
+              "target": "price",
+              "confidence": 0.99,
+              "reasoning": "Exact name match"
+            },
+            {
+              "target": "name",
+              "confidence": 0.274,
+              "reasoning": "Character similarity"
+            },
+            {
+              "target": "id",
+              "confidence": 0.235,
+              "reasoning": "Character similarity"
+            }
+          ],
+          "score_gap": 0.716,
+          "requires_review": false,
+          "transform": "integer",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "agent": "MappingReasonerAgent",
+          "format_class": "semantic_tabular",
+          "sample_parse_rate": 1.0,
+          "column_profile": {
+            "null_rate": 0.0,
+            "unique_ratio": 1.0,
+            "likely_identifier": true,
+            "likely_email": false,
+            "likely_uuid": false,
+            "likely_date": false,
+            "likely_boolean": false,
+            "semantic_pattern_score": 1.0
+          }
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-19T04:02:32.288417+00:00",
+      "updated_at": "2026-07-19T04:02:32.288417+00:00",
+      "metadata": {
+        "sync_mode": "mirror",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    }
+  },
+  "breakers": {
+    "dfc-4602f1fbf8b64808": {
+      "contract_id": "dfc-4602f1fbf8b64808",
+      "state": "closed",
+      "failure_count": 1,
+      "success_count": 0,
+      "last_failure_time": 1784433717.115308,
+      "last_state_change": 1784433717.115307,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-dffccae6378d4269": {
+      "contract_id": "dfc-dffccae6378d4269",
+      "state": "closed",
+      "failure_count": 1,
+      "success_count": 0,
+      "last_failure_time": 1784433718.155278,
+      "last_state_change": 1784433718.155277,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-5ceebf600c65437b": {
+      "contract_id": "dfc-5ceebf600c65437b",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433730.959816,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-0626f9f50c1b4f34": {
+      "contract_id": "dfc-0626f9f50c1b4f34",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433732.088765,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-6bc7070903614bc1": {
+      "contract_id": "dfc-6bc7070903614bc1",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433732.2871199,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-988c52b450d74a06": {
+      "contract_id": "dfc-988c52b450d74a06",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433732.486449,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-fadabfde4b20486f": {
+      "contract_id": "dfc-fadabfde4b20486f",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433750.803607,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-4013540d57c04f60": {
+      "contract_id": "dfc-4013540d57c04f60",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433751.903444,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-ac1013d069a0413c": {
+      "contract_id": "dfc-ac1013d069a0413c",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433752.102832,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-0a11a7f16dd2469d": {
+      "contract_id": "dfc-0a11a7f16dd2469d",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784433752.304491,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    }
+  }
+}

@@ -38,25 +38,30 @@ class SyncContract:
     name: str
     sync_mode: str
     cursor_field: str = ""
-    primary_key: str = ""
+    primary_key: str = ""  # single column or comma-separated composite
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
+        pks = data.get("primary_keys")
+        if isinstance(pks, list) and pks:
+            primary_key = ",".join(str(x).strip() for x in pks if str(x).strip())
+        else:
+            primary_key = str(data.get("primary_key") or "").strip()
         return cls(
             name=str(data.get("name") or data.get("stream") or "stream"),
             sync_mode=str(data.get("sync_mode") or "full_refresh_overwrite"),
             cursor_field=str(data.get("cursor_field") or data.get("cursor") or ""),
-            primary_key=str(
-                data.get("primary_key")
-                or (data.get("primary_keys") or [""])[0]
-                if isinstance(data.get("primary_keys"), list)
-                else data.get("primary_key") or ""
-            ),
+            primary_key=primary_key,
             schema_policy=str(data.get("schema_policy") or "manual_review"),
             validation_mode=str(data.get("validation_mode") or "strict"),
         )
+
+    def primary_key_columns(self) -> list[str]:
+        """Return PK columns; supports ``id`` or ``order_id,line_id`` / ``primary_keys``."""
+        raw = (self.primary_key or "").replace(";", ",")
+        return [p.strip() for p in raw.split(",") if p.strip()]
 
 
 def resolve_sync_contract(stream_contracts: list[dict[str, Any]] | None) -> SyncContract | None:
@@ -237,6 +242,7 @@ def requires_upsert(sync_mode: str) -> bool:
         "cdc",
         "full_refresh_mirror",
         "mirror",
+        "reverse_etl",
     }
 
 

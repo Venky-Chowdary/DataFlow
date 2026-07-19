@@ -788,13 +788,47 @@ class UniversalTransferEngine:
             write_mode = "insert"
             conflict_columns: list[str] = []
             if contract and contract.primary_key:
-                conflict_columns = [map_source_to_target(contract.primary_key, mappings)]
+                conflict_columns = [
+                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                ]
             if not conflict_columns and effective_sync_lower in ("full_refresh_mirror", "mirror", "scd2"):
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
             if requires_upsert(effective_sync) and conflict_columns:
                 write_mode = "upsert"
+
+            activation_notes: list[str] = []
+            if effective_sync_lower == "reverse_etl":
+                from services.reverse_etl import plan_activation
+
+                plan = plan_activation(
+                    destination_kind=request.destination.format or "",
+                    object_name=request.destination.table
+                    or request.destination.collection
+                    or "",
+                    primary_key=conflict_columns or ["id"],
+                    field_map={
+                        str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+                        for m in (mappings or [])
+                        if m.get("source")
+                    },
+                    mode="upsert",
+                )
+                write_mode = plan.mode or "upsert"
+                activation_notes = list(plan.notes or [])
+                if not conflict_columns:
+                    conflict_columns = list(plan.primary_key)
+                # Apply planner object name so SaaS writers hit the intended CRM object.
+                if plan.object_name:
+                    request.destination.table = plan.object_name
+                if plan.batch_size:
+                    request.destination.extra = dict(request.destination.extra or {})
+                    request.destination.extra["activation_batch_size"] = plan.batch_size
+                activation_notes.append(
+                    f"Activation apply: mode={write_mode} pk={','.join(conflict_columns)} "
+                    f"object={plan.object_name} batch={plan.batch_size}"
+                )
 
             mongo.update_job_status(
                 job_id, "running", phase="preflight", progress_pct=15,
@@ -1007,6 +1041,11 @@ class UniversalTransferEngine:
                         _write_destination_with_drop,
                         budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                     )
+                    if activation_notes:
+                        ddl_log = list(ddl_log or []) + [
+                            f"reverse-ETL: {n}" for n in activation_notes
+                        ]
+                        dest_summary["reverse_etl"] = {"notes": activation_notes}
                     if effective_sync_lower in ("full_refresh_mirror", "mirror") and conflict_columns:
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,

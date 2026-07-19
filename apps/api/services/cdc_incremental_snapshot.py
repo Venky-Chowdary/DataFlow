@@ -106,17 +106,35 @@ def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSign
     return sorted(out, key=lambda s: s.created_at, reverse=True)
 
 
-def claim_next_signal(source_key: str) -> SnapshotSignal | None:
-    """Atomically claim the oldest pending signal for this source."""
+def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None:
+    """Atomically claim the next signal for this source.
+
+    Prefers an in-progress (``running``) signal so chunked snapshots resume,
+    then the oldest ``pending`` signal. Optional ``table`` filters the claim.
+    """
     with _LOCK:
         rows = _load()
+        # 1) Resume running
         for i, r in enumerate(rows):
-            if r.get("source_key") == source_key and r.get("status") == "pending":
-                r["status"] = "running"
-                r["updated_at"] = time.time()
-                rows[i] = r
-                _save(rows)
-                return SnapshotSignal.from_dict(r)
+            if r.get("source_key") != source_key or r.get("status") != "running":
+                continue
+            if table and r.get("table") and r.get("table") != table:
+                continue
+            r["updated_at"] = time.time()
+            rows[i] = r
+            _save(rows)
+            return SnapshotSignal.from_dict(r)
+        # 2) Claim pending
+        for i, r in enumerate(rows):
+            if r.get("source_key") != source_key or r.get("status") != "pending":
+                continue
+            if table and r.get("table") and r.get("table") != table:
+                continue
+            r["status"] = "running"
+            r["updated_at"] = time.time()
+            rows[i] = r
+            _save(rows)
+            return SnapshotSignal.from_dict(r)
     return None
 
 

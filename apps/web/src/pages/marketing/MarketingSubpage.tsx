@@ -175,7 +175,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
           items={[
             { value: "Free", label: "Starter tier" },
             { value: "8", label: "Preflight gates" },
-            { value: "600+", label: "Connectors" },
+            { value: "CDC", label: "Native log capture" },
             { value: "48h", label: "Pilot kickoff" },
           ]}
         />
@@ -695,7 +695,7 @@ function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" |
     {
       step: 1,
       title: "Connect your systems",
-      body: "Pick from 600+ drivers or upload files. Every connector shows an honest transfer-ready label — no inflated marketplace counts.",
+      body: "Pick a transfer-ready driver or upload files. Every connector shows an honest capability label — no inflated marketplace counts.",
       label: "Transfer Studio · Connectors",
       caption: "Native drivers, warehouse paths, and file formats with transfer-ready status.",
       kind: "integrations" as const,
@@ -779,7 +779,7 @@ function HelpPage({ onNavigate, onGetStarted }: Pick<PageActions, "onNavigate" |
       <div className="lp-mkt-help-stats" aria-label="Platform highlights">
         {[
           { v: "8", l: "Preflight gates" },
-          { v: "600+", l: "Transfer drivers" },
+          { v: "CDC", l: "Native log capture" },
           { v: "100%", l: "Row proof" },
           { v: "0", l: "Silent drops" },
         ].map((s) => (
@@ -1000,7 +1000,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <StatsStrip
           items={[
-            { value: "600+", label: "Connectors" },
+            { value: "DLQ", label: "Quarantine replay" },
             { value: "Native", label: "Warehouse paths" },
             { value: "SQLA", label: "Generic drivers" },
             { value: "Files", label: "CSV · JSON · Parquet" },

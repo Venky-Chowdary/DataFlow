@@ -1,15 +1,16 @@
 """PostgreSQL logical decoding CDC reader.
 
-Default output plugin is ``test_decoding`` (text parse path). ``pgoutput`` can be
-selected via ``logical_decoding_plugin`` once a binary decoder is available.
-Replication lag is exposed via ``replication_lag_bytes()`` and
-``replication_lag_seconds()``.
+Production path uses ``pg_logical_slot_peek_changes`` + ``ack()`` via
+``pg_replication_slot_advance`` so WAL is never consumed before destination
+apply (at-least-once). Default plugin is ``test_decoding`` (text). ``pgoutput``
+is a real binary path via :mod:`connectors.pgoutput_decoder` when selected.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -31,6 +32,13 @@ _logger = logging.getLogger(__name__)
 _VALUE_RE = re.compile(r"^\s*(\w+)\[(\w+)\]:(.+)$")
 _OLD_KEY_PREFIX = "old-key:"
 _NEW_TUPLE_PREFIX = "new-tuple:"
+
+
+def _publication_name(database: str, table: str, cursor_key: str) -> str:
+    """Stable publication name for pgoutput (must match slot scoping)."""
+    digest = hashlib.sha1(f"{database}|{table}|{cursor_key}".encode("utf-8")).hexdigest()[:10]
+    raw = f"df_pub_{database}_{table}_{digest}".lower()
+    return re.sub(r"[^a-z0-9_]", "_", raw)[:63]
 
 
 def _slot_name(database: str, table: str, cursor_key: str) -> str:
@@ -216,16 +224,24 @@ class PostgreSqlChangeStreamCdc:
         self._last_event_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
         self._schema_ready = False
+        self._pending_ack_lsn: str | None = None
+        self._pgoutput_decoder = None
+        self.publication_name = _publication_name(self.database, table, cursor_key)
 
     def _select_plugin(self) -> str:
         """Select logical decoding plugin.
 
-        ``test_decoding`` remains the production parse path. ``pgoutput`` can be
-        forced via ``logical_decoding_plugin=pgoutput`` once a binary decoder ships;
-        probing alone is insufficient without row decoding.
+        ``test_decoding`` is the default text path. ``pgoutput`` is used when
+        ``logical_decoding_plugin=pgoutput`` or ``DATAFLOW_PGOUTPUT_DECODER`` is
+        enabled — decoded via :mod:`connectors.pgoutput_decoder` (binary, real).
         """
         preferred = (self.cfg.get("logical_decoding_plugin") or "").strip().lower()
-        if preferred in {"pgoutput", "test_decoding"}:
+        env_flag = str(
+            self.cfg.get("pgoutput_decoder") or os.getenv("DATAFLOW_PGOUTPUT_DECODER", "")
+        ).strip().lower()
+        if preferred == "pgoutput" or env_flag in {"1", "true", "experimental", "on", "pgoutput"}:
+            return "pgoutput"
+        if preferred == "test_decoding":
             return preferred
         return "test_decoding"
 
@@ -533,65 +549,249 @@ class PostgreSqlChangeStreamCdc:
     def _pk_value(self, record: dict[str, str]) -> str:
         return record.get(self.primary_key, "") if record else ""
 
+    def _ensure_publication(self) -> None:
+        """Create a FOR TABLE publication required by the pgoutput plugin."""
+        if self.output_plugin != "pgoutput":
+            return
+        qualified = f'"{self.schema}"."{self.table}"'
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM pg_publication WHERE pubname = %s",
+                    (self.publication_name,),
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        f"CREATE PUBLICATION {self.publication_name} FOR TABLE {qualified}"
+                    )
+                else:
+                    # Ensure the table is in the publication (idempotent best-effort).
+                    try:
+                        cur.execute(
+                            f"ALTER PUBLICATION {self.publication_name} ADD TABLE {qualified}"
+                        )
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+            conn.commit()
+
+    def _ensure_replica_identity(self) -> None:
+        """Require FULL replica identity so UPDATE/DELETE emit old keys."""
+        qualified = f'"{self.schema}"."{self.table}"'
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"ALTER TABLE {qualified} REPLICA IDENTITY FULL")
+                conn.commit()
+        except Exception as exc:
+            _logger.debug("Could not set REPLICA IDENTITY FULL on %s: %s", qualified, exc)
+
+    def ack(self, resume_token: Any = None) -> None:
+        """Advance the slot confirmed_flush_lsn after successful destination apply.
+
+        Poll uses ``peek_changes`` so WAL is not consumed before apply. Without
+        ``ack``, the slot retains WAL and re-delivers (at-least-once). Calling
+        ``ack`` after watermark persist makes progress durable.
+        """
+        lsn = self._pending_ack_lsn
+        if resume_token:
+            _, token_lsn, _ = decode_pg_resume_token(
+                str(resume_token),
+                database=self.database,
+                table=self.table,
+                cursor_key=self.cursor_key,
+            )
+            if token_lsn:
+                lsn = token_lsn
+        if not lsn:
+            return
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_replication_slot_advance(%s, %s::pg_lsn)",
+                    (self.slot_name, lsn),
+                )
+            conn.commit()
+        self.consistent_point_lsn = lsn
+        self._pending_ack_lsn = None
+
+    def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """PK-ordered chunk reader for Debezium-style incremental snapshots."""
+        from connectors.writer_common import quote_sql_identifier
+
+        pk = quote_sql_identifier(sig.primary_key or self.primary_key)
+        qualified = f'"{self.schema}"."{self.table}"'
+        limit = int(sig.chunk_size or self.batch_size)
+        last_pk = sig.last_pk or ""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if last_pk:
+                    cur.execute(
+                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",
+                        (last_pk, limit),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",
+                        (limit,),
+                    )
+                cols = [d[0] for d in (cur.description or [])]
+                rows = cur.fetchall() or []
+            conn.commit()
+        records = [
+            {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
+            for row in rows
+        ]
+        new_last = records[-1].get(sig.primary_key or self.primary_key) if records else last_pk
+        done = len(records) < limit
+        return records, str(new_last) if new_last is not None else last_pk, done
+
     def poll(self) -> Iterator[ChangeBatch]:
-        """Consume a batch of changes from the logical slot (test_decoding text)."""
+        """Peek WAL with txn buffering (Debezium-class) + incremental snapshots.
+
+        At-least-once: caller must ``ack`` after destination apply.
+        """
+        from services.cdc_incremental_runner import interleave_incremental_snapshot
+        from services.cdc_transaction_buffer import TransactionBuffer
+
+        # 1) Interleave incremental snapshot chunks (signal-driven).
+        yield from interleave_incremental_snapshot(
+            self.source_key,
+            table=self.table,
+            fetch_chunk=self._fetch_incremental_chunk,
+            max_chunks_per_poll=1,
+        )
+
         self._ensure_slot()
+        if self.output_plugin == "pgoutput":
+            self._ensure_publication()
+            self._ensure_replica_identity()
         self.phase = "streaming"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self._maybe_record_schema_change(offset=self.slot_name)
         self.heartbeat()
-        if self.output_plugin == "pgoutput":
-            # Binary pgoutput decoder not yet shipped — do not consume opaque WAL.
-            return
-            yield  # pragma: no cover
 
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT data FROM pg_logical_slot_get_changes(%s, NULL, %s, 'include-xids', '0')",
-                    (self.slot_name, self.batch_size),
-                )
+                if self.output_plugin == "pgoutput":
+                    cur.execute(
+                        """
+                        SELECT location::text, data
+                        FROM pg_logical_slot_peek_changes(
+                            %s, NULL, %s,
+                            'proto_version', '1',
+                            'publication_names', %s
+                        )
+                        """,
+                        (self.slot_name, self.batch_size, self.publication_name),
+                    )
+                else:
+                    # include-xids=1 so BEGIN/COMMIT carry xid for txn buffering
+                    cur.execute(
+                        """
+                        SELECT location::text, data
+                        FROM pg_logical_slot_peek_changes(
+                            %s, NULL, %s, 'include-xids', '1'
+                        )
+                        """,
+                        (self.slot_name, self.batch_size),
+                    )
                 rows = cur.fetchall()
-                flush_lsn = self._read_slot_lsn(cur)
             conn.commit()
-        if flush_lsn:
-            self.consistent_point_lsn = flush_lsn
 
-        inserts: list[dict[str, str]] = []
-        updates: list[dict[str, str]] = []
-        deletes: list[str] = []
+        buf = TransactionBuffer()
+        max_lsn: str | None = None
+        emitted = False
 
-        for (line,) in rows:
-            text = line or ""
-            if text in ("BEGIN", "COMMIT"):
-                continue
-            # test_decoding may surface DDL-ish lines; treat as schema refresh signal.
-            upper = text.upper()
-            if "ALTER TABLE" in upper or ": DDL:" in upper:
-                self._maybe_record_schema_change(offset=self.slot_name)
-                continue
-            parsed = _parse_change_line(text, self.schema, self.table)
-            if parsed is None:
-                continue
-            op, old_key, new_tuple = parsed
-            self._last_event_at = datetime.now(timezone.utc)
-            if op == "insert" and new_tuple:
-                inserts.append(new_tuple)
-            elif op == "update" and new_tuple:
-                updates.append(new_tuple)
-            elif op == "delete" and old_key:
-                pk = self._pk_value(old_key)
-                if pk:
-                    deletes.append(pk)
+        def _token_at(lsn: str | None) -> str:
+            if lsn:
+                self.consistent_point_lsn = lsn
+                self._pending_ack_lsn = lsn
+            return self._resume_token(phase="streaming")
 
-        token = self._resume_token(phase="streaming")
-        if inserts or updates or deletes:
-            yield ChangeBatch(
-                inserts=inserts,
-                updates=updates,
-                deletes=deletes,
-                resume_token=token,
-            )
-        elif self.consistent_point_lsn:
-            # Heartbeat watermark so lag/resume stay LSN-aware even on quiet polls.
-            yield ChangeBatch(resume_token=token)
+        if self.output_plugin == "pgoutput":
+            from connectors.pgoutput_decoder import PgOutputDecoder, changes_for_table
+
+            if self._pgoutput_decoder is None:
+                self._pgoutput_decoder = PgOutputDecoder()
+            decoder = self._pgoutput_decoder
+            for location, payload in rows:
+                lsn = str(location) if location else None
+                if lsn:
+                    max_lsn = lsn
+                for change in changes_for_table(
+                    decoder, payload, schema=self.schema, table=self.table
+                ):
+                    self._last_event_at = datetime.now(timezone.utc)
+                    if change.op == "begin":
+                        buf.begin(change.xid, lsn=lsn)
+                    elif change.op == "commit":
+                        batch = buf.commit(lsn=lsn, resume_token=_token_at(lsn))
+                        if batch is not None:
+                            emitted = True
+                            yield batch
+                    elif change.op == "insert" and change.new_tuple:
+                        buf.insert(change.new_tuple, lsn=lsn)
+                    elif change.op == "update" and change.new_tuple:
+                        buf.update(change.new_tuple, lsn=lsn)
+                    elif change.op == "delete" and change.old_tuple:
+                        pk = self._pk_value(change.old_tuple)
+                        if pk:
+                            buf.delete(pk, lsn=lsn)
+        else:
+            for location, line in rows:
+                lsn = str(location) if location else None
+                if lsn:
+                    max_lsn = lsn
+                text = (
+                    line.decode("utf-8", errors="replace")
+                    if isinstance(line, (bytes, memoryview))
+                    else (line or "")
+                )
+                upper = text.upper().strip()
+                if upper.startswith("BEGIN"):
+                    parts = text.split()
+                    xid = parts[1] if len(parts) > 1 else None
+                    buf.begin(xid, lsn=lsn)
+                    continue
+                if upper.startswith("COMMIT"):
+                    batch = buf.commit(lsn=lsn, resume_token=_token_at(lsn))
+                    if batch is not None:
+                        emitted = True
+                        yield batch
+                    continue
+                if upper.startswith("ROLLBACK") or upper.startswith("ABORT"):
+                    buf.rollback()
+                    continue
+                if "ALTER TABLE" in upper or ": DDL:" in upper:
+                    self._maybe_record_schema_change(offset=self.slot_name)
+                    continue
+                parsed = _parse_change_line(text, self.schema, self.table)
+                if parsed is None:
+                    continue
+                op, old_key, new_tuple = parsed
+                self._last_event_at = datetime.now(timezone.utc)
+                if op == "insert" and new_tuple:
+                    buf.insert(new_tuple, lsn=lsn)
+                elif op == "update" and new_tuple:
+                    buf.update(new_tuple, lsn=lsn)
+                elif op == "delete" and old_key:
+                    pk = self._pk_value(old_key)
+                    if pk:
+                        buf.delete(pk, lsn=lsn)
+
+        # Peek window may end mid-transaction — flush deferred DML so progress moves.
+        if buf.open_xid is not None:
+            batch = buf.flush_open(resume_token=_token_at(max_lsn))
+            if batch is not None:
+                emitted = True
+                yield batch
+        elif max_lsn:
+            self.consistent_point_lsn = max_lsn
+            self._pending_ack_lsn = max_lsn
+            if not emitted:
+                yield ChangeBatch(resume_token=self._resume_token(phase="streaming"))
+        elif self.consistent_point_lsn and not emitted:
+            yield ChangeBatch(resume_token=self._resume_token(phase="streaming"))

@@ -306,6 +306,16 @@ class MongoDBService:
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
 
+        prev_doc = None
+        try:
+            prev_doc = collection.find_one(
+                {"_id": oid},
+                {"status": 1, "phases": 1, "records_processed": 1, "rejected_rows": 1, "reconcile": 1},
+            )
+        except Exception:
+            prev_doc = None
+        previous_status = (prev_doc or {}).get("status")
+
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
@@ -322,8 +332,7 @@ class MongoDBService:
                     phase_from_engine_label,
                 )
 
-                existing = collection.find_one({"_id": oid}, {"phases": 1})
-                phases = (existing or {}).get("phases") or initial_phases()
+                phases = (prev_doc or {}).get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
                 if status in ("completed", "completed_with_quarantine"):
                     phases = complete_phases(phases, success=True, message=message or "")
@@ -358,7 +367,25 @@ class MongoDBService:
             }
 
         result = collection.update_one(filt, {"$set": updates})
-        return result.modified_count > 0 or result.matched_count > 0
+        ok = result.modified_count > 0 or result.matched_count > 0
+        if ok:
+            try:
+                from services.ops_metrics import record_terminal_job_transition
+
+                reconcile = updates.get("reconcile") or (prev_doc or {}).get("reconcile") or {}
+                reconcile_ok = None
+                if isinstance(reconcile, dict) and "ok" in reconcile:
+                    reconcile_ok = bool(reconcile.get("ok"))
+                record_terminal_job_transition(
+                    previous_status=previous_status,
+                    status=status,
+                    records=int(updates.get("records_processed") or (prev_doc or {}).get("records_processed") or 0),
+                    quarantined=int(updates.get("rejected_rows") or (prev_doc or {}).get("rejected_rows") or 0),
+                    reconcile_ok=reconcile_ok,
+                )
+            except Exception:
+                pass
+        return ok
 
     def get_job(self, job_id: str) -> Optional[dict]:
         """Get a transfer job by ID"""
@@ -523,6 +550,7 @@ class MemoryMongoDBService:
         rec = self._jobs.get(job_id)
         if not rec:
             return False
+        previous_status = rec.get("status")
         fence = kwargs.pop("lease_fence", None)
         if fence is None:
             try:
@@ -573,6 +601,22 @@ class MemoryMongoDBService:
                 rec["phases"] = phases
             except Exception:
                 pass
+        try:
+            from services.ops_metrics import record_terminal_job_transition
+
+            reconcile = rec.get("reconcile") or {}
+            reconcile_ok = None
+            if isinstance(reconcile, dict) and "ok" in reconcile:
+                reconcile_ok = bool(reconcile.get("ok"))
+            record_terminal_job_transition(
+                previous_status=previous_status,
+                status=status,
+                records=int(rec.get("records_processed") or 0),
+                quarantined=int(rec.get("rejected_rows") or 0),
+                reconcile_ok=reconcile_ok,
+            )
+        except Exception:
+            pass
         return True
 
     def get_job(self, job_id: str) -> Optional[dict]:

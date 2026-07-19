@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { fetchCatalogStats, fetchUsageSummary } from "../lib/api";
+import { fetchCatalogStats, fetchOpsDlq, fetchOpsFreshness, fetchUsageSummary } from "../lib/api";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   buildStatusDistribution,
@@ -68,6 +68,8 @@ export function DashboardPage({
 }: DashboardPageProps) {
   const [catalogStats, setCatalogStats] = useState<{ live: number; total: number; transfer_live?: number } | null>(null);
   const [usageRows, setUsageRows] = useState<number | null>(null);
+  const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
+  const [dlqCount, setDlqCount] = useState<number | null>(null);
 
   useEffect(() => {
     fetchCatalogStats()
@@ -76,6 +78,12 @@ export function DashboardPage({
     fetchUsageSummary(30)
       .then((u) => setUsageRows(u.totals?.rows_written ?? u.rows_written ?? 0))
       .catch(() => setUsageRows(null));
+    fetchOpsFreshness(60)
+      .then((f) => setOpsLagSeconds(f.worst_lag_seconds))
+      .catch(() => setOpsLagSeconds(null));
+    fetchOpsDlq(50)
+      .then((d) => setDlqCount(d.count))
+      .catch(() => setDlqCount(null));
   }, []);
 
   const completed = jobs.filter((j) => isJobSuccess(j.status));
@@ -89,8 +97,10 @@ export function DashboardPage({
     const lags = [...running, ...completed]
       .map((j) => j.cdc_lag_seconds)
       .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-    return lags.length ? Math.max(...lags) : null;
-  }, [running, completed]);
+    const fromJobs = lags.length ? Math.max(...lags) : null;
+    if (opsLagSeconds != null && fromJobs != null) return Math.max(opsLagSeconds, fromJobs);
+    return opsLagSeconds ?? fromJobs;
+  }, [running, completed, opsLagSeconds]);
 
   const throughputSeries = useMemo(() => buildThroughputSeries(jobs), [jobs]);
   const statusSlices = useMemo(() => buildStatusDistribution(jobs), [jobs]);
@@ -176,7 +186,16 @@ export function DashboardPage({
                   value: `${cdcLagSeconds.toFixed(1)}s`,
                   icon: "activity",
                   tone: cdcLagSeconds > 60 ? ("warn" as const) : ("muted" as const),
-                  title: "Worst heartbeat lag on recent CDC jobs",
+                  title: "Worst pipeline freshness lag (ops + recent CDC jobs)",
+                }]
+              : []),
+            ...(dlqCount != null && dlqCount > 0
+              ? [{
+                  label: "DLQ events",
+                  value: dlqCount,
+                  icon: "alert",
+                  tone: "warn" as const,
+                  title: "Quarantine dead-letter events — replay from Job Theater",
                 }]
               : []),
           ]}

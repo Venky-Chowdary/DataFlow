@@ -67,7 +67,9 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
 
 _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
+    "sqlserver", "oracle",
     "s3", "gcs", "adls", "sftp", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
+    "iceberg", "kafka", "salesforce", "hubspot",
 })
 
 
@@ -363,6 +365,21 @@ def _read_batch_impl(
             limit=limit,
             known_total_rows=known_total_rows,
         )
+    if src_type in ("sqlserver", "oracle"):
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(
+            src_type,
+            cfg=cfg,
+            table=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+        )
+    if src_type in ("salesforce", "hubspot"):
+        from .connector_dispatch import read_via_registry
+
+        return read_via_registry(src_type, cfg=cfg, table=table, limit=limit, offset=offset)
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
 
@@ -708,6 +725,61 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
+    from .connector_dispatch import has_writer, write_via_registry
+
+    if has_writer(dest_type):
+        mode = write_mode
+        if dest_type in ("salesforce", "hubspot") and (mode or "insert").lower() == "insert":
+            mode = "upsert"
+        common = {
+            "host": cfg.get("host", ""),
+            "port": int(cfg.get("port") or 0),
+            "database": cfg.get("database", ""),
+            "username": cfg.get("username", ""),
+            "password": cfg.get("password", ""),
+            "schema": cfg.get("schema", ""),
+            "connection_string": cfg.get("connection_string", ""),
+            "ssl": cfg.get("ssl", False),
+            "api_key": cfg.get("api_key", ""),
+            "table_name": table_name,
+            "headers": headers,
+            "data_rows": data_rows,
+            "mappings": mappings,
+            "column_types": column_types,
+            "create_table": create_table,
+            "error_policy": error_policy,
+            "on_checkpoint": (
+                (lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r))
+                if on_checkpoint
+                else None
+            ),
+        }
+        extra = {}
+        if dest_type == "kafka":
+            extra["schema_registry_url"] = str(
+                (getattr(dest, "extra", None) or {}).get("schema_registry_url")
+                or cfg.get("schema_registry_url")
+                or ""
+            )
+        result = write_via_registry(
+            dest_type,
+            common=common,
+            write_mode=mode or "insert",
+            conflict_columns=conflict_columns or [],
+            extra=extra or None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+        summary = {
+            "type": dest_type,
+            "schema": result.target_schema,
+            "table": result.table_name,
+            "checksum": result.checksum,
+            "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+        return result.rows_written, result.checksum, summary
+
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
 
 
@@ -757,7 +829,9 @@ def stream_database_transfer(
     cursor_source_col = contract.cursor_field if contract else ""
     pk_target_cols: list[str] = []
     if contract and contract.primary_key:
-        pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
+        pk_target_cols = [
+            map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+        ]
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
@@ -1477,7 +1551,7 @@ def stream_scd2_mirror_transfer(
 
     from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
-    from services.sync_cursor import resolve_sync_contract
+    from services.sync_cursor import map_source_to_target, resolve_sync_contract
 
     contract = resolve_sync_contract(stream_contracts)
     effective_sync = (contract.sync_mode if contract else sync_mode).lower()
@@ -1550,8 +1624,12 @@ def stream_scd2_mirror_transfer(
             from src.services.scd2_engine import apply_scd2
 
             batch_size = 1_000
-            pk = (contract.primary_key if contract else "") or target_cols[0]
-            conflict_columns = [pk]
+            if contract and contract.primary_key:
+                conflict_columns = [
+                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                ]
+            else:
+                conflict_columns = [target_cols[0]]
             written_total = 0
             updated_total = 0
             active_rows = 0
@@ -1614,8 +1692,17 @@ def stream_scd2_mirror_transfer(
             # Single SQL pass to reactivate present keys and soft-delete missing keys.
             engine = get_sqlalchemy_engine(dest_cfg)
             soft_delete_col = quote_sql_identifier("_deleted")
-            pk = quote_sql_identifier(
-                contract.primary_key if contract else target_cols[0]
+            if contract and contract.primary_key:
+                pk_cols = [
+                    map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+                ]
+            else:
+                pk_cols = [target_cols[0]]
+            # Correlate target↔staging without UPDATE aliases (SQLite-compatible).
+            join_pred = " AND ".join(
+                f"{staging_qualified}.{quote_sql_identifier(c)} = "
+                f"{target_qualified}.{quote_sql_identifier(c)}"
+                for c in pk_cols
             )
             with engine.connect() as conn:
                 _ensure_soft_delete_column(conn, target_qualified, "_deleted")
@@ -1624,7 +1711,7 @@ def stream_scd2_mirror_transfer(
                     sa.text(
                         f"UPDATE {target_qualified} "
                         f"SET {soft_delete_col} = FALSE "
-                        f"WHERE {pk} IN (SELECT {pk} FROM {staging_qualified})"
+                        f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
                     )
                 )
                 # Soft-delete rows that are no longer in the source.
@@ -1632,7 +1719,7 @@ def stream_scd2_mirror_transfer(
                     sa.text(
                         f"UPDATE {target_qualified} "
                         f"SET {soft_delete_col} = TRUE "
-                        f"WHERE {pk} NOT IN (SELECT {pk} FROM {staging_qualified}) "
+                        f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
                         f"AND ({soft_delete_col} IS NULL OR {soft_delete_col} = FALSE)"
                     )
                 )

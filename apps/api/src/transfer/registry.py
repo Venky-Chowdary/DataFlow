@@ -175,6 +175,23 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "mysql", "database", "mysql"),
     ("database", "mysql", "file_export", "csv"),
     ("database", "mysql", "file_export", "json"),
+    # First-class enterprise engines + lakehouse / activation destinations
+    ("database", "postgresql", "database", "sqlserver"),
+    ("database", "postgresql", "database", "oracle"),
+    ("database", "mysql", "database", "sqlserver"),
+    ("database", "sqlite", "database", "iceberg"),
+    ("file", "csv", "database", "iceberg"),
+    ("file", "json", "database", "kafka"),
+    ("database", "postgresql", "database", "salesforce"),
+    ("database", "postgresql", "database", "hubspot"),
+    ("database", "snowflake", "database", "salesforce"),
+    ("database", "bigquery", "database", "hubspot"),
+    # Warehouse proof routes (exercised when cloud credentials/emulators present)
+    ("database", "postgresql", "database", "snowflake"),
+    ("database", "postgresql", "database", "bigquery"),
+    ("database", "postgresql", "database", "s3"),
+    ("file", "csv", "database", "s3"),
+    ("file", "parquet", "database", "snowflake"),
 ]
 
 

@@ -193,6 +193,13 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "validation_mode": sched.validation_mode,
         }]
 
+    contract_id = (getattr(sched, "contract_id", None) or "").strip()
+    require_signed = bool(getattr(sched, "require_signed_contract", False))
+    if contract_id or require_signed:
+        from services.schedule_store import assert_signed_contract
+
+        assert_signed_contract(contract_id, require_signed=require_signed)
+
     return TransferRequest(
         source=source,
         destination=destination,
@@ -204,6 +211,9 @@ def build_schedule_request(sched, src: dict, dst: dict):
         backfill_new_fields=bool(sched.backfill_new_fields),
         stream_contracts=stream_contracts,
         workspace_id=sched.workspace_id or "",
+        contract_id=contract_id,
+        enforce_contract=bool(contract_id),
+        require_signed_contract=require_signed,
     )
 
 
@@ -327,7 +337,28 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
         return None
 
-    request = build_schedule_request(sched, src, dst)
+    try:
+        request = build_schedule_request(sched, src, dst)
+    except ValueError as exc:
+        logger.error("Schedule %s blocked by contract policy: %s", schedule_id, exc)
+        mark_schedule_run(
+            schedule_id,
+            "",
+            status="failed",
+            run_entry={
+                "job_id": "",
+                "status": "failed",
+                "attempt": attempt,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_seconds": 0,
+                "records_transferred": 0,
+                "rejected_rows": 0,
+                "coerced_null_rows": 0,
+                "error": str(exc)[:500],
+            },
+        )
+        return None
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
     started_at = datetime.now(timezone.utc)

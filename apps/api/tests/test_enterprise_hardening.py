@@ -14,15 +14,20 @@ from services.worker_leases import WorkerLeaseStore, active_fence, clear_active_
 
 
 def test_capability_registry_demotes_fiction_connectors():
-    for key in ("kafka", "iceberg", "delta", "sap", "databricks", "sqlserver", "oracle"):
+    # Still demoted: no production modules.
+    for key in ("delta", "sap", "databricks", "kinesis", "hudi"):
         cap = get_connector_capability(key)
         assert cap.get("transfer_ready") is False, key
 
 
 def test_capability_registry_keeps_real_drivers_ready():
-    for key in ("postgresql", "mysql", "mongodb", "snowflake", "s3", "csv"):
+    for key in ("postgresql", "mysql", "mongodb", "snowflake", "s3", "csv", "iceberg", "kafka"):
         cap = get_connector_capability(key)
         assert cap.get("transfer_ready") is True, key
+    # SQL Server / Oracle are first-class; transfer_ready depends on DBAPI install.
+    for key in ("sqlserver", "oracle"):
+        cap = get_connector_capability(key)
+        assert "transfer_ready" in cap
 
 
 def test_requires_distributed_backend_respects_memory_and_flag(monkeypatch):

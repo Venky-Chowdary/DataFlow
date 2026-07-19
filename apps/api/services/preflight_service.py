@@ -244,10 +244,25 @@ def run_transfer_policy_gates(
         })
 
     schema_issues: list[str] = []
-    if schema not in {"manual_review", "propagate_columns", "propagate_all", "pause_on_change"}:
+    allowed_schema = {
+        "manual_review",
+        "propagate_columns",
+        "propagate_all",
+        "pause_on_change",
+        "type_locked",
+    }
+    if schema not in allowed_schema:
         schema_issues.append(f"Unknown schema policy '{schema}'")
     if backfill_new_fields and schema not in {"propagate_columns", "propagate_all"}:
         schema_issues.append("Backfill new fields requires automatic column propagation")
+
+    breaking = {
+        "manual_review": "pause_for_manual_review",
+        "pause_on_change": "halt_pipeline",
+        "type_locked": "reject_type_changes",
+        "propagate_columns": "auto_add_columns",
+        "propagate_all": "auto_propagate_schema",
+    }.get(schema, "pause_for_manual_review")
 
     if schema_issues:
         gates.append({
@@ -266,7 +281,7 @@ def run_transfer_policy_gates(
             "details": {
                 "schema_policy": schema,
                 "backfill_new_fields": backfill_new_fields,
-                "breaking_changes": "pause_for_manual_review",
+                "breaking_changes": breaking,
             },
         })
 

@@ -25,7 +25,22 @@ except ImportError:
 STORE_PATH = data_dir() / "schedules.json"
 
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
-SYNC_MODES = {"full_refresh_overwrite", "full_refresh_append", "incremental", "cdc", "scd2", "mirror"}
+SYNC_MODES = {
+    "full_refresh_overwrite",
+    "full_refresh_append",
+    "incremental",
+    "cdc",
+    "scd2",
+    "mirror",
+    "reverse_etl",
+}
+SCHEMA_POLICIES = {
+    "manual_review",
+    "propagate_columns",
+    "propagate_all",
+    "pause_on_change",
+    "type_locked",
+}
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
 
@@ -54,6 +69,9 @@ class PipelineSchedule:
     primary_key: str = ""  # key for idempotent incremental/cdc upserts
     cursor_value: str = ""  # last observed watermark (advances each run)
     workspace_id: str = ""
+    # Data contract — when set, scheduled runs enforce the signed contract.
+    contract_id: str = ""
+    require_signed_contract: bool = False
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -98,6 +116,13 @@ class PipelineSchedule:
             primary_key=(data.get("primary_key") or "").strip(),
             cursor_value=str(data.get("cursor_value") or ""),
             workspace_id=(data.get("workspace_id") or "").strip(),
+            contract_id=(data.get("contract_id") or "").strip(),
+            require_signed_contract=bool(
+                data.get(
+                    "require_signed_contract",
+                    bool((data.get("contract_id") or "").strip()),
+                )
+            ),
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
             notify_on_failure=bool(data.get("notify_on_failure", True)),
@@ -260,6 +285,30 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> None
             raise ValueError(str(exc)) from exc
 
 
+def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
+    """Fail closed when a schedule requires a signed data contract."""
+    contract_id = (contract_id or "").strip()
+    if not contract_id:
+        if require_signed:
+            raise ValueError("require_signed_contract is set but no contract_id was provided")
+        return
+    try:
+        from services.contract_store import get_contract_store
+        from services.data_contract import ContractStatus
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+        from src.services.data_contract import ContractStatus
+
+    contract = get_contract_store().get_contract(contract_id)
+    if contract is None:
+        raise ValueError(f"Contract {contract_id} not found")
+    if require_signed and contract.status != ContractStatus.SIGNED:
+        raise ValueError(
+            f"Contract {contract_id} must be SIGNED before scheduling "
+            f"(current status: {contract.status.value})"
+        )
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     schedules = _load_all()
     interval = data.get("interval", "daily")
@@ -267,6 +316,10 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     tz = (data.get("timezone") or "UTC").strip() or "UTC"
     sync_mode = data.get("sync_mode") or "full_refresh_overwrite"
     _validate_cadence(interval, cron, tz, sync_mode)
+    contract_id = (data.get("contract_id") or "").strip()
+    require_signed = bool(data.get("require_signed_contract", bool(contract_id)))
+    if contract_id or require_signed:
+        assert_signed_contract(contract_id, require_signed=require_signed)
     sched = PipelineSchedule.from_dict({
         **data,
         "id": str(uuid.uuid4()),
@@ -274,6 +327,8 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
         "cron": cron,
         "timezone": tz,
         "sync_mode": sync_mode,
+        "contract_id": contract_id,
+        "require_signed_contract": require_signed,
         "enabled": bool(data.get("enabled", True)),
     })
     sched.next_run_at = next_run_for(sched)
@@ -292,7 +347,21 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
         _validate_cadence(interval, cron, tz, sync_mode)
-        updated = PipelineSchedule.from_dict({**s.to_dict(), **data, "id": schedule_id})
+        merged = {**s.to_dict(), **data, "id": schedule_id}
+        contract_id = (merged.get("contract_id") or "").strip()
+        require_signed = bool(
+            merged.get("require_signed_contract", bool(contract_id))
+        )
+        # Re-validate when enabling, attaching a contract, or tightening the gate.
+        enabling = bool(merged.get("enabled", s.enabled)) and not s.enabled
+        contract_changed = contract_id != (s.contract_id or "") or require_signed != bool(
+            s.require_signed_contract
+        )
+        if (enabling or contract_changed) and (contract_id or require_signed):
+            assert_signed_contract(contract_id, require_signed=require_signed)
+        merged["contract_id"] = contract_id
+        merged["require_signed_contract"] = require_signed
+        updated = PipelineSchedule.from_dict(merged)
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):
             updated.next_run_at = next_run_for(updated)

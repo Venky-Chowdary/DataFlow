@@ -15,8 +15,8 @@ const CONNECTORS: ConnectorDef[] = [
   { id: "postgresql", name: "PostgreSQL", category: "Databases", icon: "🐘", color: "#336791", status: "live", description: "Open-source relational database" },
   { id: "mysql", name: "MySQL", category: "Databases", icon: "🐬", color: "#00758F", status: "live", description: "Popular open-source RDBMS" },
   { id: "mongodb", name: "MongoDB", category: "Databases", icon: "🍃", color: "#13AA52", status: "live", description: "NoSQL document database" },
-  { id: "oracle", name: "Oracle", category: "Databases", icon: "🔴", color: "#F80000", status: "live", description: "Enterprise database system" },
-  { id: "sqlserver", name: "SQL Server", category: "Databases", icon: "📊", color: "#CC2927", status: "live", description: "Microsoft enterprise database" },
+  { id: "oracle", name: "Oracle", category: "Databases", icon: "🔴", color: "#F80000", status: "live", description: "Enterprise database — LogMiner/Flashback CDC" },
+  { id: "sqlserver", name: "SQL Server", category: "Databases", icon: "📊", color: "#CC2927", status: "live", description: "Enterprise database — native CDC / CT" },
   { id: "redis", name: "Redis", category: "Databases", icon: "⚡", color: "#DC382D", status: "live", description: "In-memory data store" },
   { id: "cassandra", name: "Cassandra", category: "Databases", icon: "👁", color: "#1287B1", status: "beta", description: "Distributed NoSQL database" },
   { id: "dynamodb", name: "DynamoDB", category: "Databases", icon: "⚙️", color: "#4053D6", status: "live", description: "AWS managed NoSQL" },
@@ -25,8 +25,9 @@ const CONNECTORS: ConnectorDef[] = [
   { id: "snowflake", name: "Snowflake", category: "Data Warehouses", icon: "❄️", color: "#29B5E8", status: "live", description: "Cloud data platform" },
   { id: "bigquery", name: "BigQuery", category: "Data Warehouses", icon: "📈", color: "#4285F4", status: "live", description: "Google cloud analytics" },
   { id: "redshift", name: "Redshift", category: "Data Warehouses", icon: "🔴", color: "#8C4FFF", status: "live", description: "AWS data warehouse" },
-  { id: "databricks", name: "Databricks", category: "Data Warehouses", icon: "🧱", color: "#FF3621", status: "live", description: "Unified analytics platform" },
-  { id: "synapse", name: "Azure Synapse", category: "Data Warehouses", icon: "🔷", color: "#0078D4", status: "beta", description: "Microsoft analytics service" },
+  { id: "databricks", name: "Databricks", category: "Data Warehouses", icon: "🧱", color: "#FF3621", status: "coming", description: "Unified analytics platform" },
+  { id: "synapse", name: "Azure Synapse", category: "Data Warehouses", icon: "🔷", color: "#0078D4", status: "coming", description: "Microsoft analytics service" },
+  { id: "iceberg", name: "Apache Iceberg", category: "Data Warehouses", icon: "🧊", color: "#1B7A9E", status: "live", description: "Lakehouse table format writer" },
 
   // Files
   { id: "csv", name: "CSV", category: "Files", icon: "📄", color: "#4CAF50", status: "live", description: "Comma-separated values" },
@@ -53,18 +54,18 @@ const CONNECTORS: ConnectorDef[] = [
   { id: "hubspot", name: "HubSpot", category: "SaaS", icon: "🧡", color: "#FF7A59", status: "live", description: "Marketing & CRM" },
   { id: "zendesk", name: "Zendesk", category: "SaaS", icon: "🎧", color: "#03363D", status: "beta", description: "Customer service" },
   { id: "stripe", name: "Stripe", category: "SaaS", icon: "💳", color: "#635BFF", status: "live", description: "Payment processing" },
-  { id: "shopify", name: "Shopify", category: "SaaS", icon: "🛒", color: "#96BF48", status: "live", description: "E-commerce platform" },
+  { id: "shopify", name: "Shopify", category: "SaaS", icon: "🛒", color: "#96BF48", status: "coming", description: "E-commerce platform" },
 
   // Event Streams
-  { id: "kafka", name: "Apache Kafka", category: "Streams", icon: "📨", color: "#231F20", status: "live", description: "Event streaming platform" },
-  { id: "kinesis", name: "AWS Kinesis", category: "Streams", icon: "🌊", color: "#FF9900", status: "live", description: "Real-time data streaming" },
-  { id: "pubsub", name: "Google Pub/Sub", category: "Streams", icon: "📡", color: "#4285F4", status: "beta", description: "Messaging service" },
-  { id: "rabbitmq", name: "RabbitMQ", category: "Streams", icon: "🐰", color: "#FF6600", status: "live", description: "Message broker" },
+  { id: "kafka", name: "Apache Kafka", category: "Streams", icon: "📨", color: "#231F20", status: "live", description: "JSON produce destination (optional Schema Registry)" },
+  { id: "kinesis", name: "AWS Kinesis", category: "Streams", icon: "🌊", color: "#FF9900", status: "coming", description: "Real-time data streaming" },
+  { id: "pubsub", name: "Google Pub/Sub", category: "Streams", icon: "📡", color: "#4285F4", status: "coming", description: "Messaging service" },
+  { id: "rabbitmq", name: "RabbitMQ", category: "Streams", icon: "🐰", color: "#FF6600", status: "coming", description: "Message broker" },
 
   // Enterprise
-  { id: "sap", name: "SAP", category: "Enterprise", icon: "💎", color: "#0FAAFF", status: "live", description: "Enterprise software" },
-  { id: "workday", name: "Workday", category: "Enterprise", icon: "👔", color: "#0072CE", status: "beta", description: "HR & finance platform" },
-  { id: "netsuite", name: "NetSuite", category: "Enterprise", icon: "📋", color: "#0B0B0B", status: "beta", description: "ERP system" },
+  { id: "sap", name: "SAP", category: "Enterprise", icon: "💎", color: "#0FAAFF", status: "coming", description: "Enterprise software" },
+  { id: "workday", name: "Workday", category: "Enterprise", icon: "👔", color: "#0072CE", status: "coming", description: "HR & finance platform" },
+  { id: "netsuite", name: "NetSuite", category: "Enterprise", icon: "📋", color: "#0B0B0B", status: "coming", description: "ERP system" },
   { id: "servicenow", name: "ServiceNow", category: "Enterprise", icon: "🎫", color: "#81B5A1", status: "coming", description: "IT service management" },
 ];
 

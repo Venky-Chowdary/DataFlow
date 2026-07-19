@@ -148,8 +148,12 @@ def validate_production_config() -> list[str]:
         if not users_raw:
             errors.append("DATAFLOW_AUTH_USERS must define at least one user (or set DATAFLOW_ALLOW_DEV_USER=1 for staging only)")
 
-    if not os.getenv("DATAFLOW_SECRETS_KEY", "").strip() and not secret:
-        errors.append("DATAFLOW_SECRETS_KEY or DATAFLOW_AUTH_SECRET required for connector encryption")
+    if not os.getenv("DATAFLOW_SECRETS_KEY", "").strip():
+        errors.append("DATAFLOW_SECRETS_KEY must be set for Fernet encryption of connector credentials in production")
+    try:
+        import cryptography.fernet  # noqa: F401
+    except Exception:
+        errors.append("cryptography package must be installed in production (Fernet secret vault)")
 
     mongo = mongodb_uri()
     if _mongo_is_localhost(mongo) and not mongo.startswith("mongodb://mongo:"):

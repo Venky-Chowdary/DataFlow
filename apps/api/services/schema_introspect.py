@@ -377,31 +377,161 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 
+def _snowflake_list_schemas(cur: Any) -> list[str]:
+    """Return schema names visible in the current database (uppercase)."""
+    try:
+        cur.execute(
+            """
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE catalog_name = CURRENT_DATABASE()
+               OR catalog_name IS NULL
+            ORDER BY schema_name
+            LIMIT 200
+            """
+        )
+        names = [str(r[0]).upper() for r in (cur.fetchall() or []) if r and r[0]]
+        if names:
+            return names
+    except Exception:
+        logger.debug("Snowflake schemata catalog query failed; trying SHOW SCHEMAS", exc_info=True)
+    try:
+        cur.execute("SHOW SCHEMAS")
+        # SHOW SCHEMAS columns vary; "name" is typically index 1
+        rows = cur.fetchall() or []
+        names = []
+        for row in rows:
+            if not row:
+                continue
+            # Prefer named access when available
+            if hasattr(row, "get"):
+                n = row.get("name") or row.get("schema_name")
+            else:
+                n = row[1] if len(row) > 1 else row[0]
+            if n:
+                names.append(str(n).upper())
+        return names
+    except Exception:
+        logger.debug("SHOW SCHEMAS failed", exc_info=True)
+        return []
+
+
+def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str], str | None]:
+    """Pick a usable schema. Returns (schema, available, warning_or_none)."""
+    from connectors.writer_common import quote_sql_identifier
+
+    requested = (requested or "PUBLIC").strip() or "PUBLIC"
+    # Snowflake unquoted identifiers fold to uppercase.
+    candidates = []
+    for c in (requested, requested.upper(), requested.lower(), "PUBLIC", "public"):
+        if c and c not in candidates:
+            candidates.append(c)
+
+    available = _snowflake_list_schemas(cur)
+    available_set = {a.upper() for a in available}
+
+    for cand in candidates:
+        try:
+            cur.execute(f"USE SCHEMA {quote_sql_identifier(cand)}")
+            resolved = cand.upper()
+            warning = None
+            if requested.upper() != resolved:
+                warning = (
+                    f"Schema '{requested}' was not usable; using '{resolved}' instead."
+                )
+            elif available_set and resolved not in available_set:
+                # USE succeeded even if catalog list was incomplete — fine.
+                warning = None
+            return resolved, available, warning
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "002043" in str(exc) or "does not exist" in msg or "not exist" in msg:
+                continue
+            # Unexpected errors (permissions, etc.) — re-raise for outer handler
+            raise
+
+    # Requested schema missing: fall back to first available, preferring PUBLIC.
+    fallback = None
+    if "PUBLIC" in available_set:
+        fallback = "PUBLIC"
+    elif available:
+        fallback = available[0]
+    if fallback:
+        cur.execute(f"USE SCHEMA {quote_sql_identifier(fallback)}")
+        sample = ", ".join(available[:12])
+        more = f" (+{len(available) - 12} more)" if len(available) > 12 else ""
+        warning = (
+            f"Schema '{requested}' does not exist in this database. "
+            f"Using '{fallback}'. Available schemas: {sample}{more}."
+        )
+        return fallback, available, warning
+
+    raise RuntimeError(
+        f"Schema '{requested}' does not exist, and no schemas were found in the "
+        f"current Snowflake database. Check the database name and that your role "
+        f"can see information_schema.schemata."
+    )
+
+
 def _introspect_snowflake(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
-    schema = (kwargs.get("schema") or "PUBLIC").upper()
+    schema = (kwargs.get("schema") or "PUBLIC").strip() or "PUBLIC"
     try:
         from connectors.snowflake_conn import get_connection, normalize_account
+        from connectors.writer_common import quote_sql_identifier
 
         conn = get_connection(
             account=normalize_account(kwargs.get("host", "")),
             username=kwargs.get("username", ""),
             password=kwargs.get("password", ""),
             database=kwargs.get("database", ""),
-            schema=schema,
+            schema=schema.upper(),
             warehouse=kwargs.get("warehouse", ""),
             connection_string=kwargs.get("connection_string", ""),
         )
-        from connectors.writer_common import quote_sql_identifier
 
+        warnings: list[str] = []
         with conn.cursor() as cur:
-            wh = kwargs.get("warehouse", "")
+            wh = (kwargs.get("warehouse") or "").strip()
             if wh:
-                cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
-            db = kwargs.get("database", "")
+                try:
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception as exc:
+                    # Warehouse optional for metadata reads on some accounts.
+                    warnings.append(f"USE WAREHOUSE '{wh}' failed: {exc}")
+                    logger.info("Snowflake USE WAREHOUSE skipped: %s", exc)
+
+            db = (kwargs.get("database") or "").strip()
             if db:
-                cur.execute(f"USE DATABASE {quote_sql_identifier(db)}")
-            cur.execute(f"USE SCHEMA {quote_sql_identifier(schema)}")
+                try:
+                    cur.execute(f"USE DATABASE {quote_sql_identifier(db)}")
+                except Exception as exc:
+                    conn.close()
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Snowflake database '{db}' does not exist or is not accessible "
+                            f"with the current role ({exc})."
+                        ),
+                        "columns": [],
+                        "tables": [],
+                        "schema": schema.upper(),
+                    }
+
+            try:
+                schema, _available, schema_warning = _snowflake_resolve_schema(cur, schema)
+            except RuntimeError as exc:
+                conn.close()
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "columns": [],
+                    "tables": [],
+                    "schema": (kwargs.get("schema") or "PUBLIC").upper(),
+                }
+            if schema_warning:
+                warnings.append(schema_warning)
+
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
@@ -432,7 +562,17 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                         }
                     )
         conn.close()
-        return {"ok": True, "tables": tables, "columns": columns, "schema": schema}
+        out: dict[str, Any] = {
+            "ok": True,
+            "tables": tables,
+            "columns": columns,
+            "schema": schema,
+        }
+        if warnings:
+            out["warnings"] = warnings
+            # Surface the primary warning in error-adjacent field for older UI clients.
+            out["message"] = warnings[0]
+        return out
     except ImportError:
         return {
             "ok": False,
@@ -441,10 +581,24 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             "tables": [],
         }
     except Exception as exc:
-        logger.warning("Snowflake introspect failed", exc_info=True)
+        msg = str(exc)
+        # Expected "object does not exist" — actionable, no stack spam.
+        if "002043" in msg or "does not exist" in msg.lower():
+            logger.info("Snowflake introspect schema/database missing: %s", msg)
+            return {
+                "ok": False,
+                "error": (
+                    "Snowflake object does not exist or cannot be accessed. "
+                    "Verify database, schema, warehouse, and role. "
+                    f"Detail: {msg}"
+                ),
+                "columns": [],
+                "tables": [],
+            }
+        logger.warning("Snowflake introspect failed: %s", msg, exc_info=True)
         return {
             "ok": False,
-            "error": f"{type(exc).__name__}: connection or schema introspection failed",
+            "error": f"{type(exc).__name__}: {msg}",
             "columns": [],
             "tables": [],
         }

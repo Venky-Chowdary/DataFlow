@@ -343,7 +343,7 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
         <h1>Move any schema anywhere</h1>
         <p className="lp-hero-sub">
           Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
-          {liveDrivers != null ? ` ${liveDrivers}+ live transfer drivers ready today.` : ""}
+          {liveDrivers != null ? ` ${liveDrivers} transfer-ready drivers today.` : ""}
         </p>
 
         <div className="lp-hero-cta">
@@ -373,8 +373,8 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
           <article>
             <span className="lp-hero-value-icon" aria-hidden><DtIcon name="connectors" size={22} /></span>
             <div>
-              <strong>{liveDrivers != null ? `${liveDrivers}+` : "600+"} connectors</strong>
-              <span>Any source to any destination</span>
+              <strong>{liveDrivers != null ? `${liveDrivers} transfer-ready` : "Transfer-ready"} drivers</strong>
+              <span>Honest labels — catalog stubs stay planned</span>
             </div>
           </article>
         </div>
@@ -385,7 +385,7 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
       <section className="lp-logos" aria-label="Trusted stacks">
         <h5>Industry leaders move data with</h5>
         <div className="lp-logos-row">
-          {["postgresql", "snowflake", "bigquery", "mongodb", "kafka", "s3"].map((id) => (
+          {["postgresql", "snowflake", "bigquery", "mongodb", "sqlserver", "s3"].map((id) => (
             <span key={id} className="lp-logo-item">
               <ConnectorIcon id={id} size={22} />
               {id}
@@ -406,7 +406,7 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
         </Reveal>
         <Reveal className="lp-platform-steps">
           {[
-            { step: "01", title: "Connect", body: "Pick from 600+ drivers or upload CSV, JSONL, and Parquet. Honest transfer-ready labels.", icon: "connectors" as const },
+            { step: "01", title: "Connect", body: "Pick a transfer-ready driver or upload CSV, JSONL, and Parquet. Honest capability labels — no inflated marketplace counts.", icon: "connectors" as const },
             { step: "02", title: "Map", body: "Semantic column mapping with confidence scores and human review for ambiguous fields.", icon: "sparkle" as const },
             { step: "03", title: "Preflight", body: "Eight fail-fast gates — schema, types, capacity, and destination probes before write.", icon: "gate" as const },
             { step: "04", title: "Proof", body: "Job Theater shows batch progress, reconciliation, checksums, and quarantine for bad rows.", icon: "check" as const },

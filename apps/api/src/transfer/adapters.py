@@ -52,6 +52,11 @@ def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_nam
         # Elasticsearch uses an index name; prefer the table name (UI's destination name)
         # and fall back to the database field when it is intentionally supplied.
         return destination.table or destination.collection or destination.database or f"dt_{base}"
+    if dt == "kafka":
+        return destination.table or destination.collection or destination.database or f"dataflow.{base}"
+    if dt in ("iceberg", "salesforce", "hubspot"):
+        # Preserve case for CRM objects / lakehouse table identifiers.
+        return destination.table or destination.collection or f"dt_{base}"
     return destination.table or destination.collection or f"dt_{base}"
 
 
@@ -184,11 +189,13 @@ def resolve_connector_config(
     default_port = (
         27017 if fmt == "mongodb" else
         3306 if fmt == "mysql" else
+        1433 if fmt == "sqlserver" else
+        1521 if fmt == "oracle" else
+        9092 if fmt == "kafka" else
         6379 if fmt == "redis" else
         9200 if fmt == "elasticsearch" else
         5439 if fmt == "redshift" else
-        0 if fmt == "sqlite" else
-        0 if fmt == "generic_sql" else
+        0 if fmt in ("sqlite", "generic_sql", "iceberg") else
         22 if fmt == "sftp" else
         587 if fmt == "email" else
         443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase") else 5432
@@ -674,6 +681,19 @@ def read_source_database(
         schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
         return records, batch.headers, schema
 
+    if db_type in ("sqlserver", "oracle"):
+        from .connector_dispatch import read_via_registry
+
+        table = endpoint.table
+        if not table:
+            raise ValueError(f"Source {db_type} table name required")
+        batch = read_via_registry(db_type, cfg=cfg, table=table, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, table)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = _introspect_table_schema(db_type, cfg, table, batch.headers, records=records)
+        return records, batch.headers, schema
+
     if db_type == "sftp":
         from connectors.sftp_reader import read_object
 
@@ -760,9 +780,12 @@ def write_destination_database(
             5439 if db_type == "redshift" else
             5432 if db_type == "postgresql" else
             3306 if db_type == "mysql" else
+            1433 if db_type == "sqlserver" else
+            1521 if db_type == "oracle" else
+            9092 if db_type == "kafka" else
             22 if db_type == "sftp" else
             587 if db_type == "email" else
-            0 if db_type == "generic_sql" else 443
+            0 if db_type in ("generic_sql", "iceberg", "sqlite") else 443
         ),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
@@ -1052,6 +1075,44 @@ def write_destination_database(
         return result.rows_written, ddl_log, {
             "type": "qdrant", "collection": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
+            **_writer_diagnostics(result),
+        }
+
+    # Registry-driven path: sqlserver, oracle, iceberg, kafka, salesforce, hubspot, …
+    from .connector_dispatch import has_writer, write_via_registry
+
+    if has_writer(db_type):
+        extra: dict[str, Any] = {}
+        if db_type == "kafka":
+            extra["schema_registry_url"] = str(
+                (endpoint.extra or {}).get("schema_registry_url")
+                or cfg.get("schema_registry_url")
+                or ""
+            )
+        if db_type in ("salesforce", "hubspot"):
+            # Prefer upsert for activation / reverse-ETL destinations.
+            if (write_mode or "insert").lower() == "insert":
+                write_mode = "upsert"
+            if (endpoint.extra or {}).get("activation_batch_size"):
+                extra["batch_size"] = int(endpoint.extra["activation_batch_size"])
+        for col in columns:
+            ddl_log.append(f"{db_type.upper()} FIELD {col}")
+        result = write_via_registry(
+            db_type,
+            common=common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            extra=extra or None,
+        )
+        if not result.ok:
+            raise RuntimeError(result.error or f"{db_type} write failed")
+        ddl_log.insert(0, f"WRITE {db_type} → {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": db_type,
+            "schema": result.target_schema,
+            "table": result.table_name,
+            "checksum": result.checksum,
+            "driver": result.driver,
             **_writer_diagnostics(result),
         }
 

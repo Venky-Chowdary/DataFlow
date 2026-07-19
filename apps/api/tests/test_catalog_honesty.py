@@ -26,15 +26,21 @@ def test_rest_api_brand_alias_is_planned_not_live() -> None:
         assert row["capability_label"] == "Planned", brand
 
 
-def test_dedicated_saas_drivers_are_source_only_not_certified() -> None:
-    """HubSpot/Salesforce/Stripe have real modules but are source-only (no write)."""
-    for brand in ("hubspot", "salesforce", "stripe"):
+def test_dedicated_saas_drivers_activation_and_source_only() -> None:
+    """Salesforce/HubSpot are reverse-ETL write-ready; Stripe remains source-only."""
+    for brand in ("hubspot", "salesforce"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
         )
-        assert row["transfer_ready"] is False, brand
-        assert row["certification_tier"] == "source_only", brand
+        assert row["transfer_ready"] is True, brand
+        assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live", "description": ""}
+    )
+    assert stripe["transfer_ready"] is False
+    assert stripe["certification_tier"] == "source_only"
+    assert stripe["effective_status"] == "live"
 
 
 def test_first_class_rest_api_is_source_only() -> None:
@@ -74,8 +80,7 @@ def test_planned_brand_blocked_as_transfer_endpoint() -> None:
     assert "Planned" in msg
 
     ok, msg = endpoint_allowed_for_role("hubspot", "destination")
-    assert ok is False
-    assert "source-only" in msg.lower()
+    assert ok is True, msg
 
     ok, msg = endpoint_allowed_for_role("hubspot", "source")
     assert ok is True
@@ -98,8 +103,9 @@ def test_catalog_search_live_is_certified_only() -> None:
         data = search_catalog(status="live", limit=500)
         ids = {c["id"] for c in data["connectors"]}
         assert all(c.get("transfer_ready") for c in data["connectors"])
-        # Source-only SaaS and REST brand stubs must not appear under Certified.
-        for brand in ("hubspot", "salesforce", "stripe", "zendesk", "shopify"):
+        # Reverse-ETL SaaS (hubspot/salesforce) may appear as certified destinations.
+        # Source-only Stripe and REST brand stubs must not.
+        for brand in ("stripe", "zendesk", "shopify"):
             assert brand not in ids
         assert data.get("transfer_live", 0) < 200  # not hundreds of greenwashed stubs
         assert data.get("certified", 0) > 0

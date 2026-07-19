@@ -115,6 +115,17 @@ class MySqlChangeStreamCdc:
             return False
 
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:
+        # Unique server_id per connector/table so multi-stream CDC does not collide.
+        configured = self.cfg.get("server_id") or self.cfg.get("binlog_server_id")
+        if configured is not None:
+            server_id = int(configured)
+        else:
+            import hashlib
+
+            digest = hashlib.sha1(
+                f"{self.cfg.get('host')}|{self.database}|{self.table}".encode()
+            ).hexdigest()
+            server_id = 10_000 + (int(digest[:6], 16) % 1_000_000)
         kwargs: dict[str, Any] = {
             "connection_settings": {
                 "host": self.cfg.get("host") or "localhost",
@@ -122,7 +133,7 @@ class MySqlChangeStreamCdc:
                 "user": self.cfg.get("username") or "",
                 "password": self.cfg.get("password") or "",
             },
-            "server_id": 10001,
+            "server_id": server_id,
             "blocking": blocking,
             "only_schemas": self.database if self.database else None,
             "only_tables": self.table if self.table else None,
@@ -132,7 +143,18 @@ class MySqlChangeStreamCdc:
         # otherwise leave it unset so BinLogStreamReader streams all events.
         if only_events:
             kwargs["only_events"] = only_events
-        if self.resume_token and self.resume_token.get("file") and self.resume_token.get("pos") is not None:
+        # Prefer GTID auto-position (Debezium-class); fall back to file/pos.
+        gtid = None
+        if isinstance(self.resume_token, dict):
+            gtid = self.resume_token.get("gtid") or self.resume_token.get("gtid_set")
+        if gtid:
+            kwargs["auto_position"] = True
+            try:
+                # pymysqlreplication >=0.45
+                kwargs["gtid_set"] = gtid
+            except Exception:
+                pass
+        elif self.resume_token and self.resume_token.get("file") and self.resume_token.get("pos") is not None:
             kwargs["log_file"] = self.resume_token["file"]
             kwargs["log_pos"] = self.resume_token["pos"]
         return kwargs
@@ -140,10 +162,17 @@ class MySqlChangeStreamCdc:
     def snapshot(self) -> Iterator[ChangeBatch]:
         # Capture binlog file/pos BEFORE the snapshot so poll() starts from a
         # consistent handoff point (at-least-once; duplicates possible, no gaps).
-        start_pos = self._current_binlog_position()
+        start_pos = self._current_binlog_position() or {
+            "table": self.table,
+            "file": None,
+            "pos": None,
+        }
         self._ensure_decode_schema(resume_offset=start_pos)
         self.heartbeat()
+        # Resume mid-snapshot when watermark carries phase/offset.
         offset = 0
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            offset = int(self.resume_token.get("offset") or 0)
         while True:
             batch = read_table_batch(
                 host=self.cfg.get("host") or "localhost",
@@ -162,25 +191,69 @@ class MySqlChangeStreamCdc:
             if not batch.rows:
                 break
             records = [dict(zip(batch.headers, row)) for row in batch.rows]
-            yield ChangeBatch(inserts=records)
             offset += len(batch.rows)
+            # Every snapshot batch carries a resume token so a crash cannot
+            # overwrite the binlog handoff with a primary-key cursor.
+            yield ChangeBatch(
+                inserts=records,
+                resume_token={
+                    **start_pos,
+                    "phase": "snapshot",
+                    "offset": offset,
+                    "table": self.table,
+                },
+            )
             if len(batch.rows) < self.batch_size:
                 break
-        yield ChangeBatch(resume_token=start_pos or {"table": self.table, "file": None, "pos": None})
+        yield ChangeBatch(
+            resume_token={
+                **start_pos,
+                "phase": "streaming",
+                "offset": 0,
+                "table": self.table,
+            }
+        )
+
+    def _current_gtid_executed(self, cur) -> str | None:
+        try:
+            cur.execute("SELECT @@GLOBAL.gtid_executed")
+            row = cur.fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:
+            pass
+        try:
+            cur.execute("SHOW GLOBAL VARIABLES LIKE 'gtid_executed'")
+            row = cur.fetchone()
+            if row and len(row) > 1 and row[1]:
+                return str(row[1])
+        except Exception:
+            pass
+        return None
 
     def _current_binlog_position(self) -> dict[str, Any] | None:
         try:
             conn = self._conn()
             try:
                 with conn.cursor() as cur:
+                    gtid = self._current_gtid_executed(cur)
                     for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
                         try:
                             cur.execute(sql)
                             row = cur.fetchone()
                             if row:
-                                return {"file": row[0], "pos": int(row[1]), "table": self.table}
+                                pos = {
+                                    "file": row[0],
+                                    "pos": int(row[1]),
+                                    "table": self.table,
+                                }
+                                if gtid:
+                                    pos["gtid"] = gtid
+                                return pos
                         except Exception:
                             continue
+                    if gtid:
+                        return {"gtid": gtid, "file": None, "pos": None, "table": self.table}
             finally:
                 conn.close()
         except Exception:
@@ -363,6 +436,11 @@ class MySqlChangeStreamCdc:
         return _serialize(row.get(self.primary_key))
 
     def poll(self) -> Iterator[ChangeBatch]:
+        # Incomplete initial sync must finish before binlog streaming.
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            yield from self.snapshot()
+            return
+
         from pymysqlreplication import BinLogStreamReader
         from pymysqlreplication.event import QueryEvent, RotateEvent
         from pymysqlreplication.row_event import (

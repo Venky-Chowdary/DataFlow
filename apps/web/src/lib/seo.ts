@@ -12,7 +12,7 @@ export interface PageMeta {
 
 const BASE_TITLE = "DataFlow";
 const DEFAULT_DESCRIPTION =
-  "Universal data transfer platform — migrate databases, sync files, and move data between 650+ systems with AI semantic mapping and 8 preflight gates.";
+  "Integrity-first data transfer — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and 8 preflight gates.";
 const DEFAULT_KEYWORDS =
   "data transfer, data migration, ETL, database migration, CSV to PostgreSQL, Snowflake migration, semantic mapping, preflight validation, data pipeline, DataFlow";
 
@@ -62,7 +62,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   connectors: {
     title: "Connectors",
     description:
-      "Manage sources and destinations — PostgreSQL, MySQL, MongoDB, Snowflake, BigQuery, S3, Redis, Elasticsearch, and 650+ catalog systems.",
+      "Manage sources and destinations — PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, Snowflake, BigQuery, S3, Iceberg, and transfer-ready drivers with honest labels.",
     keywords: "data connectors, PostgreSQL connector, Snowflake connector, S3 connector, database connection",
     robots: "noindex",
   },

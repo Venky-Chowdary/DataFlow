@@ -25,10 +25,15 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "sqlserver": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
+    "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
-    "salesforce": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
-    "hubspot": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "iceberg": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "kafka": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
+    # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
+    "salesforce": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
+    "hubspot": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
     "stripe": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
@@ -88,6 +93,14 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "neon": "postgresql",
     "timescaledb": "postgresql",
     "cockroachdb": "postgresql",
+    "sql_server": "sqlserver",
+    "mssql": "sqlserver",
+    "microsoft_sql_server": "sqlserver",
+    "azure_sql": "sqlserver",
+    "azure_sql_database": "sqlserver",
+    "amazon_rds_sql_server": "sqlserver",
+    "apache_iceberg": "iceberg",
+    "apache_kafka": "kafka",
     "alibaba_oss": "s3",
     "alibaba_cloud_object_storage": "s3",
     "azure_cosmos_db": "mongodb",
@@ -107,7 +120,8 @@ CATALOG_ID_ALIASES: dict[str, str] = {
 
 # Suggested lists — only connectors users can configure today
 SUGGESTED_SOURCES = [
-    "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
+    "postgresql", "mongodb", "mysql", "sqlserver", "oracle",
+    "snowflake", "bigquery", "redshift",
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
@@ -116,17 +130,22 @@ SUGGESTED_SOURCES = [
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases
 TRANSFER_READY_CATALOG_IDS = frozenset({
-    "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
+    "postgresql", "mysql", "mongodb", "sqlserver", "oracle",
+    "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "s3", "gcs", "google_cloud_storage", "adls",
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
+    "iceberg", "apache_iceberg", "kafka", "apache_kafka",
+    "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     "sftp", "email",
 })
 
 SUGGESTED_DESTINATIONS = [
-    "postgresql", "mongodb", "mysql", "snowflake", "bigquery", "redshift",
+    "postgresql", "mongodb", "mysql", "sqlserver", "oracle",
+    "snowflake", "bigquery", "redshift",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
+    "iceberg", "kafka", "salesforce", "hubspot",
     "sftp", "email",
 ]
 
@@ -148,9 +167,13 @@ def default_port(driver_type: str) -> int:
         "pgvector": 5432,
         "qdrant": 6333,
         "sqlite": 0,
+        "sqlserver": 1433,
+        "oracle": 1521,
         "generic_sql": 0,
         "sftp": 22,
         "email": 587,
+        "iceberg": 0,
+        "kafka": 9092,
         "salesforce": 443,
         "hubspot": 443,
         "stripe": 443,
@@ -222,12 +245,12 @@ def resolve_driver_type(catalog_id: str) -> str:
         ("spaces", "s3"),
         ("object_storage", "s3"),
         # Generic SQL engines
-        ("mssql", "generic_sql"),
-        ("sql_server", "generic_sql"),
-        ("sqlserver", "generic_sql"),
-        ("microsoft_sql", "generic_sql"),
-        ("azure_sql", "generic_sql"),
-        ("oracle", "generic_sql"),
+        ("mssql", "sqlserver"),
+        ("sql_server", "sqlserver"),
+        ("sqlserver", "sqlserver"),
+        ("microsoft_sql", "sqlserver"),
+        ("azure_sql", "sqlserver"),
+        ("oracle", "oracle"),
         ("db2", "generic_sql"),
         ("ibm_db2", "generic_sql"),
         ("teradata", "generic_sql"),
@@ -333,8 +356,12 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "snowflake": "snowflake.connector",
     "bigquery": "google.cloud.bigquery",
     "sqlite": "sqlite3",
+    "sqlserver": "pyodbc",  # pymssql accepted in driver_available()
+    "oracle": "oracledb",
     "sftp": "paramiko",
     "email": None,
+    "iceberg": None,  # filesystem writer; pyarrow optional for parquet data files
+    "kafka": None,  # kafka-python checked at produce time with clear error
     "salesforce": "requests",
     "hubspot": "requests",
     "stripe": "requests",
@@ -450,6 +477,8 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
             return _module_is_installed("clickhouse_sqlalchemy")
         return True
 
+    if driver_type == "sqlserver":
+        return _module_is_installed("pyodbc") or _module_is_installed("pymssql")
     module = _DRIVER_MODULE.get(driver_type)
     return _module_is_installed(module)
 
@@ -516,32 +545,31 @@ def capability_label(caps: dict[str, bool]) -> str:
 
 
 # Engines that resolve to generic_sql but are not yet CI-proven as Certified.
-# Oracle / SQL Server are promoted via ``_generic_sql_brand_certified`` when DBAPI is present.
+# Oracle / SQL Server are first-class drivers (see _DRIVER_CAPS).
 _UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
-    "oracle", "sql_server", "sqlserver", "mssql", "db2", "sybase_ase", "sybase",
+    "db2", "sybase_ase", "sybase",
     "informix", "teradata", "greenplum", "vertica", "singlestore", "motherduck",
     "amazon_emr", "cloudera_data_platform", "sap_bw_4hana", "duckdb",
     "clickhouse", "presto", "trino", "athena", "hive", "impala",
 })
 
-# Brands we certify through generic_sql once the dialect DBAPI is importable.
+# Legacy helper kept for tests that still probe generic_sql brand certification.
 _CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
     "oracle", "sql_server", "sqlserver", "mssql",
 })
 
 
 def _generic_sql_brand_certified(catalog_id: str) -> bool:
-    """True when Oracle/SQL Server DBAPI is installed (Sprint D certified path)."""
+    """True when Oracle/SQL Server resolve as first-class transfer-ready drivers."""
     cid = (catalog_id or "").lower().strip()
     if cid not in _CERTIFIABLE_GENERIC_SQL_BRANDS and not any(
         cid.startswith(p) for p in ("oracle", "sql_server", "mssql")
     ):
         return False
-    # Map brand → driver key used by driver_available
     if "oracle" in cid:
-        return driver_available("generic_sql", "oracle")
+        return bool(_DRIVER_CAPS.get("oracle", {}).get("read") and _DRIVER_CAPS["oracle"].get("write"))
     if "sql_server" in cid or "mssql" in cid or cid == "sqlserver":
-        return driver_available("generic_sql", "sqlserver")
+        return bool(_DRIVER_CAPS.get("sqlserver", {}).get("read") and _DRIVER_CAPS["sqlserver"].get("write"))
     return False
 
 

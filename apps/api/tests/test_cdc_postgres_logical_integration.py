@@ -117,6 +117,14 @@ def test_postgres_logical_snapshot_then_poll_captures_real_cdc():
             str(r.get("id")) == "1" and str(r.get("amount")).startswith("99") for r in updates
         ), f"update not captured: {updates}"
         assert "2" in deletes, f"delete not captured: {deletes}"
+
+        # Peek must not consume — re-poll should redeliver until ack.
+        again = list(cdc.poll())
+        assert any(str(r.get("id")) == "3" for b in again for r in b.inserts)
+        for batch in changes:
+            cdc.ack(batch.resume_token)
+        after_ack = list(cdc.poll())
+        assert not any(b.total_changes for b in after_ack), after_ack
     finally:
         try:
             with _connect() as conn:

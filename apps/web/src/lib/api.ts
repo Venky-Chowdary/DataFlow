@@ -1060,6 +1060,37 @@ export async function fetchPlatformStatus(): Promise<{
   return res.json();
 }
 
+export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
+  worst_lag_seconds: number | null;
+  warn_threshold_seconds: number;
+  pipelines: Array<{
+    schedule_id: string;
+    stream: string;
+    job_id: string;
+    lag_seconds: number;
+    polls_total: number;
+    heartbeat_at?: number;
+    stale: boolean;
+  }>;
+  counters: Record<string, number>;
+  gauges: Record<string, number>;
+}> {
+  const res = await apiFetch(`${API_BASE}/ops/freshness?warn_seconds=${warnSeconds}`);
+  if (!res.ok) throw new Error("Failed to load pipeline freshness");
+  return res.json();
+}
+
+export async function fetchOpsDlq(limit = 50): Promise<{
+  events: Array<Record<string, unknown>>;
+  count: number;
+  by_action: Record<string, number>;
+  open_rows: number;
+}> {
+  const res = await apiFetch(`${API_BASE}/ops/dlq?limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to load quarantine DLQ");
+  return res.json();
+}
+
 export async function fetchTransferReadiness(): Promise<{
   ready: boolean;
   drivers_total: number;

@@ -55,8 +55,13 @@ def enforce_or_create_contract(
                 f"Circuit breaker for contract {contract.id} is OPEN; transfer blocked until recovery",
                 violations=[{"rule": "circuit_breaker_open", "contract_id": contract.id, "state": breaker.state.value}],
             )
+        require_signed = bool(getattr(request, "require_signed_contract", False))
         enforcer = ContractEnforcer(contract)
-        enforcer.enforce(request, sample_schema=schema or request.column_types or {})
+        enforcer.enforce(
+            request,
+            sample_schema=schema or request.column_types or {},
+            require_signed=require_signed,
+        )
         return contract.id
 
     if not getattr(request, "enforce_contract", True):

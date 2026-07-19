@@ -146,11 +146,11 @@ def test_poll_parses_slot_changes() -> None:
     conn = MagicMock()
     cur = MagicMock()
     cur.fetchall.return_value = [
-        ("BEGIN",),
-        ("table public.orders: INSERT: id[int4]:1 amount[numeric]:100.00",),
-        ("table public.orders: UPDATE: old-key: id[int4]:2 new-tuple: id[int4]:2 amount[numeric]:200.00",),
-        ("table public.orders: DELETE: id[int4]:3",),
-        ("COMMIT",),
+        ("0/16B3700", "BEGIN"),
+        ("0/16B3710", "table public.orders: INSERT: id[int4]:1 amount[numeric]:100.00"),
+        ("0/16B3720", "table public.orders: UPDATE: old-key: id[int4]:2 new-tuple: id[int4]:2 amount[numeric]:200.00"),
+        ("0/16B3730", "table public.orders: DELETE: id[int4]:3"),
+        ("0/16B3748", "COMMIT"),
     ]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
@@ -159,7 +159,6 @@ def test_poll_parses_slot_changes() -> None:
 
     with patch("connectors.postgresql_change_stream.get_connection", return_value=conn), \
          patch.object(cdc, "_ensure_slot", return_value="0/16B3700"), \
-         patch.object(cdc, "_read_slot_lsn", return_value="0/16B3748"), \
          patch.object(cdc, "_ensure_decode_schema", return_value={}), \
          patch.object(cdc, "_maybe_record_schema_change"):
         changes = list(cdc.poll())
@@ -172,6 +171,42 @@ def test_poll_parses_slot_changes() -> None:
     assert batch.resume_token == encode_pg_resume_token(
         "df_test_orders_12345678", lsn="0/16B3748", phase="streaming"
     )
+    assert cdc._pending_ack_lsn == "0/16B3748"
+    executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list if c.args)
+    assert "peek_changes" in executed
+    assert "get_changes" not in executed
+    assert "'include-xids', '1'" in executed or "include-xids" in executed
+
+
+def test_ack_advances_replication_slot() -> None:
+    cfg = {
+        "host": "localhost",
+        "port": 5432,
+        "database": "test",
+        "username": "",
+        "password": "",
+        "connection_string": "",
+        "ssl": False,
+        "schema": "public",
+    }
+    cdc = PostgreSqlChangeStreamCdc(
+        cfg,
+        table="orders",
+        primary_key="id",
+        cursor_key="k",
+        resume_token=encode_pg_resume_token("slot1", lsn="0/ABC", phase="streaming"),
+    )
+    cdc._pending_ack_lsn = "0/ABC"
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    with patch("connectors.postgresql_change_stream.get_connection", return_value=conn):
+        cdc.ack()
+    assert "pg_replication_slot_advance" in str(cur.execute.call_args)
+    assert cdc._pending_ack_lsn is None
 
 
 def test_run_cdc_database_transfer_uses_postgresql_logical_decoding():
@@ -198,18 +233,22 @@ def test_run_cdc_database_transfer_uses_postgresql_logical_decoding():
         def poll(self):
             return iter([])
 
+        def ack(self, token=None):
+            pass
+
     with (
         patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakePgCdc),
         patch("src.transfer.cdc_transfer._write_batch", mock_write),
         patch("src.transfer.cdc_transfer.delete_by_primary_keys", mock_delete),
         patch("src.transfer.cdc_transfer.get_watermark", return_value=None),
+        patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}),
     ):
         rows_written, ddl_log, dest_summary, columns = run_cdc_database_transfer(
             source,
             destination,
             mappings=[{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}],
             schema={"id": "integer", "amount": "decimal"},
-            stream_contracts=[{"sync_mode": "cdc", "primary_key": "id"}],
+            stream_contracts=[{"sync_mode": "cdc", "primary_key": "id", "cursor_field": "id"}],
             job_id="cdc-pg-test",
         )
 

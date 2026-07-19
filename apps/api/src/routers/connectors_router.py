@@ -813,6 +813,35 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             destination_summary=dest_summary,
             ddl_log=ddl_log,
         )
+        try:
+            from services.audit_log import append_audit_event
+            from services.quarantine_dlq import append_dlq_event
+
+            append_dlq_event(
+                job_id=job_id,
+                action="replay",
+                rows=rows_written,
+                child_job_id=child_job_id,
+                workspace_id=str(job.get("workspace_id") or ""),
+                details={"rejected": rejected, "status": status},
+            )
+            actor = getattr(getattr(request, "state", None), "user", None)
+            append_audit_event(
+                action="quarantine.replay",
+                resource=f"job:{job_id}",
+                actor=str(actor or "system"),
+                level="info",
+                correlation_id=child_job_id,
+                details={
+                    "parent_job_id": job_id,
+                    "child_job_id": child_job_id,
+                    "rows_written": rows_written,
+                    "rejected": rejected,
+                    "status": status,
+                },
+            )
+        except Exception:
+            pass
         return {
             "success": True,
             "job_id": child_job_id,
@@ -825,9 +854,52 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         }
     except HTTPException:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message="Quarantine replay failed")
+        try:
+            from services.audit_log import append_audit_event
+            from services.quarantine_dlq import append_dlq_event
+
+            append_dlq_event(
+                job_id=job_id,
+                action="replay_failed",
+                rows=0,
+                child_job_id=child_job_id,
+                workspace_id=str(job.get("workspace_id") or ""),
+            )
+            append_audit_event(
+                action="quarantine.replay_failed",
+                resource=f"job:{job_id}",
+                actor="system",
+                level="error",
+                correlation_id=child_job_id,
+                details={"parent_job_id": job_id, "child_job_id": child_job_id},
+            )
+        except Exception:
+            pass
         raise
     except Exception as e:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message=str(e), error=str(e))
+        try:
+            from services.audit_log import append_audit_event
+            from services.quarantine_dlq import append_dlq_event
+
+            append_dlq_event(
+                job_id=job_id,
+                action="replay_failed",
+                rows=0,
+                child_job_id=child_job_id,
+                workspace_id=str(job.get("workspace_id") or ""),
+                details={"error": str(e)[:500]},
+            )
+            append_audit_event(
+                action="quarantine.replay_failed",
+                resource=f"job:{job_id}",
+                actor="system",
+                level="error",
+                correlation_id=child_job_id,
+                details={"parent_job_id": job_id, "error": str(e)[:500]},
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
