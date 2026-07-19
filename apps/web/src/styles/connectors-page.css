@@ -270,6 +270,61 @@
   color: #94a3b8;
 }
 
+/* Shared key/value + table blocks used by Pipelines / Contracts drawers */
+.df2-drawer-kv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin: 4px 0 0;
+}
+
+.df2-drawer-kv > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df2-drawer-kv dt {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary, #94a3b8);
+}
+
+.df2-drawer-kv dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--df-text-primary, #0f172a);
+  overflow-wrap: anywhere;
+}
+
+.df2-drawer-route-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-drawer-table-wrap {
+  max-height: min(420px, 52vh);
+  border-radius: var(--df-radius-md, 8px);
+}
+
+.df2-drawer-workbench {
+  gap: 12px;
+}
+
+.df2-drawer-workbench .df2-filter-tabs {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 560px) {
+  .df2-drawer-kv {
+    grid-template-columns: 1fr;
+  }
+}
+
 .df2-drawer-related-list {
   display: flex;
   flex-direction: column;

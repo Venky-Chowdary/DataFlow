@@ -40,7 +40,7 @@ import {
   type PublicRoute,
   writePublicHash,
 } from "./lib/publicNavigation";
-import { apiEnvLabel, apiOfflineMessage } from "./lib/runtimeEnv";
+import { apiOfflineMessage } from "./lib/runtimeEnv";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 
@@ -291,7 +291,6 @@ function AppShell({
 
   const showCopilotRail = screen !== "pilot" && copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
-  const envLabel = apiEnvLabel(apiOnline);
   const offlineCopy = apiOfflineMessage();
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
@@ -304,7 +303,7 @@ function AppShell({
 
       <aside className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Main navigation">
         <div className="df2-sidebar-brand">
-          <DtLogo size={40} />
+          <DtLogo size={sidebarNavCompact ? 32 : 36} />
           <div className="df2-sidebar-brand-copy">
             <div className="df2-brand-name">DataFlow</div>
             <div className="df2-brand-tag">Universal data platform</div>
@@ -387,11 +386,6 @@ function AppShell({
             <DtIcon name="transfer" size={16} />
             <span className="df2-sidebar-collapse-label">New transfer</span>
           </button>
-          <div className={`df2-sidebar-env ${apiOnline ? "" : "offline"}`} title="Control plane health">
-            <span className="df2-system-dot" />
-            <strong>{apiOnline ? "API connected" : "API offline"}</strong>
-            <small>{apiOnline ? envLabel : "Check API service"}</small>
-          </div>
           <div className="df2-sidebar-user">
             <button
               type="button"
@@ -446,10 +440,20 @@ function AppShell({
             />
           </div>
           <div className="df2-topbar-actions">
-            <div className={`df2-system-pill ${apiOnline ? "" : "degraded"}`} title="Control plane status">
-              <span className="df2-system-dot" />
-              <span className="df2-topbar-pill-text">{apiOnline ? "Online" : "Offline"}</span>
-            </div>
+            {sidebarNavCompact && (
+              <button
+                type="button"
+                className="df2-sidebar-expand-topbar"
+                onClick={() => {
+                  setSidebarNavCompact(false);
+                  saveSidebarNavCompact(false);
+                }}
+                aria-label="Expand navigation"
+                title="Expand navigation"
+              >
+                <DtIcon name="menu" size={18} />
+              </button>
+            )}
             <StatusPopover
               apiOnline={apiOnline}
               failedJobsCount={failedJobsCount}

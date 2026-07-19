@@ -11,7 +11,11 @@ import { PageShell } from "../components/ui/PageShell";
 import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { ScheduleForm } from "../components/schedules/ScheduleForm";
-import { ScheduleRunHistory } from "../components/schedules/ScheduleRunHistory";
+import {
+  PIPELINE_TABS,
+  PipelineDetailDrawer,
+  type PipelineTab,
+} from "../components/PipelineDetailDrawer";
 import { useToast } from "../components/Toast";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
@@ -43,7 +47,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [editing, setEditing] = useState<PipelineSchedule | null>(null);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
-  const [historyId, setHistoryId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [pipelineTab, setPipelineTab] = useState<PipelineTab>(PIPELINE_TABS[0]);
   const [filter, setFilter] = useState<ScheduleFilter>("all");
   const [pipelineSearch, setPipelineSearch] = useState("");
 
@@ -69,6 +75,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
 
   useEffect(() => {
     if (!highlightScheduleId || loading) return;
+    setSelectedId(highlightScheduleId);
+    setPipelineTab("Overview");
+    setDrawerOpen(true);
     window.requestAnimationFrame(() => {
       document.getElementById(`pipeline-card-${highlightScheduleId}`)?.scrollIntoView({
         behavior: "smooth",
@@ -76,6 +85,24 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       });
     });
   }, [highlightScheduleId, loading, schedules.length]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    if (!schedules.some((s) => s.id === selectedId)) {
+      setSelectedId(null);
+      setDrawerOpen(false);
+    }
+  }, [schedules, selectedId]);
+
+  const selectedSchedule = schedules.find((s) => s.id === selectedId) ?? null;
+
+  const openDrawer = (id: string, tab: PipelineTab = "Overview") => {
+    setSelectedId(id);
+    setPipelineTab(tab);
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => setDrawerOpen(false);
 
   const enabledCount = schedules.filter((s) => s.enabled).length;
   const pausedCount = schedules.length - enabledCount;
@@ -163,6 +190,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     if (!ok) return;
     try {
       await deleteSchedule(id);
+      if (selectedId === id) {
+        setSelectedId(null);
+        setDrawerOpen(false);
+      }
       await load();
       void onSchedulesChange?.();
       toast({ title: "Pipeline deleted", tone: "success" });
@@ -318,22 +349,50 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
               dest={connectors.find((c) => c.id === sched.dest_connector_id)}
               running={runningId === sched.id}
               highlighted={highlightScheduleId === sched.id}
-              historyOpen={historyId === sched.id}
+              selected={drawerOpen && selectedId === sched.id}
+              onSelect={() => openDrawer(sched.id)}
               onToggle={() => void toggleEnabled(sched)}
               onRun={() => void handleRunNow(sched.id)}
               onEdit={() => openEdit(sched)}
               onDelete={() => void handleDelete(sched.id)}
-              onToggleHistory={() => setHistoryId((cur) => (cur === sched.id ? null : sched.id))}
-            >
-              {historyId === sched.id && (
-                <ScheduleRunHistory scheduleId={sched.id} onOpenJob={onOpenJob} />
-              )}
-            </PipelineCard>
+              onToggleHistory={() => openDrawer(sched.id, "History")}
+            />
           ))
         )}
       </div>
       )}
       </div>
+
+      <PipelineDetailDrawer
+        open={drawerOpen && Boolean(selectedSchedule)}
+        schedule={selectedSchedule}
+        source={
+          selectedSchedule
+            ? connectors.find((c) => c.id === selectedSchedule.source_connector_id)
+            : undefined
+        }
+        dest={
+          selectedSchedule
+            ? connectors.find((c) => c.id === selectedSchedule.dest_connector_id)
+            : undefined
+        }
+        tab={pipelineTab}
+        setTab={setPipelineTab}
+        running={selectedSchedule ? runningId === selectedSchedule.id : false}
+        onClose={closeDrawer}
+        onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+        onEdit={() => {
+          if (!selectedSchedule) return;
+          closeDrawer();
+          openEdit(selectedSchedule);
+        }}
+        onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
+        onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+        onOpenJob={(jobId) => {
+          closeDrawer();
+          onOpenJob?.(jobId);
+        }}
+      />
       </PageFrame>
     </PageShell>
   );

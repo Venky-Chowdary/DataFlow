@@ -49,6 +49,7 @@ interface JobsPageProps {
 }
 
 type JobFilter = "all" | "running" | "completed" | "failed";
+type JobDetailTab = "detail" | "mapping" | "quarantine" | "log";
 
 function statusIcon(status: string) {
   if (status === "completed") return "check";
@@ -56,6 +57,12 @@ function statusIcon(status: string) {
   if (status === "failed" || status === "cancelled") return "x";
   if (status === "running" || status === "pending") return "activity";
   return "jobs";
+}
+
+function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
+  if (status === "completed_with_quarantine" || rejectedRows > 0) return "quarantine";
+  if (status === "failed") return "detail";
+  return "detail";
 }
 
 export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: JobsPageProps) {
@@ -69,6 +76,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const [cancelling, setCancelling] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
+  const [detailTab, setDetailTab] = useState<JobDetailTab>("detail");
 
   const counts = useMemo(() => ({
     all: jobs.length,
@@ -243,6 +251,37 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const ddlLog = liveJob?.ddl_log ?? [];
+  const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
+  const rejectedCount = liveJob?.rejected_rows ?? 0;
+  const showQuarantineTab = Boolean(
+    liveJob
+    && (
+      liveJob.status === "failed"
+      || liveJob.status === "completed_with_quarantine"
+      || rejectedCount > 0
+    ),
+  );
+
+  // Reset tabs only when the operator picks a different job.
+  useEffect(() => {
+    if (!selectedId) {
+      setDetailTab("detail");
+      return;
+    }
+    const listed = jobs.find((j) => j._id === selectedId);
+    setDetailTab(
+      defaultDetailTab(listed?.status ?? "completed", listed?.status === "completed_with_quarantine" ? 1 : 0),
+    );
+    // jobs intentionally omitted — list polling must not yank the active tab
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (detailTab === "quarantine" && !showQuarantineTab) {
+      setDetailTab("detail");
+    }
+  }, [detailTab, showQuarantineTab]);
+
   const timelineEntries = useMemo(
     () =>
       liveJob && selected
@@ -458,7 +497,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                     <div className="df2-jobs-v3-summary-metrics">
                       <article><strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong><span>Rows processed</span></article>
                       <article><strong>{liveJob.progress_pct ?? 100}%</strong><span>Progress</span></article>
-                      <article><strong>{jobMappings.length || Object.keys(columnTypes).length || "—"}</strong><span>Columns</span></article>
+                      <article><strong>{mappingCount || "—"}</strong><span>Columns</span></article>
                       <article><strong>{liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}</strong><span>Mode</span></article>
                       {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
                         <article>
@@ -478,186 +517,265 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       )}
                     </div>
 
-                    <div className="df2-jobs-v3-timeline-block">
-                      <h3>Timeline</h3>
-                      <JobTimeline entries={timelineEntries} />
-                    </div>
-
-                    {liveJob.message && (
-                      <dl className="df2-jobs-v3-summary-dl">
-                        <div><dt>Latest message</dt><dd>{liveJob.message}</dd></div>
-                      </dl>
-                    )}
-
-                    {liveJob.error && (
-                      <div className="df2-jobs-v3-failure-panel" role="alert">
-                        <header className="df2-jobs-v3-failure-head">
-                          <DtIcon name="alert" size={18} />
-                          <div>
-                            <strong>What went wrong</strong>
-                            <span>Job stopped before completion — review the failure below and quarantined rows if any.</span>
-                          </div>
-                        </header>
-                        <p className="df2-jobs-v3-failure-message">{liveJob.error}</p>
-                        <dl className="df2-jobs-v3-failure-meta">
-                          {liveJob.phase && (
-                            <div>
-                              <dt>Failed phase</dt>
-                              <dd>{liveJob.phase}</dd>
-                            </div>
-                          )}
-                          {(liveJob.rejected_rows ?? 0) > 0 && (
-                            <div>
-                              <dt>Quarantined rows</dt>
-                              <dd>{liveJob.rejected_rows!.toLocaleString()} — validation failures isolated, not silently dropped</dd>
-                            </div>
-                          )}
-                          {liveJob.records_processed != null && liveJob.records_processed > 0 && (
-                            <div>
-                              <dt>Progress before failure</dt>
-                              <dd>{liveJob.records_processed.toLocaleString()} rows processed</dd>
-                            </div>
-                          )}
-                        </dl>
-                      </div>
-                    )}
-
-                    {(jobMappings.length > 0 || Object.keys(columnTypes).length > 0) && (
-                      <div className="df2-jobs-v3-mappings">
-                        <div className="df2-jobs-v3-mappings-head">
-                          <h3>Column mapping</h3>
-                          <span className="df2-jobs-v3-mappings-count">
-                            {(jobMappings.length || Object.keys(columnTypes).length).toLocaleString()} columns
-                          </span>
-                        </div>
-                        <div className="df2-jobs-v3-mappings-scroll">
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>Source</th>
-                                <th>Target</th>
-                                <th>Type</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {jobMappings.length > 0
-                                ? jobMappings.map((m, i) => {
-                                    const src = String(m.source ?? m.source_column ?? "").trim() || "—";
-                                    const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
-                                    const typ =
-                                      columnTypes[src]
-                                      ?? m.source_type
-                                      ?? m.target_type
-                                      ?? columnTypes[tgt]
-                                      ?? columnTypes[src.toLowerCase()]
-                                      ?? columnTypes[tgt.toLowerCase()]
-                                      ?? "—";
-                                    return (
-                                      <tr key={`${src}-${tgt}-${i}`}>
-                                        <td title={src}>{src}</td>
-                                        <td title={tgt}>{tgt}</td>
-                                        <td title={typ}>{typ}</td>
-                                      </tr>
-                                    );
-                                  })
-                                : Object.entries(columnTypes).map(([col, typ]) => (
-                                    <tr key={col}>
-                                      <td title={col}>{col}</td>
-                                      <td title={col}>{col}</td>
-                                      <td title={String(typ)}>{String(typ)}</td>
-                                    </tr>
-                                  ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-
-                    {ddlLog.length > 0 && (
-                      <div className="df2-jobs-v3-log">
-                        <h3>DDL log</h3>
-                        <pre>{ddlLog.join("\n")}</pre>
-                      </div>
-                    )}
-
-                    {isJobSuccess(selected.status) && (((liveJob.rejected_rows ?? 0) - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
-                      <div className="df2-data-integrity" role="note">
-                        <header className="df2-data-integrity-head">
-                          <DtIcon name="alert" size={16} />
-                          <div>
-                            <strong>Completed with quarantine — not full fidelity</strong>
-                            <span>The transfer finished and data landed, but some rows were affected. These are two different kinds of data change.</span>
-                          </div>
-                        </header>
-                        <div className="df2-data-integrity-metrics">
-                          <article className="df2-data-integrity-metric is-dropped">
-                            <strong>{Math.max((liveJob.rejected_rows ?? 0) - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
-                            <span>Rows dropped / rejected</span>
-                            <small>Isolated in quarantine — not written to the destination.</small>
-                          </article>
-                          <article className="df2-data-integrity-metric is-coerced">
-                            <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
-                            <span>Values coerced to NULL</span>
-                            <small>Row kept, but a value was altered to NULL — the original value was not preserved.</small>
-                          </article>
-                        </div>
-                      </div>
-                    )}
-
-                    {(selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0 || selected.status === "completed_with_quarantine") && (
-                      <section className="df2-jobs-v3-quarantine" aria-label="Quarantined rows">
-                        <header className="df2-jobs-v3-quarantine-head">
-                          <div>
-                            <h3>Quarantined rows</h3>
-                            <p>
-                              {(liveJob.rejected_rows ?? 0) > 0
-                                ? `${(liveJob.rejected_rows ?? 0).toLocaleString()} row(s) isolated — inspect columns, values, and reasons below. Export CSV downloads to your machine.`
-                                : "Inspect preflight / integrity findings for this job. Export CSV downloads to your machine."}
-                            </p>
-                          </div>
-                          {(liveJob.rejected_rows ?? 0) > 0 && (
-                            <span className="df2-jobs-v3-quarantine-badge">
-                              {(liveJob.rejected_rows ?? 0).toLocaleString()} quarantined
-                            </span>
-                          )}
-                        </header>
-                        <QuarantinePanel
-                          jobId={selected._id}
-                          rejectedRows={liveJob.rejected_rows}
-                          coercedNullRows={liveJob.coerced_null_rows}
-                          autoLoad
-                          initiallyOpen={selected.status === "failed" || (liveJob.rejected_rows ?? 0) > 0}
-                        />
-                      </section>
-                    )}
-
-                    {selected.status === "failed" && (
-                      <div className="df2-jobs-v3-actions">
-                        {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && (
+                    <div className="df2-jobs-detail-card">
+                      <div className="df2-jobs-detail-tabs" role="tablist" aria-label="Job detail sections">
+                        {(
+                          [
+                            { id: "detail" as const, label: "Detail", icon: "activity" },
+                            { id: "mapping" as const, label: "Mapping", icon: "connectors", count: mappingCount || undefined },
+                            { id: "quarantine" as const, label: "Quarantine", icon: "alert", count: rejectedCount || undefined, hidden: !showQuarantineTab },
+                            { id: "log" as const, label: "Log", icon: "jobs", count: ddlLog.length || undefined },
+                          ] as const
+                        ).filter((t) => !("hidden" in t && t.hidden)).map((tab) => (
                           <button
+                            key={tab.id}
                             type="button"
-                            className="df2-btn df2-btn-primary"
-                            onClick={() => void handleResume()}
-                            disabled={resuming}
+                            role="tab"
+                            id={`job-tab-${tab.id}`}
+                            aria-selected={detailTab === tab.id}
+                            aria-controls={`job-panel-${tab.id}`}
+                            className={`df2-jobs-detail-tab${detailTab === tab.id ? " is-active" : ""}`}
+                            onClick={() => setDetailTab(tab.id)}
                           >
-                            {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
+                            <DtIcon name={tab.icon} size={14} />
+                            <span>{tab.label}</span>
+                            {"count" in tab && tab.count != null && tab.count > 0 && (
+                              <em className="df2-jobs-detail-tab-count">{tab.count.toLocaleString()}</em>
+                            )}
                           </button>
+                        ))}
+                      </div>
+
+                      <div
+                        className="df2-jobs-detail-panel"
+                        role="tabpanel"
+                        id={`job-panel-${detailTab}`}
+                        aria-labelledby={`job-tab-${detailTab}`}
+                      >
+                        {detailTab === "detail" && (
+                          <div className="df2-jobs-detail-pane">
+                            <div className="df2-jobs-v3-timeline-block">
+                              <h3>Timeline</h3>
+                              <JobTimeline entries={timelineEntries} />
+                            </div>
+
+                            {liveJob.message && (
+                              <dl className="df2-jobs-v3-summary-dl">
+                                <div><dt>Latest message</dt><dd>{liveJob.message}</dd></div>
+                              </dl>
+                            )}
+
+                            {liveJob.error && (
+                              <div className="df2-jobs-v3-failure-panel" role="alert">
+                                <header className="df2-jobs-v3-failure-head">
+                                  <DtIcon name="alert" size={18} />
+                                  <div>
+                                    <strong>What went wrong</strong>
+                                    <span>Job stopped before completion — review the failure below and quarantined rows if any.</span>
+                                  </div>
+                                </header>
+                                <p className="df2-jobs-v3-failure-message">{liveJob.error}</p>
+                                <dl className="df2-jobs-v3-failure-meta">
+                                  {liveJob.phase && (
+                                    <div>
+                                      <dt>Failed phase</dt>
+                                      <dd>{liveJob.phase}</dd>
+                                    </div>
+                                  )}
+                                  {rejectedCount > 0 && (
+                                    <div>
+                                      <dt>Quarantined rows</dt>
+                                      <dd>{rejectedCount.toLocaleString()} — validation failures isolated, not silently dropped</dd>
+                                    </div>
+                                  )}
+                                  {liveJob.records_processed != null && liveJob.records_processed > 0 && (
+                                    <div>
+                                      <dt>Progress before failure</dt>
+                                      <dd>{liveJob.records_processed.toLocaleString()} rows processed</dd>
+                                    </div>
+                                  )}
+                                </dl>
+                                {showQuarantineTab && (
+                                  <button
+                                    type="button"
+                                    className="df2-btn df2-btn-sm"
+                                    onClick={() => setDetailTab("quarantine")}
+                                  >
+                                    Open Quarantine tab
+                                  </button>
+                                )}
+                              </div>
+                            )}
+
+                            {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
+                              <div className="df2-data-integrity" role="note">
+                                <header className="df2-data-integrity-head">
+                                  <DtIcon name="alert" size={16} />
+                                  <div>
+                                    <strong>Completed with quarantine — not full fidelity</strong>
+                                    <span>The transfer finished and data landed, but some rows were affected.</span>
+                                  </div>
+                                </header>
+                                <div className="df2-data-integrity-metrics">
+                                  <article className="df2-data-integrity-metric is-dropped">
+                                    <strong>{Math.max(rejectedCount - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
+                                    <span>Rows dropped / rejected</span>
+                                    <small>Isolated in quarantine — not written to the destination.</small>
+                                  </article>
+                                  <article className="df2-data-integrity-metric is-coerced">
+                                    <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                    <span>Values coerced to NULL</span>
+                                    <small>Row kept, but a value was altered to NULL — the original value was not preserved.</small>
+                                  </article>
+                                </div>
+                              </div>
+                            )}
+
+                            {selected.status === "failed" && (
+                              <div className="df2-jobs-v3-actions">
+                                {liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 && (
+                                  <button
+                                    type="button"
+                                    className="df2-btn df2-btn-primary"
+                                    onClick={() => void handleResume()}
+                                    disabled={resuming}
+                                  >
+                                    {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className={liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 ? "df2-btn" : "df2-btn df2-btn-primary"}
+                                  onClick={() => void handleRetry()}
+                                  disabled={retrying}
+                                >
+                                  {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry from start</>}
+                                </button>
+                                {onStartTransfer && (
+                                  <button type="button" className="df2-btn" onClick={onStartTransfer}>
+                                    Open Transfer Studio
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         )}
-                        <button
-                          type="button"
-                          className={liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0 ? "df2-btn" : "df2-btn df2-btn-primary"}
-                          onClick={() => void handleRetry()}
-                          disabled={retrying}
-                        >
-                          {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry from start</>}
-                        </button>
-                        {onStartTransfer && (
-                          <button type="button" className="df2-btn" onClick={onStartTransfer}>
-                            Open Transfer Studio
-                          </button>
+
+                        {detailTab === "mapping" && (
+                          <div className="df2-jobs-detail-pane">
+                            {mappingCount > 0 ? (
+                              <div className="df2-jobs-v3-mappings is-tab">
+                                <div className="df2-jobs-v3-mappings-head">
+                                  <h3>Column mapping</h3>
+                                  <span className="df2-jobs-v3-mappings-count">
+                                    {mappingCount.toLocaleString()} columns
+                                  </span>
+                                </div>
+                                <div className="df2-jobs-v3-mappings-scroll">
+                                  <table className="df2-table">
+                                    <thead>
+                                      <tr>
+                                        <th>Source</th>
+                                        <th>Target</th>
+                                        <th>Type</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {jobMappings.length > 0
+                                        ? jobMappings.map((m, i) => {
+                                            const src = String(m.source ?? m.source_column ?? "").trim() || "—";
+                                            const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
+                                            const typ =
+                                              columnTypes[src]
+                                              ?? m.source_type
+                                              ?? m.target_type
+                                              ?? columnTypes[tgt]
+                                              ?? columnTypes[src.toLowerCase()]
+                                              ?? columnTypes[tgt.toLowerCase()]
+                                              ?? "—";
+                                            return (
+                                              <tr key={`${src}-${tgt}-${i}`}>
+                                                <td title={src}>{src}</td>
+                                                <td title={tgt}>{tgt}</td>
+                                                <td className="df2-cell-mono" title={typ}>{typ}</td>
+                                              </tr>
+                                            );
+                                          })
+                                        : Object.entries(columnTypes).map(([col, typ]) => (
+                                            <tr key={col}>
+                                              <td title={col}>{col}</td>
+                                              <td title={col}>{col}</td>
+                                              <td className="df2-cell-mono" title={String(typ)}>{String(typ)}</td>
+                                            </tr>
+                                          ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : (
+                              <EmptyState
+                                compact
+                                icon="connectors"
+                                title="No mapping recorded"
+                                description="This job has no persisted column mappings to display."
+                              />
+                            )}
+                          </div>
+                        )}
+
+                        {detailTab === "quarantine" && (
+                          <div className="df2-jobs-detail-pane">
+                            <section className="df2-jobs-v3-quarantine is-tab" aria-label="Quarantined rows">
+                              <header className="df2-jobs-v3-quarantine-head">
+                                <div>
+                                  <h3>Quarantined rows</h3>
+                                  <p>
+                                    {rejectedCount > 0
+                                      ? `${rejectedCount.toLocaleString()} row(s) isolated — inspect columns, values, and reasons. Export CSV downloads to your machine.`
+                                      : "Inspect preflight / integrity findings for this job."}
+                                  </p>
+                                </div>
+                                {rejectedCount > 0 && (
+                                  <span className="df2-jobs-v3-quarantine-badge">
+                                    {rejectedCount.toLocaleString()} quarantined
+                                  </span>
+                                )}
+                              </header>
+                              <QuarantinePanel
+                                jobId={selected._id}
+                                rejectedRows={liveJob.rejected_rows}
+                                coercedNullRows={liveJob.coerced_null_rows}
+                                autoLoad
+                                initiallyOpen
+                              />
+                            </section>
+                          </div>
+                        )}
+
+                        {detailTab === "log" && (
+                          <div className="df2-jobs-detail-pane">
+                            {ddlLog.length > 0 ? (
+                              <div className="df2-jobs-v3-log is-tab">
+                                <h3>DDL log</h3>
+                                <pre>{ddlLog.join("\n")}</pre>
+                              </div>
+                            ) : (
+                              <EmptyState
+                                compact
+                                icon="jobs"
+                                title="No DDL log"
+                                description="This job did not record DDL statements, or the log is empty."
+                              />
+                            )}
+                            {liveJob.message && (
+                              <dl className="df2-jobs-v3-summary-dl">
+                                <div><dt>Latest message</dt><dd>{liveJob.message}</dd></div>
+                              </dl>
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
+                    </div>
                   </div>
                 ) : (
                   <EmptyState

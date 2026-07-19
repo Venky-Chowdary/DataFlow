@@ -96,39 +96,32 @@
     font-size: 9px;
   }
 
+  /* Compact brand: logo + expand only — taller header so the control is never clipped */
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-brand {
     flex-direction: column;
     align-items: center;
-    text-align: center;
+    justify-content: center;
     gap: 8px;
-    padding: 14px 8px;
+    height: auto !important;
+    min-height: 96px !important;
+    max-height: none !important;
+    padding: 16px 10px 12px !important;
+    overflow: visible !important;
   }
 
-  /* Brand mark always visible; keep it centered and full size when compact */
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-brand > svg,
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-brand .dt-logo {
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-brand .dt-brand-mark {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
     margin: 0 auto;
   }
 
-  .df2-app.df2-sidebar-nav-compact .df2-brand-name {
-    display: block !important;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    line-height: 1.2;
-    max-width: 72px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .df2-app.df2-sidebar-nav-compact .df2-brand-tag {
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-brand-copy {
     display: none !important;
   }
 
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-collapse-label,
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env small,
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env strong {
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-collapse-label {
     display: none;
   }
 
@@ -154,17 +147,18 @@
   /* Keep the toggle reachable so the user can expand again */
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-collapse-btn {
     display: inline-flex !important;
-    margin: 6px auto 0;
-    width: 36px;
-    height: 36px;
-    border-color: #99f6e4;
-    background: #f0fdfa;
+    margin: 0 auto;
+    width: 34px;
+    height: 34px;
+    border: 1.5px solid #14b8a6;
+    background: #ecfdf5;
     color: #0f766e;
+    box-shadow: 0 1px 2px rgba(15, 118, 110, 0.12);
   }
 
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env {
-    padding: 8px;
-    text-align: center;
+  .df2-app.df2-sidebar-nav-compact .df2-sidebar-collapse-btn:hover {
+    background: #ccfbf1;
+    border-color: #0d9488;
   }
 
   .df2-app.df2-sidebar-nav-compact .df2-sidebar-user {
@@ -179,10 +173,27 @@
   .df2-app.df2-sidebar-nav-compact .df2-user-meta {
     display: none;
   }
+}
 
-  .df2-app.df2-sidebar-nav-compact .df2-sidebar-env strong {
-    font-size: 10px;
-  }
+/* Topbar expand control when nav is compact */
+.df2-sidebar-expand-topbar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--df-text-secondary, #64748b);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.df2-sidebar-expand-topbar:hover {
+  background: var(--df-surface-muted, #f1f5f9);
+  color: var(--df-text-primary, #0f172a);
+  border-color: #99f6e4;
 }
 
 /* Legacy collapsed class — map to nav-compact behavior without hiding brand */

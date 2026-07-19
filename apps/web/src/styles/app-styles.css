@@ -200,7 +200,6 @@
 }
 
 .df2-app .df2-topbar-actions > .df2-btn,
-.df2-app .df2-topbar-actions .df2-system-pill,
 .df2-app .df2-topbar-actions > button {
   height: 36px;
   min-height: 36px;
@@ -221,12 +220,6 @@
   background: var(--df-brand-muted, #f0fdfa);
   color: var(--df-brand-hover, #0f766e);
   border-color: color-mix(in srgb, var(--df-brand, #0d9488) 30%, var(--df-border, #e2e8f0));
-}
-
-.df2-app .df2-topbar-actions .df2-system-pill {
-  padding: 0 12px;
-  font-size: 12.5px;
-  font-weight: 600;
 }
 
 /* ── 3. Deterministic content scroll (no :has() / inline-style races) ─────── */

@@ -12,7 +12,9 @@ interface PipelineCardProps {
   dest?: Connector;
   running?: boolean;
   highlighted?: boolean;
+  selected?: boolean;
   historyOpen?: boolean;
+  onSelect?: () => void;
   onToggle: () => void;
   onRun: () => void;
   onEdit: () => void;
@@ -54,7 +56,9 @@ export function PipelineCard({
   dest,
   running,
   highlighted,
+  selected,
   historyOpen,
+  onSelect,
   onToggle,
   onRun,
   onEdit,
@@ -72,7 +76,22 @@ export function PipelineCard({
         "df2-card-interactive",
         sched.enabled ? "is-active" : "is-paused",
         highlighted ? "is-highlighted" : "",
+        selected ? "is-selected" : "",
       ].filter(Boolean).join(" ")}
+      onClick={onSelect}
+      onKeyDown={
+        onSelect
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect();
+              }
+            }
+          : undefined
+      }
+      role={onSelect ? "button" : undefined}
+      tabIndex={onSelect ? 0 : undefined}
+      aria-current={selected || undefined}
     >
       <div className="df2-pipe-card-head">
         <div className="df2-pipe-card-copy">
@@ -80,7 +99,7 @@ export function PipelineCard({
           <p className="df2-pipe-card-sub">Last run {formatWhen(sched.last_run_at)}</p>
           <CopyIdChip id={sched.id} label="Pipeline" compact className="df2-pipe-card-id" />
         </div>
-        <div className="df2-pipe-card-badges">
+        <div className="df2-pipe-card-badges" onClick={(e) => e.stopPropagation()}>
           {isRunning && (
             <span className="df2-badge df2-badge-run" title="A run is in progress">
               <DtIcon name="activity" size={11} /> Running
@@ -126,7 +145,7 @@ export function PipelineCard({
         <span>{sched.run_count} runs</span>
       </div>
 
-      <div className="df2-pipe-card-actions">
+      <div className="df2-pipe-card-actions" onClick={(e) => e.stopPropagation()}>
         <Button
           size="sm"
           variant="primary"
@@ -141,11 +160,11 @@ export function PipelineCard({
         <Button
           size="sm"
           variant="ghost"
-          onClick={onToggleHistory}
+          onClick={onSelect ?? onToggleHistory}
           aria-expanded={historyOpen}
           leadingIcon={<DtIcon name="jobs" size={14} />}
         >
-          History
+          {onSelect ? "Open" : "History"}
         </Button>
         <Button
           size="sm"

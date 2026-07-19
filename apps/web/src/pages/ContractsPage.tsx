@@ -7,6 +7,11 @@ import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { SectionLoader } from "../components/LoadingState";
 import { DtIcon } from "../components/DtIcon";
+import {
+  CONTRACT_TABS,
+  ContractDetailDrawer,
+  type ContractTab,
+} from "../components/ContractDetailDrawer";
 import { useToast } from "../components/Toast";
 import {
   DataContractSummary,
@@ -58,6 +63,9 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
   const [loadError, setLoadError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [breakers, setBreakers] = useState<Record<string, string>>({});
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [contractTab, setContractTab] = useState<ContractTab>(CONTRACT_TABS[0]);
   const pendingReload = useRef(false);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -133,6 +141,23 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
   const signed = contracts.filter((c) => c.status === "signed").length;
   const drafts = contracts.filter((c) => c.status === "draft").length;
   const broken = contracts.filter((c) => c.status === "broken").length;
+  const selectedContract = contracts.find((c) => c.id === selectedId) ?? null;
+
+  useEffect(() => {
+    if (!selectedId) return;
+    if (!contracts.some((c) => c.id === selectedId)) {
+      setSelectedId(null);
+      setDrawerOpen(false);
+    }
+  }, [contracts, selectedId]);
+
+  const openDrawer = (id: string) => {
+    setSelectedId(id);
+    setContractTab("Overview");
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => setDrawerOpen(false);
 
   const run = async (id: string, fn: () => Promise<unknown>, ok: string) => {
     setBusyId(id);
@@ -144,6 +169,20 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       toast({ title: "Action failed", message: (e as Error).message, tone: "error" });
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const exportOne = async (c: DataContractSummary) => {
+    try {
+      const blob = await exportContract(c.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${c.name || c.id}.yaml`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast({ title: "Export failed", message: (e as Error).message, tone: "error" });
     }
   };
 
@@ -205,8 +244,22 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
                 const badge = statusBadge(c.status);
                 const breaker = breakers[c.id];
                 const showReset = c.status === "broken" || breaker === "open" || breaker === "half_open";
+                const selected = drawerOpen && selectedId === c.id;
                 return (
-                  <article key={c.id} className="df2-contract-card">
+                  <article
+                    key={c.id}
+                    className={`df2-contract-card df2-card-interactive${selected ? " is-selected" : ""}`}
+                    onClick={() => openDrawer(c.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openDrawer(c.id);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-current={selected || undefined}
+                  >
                     <header className="df2-contract-card-head">
                       <div>
                         <h3 className="df2-contract-name">{c.name}</h3>
@@ -217,7 +270,7 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
                       </div>
                       <span className={`df2-badge ${badge.cls}`}>{badge.label}</span>
                     </header>
-                    <div className="df2-contract-actions">
+                    <div className="df2-contract-actions" onClick={(e) => e.stopPropagation()}>
                       {(c.status === "draft" || c.status === "broken") && (
                         <Button
                           size="sm"
@@ -250,27 +303,46 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
                         size="sm"
                         variant="ghost"
                         disabled={busyId === c.id}
-                        onClick={async () => {
-                          try {
-                            const blob = await exportContract(c.id);
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `${c.name || c.id}.yaml`;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                          } catch (e) {
-                            toast({ title: "Export failed", message: (e as Error).message, tone: "error" });
-                          }
-                        }}
+                        onClick={() => void exportOne(c)}
                       >
                         Export
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openDrawer(c.id)}
+                        leadingIcon={<DtIcon name="arrow-right" size={14} />}
+                      >
+                        Open
                       </Button>
                     </div>
                   </article>
                 );
               })}
             </div>
+
+            <ContractDetailDrawer
+              open={drawerOpen && Boolean(selectedContract)}
+              contract={selectedContract}
+              tab={contractTab}
+              setTab={setContractTab}
+              breakerHint={selectedContract ? breakers[selectedContract.id] : undefined}
+              busy={Boolean(selectedContract && busyId === selectedContract.id)}
+              onClose={closeDrawer}
+              onSign={() =>
+                selectedContract
+                && void run(selectedContract.id, () => signContract(selectedContract.id), "Contract signed")
+              }
+              onDeprecate={() =>
+                selectedContract
+                && void run(selectedContract.id, () => deprecateContract(selectedContract.id), "Contract deprecated")
+              }
+              onResetBreaker={() =>
+                selectedContract
+                && void run(selectedContract.id, () => resetContractBreaker(selectedContract.id), "Breaker reset")
+              }
+              onExport={() => selectedContract && void exportOne(selectedContract)}
+            />
           </>
         )}
       </PageFrame>
