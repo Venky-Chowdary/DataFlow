@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "total": 734,
+  "total": 740,
   "connectors": [
     {
       "id": "postgresql",
@@ -8,6 +8,41 @@
       "category": "database",
       "status": "live",
       "description": "Full read/write with live schema probe"
+    },
+    {
+      "id": "pgvector",
+      "name": "pgvector (PostgreSQL)",
+      "category": "vector",
+      "status": "live",
+      "description": "Destination-only: embed text chunks into PostgreSQL + vector extension for RAG"
+    },
+    {
+      "id": "qdrant",
+      "name": "Qdrant",
+      "category": "vector",
+      "status": "live",
+      "description": "Destination-only: upsert embedded chunks into a Qdrant collection"
+    },
+    {
+      "id": "weaviate",
+      "name": "Weaviate",
+      "category": "vector",
+      "status": "live",
+      "description": "Destination-only: upsert embedded objects into a Weaviate class (vectorizer: none)"
+    },
+    {
+      "id": "pinecone",
+      "name": "Pinecone",
+      "category": "vector",
+      "status": "live",
+      "description": "Destination-only: upsert embedded vectors into a Pinecone index namespace"
+    },
+    {
+      "id": "milvus",
+      "name": "Milvus",
+      "category": "vector",
+      "status": "live",
+      "description": "Destination-only: upsert embedded entities into a Milvus collection (REST v2)"
     },
     {
       "id": "snowflake",

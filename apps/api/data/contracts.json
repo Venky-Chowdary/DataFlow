@@ -35608,6 +35608,2081 @@
         "backfill_new_fields": false,
         "readiness_score": 0
       }
+    },
+    "dfc-5474c45a4fd847be": {
+      "id": "dfc-5474c45a4fd847be",
+      "name": "staging-orders",
+      "version": 1,
+      "status": "signed",
+      "source": {
+        "type": "postgresql"
+      },
+      "destination": {
+        "type": "snowflake"
+      },
+      "columns": [],
+      "mappings": [],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:13:05.731947+00:00",
+      "updated_at": "2026-07-20T19:13:05.731947+00:00",
+      "metadata": {}
+    },
+    "dfc-8e94ab894fa84766": {
+      "id": "dfc-8e94ab894fa84766",
+      "name": "staging-orders",
+      "version": 1,
+      "status": "signed",
+      "source": {
+        "type": "postgresql"
+      },
+      "destination": {
+        "type": "snowflake"
+      },
+      "columns": [],
+      "mappings": [],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:23:16.086240+00:00",
+      "updated_at": "2026-07-20T19:23:16.086240+00:00",
+      "metadata": {}
+    },
+    "dfc-27a95419ae394eff": {
+      "id": "dfc-27a95419ae394eff",
+      "name": "staging-orders",
+      "version": 1,
+      "status": "signed",
+      "source": {
+        "type": "postgresql"
+      },
+      "destination": {
+        "type": "snowflake"
+      },
+      "columns": [],
+      "mappings": [],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:24:00.165174+00:00",
+      "updated_at": "2026-07-20T19:24:00.165174+00:00",
+      "metadata": {}
+    },
+    "dfc-3b008063367f4afe": {
+      "id": "dfc-3b008063367f4afe",
+      "name": "csv-to-sqlite-a0a4ebcf",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:30:08.975444+00:00",
+      "updated_at": "2026-07-20T19:30:08.975444+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-0ee3537cf3d74f11": {
+      "id": "dfc-0ee3537cf3d74f11",
+      "name": "csv-to-sqlite-7598a3a1",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:30:09.301516+00:00",
+      "updated_at": "2026-07-20T19:30:09.301516+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-9f89f7b19a9e4f46": {
+      "id": "dfc-9f89f7b19a9e4f46",
+      "name": "csv-to-sqlite-421a9cf9",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "ages",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:30:10.001783+00:00",
+      "updated_at": "2026-07-20T19:30:10.001783+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-a7a94d4075254d79": {
+      "id": "dfc-a7a94d4075254d79",
+      "name": "csv-to-sqlite-db55e47f",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "empty_q",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:30:10.327958+00:00",
+      "updated_at": "2026-07-20T19:30:10.327958+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-3a0822b368a44311": {
+      "id": "dfc-3a0822b368a44311",
+      "name": "csv-to-sqlite-1c229eaa",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:31:12.687729+00:00",
+      "updated_at": "2026-07-20T19:31:12.687729+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-9d5a36aeef544993": {
+      "id": "dfc-9d5a36aeef544993",
+      "name": "csv-to-sqlite-f831d06a",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:31:13.007989+00:00",
+      "updated_at": "2026-07-20T19:31:13.007989+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-a15f178fd19b4e08": {
+      "id": "dfc-a15f178fd19b4e08",
+      "name": "csv-to-sqlite-8a8654b6",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "ages",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:31:13.675274+00:00",
+      "updated_at": "2026-07-20T19:31:13.675274+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-f99a3115ded2498e": {
+      "id": "dfc-f99a3115ded2498e",
+      "name": "csv-to-sqlite-aea7b0e7",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "empty_q",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:31:14.001186+00:00",
+      "updated_at": "2026-07-20T19:31:14.001186+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-5506567f018842c5": {
+      "id": "dfc-5506567f018842c5",
+      "name": "csv-to-sqlite-d710e268",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:32:13.235173+00:00",
+      "updated_at": "2026-07-20T19:32:13.235173+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-dc55f7ad0f484022": {
+      "id": "dfc-dc55f7ad0f484022",
+      "name": "csv-to-sqlite-dbf54b1d",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:32:13.624507+00:00",
+      "updated_at": "2026-07-20T19:32:13.624507+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-cdb4674ca9bf418a": {
+      "id": "dfc-cdb4674ca9bf418a",
+      "name": "csv-to-sqlite-af2f8eee",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "ages",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:32:14.331695+00:00",
+      "updated_at": "2026-07-20T19:32:14.331695+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-28ceab34351d4c11": {
+      "id": "dfc-28ceab34351d4c11",
+      "name": "csv-to-sqlite-905d1867",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "empty_q",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:32:14.662055+00:00",
+      "updated_at": "2026-07-20T19:32:14.662055+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-de5002e4d7434ecb": {
+      "id": "dfc-de5002e4d7434ecb",
+      "name": "csv-to-sqlite-55cea7af",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:32:47.460438+00:00",
+      "updated_at": "2026-07-20T19:32:47.460438+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-977ac3416aab480c": {
+      "id": "dfc-977ac3416aab480c",
+      "name": "csv-to-sqlite-e7fe431e",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:32:48.215754+00:00",
+      "updated_at": "2026-07-20T19:32:48.215754+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-2e1fb5438a794114": {
+      "id": "dfc-2e1fb5438a794114",
+      "name": "csv-to-sqlite-e2156c82",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:33:36.295439+00:00",
+      "updated_at": "2026-07-20T19:33:36.295439+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-249a58b663a440e2": {
+      "id": "dfc-249a58b663a440e2",
+      "name": "csv-to-sqlite-0ae0cd15",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:33:36.823174+00:00",
+      "updated_at": "2026-07-20T19:33:36.823174+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-ac2a53c50ec54f12": {
+      "id": "dfc-ac2a53c50ec54f12",
+      "name": "csv-to-sqlite-c81a2438",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "ages",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:33:37.786578+00:00",
+      "updated_at": "2026-07-20T19:33:37.786578+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-85e42ab2fb9a473c": {
+      "id": "dfc-85e42ab2fb9a473c",
+      "name": "csv-to-sqlite-6595242f",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "empty_q",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:33:38.137653+00:00",
+      "updated_at": "2026-07-20T19:33:38.137653+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-66d0268347b444a6": {
+      "id": "dfc-66d0268347b444a6",
+      "name": "csv-to-sqlite-0cf8d348",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:36:42.296883+00:00",
+      "updated_at": "2026-07-20T19:36:42.296883+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-97cfa0a40df44194": {
+      "id": "dfc-97cfa0a40df44194",
+      "name": "csv-to-sqlite-81f1cb39",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:41:29.820072+00:00",
+      "updated_at": "2026-07-20T19:41:29.820072+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-c4074275ba864f31": {
+      "id": "dfc-c4074275ba864f31",
+      "name": "csv-to-sqlite-9c976118",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:41:30.675826+00:00",
+      "updated_at": "2026-07-20T19:41:30.675826+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_append",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-22daf69c4263470e": {
+      "id": "dfc-22daf69c4263470e",
+      "name": "csv-to-sqlite-edb0ffcb",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:41:31.000234+00:00",
+      "updated_at": "2026-07-20T19:41:31.000234+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-a9541ae3c3174949": {
+      "id": "dfc-a9541ae3c3174949",
+      "name": "csv-to-sqlite-5d099f7a",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:41:41.557133+00:00",
+      "updated_at": "2026-07-20T19:41:41.557133+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-c6a2f905cde74bad": {
+      "id": "dfc-c6a2f905cde74bad",
+      "name": "csv-to-sqlite-b491cd9d",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:31.395789+00:00",
+      "updated_at": "2026-07-20T19:42:31.395789+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-79dd5ad4c00048fc": {
+      "id": "dfc-79dd5ad4c00048fc",
+      "name": "csv-to-sqlite-5d1b0a05",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:31.798352+00:00",
+      "updated_at": "2026-07-20T19:42:31.798352+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_append",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-b33240219dae433d": {
+      "id": "dfc-b33240219dae433d",
+      "name": "csv-to-sqlite-6af4c095",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:44.147229+00:00",
+      "updated_at": "2026-07-20T19:42:44.147229+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-045df5a268b54a2b": {
+      "id": "dfc-045df5a268b54a2b",
+      "name": "csv-to-sqlite-532f5684",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:44.849565+00:00",
+      "updated_at": "2026-07-20T19:42:44.849565+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_append",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-89d23c911c3f4df0": {
+      "id": "dfc-89d23c911c3f4df0",
+      "name": "csv-to-sqlite-cd535432",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:45.550154+00:00",
+      "updated_at": "2026-07-20T19:42:45.550154+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-8a4ca472cb934c88": {
+      "id": "dfc-8a4ca472cb934c88",
+      "name": "csv-to-sqlite-641759a6",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "users",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:46.303327+00:00",
+      "updated_at": "2026-07-20T19:42:46.303327+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-27b235a8e4cb4e63": {
+      "id": "dfc-27b235a8e4cb4e63",
+      "name": "csv-to-sqlite-0ad65315",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "ages",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "VARCHAR",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:47.108760+00:00",
+      "updated_at": "2026-07-20T19:42:47.108760+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
+    },
+    "dfc-0f9fc4d2bf254780": {
+      "id": "dfc-0f9fc4d2bf254780",
+      "name": "csv-to-sqlite-c342776a",
+      "version": 1,
+      "status": "draft",
+      "source": {
+        "kind": "file",
+        "format": "csv",
+        "table": "",
+        "collection": ""
+      },
+      "destination": {
+        "kind": "database",
+        "format": "sqlite",
+        "table": "empty_q",
+        "collection": ""
+      },
+      "columns": [
+        {
+          "source_name": "id",
+          "target_name": "id",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": true
+        },
+        {
+          "source_name": "age",
+          "target_name": "age",
+          "source_type": "INTEGER",
+          "target_type": "integer",
+          "transform": "integer",
+          "nullable": true,
+          "primary_key": false
+        }
+      ],
+      "mappings": [
+        {
+          "source": "id",
+          "target": "id",
+          "confidence": 0.95,
+          "transform": "integer"
+        },
+        {
+          "source": "age",
+          "target": "age",
+          "confidence": 0.95,
+          "target_type": "integer",
+          "transform": "integer"
+        }
+      ],
+      "quality_rules": [],
+      "preflight_gates": [],
+      "strict": true,
+      "created_at": "2026-07-20T19:42:47.445324+00:00",
+      "updated_at": "2026-07-20T19:42:47.445324+00:00",
+      "metadata": {
+        "sync_mode": "full_refresh_overwrite",
+        "validation_mode": "balanced",
+        "schema_policy": "manual_review",
+        "backfill_new_fields": false,
+        "readiness_score": 0
+      }
     }
   },
   "breakers": {
@@ -40326,6 +42401,325 @@
       "success_count": 0,
       "last_failure_time": null,
       "last_state_change": 1784558422.2314408,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-3b008063367f4afe": {
+      "contract_id": "dfc-3b008063367f4afe",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575809.018511,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-0ee3537cf3d74f11": {
+      "contract_id": "dfc-0ee3537cf3d74f11",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575809.342318,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-9f89f7b19a9e4f46": {
+      "contract_id": "dfc-9f89f7b19a9e4f46",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575810.069675,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-a7a94d4075254d79": {
+      "contract_id": "dfc-a7a94d4075254d79",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575810.367579,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-3a0822b368a44311": {
+      "contract_id": "dfc-3a0822b368a44311",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575872.7319832,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-9d5a36aeef544993": {
+      "contract_id": "dfc-9d5a36aeef544993",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575873.048842,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-a15f178fd19b4e08": {
+      "contract_id": "dfc-a15f178fd19b4e08",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575873.743097,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-f99a3115ded2498e": {
+      "contract_id": "dfc-f99a3115ded2498e",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575874.040889,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-5506567f018842c5": {
+      "contract_id": "dfc-5506567f018842c5",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575933.331535,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-dc55f7ad0f484022": {
+      "contract_id": "dfc-dc55f7ad0f484022",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575933.667092,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-cdb4674ca9bf418a": {
+      "contract_id": "dfc-cdb4674ca9bf418a",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575934.401336,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-28ceab34351d4c11": {
+      "contract_id": "dfc-28ceab34351d4c11",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575934.702946,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-de5002e4d7434ecb": {
+      "contract_id": "dfc-de5002e4d7434ecb",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575967.510182,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-977ac3416aab480c": {
+      "contract_id": "dfc-977ac3416aab480c",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784575968.2588391,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-2e1fb5438a794114": {
+      "contract_id": "dfc-2e1fb5438a794114",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576016.340064,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-249a58b663a440e2": {
+      "contract_id": "dfc-249a58b663a440e2",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576017.052657,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-ac2a53c50ec54f12": {
+      "contract_id": "dfc-ac2a53c50ec54f12",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576017.857022,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-85e42ab2fb9a473c": {
+      "contract_id": "dfc-85e42ab2fb9a473c",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576018.1767612,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-66d0268347b444a6": {
+      "contract_id": "dfc-66d0268347b444a6",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576202.4495769,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-97cfa0a40df44194": {
+      "contract_id": "dfc-97cfa0a40df44194",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576489.8739042,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-c4074275ba864f31": {
+      "contract_id": "dfc-c4074275ba864f31",
+      "state": "closed",
+      "failure_count": 1,
+      "success_count": 0,
+      "last_failure_time": 1784576490.720937,
+      "last_state_change": 1784576490.7209349,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-22daf69c4263470e": {
+      "contract_id": "dfc-22daf69c4263470e",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576491.044443,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-a9541ae3c3174949": {
+      "contract_id": "dfc-a9541ae3c3174949",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576501.7219598,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-c6a2f905cde74bad": {
+      "contract_id": "dfc-c6a2f905cde74bad",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576551.4860868,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-b33240219dae433d": {
+      "contract_id": "dfc-b33240219dae433d",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576564.199612,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-89d23c911c3f4df0": {
+      "contract_id": "dfc-89d23c911c3f4df0",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576565.626776,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-8a4ca472cb934c88": {
+      "contract_id": "dfc-8a4ca472cb934c88",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576566.414103,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-27b235a8e4cb4e63": {
+      "contract_id": "dfc-27b235a8e4cb4e63",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576567.152072,
+      "failure_threshold": 3,
+      "recovery_timeout_seconds": 60.0,
+      "half_open_max": 1
+    },
+    "dfc-0f9fc4d2bf254780": {
+      "contract_id": "dfc-0f9fc4d2bf254780",
+      "state": "closed",
+      "failure_count": 0,
+      "success_count": 0,
+      "last_failure_time": null,
+      "last_state_change": 1784576567.487242,
       "failure_threshold": 3,
       "recovery_timeout_seconds": 60.0,
       "half_open_max": 1
