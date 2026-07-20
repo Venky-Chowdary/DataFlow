@@ -159,6 +159,16 @@ export function TransferMapStep({
           </p>
         </div>
         <div className="df2-map-step-head-actions">
+          {(effectiveProof.summary?.cdc_detected || (effectiveProof.sync_mode || "").toLowerCase().includes("cdc")) && (
+            <span className="df2-badge df2-badge-info df2-badge-xs" title="Change-stream / CDC route — at-least-once upsert by default">
+              CDC · at-least-once
+            </span>
+          )}
+          {destDisplayType && (
+            <span className="df2-badge df2-badge-muted df2-badge-xs" title="Destination DDL family used for type pickers and native types">
+              {destDisplayType}
+            </span>
+          )}
           <button
             type="button"
             className="df2-btn df2-btn-sm"

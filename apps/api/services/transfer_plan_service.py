@@ -84,6 +84,7 @@ def run_plan_mapping(
         validation_mode=validation_mode,
         destination_db_type=(plan.destination.get("format") or plan.destination.get("type") or "").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
+        sync_mode=str(policies.get("sync_mode") or ""),
     )
 
     updated = add_mapping_revision(plan_id, result)

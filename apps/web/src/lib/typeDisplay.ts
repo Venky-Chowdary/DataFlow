@@ -212,5 +212,27 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
       return "VARCHAR";
     }
   }
+  const dest = (destType || "").toLowerCase();
+  if (dest.includes("databricks") || dest.includes("spark") || dest.includes("delta")) {
+    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "INT";
+    if (upper === "BIGINT" || upper === "LONG") return "BIGINT";
+    if (upper === "DECIMAL" || upper === "NUMERIC") return "DECIMAL(38,10)";
+    if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "STRING";
+    if (upper === "JSON" || upper === "JSONB" || upper === "ARRAY" || upper === "VARIANT") return "MAP";
+    if (upper === "TIMESTAMPTZ" || upper === "DATETIME") return "TIMESTAMP";
+    if (upper === "BYTEA" || upper === "BLOB" || upper === "BYTES") return "BINARY";
+  }
+  if (dest.includes("iceberg")) {
+    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "int";
+    if (upper === "BIGINT" || upper === "LONG") return "long";
+    if (upper === "DECIMAL" || upper === "NUMERIC") return "decimal(38,10)";
+    if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "string";
+    if (upper === "JSON" || upper === "JSONB" || upper === "ARRAY") return "list";
+    if (upper === "TIMESTAMPTZ" || upper === "TIMESTAMP_TZ") return "timestamptz";
+    if (upper === "DATETIME" || upper === "TIMESTAMP") return "timestamp";
+    if (upper === "BYTEA" || upper === "BLOB" || upper === "BYTES" || upper === "BINARY") return "binary";
+    if (upper === "BOOLEAN" || upper === "BOOL") return "boolean";
+    if (upper === "UUID") return "uuid";
+  }
   return cur;
 }

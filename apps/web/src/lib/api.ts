@@ -1252,6 +1252,9 @@ export async function mapTransferColumns(payload: {
   file_format?: string;
   use_llm?: boolean;
   source_samples?: Record<string, string[]>;
+  destination_db_type?: string;
+  sync_mode?: string;
+  schema_policy?: string;
 }): Promise<{
   mappings: Array<{
     source: string;

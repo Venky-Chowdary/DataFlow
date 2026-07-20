@@ -63,7 +63,15 @@ export function QueryPage({ connectors }: QueryPageProps) {
       });
       setResult(data);
     } catch (e) {
-      toast({ title: "Query failed", message: (e as Error).message, tone: "error" });
+      const message = (e as Error).message || "Query failed";
+      const dialectHint = /dialect|pymysql|psycopg|driver/i.test(message);
+      toast({
+        title: "Query failed",
+        message: dialectHint
+          ? `${message} Check that the ${selected?.type || "SQL"} connector driver is installed in the API environment.`
+          : message,
+        tone: "error",
+      });
     } finally {
       setQueryLoading(false);
     }

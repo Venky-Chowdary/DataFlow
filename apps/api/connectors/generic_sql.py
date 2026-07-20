@@ -176,6 +176,12 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "cloudera_data_platform": "impala",
     "sap_bw_4hana": "hana",
     "motherduck": "duckdb",
+    # First-class RDBMS — never fall back to bare dialect without a DBAPI.
+    "mysql": "mysql+pymysql",
+    "postgresql": "postgresql+psycopg2",
+    "postgres": "postgresql+psycopg2",
+    "redshift": "postgresql+psycopg2",
+    "amazon_redshift": "postgresql+psycopg2",
 }
 
 _DEFAULT_PORT_MAP: dict[str, int] = {
@@ -252,6 +258,11 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
     "azure_database_for_mysql": 3306,
     "amazon_aurora": 3306,
     "mariadb": 3306,
+    "mysql": 3306,
+    "postgresql": 5432,
+    "postgres": 5432,
+    "redshift": 5439,
+    "amazon_redshift": 5439,
     "dremio": 32010,
     "dremio_flight": 32010,
     "firebolt": 443,
@@ -294,6 +305,38 @@ def _normalize_sqlite_url(url: str) -> str:
     return url
 
 
+def _normalize_sqlalchemy_url_string(url: str, db_type: str = "") -> str:
+    """Rewrite bare dialect schemes to installed DBAPI dialects.
+
+    Users and saved connectors often store ``mysql://…`` / ``postgresql://…``.
+    SQLAlchemy 2 requires an explicit DBAPI (``mysql+pymysql``, ``postgresql+psycopg2``).
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    lower = raw.lower()
+    dt = (db_type or "").lower().strip()
+
+    replacements: list[tuple[str, str]] = [
+        ("mysql+pymysql://", "mysql+pymysql://"),  # already correct
+        ("mysql://", "mysql+pymysql://"),
+        ("mariadb://", "mysql+pymysql://"),
+        ("mariadb+pymysql://", "mysql+pymysql://"),
+        ("postgres://", "postgresql+psycopg2://"),
+        ("postgresql://", "postgresql+psycopg2://"),
+        ("postgresql+psycopg2://", "postgresql+psycopg2://"),
+    ]
+    for src, dst in replacements:
+        if lower.startswith(src) and src != dst:
+            return dst + raw[len(src):]
+
+    # If type is mysql/mariadb but scheme is missing or opaque, leave as-is;
+    # host/port builders below handle structured cfg.
+    if dt in {"mysql", "mariadb"} and "://" not in raw and not lower.startswith("mysql"):
+        return raw
+    return raw
+
+
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
@@ -308,10 +351,16 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
             return f"duckdb:////{connection_string}" if connection_string.startswith("/") else f"duckdb:///{connection_string}"
         if db_type == "sqlite":
             return _normalize_sqlite_url(f"sqlite:///{connection_string}")
-        return connection_string
+        return _normalize_sqlalchemy_url_string(connection_string, db_type)
 
     if not db_type:
         raise ValueError("A database type or connection_string is required")
+
+    if not SQLALCHEMY_AVAILABLE:
+        raise RuntimeError(
+            "SQLAlchemy is not installed in this API environment. "
+            "Install sqlalchemy and the DBAPI for your engine (e.g. pymysql for MySQL)."
+        )
 
     # MotherDuck is DuckDB cloud: the database token/DB is addressed as md:<database>.
     if db_type == "motherduck":
@@ -377,10 +426,29 @@ def _engine(cfg: dict[str, Any]) -> Any:
         # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
         # Convert it to a clear RuntimeError so callers can surface a 4xx/5xx
         # response instead of an unhandled ExceptionGroup crashing the worker.
-        raise RuntimeError(
-            f"SQLAlchemy dialect for '{db_type or url.drivername}' is not installed. "
-            f"Install the matching driver package (e.g. snowflake-sqlalchemy, databricks-sqlalchemy)."
-        ) from exc
+        driver = getattr(url, "drivername", None) or str(url).split("://", 1)[0]
+        dialect_key = str(db_type or str(driver).split("+", 1)[0]).lower()
+        hint_by_dialect = {
+            "mysql": "pymysql (scheme mysql+pymysql://)",
+            "mariadb": "pymysql (scheme mysql+pymysql://)",
+            "postgresql": "psycopg2-binary (scheme postgresql+psycopg2://)",
+            "postgres": "psycopg2-binary (scheme postgresql+psycopg2://)",
+            "snowflake": "snowflake-sqlalchemy",
+            "databricks": "databricks-sqlalchemy",
+        }
+        hint = hint_by_dialect.get(dialect_key)
+        detail = (
+            f"SQLAlchemy dialect/driver for '{db_type or driver}' is not available "
+            f"(tried '{driver}')."
+        )
+        if hint:
+            detail += f" Install/enable {hint}."
+        else:
+            detail += (
+                " Install the matching driver package "
+                "(e.g. pymysql, psycopg2-binary, snowflake-sqlalchemy, databricks-sqlalchemy)."
+            )
+        raise RuntimeError(detail) from exc
 
 
 def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:

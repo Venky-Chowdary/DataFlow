@@ -27,6 +27,7 @@ boto3>=1.34.0
 redis>=5.0.0
 elasticsearch>=8.0.0,<9.0.0
 sqlalchemy>=2.0.0
+sqlparse>=0.4.4  # Query playground read-only SQL validation
 duckdb-sqlalchemy>=0.5.0  # DuckDB via SQLAlchemy / generic_sql
 clickhouse-sqlalchemy>=0.3.0  # ClickHouse via SQLAlchemy / generic_sql
 trino>=0.338.0  # Trino via SQLAlchemy / generic_sql

@@ -135,6 +135,9 @@ class MapColumnsRequest(BaseModel):
     file_format: Optional[str] = None
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
+    destination_db_type: str = ""
+    sync_mode: str = ""
+    schema_policy: str = "manual_review"
 
 
 @router.get("/capabilities")
@@ -277,7 +280,9 @@ async def map_columns_route(body: MapColumnsRequest):
         use_llm=body.use_llm,
         source_samples=body.source_samples or None,
         validation_mode=body.validation_mode,
-        schema_policy=getattr(body, "schema_policy", "manual_review"),
+        destination_db_type=body.destination_db_type or "",
+        schema_policy=body.schema_policy or "manual_review",
+        sync_mode=body.sync_mode or "",
     )
     nested_fields: list[dict[str, str]] = []
     try:

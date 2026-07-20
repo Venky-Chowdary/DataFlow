@@ -744,6 +744,8 @@ export function TransferPage({
                 ?? file?.name.split(".").pop(),
               use_llm: true,
               source_samples: buildSourceSamples(),
+              destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
+              sync_mode: syncMode,
             });
         setColumnMappings(
           editableFromPipelineMappings(
@@ -1082,6 +1084,8 @@ export function TransferPage({
           file_format: data.file_type ?? file?.name.split(".").pop(),
           use_llm: true,
           source_samples: buildColumnSamples(data.columns, rows),
+          destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
+          sync_mode: syncMode,
         });
         const pipelineAnalysis = analysisFromPipeline(data.columns, data.schema ?? {}, pipeline.mappings);
         setAnalysis(pipelineAnalysis);
