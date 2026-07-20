@@ -1,0 +1,78 @@
+{
+  "proposals": [
+    {
+      "id": "repair_22b3e8c06553",
+      "job_id": "job1",
+      "source": "quarantine",
+      "status": "applied",
+      "confidence": "medium",
+      "auto_applicable": false,
+      "summary": "2 repair action(s) from 2 quarantined detail(s)",
+      "actions": [
+        {
+          "kind": "change_target_type",
+          "column": "amount",
+          "to_type": "VARCHAR",
+          "label": "Widen 'amount' to VARCHAR to accept non-numeric values"
+        },
+        {
+          "kind": "add_transform",
+          "column": "when",
+          "transform": "to_timestamp",
+          "label": "Apply timestamp transform to 'when'"
+        }
+      ],
+      "diagnosis": {
+        "rejected_count": 2
+      },
+      "created_at": 1784516242.578757,
+      "decided_at": 1784516242.579495,
+      "decided_by": "tester",
+      "apply_result": {
+        "applied": true,
+        "mappings": [
+          {
+            "source": "amount",
+            "destination": "amount",
+            "destination_type": "VARCHAR",
+            "target_type": "VARCHAR"
+          },
+          {
+            "source": "when",
+            "destination": "when",
+            "transforms": [
+              {
+                "type": "to_timestamp"
+              }
+            ],
+            "transform": "to_timestamp"
+          }
+        ]
+      }
+    },
+    {
+      "id": "repair_988de0612bc6",
+      "job_id": "j2",
+      "source": "quarantine",
+      "status": "rejected",
+      "confidence": "medium",
+      "auto_applicable": false,
+      "summary": "1 repair action(s) from 1 quarantined detail(s)",
+      "actions": [
+        {
+          "kind": "add_transform",
+          "column": "x",
+          "transform": "to_text",
+          "label": "Cast 'x' to text"
+        }
+      ],
+      "diagnosis": {
+        "rejected_count": 1
+      },
+      "created_at": 1784516242.580657,
+      "decided_at": 1784516242.581362,
+      "decided_by": "tester",
+      "apply_result": {}
+    }
+  ]
+}

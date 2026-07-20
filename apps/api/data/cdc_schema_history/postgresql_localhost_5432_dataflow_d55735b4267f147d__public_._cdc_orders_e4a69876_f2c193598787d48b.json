@@ -1,0 +1,29 @@
+{
+  "source_key": "postgresql:localhost:5432/dataflow",
+  "table": "\"public\".\"cdc_orders_e4a69876\"",
+  "entries": [
+    {
+      "id": "02460aa5-a91c-4eb0-9936-042739ffc678",
+      "source_key": "postgresql:localhost:5432/dataflow",
+      "table": "\"public\".\"cdc_orders_e4a69876\"",
+      "ddl": "SNAPSHOT",
+      "offset": "df_dataflow_cdc_orders_e4a69876_d8300226",
+      "schema_snapshot": {
+        "columns": {
+          "id": "integer",
+          "amount": "numeric"
+        },
+        "nullable": {
+          "id": false,
+          "amount": true
+        },
+        "primary_key": [
+          "id"
+        ]
+      },
+      "recorded_at": "2026-07-20T12:07:54.108954+00:00",
+      "version": 1
+    }
+  ],
+  "updated_at": "2026-07-20T12:07:54.109050+00:00"
+}

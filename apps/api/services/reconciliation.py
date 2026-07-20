@@ -15,7 +15,7 @@ from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Iterable
 
 from services.value_serializer import json_default
@@ -1064,11 +1064,15 @@ def _canonicalize_number(value: Any) -> str | None:
         d = Decimal(value) if not isinstance(value, Decimal) else value
         if d.is_nan():
             return None
-        s = format(d.normalize(), "f")
-        if "." in s:
+        from services.value_serializer import safe_decimal_text
+
+        s = safe_decimal_text(d.normalize() if d.is_finite() else d)
+        if s is None:
+            return None
+        if "." in s and "e" not in s.lower():
             s = s.rstrip("0").rstrip(".")
         return s if s else "0"
-    except (InvalidOperation, TypeError, ValueError):
+    except (InvalidOperation, Overflow, TypeError, ValueError):
         return None
 
 

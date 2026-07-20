@@ -12,7 +12,7 @@ import re
 import unicodedata
 import uuid as uuid_lib
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any
 
 from services.pii_guard import mask as pii_mask
@@ -398,18 +398,24 @@ def _parse_decimal(value: str) -> str | None:
         return None
     try:
         dec = Decimal(text)
-    except InvalidOperation:
+    except (InvalidOperation, Overflow):
+        return None
+    if not dec.is_finite():
         return None
 
-    # Percent is parsed as the numeric value (50% -> 50) to preserve magnitude.
-    # Scientific notation: 1.5e3, 2E-4. Convert to fixed-point form so
-    # downstream numeric checks stay stable and comparable across formats.
-    if "e" in text.lower():
-        fixed = format(dec, "f")
-        if "." in fixed:
-            fixed = fixed.rstrip("0").rstrip(".")
-        return fixed or "0"
-    return str(dec)
+    from services.value_serializer import safe_decimal_text
+
+    # Scientific / extreme magnitudes: keep a short exact form (never expand
+    # 1e+1000000 into a million-character fixed-point string mid-transfer).
+    rendered = safe_decimal_text(dec)
+    if rendered is None:
+        return None
+    if "e" in rendered.lower() and "." in rendered:
+        # normalize 1.230000e+10 → keep scientific from safe_decimal_text
+        return rendered
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
 
 
 def _parse_integer(value: str) -> int | None:
@@ -417,21 +423,39 @@ def _parse_integer(value: str) -> int | None:
     text = _normalize_locale_separators(text)
     if text is None or text == "":
         return None
-    if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
-        try:
+    try:
+        if re.match(r"^-?\d+(\.\d+)?[eE][+-]?\d+$", text):
             dec = Decimal(text)
+            if not dec.is_finite():
+                return None
             if dec != dec.to_integral_value():
                 return None
+            from services.type_system import integer_within_wire_budget
+
+            _sign, digits, exp = dec.as_tuple()
+            if isinstance(exp, int) and not integer_within_wire_budget(
+                digit_count=len(digits), exponent=exp
+            ):
+                return None
             return int(dec)
-        except (InvalidOperation, ValueError):
-            return None
-    try:
         dec = Decimal(text)
-    except InvalidOperation:
+    except (InvalidOperation, Overflow, ValueError):
+        return None
+    if not dec.is_finite():
         return None
     if dec != dec.to_integral_value():
         return None
-    return int(dec)
+    from services.type_system import integer_within_wire_budget
+
+    _sign, digits, exp = dec.as_tuple()
+    if isinstance(exp, int) and not integer_within_wire_budget(
+        digit_count=len(digits), exponent=exp
+    ):
+        return None
+    try:
+        return int(dec)
+    except (Overflow, ValueError, InvalidOperation):
+        return None
 
 
 # Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are

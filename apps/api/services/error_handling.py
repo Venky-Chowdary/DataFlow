@@ -211,6 +211,28 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            "decimal.overflow",
+            "[<class 'decimal.Overflow'>]",
+            "[<class 'decimal.Overflow'>",
+            "exceeded safe decimal capacity",
+            "would raise decimal.Overflow",
+        ),
+        {
+            "code": "decimal_overflow",
+            "category": "data_type",
+            "confidence": "high",
+            "title": "Numeric value overflowed decimal capacity",
+            "fix": (
+                "A number was too large (or had too many digits) for the decimal path used on "
+                "this transfer — common with extreme scientific notation or oversized Decimal128. "
+                "Open Quarantine / the event log for the column, map overflow fields to string, "
+                "or coerce null under a quarantine policy, then Resume from checkpoint. "
+                "This is not a Redis/Snowflake-only issue; the same rule applies on every dest."
+            ),
+        },
+    ),
+    (
+        (
             'dataflow."public"',
             '."public"',
             'schema "public"',
@@ -233,6 +255,33 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
 )
 
 
+def format_exception_message(error: Exception | str) -> str:
+    """Stable operator-facing raw text — never empty or bare ``[<class '...'>]``."""
+    if isinstance(error, str):
+        text = error.strip()
+        if text and not text.startswith("[<class"):
+            return text
+        if "Overflow" in text or "overflow" in text.lower():
+            return (
+                "decimal.Overflow: a numeric value exceeded safe decimal capacity "
+                "(extreme scientific notation or oversized Decimal128)"
+            )
+        return text or "unknown error"
+    name = type(error).__name__
+    module = getattr(type(error), "__module__", "") or ""
+    msg = str(error).strip()
+    if name == "Overflow" or (module == "decimal" and name == "Overflow"):
+        if not msg or msg.startswith("[<class"):
+            return (
+                "decimal.Overflow: a numeric value exceeded safe decimal capacity "
+                "(extreme scientific notation or oversized Decimal128)"
+            )
+        return f"decimal.Overflow: {msg}"
+    if not msg or msg.startswith("[<class"):
+        return f"{module}.{name}" if module else name
+    return msg
+
+
 def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """Turn a raw driver exception into an operator-facing failure summary.
 
@@ -244,8 +293,11 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
 
     Returns keys: code, category, title, message, fix, raw, retriable, confidence.
     """
-    raw = str(error)
+    raw = format_exception_message(error)
     text = raw.lower()
+    # Type-aware match when str(exc) is empty (decimal.Overflow).
+    if isinstance(error, Exception) and type(error).__name__ == "Overflow":
+        text = f"decimal.overflow {text}"
     classification = classify_error(error)
     matched: dict[str, str] | None = None
     for needles, payload in _OPERATOR_FAILURE_RULES:
@@ -256,10 +308,16 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
         title = matched["title"]
         fix = matched["fix"]
         confidence = matched.get("confidence", "medium")
-        message = (
-            f"{title}. Driver reported: {raw}. "
-            f"Rows already written stay on the destination until you address capacity."
-        )
+        if matched.get("code") == "decimal_overflow":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                f"Rows already written remain; fix the overflow column then Resume."
+            )
+        else:
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                f"Rows already written stay on the destination until you address capacity."
+            )
         return {
             "code": matched["code"],
             "category": matched["category"],

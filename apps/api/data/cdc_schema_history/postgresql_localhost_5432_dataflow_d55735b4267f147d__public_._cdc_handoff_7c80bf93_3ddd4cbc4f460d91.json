@@ -1,0 +1,29 @@
+{
+  "source_key": "postgresql:localhost:5432/dataflow",
+  "table": "\"public\".\"cdc_handoff_7c80bf93\"",
+  "entries": [
+    {
+      "id": "07dda23d-fa4f-40b1-b594-705f11a77150",
+      "source_key": "postgresql:localhost:5432/dataflow",
+      "table": "\"public\".\"cdc_handoff_7c80bf93\"",
+      "ddl": "SNAPSHOT",
+      "offset": "df_dataflow_cdc_handoff_7c80bf93_86415067",
+      "schema_snapshot": {
+        "columns": {
+          "id": "integer",
+          "amount": "numeric"
+        },
+        "nullable": {
+          "id": false,
+          "amount": true
+        },
+        "primary_key": [
+          "id"
+        ]
+      },
+      "recorded_at": "2026-07-20T12:31:35.079074+00:00",
+      "version": 1
+    }
+  ],
+  "updated_at": "2026-07-20T12:31:35.079184+00:00"
+}

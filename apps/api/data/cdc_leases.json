@@ -1,0 +1,41 @@
+{
+  "leases": {
+    "test:gtid:preserve": {
+      "cursor_key": "test:gtid:preserve",
+      "resource": "mysql_server_id:42444",
+      "holder_id": "gtid-test",
+      "acquired_at": 1784551661.661568,
+      "heartbeat_at": 1784551661.661568,
+      "ttl_sec": 120.0,
+      "meta": {
+        "table": "orders",
+        "database": "db",
+        "engine": "mysql"
+      }
+    },
+    "mssql-ct:app:dbo.orders": {
+      "cursor_key": "mssql-ct:app:dbo.orders",
+      "resource": "mssql_ct:app:dbo.orders",
+      "holder_id": "venkys-iMac.local:job:e63f9db0d8",
+      "acquired_at": 1784551661.670561,
+      "heartbeat_at": 1784551661.670561,
+      "ttl_sec": 120.0,
+      "meta": {
+        "engine": "sqlserver_ct",
+        "table": "orders"
+      }
+    },
+    "oracle-flashback:APP.ORDERS": {
+      "cursor_key": "oracle-flashback:APP.ORDERS",
+      "resource": "oracle_flashback:localhost:APP.ORDERS",
+      "holder_id": "venkys-iMac.local:job:fd8a4f09a0",
+      "acquired_at": 1784551661.7274072,
+      "heartbeat_at": 1784551661.7274072,
+      "ttl_sec": 120.0,
+      "meta": {
+        "engine": "oracle_flashback",
+        "table": "orders"
+      }
+    }
+  }
+}

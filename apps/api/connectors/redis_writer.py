@@ -15,7 +15,8 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
-from services.value_serializer import json_default
+from services.error_handling import format_exception_message
+from services.value_serializer import json_default, sanitize_json_value
 
 
 @dataclass
@@ -73,8 +74,45 @@ def write_mapped_rows(
             doc = dict(zip(target_cols, row))
             key_id = doc.get(id_col) or str(i)
             key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
-            client.set(key, json.dumps(doc, default=json_default))
-            written += 1
+            try:
+                # Pre-sanitize so extreme Decimals never raise mid-dumps.
+                safe_doc = sanitize_json_value(doc)
+                client.set(key, json.dumps(safe_doc, default=json_default, allow_nan=False))
+                written += 1
+            except Exception as cell_exc:
+                msg = format_exception_message(cell_exc)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=prefix,
+                        target_schema=f"db{database or 0}",
+                        checksum="",
+                        chunks_completed=0,
+                        error=msg,
+                        warnings=errors[:10],
+                        rejected_rows=len({d["row"] for d in rejected_details}) + 1,
+                        rejected_details=rejected_details[:100]
+                        + [{
+                            "row": i + 1,
+                            "column": id_col,
+                            "target": id_col,
+                            "value": str(key_id)[:120],
+                            "reason": msg,
+                            "policy": "write_fail",
+                            "chars": [],
+                        }],
+                    )
+                rejected_details.append({
+                    "row": i + 1,
+                    "column": id_col,
+                    "target": id_col,
+                    "value": str(key_id)[:120],
+                    "reason": msg,
+                    "policy": "write_quarantine",
+                    "chars": [],
+                })
+                errors.append(msg)
         if on_checkpoint:
             on_checkpoint(1, 1, written)
         return WriteResult(
@@ -90,8 +128,13 @@ def write_mapped_rows(
         )
     except Exception as exc:
         return WriteResult(
-            ok=False, rows_written=0, table_name=prefix, target_schema="",
-            checksum="", chunks_completed=0, error=str(exc),
+            ok=False,
+            rows_written=0,
+            table_name=prefix,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=format_exception_message(exc),
         )
     finally:
         client.close()

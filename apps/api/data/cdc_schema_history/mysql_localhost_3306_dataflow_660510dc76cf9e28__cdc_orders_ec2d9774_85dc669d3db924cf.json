@@ -1,0 +1,34 @@
+{
+  "source_key": "mysql:localhost:3306/dataflow",
+  "table": "cdc_orders_ec2d9774",
+  "entries": [
+    {
+      "id": "3ae744a1-d4ac-42b7-b207-6cbea5d93a04",
+      "source_key": "mysql:localhost:3306/dataflow",
+      "table": "cdc_orders_ec2d9774",
+      "ddl": "SNAPSHOT",
+      "offset": {
+        "file": "binlog.000001",
+        "gtid": "c4e8387a-7884-11f1-993c-f93e49b3a628:1-1249",
+        "pos": 389919,
+        "table": "cdc_orders_ec2d9774"
+      },
+      "schema_snapshot": {
+        "columns": {
+          "id": "int",
+          "amount": "decimal(10,2)"
+        },
+        "nullable": {
+          "id": false,
+          "amount": true
+        },
+        "primary_key": [
+          "id"
+        ]
+      },
+      "recorded_at": "2026-07-20T13:15:47.386941+00:00",
+      "version": 1
+    }
+  ],
+  "updated_at": "2026-07-20T13:15:47.387033+00:00"
+}

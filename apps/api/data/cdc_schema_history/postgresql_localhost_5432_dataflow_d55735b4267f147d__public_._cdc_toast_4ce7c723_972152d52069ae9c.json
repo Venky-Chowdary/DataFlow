@@ -1,0 +1,31 @@
+{
+  "source_key": "postgresql:localhost:5432/dataflow",
+  "table": "\"public\".\"cdc_toast_4ce7c723\"",
+  "entries": [
+    {
+      "id": "a8fb841e-2931-487e-aa6f-ab5a8699e6c1",
+      "source_key": "postgresql:localhost:5432/dataflow",
+      "table": "\"public\".\"cdc_toast_4ce7c723\"",
+      "ddl": "SNAPSHOT",
+      "offset": "df_dataflow_cdc_toast_4ce7c723_ccaea3dd",
+      "schema_snapshot": {
+        "columns": {
+          "id": "integer",
+          "blob": "text",
+          "status": "text"
+        },
+        "nullable": {
+          "id": false,
+          "blob": true,
+          "status": true
+        },
+        "primary_key": [
+          "id"
+        ]
+      },
+      "recorded_at": "2026-07-20T15:56:38.282941+00:00",
+      "version": 1
+    }
+  ],
+  "updated_at": "2026-07-20T15:56:38.283102+00:00"
+}
