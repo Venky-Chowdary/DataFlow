@@ -175,6 +175,7 @@ def run_mapping_pipeline(
     validation_mode: str = "strict",
     destination_db_type: str = "",
     schema_policy: str = "manual_review",
+    sync_mode: str = "",
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -415,6 +416,7 @@ def run_mapping_pipeline(
         enriched_mappings,
         target_columns=target_columns,
         destination_db_type=destination_db_type,
+        sync_mode=sync_mode,
     )
     plan_summary["dest_mode"] = mapping_proof.get("dest_mode")
     plan_summary["mapping_proof_summary"] = mapping_proof.get("summary")

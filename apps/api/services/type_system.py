@@ -292,6 +292,36 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "JSON",
         LOGICAL_BINARY: "BLOB",
     },
+    # Databricks / Spark SQL lakehouse (Unity Catalog tables, Delta).
+    "databricks": {
+        LOGICAL_STRING: "STRING",
+        LOGICAL_TEXT: "STRING",
+        LOGICAL_INTEGER: "BIGINT",
+        LOGICAL_DECIMAL: "DECIMAL(38,10)",
+        LOGICAL_BOOLEAN: "BOOLEAN",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "TIMESTAMP",
+        LOGICAL_TIME: "STRING",
+        LOGICAL_UUID: "STRING",
+        LOGICAL_JSON: "STRING",
+        LOGICAL_ARRAY: "STRING",
+        LOGICAL_BINARY: "BINARY",
+    },
+    # Apache Iceberg table schema (writer/catalog native).
+    "iceberg": {
+        LOGICAL_STRING: "string",
+        LOGICAL_TEXT: "string",
+        LOGICAL_INTEGER: "long",
+        LOGICAL_DECIMAL: "decimal(38,10)",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "timestamptz",
+        LOGICAL_TIME: "time",
+        LOGICAL_UUID: "uuid",
+        LOGICAL_JSON: "string",
+        LOGICAL_ARRAY: "list",
+        LOGICAL_BINARY: "binary",
+    },
 }
 
 DEFAULT_DDL: Final[dict[str, str]] = {
@@ -303,6 +333,8 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "redshift": "VARCHAR(65535)",
     "sqlite": "TEXT",
     "generic_sql": "TEXT",
+    "databricks": "STRING",
+    "iceberg": "string",
 }
 
 
@@ -331,6 +363,11 @@ def normalize_logical_type(inferred: str | None) -> str:
 def ddl_type(db_type: str, inferred: str | None) -> str:
     """Map a logical source type to a destination-native DDL type."""
     db = (db_type or "").strip().lower()
+    # Alias lakehouse / Delta SKUs onto Databricks Spark SQL DDL.
+    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+        db = "databricks"
+    if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
+        db = "iceberg"
     logical = normalize_logical_type(inferred)
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
 

@@ -70,7 +70,9 @@ export interface MappingProof {
     avg_confidence?: number;
     max_confidence?: number;
     confidence_cap_create_new?: number;
+    cdc_detected?: boolean;
   };
+  sync_mode?: string;
   mappings?: MappingProofRow[];
   global_risks?: MappingProofRisk[];
 }
@@ -466,6 +468,9 @@ export function MappingProofDrawer({
           <span className={`df2-badge ${proof.dest_mode === "create_new" ? "df2-badge-warn" : "df2-badge-live"}`}>
             {proof.dest_mode === "create_new" ? "Create new" : "Match existing"}
           </span>
+          {(proof.summary?.cdc_detected || (proof.sync_mode || "").toLowerCase().includes("cdc")) && (
+            <span className="df2-badge df2-badge-info df2-badge-xs">CDC · at-least-once</span>
+          )}
           <strong>{modeLabel}</strong>
         </div>
         <div className="df2-drawer-facts df2-map-proof-kpis">

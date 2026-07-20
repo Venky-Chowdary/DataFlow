@@ -105,17 +105,38 @@ def _pii_tags(mapping: dict, profile: dict | None = None) -> list[str]:
     return out
 
 
+# CDC / Debezium metadata columns — not business payload; need explicit posture.
+_CDC_META_COLUMNS = frozenset({
+    "__op",
+    "__deleted",
+    "__source_ts_ms",
+    "__source_ls",
+    "__lsn",
+    "__ts_ms",
+    "_ab_cdc_cursor",
+    "_ab_cdc_updated_at",
+    "_ab_cdc_deleted_at",
+})
+
+
+def _is_bigint_unsigned(src_raw: str) -> bool:
+    return "unsigned" in src_raw and ("bigint" in src_raw or "int8" in src_raw)
+
+
 def _mapping_risks(
     mapping: dict,
     *,
     dest_mode: str,
     destination_db_type: str,
+    sync_mode: str = "",
 ) -> list[dict[str, str]]:
     risks: list[dict[str, str]] = []
     transform = (mapping.get("transform") or "none").lower()
     fidelity = transform_fidelity(transform)
     src_type = str(mapping.get("source_type") or "VARCHAR")
     tgt_type = str(mapping.get("target_type") or mapping.get("dest_type") or src_type)
+    src_name = str(mapping.get("source") or "").strip().lower()
+    tgt_name = str(mapping.get("target") or "").strip().lower()
 
     if fidelity == "mutate":
         if transform in {"trim", "trim_id"}:
@@ -159,41 +180,63 @@ def _mapping_risks(
     src_logical = normalize_logical_type(src_type)
     tgt_logical = normalize_logical_type(tgt_type)
     dest = (destination_db_type or "").lower()
+    if dest in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+        dest = "databricks"
+    if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
+        dest = "iceberg"
     src_raw = src_type.lower()
+    lakehouse = dest in {"databricks", "iceberg", "snowflake", "bigquery", "redshift"}
 
     if src_logical in {"datetime", "timestamp"} and tgt_logical in {"datetime", "timestamp", "date"}:
-        if dest in {"snowflake", "bigquery", "redshift", "postgresql", "postgres", "mysql"} or "timestamp" in tgt_type.lower():
+        if dest in {
+            "snowflake", "bigquery", "redshift", "postgresql", "postgres", "mysql",
+            "databricks", "iceberg",
+        } or "timestamp" in tgt_type.lower():
             risks.append({
                 "code": "timezone_policy",
                 "severity": "info",
                 "message": (
                     "Temporal write follows destination timezone/bind policy "
                     f"({destination_db_type or 'dest'}); MySQL TIMESTAMP vs DATETIME "
-                    "semantics differ — confirm TZ expectations."
+                    "and Iceberg timestamptz vs timestamp without TZ differ — confirm expectations."
                 ),
             })
 
-    # Per-SKU fidelity: unsigned MySQL integers into warehouse/PG.
+    # Per-SKU fidelity: unsigned MySQL integers into warehouse/PG/lakehouse.
     if "unsigned" in src_raw and src_logical in {"integer", "decimal"}:
-        risks.append({
-            "code": "unsigned_range",
-            "severity": "warn",
-            "message": (
-                f"Source appears UNSIGNED ({src_type}). Destination "
-                f"{ddl_type(dest, src_type) if dest else tgt_type} must cover the full "
-                "unsigned range or values can overflow / quarantine."
-            ),
-        })
+        native = ddl_type(dest, src_type) if dest else tgt_type
+        if _is_bigint_unsigned(src_raw):
+            risks.append({
+                "code": "unsigned_bigint_range",
+                "severity": "warn",
+                "message": (
+                    f"MySQL BIGINT UNSIGNED can exceed signed 64-bit max. Destination "
+                    f"{native} on {destination_db_type or 'dest'} may overflow — "
+                    "prefer DECIMAL/NUMBER or quarantine out-of-range values."
+                ),
+            })
+        else:
+            risks.append({
+                "code": "unsigned_range",
+                "severity": "warn",
+                "message": (
+                    f"Source appears UNSIGNED ({src_type}). Destination {native} must cover "
+                    "the full unsigned range or values can overflow / quarantine."
+                ),
+            })
 
-    # Semi-structured → document/warehouse variants.
-    if src_logical in {"json", "array"} or "json" in src_raw or "variant" in tgt_type.lower():
-        if dest in {"snowflake", "bigquery", "mongodb", "postgresql", "postgres"}:
+    # Semi-structured → document/warehouse/lakehouse variants.
+    if src_logical in {"json", "array"} or "json" in src_raw or "variant" in tgt_type.lower() or "struct" in src_raw:
+        if dest in {
+            "snowflake", "bigquery", "mongodb", "postgresql", "postgres",
+            "databricks", "iceberg", "redshift",
+        }:
             risks.append({
                 "code": "semi_structured",
                 "severity": "info",
                 "message": (
                     f"Semi-structured path {src_type} → {tgt_type} on {destination_db_type or 'dest'}: "
-                    "nested shape is preserved as document/VARIANT/JSONB — not flattened unless configured."
+                    "nested shape is preserved as document/VARIANT/JSON/STRING — not flattened unless configured."
                 ),
             })
 
@@ -206,7 +249,9 @@ def _mapping_risks(
         })
 
     # Text / CLOB into VARCHAR warehouses — length risk.
-    if src_logical in {"text", "string"} and dest in {"snowflake", "redshift", "bigquery", "mysql"}:
+    if src_logical in {"text", "string"} and dest in {
+        "snowflake", "redshift", "bigquery", "mysql", "databricks", "iceberg",
+    }:
         if "text" in src_raw or "clob" in src_raw or "long" in src_raw:
             risks.append({
                 "code": "text_length",
@@ -217,9 +262,42 @@ def _mapping_risks(
                 ),
             })
 
+    # CDC metadata / tombstone columns — operator must understand upsert semantics.
+    if src_name in _CDC_META_COLUMNS or tgt_name in _CDC_META_COLUMNS:
+        risks.append({
+            "code": "cdc_metadata_column",
+            "severity": "info",
+            "message": (
+                f"Column `{mapping.get('source')}` looks like CDC metadata "
+                "(__op / __deleted / LSN). It is change-stream machinery, not business payload — "
+                "confirm destination consumers expect these fields."
+            ),
+        })
+    if src_name in {"__deleted", "_ab_cdc_deleted_at"} or tgt_name in {"__deleted", "_ab_cdc_deleted_at"}:
+        risks.append({
+            "code": "cdc_tombstone",
+            "severity": "warn",
+            "message": (
+                "Delete/tombstone signal present. Default delivery is at-least-once upsert; "
+                "hard deletes require destination delete-by-PK support — not silent drop of history."
+            ),
+        })
+
+    sync = (sync_mode or str(mapping.get("sync_mode") or "")).strip().lower()
+    if sync in {"cdc", "incremental", "change_stream", "log"} and lakehouse:
+        if not any(r["code"] == "cdc_at_least_once" for r in risks):
+            risks.append({
+                "code": "cdc_at_least_once",
+                "severity": "info",
+                "message": (
+                    "CDC/incremental into lakehouse defaults to at-least-once upsert/MERGE; "
+                    "exactly-once is not claimed unless the route proves idempotent keys + watermark handoff."
+                ),
+            })
+
     reasoning = str(mapping.get("reasoning") or "")
     if "unsigned" in reasoning.lower() or "out of range" in reasoning.lower():
-        if not any(r["code"] == "unsigned_range" for r in risks):
+        if not any(r["code"] in {"unsigned_range", "unsigned_bigint_range"} for r in risks):
             risks.append({
                 "code": "unsigned_range",
                 "severity": "warn",
@@ -402,6 +480,7 @@ def build_mapping_proof(
     destination_db_type: str = "",
     source_kind: str = "",
     dest_kind: str = "",
+    sync_mode: str = "",
 ) -> dict[str, Any]:
     """Build universal mapping proof for Map/Validate UI — any connector pair."""
     has_targets = bool(target_columns)
@@ -418,12 +497,27 @@ def build_mapping_proof(
     all_risks: list[dict[str, str]] = []
     confidences: list[float] = []
 
+    # Detect CDC even when sync_mode unset (Debezium/Airbyte meta columns in map).
+    inferred_cdc = sync_mode.strip().lower() in {"cdc", "incremental", "change_stream", "log"}
+    if not inferred_cdc:
+        for m in mappings:
+            name = str(m.get("source") or m.get("target") or "").strip().lower()
+            if name in _CDC_META_COLUMNS:
+                inferred_cdc = True
+                break
+    effective_sync = sync_mode or ("cdc" if inferred_cdc else "")
+
     for m in mappings:
         conf = float(m.get("confidence") or 0)
         confidences.append(conf)
         transform = m.get("transform") or "none"
         fidelity = transform_fidelity(str(transform))
-        risks = _mapping_risks(m, dest_mode=dest_mode, destination_db_type=destination_db_type)
+        risks = _mapping_risks(
+            m,
+            dest_mode=dest_mode,
+            destination_db_type=destination_db_type,
+            sync_mode=effective_sync,
+        )
         all_risks.extend(risks)
         evidence = _evidence(m)
         # Cap display confidence honesty for create-new identity
@@ -473,6 +567,17 @@ def build_mapping_proof(
         seen_g.add(key)
         global_risks.append(r)
 
+    # One global CDC posture line when change-stream columns or sync mode present.
+    if inferred_cdc and not any(r["code"] == "cdc_delivery_posture" for r in global_risks):
+        global_risks.insert(0, {
+            "code": "cdc_delivery_posture",
+            "severity": "info",
+            "message": (
+                "CDC/change-stream route: default is at-least-once upsert with watermark/LSN resume; "
+                "exactly-once is not claimed. Deletes surface as tombstones when supported."
+            ),
+        })
+
     avg_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
     max_conf = round(max(confidences), 3) if confidences else 0.0
     if dest_mode == "create_new":
@@ -486,6 +591,7 @@ def build_mapping_proof(
         "destination_db_type": (destination_db_type or "").lower(),
         "source_kind": source_kind or "",
         "dest_kind": dest_kind or "",
+        "sync_mode": effective_sync or "",
         "quarantine_posture": QUARANTINE_POSTURE,
         "delivery_semantics": DELIVERY_SEMANTICS,
         "summary": {
@@ -497,6 +603,7 @@ def build_mapping_proof(
             "avg_confidence": avg_conf if dest_mode != "create_new" else min(avg_conf, IDENTITY_PASSTHROUGH_CONF_CAP),
             "max_confidence": max_conf,
             "confidence_cap_create_new": IDENTITY_PASSTHROUGH_CONF_CAP,
+            "cdc_detected": inferred_cdc,
         },
         "mappings": rows,
         "global_risks": global_risks[:40],

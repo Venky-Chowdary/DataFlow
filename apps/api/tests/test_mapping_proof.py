@@ -110,6 +110,72 @@ def test_unsigned_and_float_sku_risks():
     assert "float_to_decimal" in codes
 
 
+def test_bigint_unsigned_lakehouse_risk():
+    proof = build_mapping_proof(
+        [{
+            "source": "id",
+            "target": "id",
+            "confidence": 0.9,
+            "source_type": "BIGINT UNSIGNED",
+            "target_type": "BIGINT",
+            "transform": "none",
+            "create_new": True,
+            "assignment_strategy": "identity_passthrough",
+        }],
+        target_columns=[],
+        destination_db_type="databricks",
+    )
+    row = proof["mappings"][0]
+    assert row["dest_native_type"] == "BIGINT"
+    assert any(r["code"] == "unsigned_bigint_range" for r in row["risks"])
+
+
+def test_cdc_metadata_and_delivery_posture():
+    proof = build_mapping_proof(
+        [
+            {
+                "source": "id",
+                "target": "id",
+                "confidence": 0.9,
+                "source_type": "INTEGER",
+                "target_type": "long",
+                "transform": "none",
+                "create_new": True,
+                "assignment_strategy": "identity_passthrough",
+            },
+            {
+                "source": "__op",
+                "target": "__op",
+                "confidence": 0.9,
+                "source_type": "VARCHAR",
+                "target_type": "string",
+                "transform": "none",
+                "create_new": True,
+                "assignment_strategy": "identity_passthrough",
+            },
+            {
+                "source": "__deleted",
+                "target": "__deleted",
+                "confidence": 0.9,
+                "source_type": "BOOLEAN",
+                "target_type": "boolean",
+                "transform": "none",
+                "create_new": True,
+                "assignment_strategy": "identity_passthrough",
+            },
+        ],
+        target_columns=[],
+        destination_db_type="iceberg",
+        sync_mode="cdc",
+    )
+    assert proof["summary"]["cdc_detected"] is True
+    assert any(r["code"] == "cdc_delivery_posture" for r in proof["global_risks"])
+    meta = next(m for m in proof["mappings"] if m["source"] == "__op")
+    assert any(r["code"] == "cdc_metadata_column" for r in meta["risks"])
+    tomb = next(m for m in proof["mappings"] if m["source"] == "__deleted")
+    assert any(r["code"] == "cdc_tombstone" for r in tomb["risks"])
+
+
 def test_semi_structured_and_sample_preview():
     proof = build_mapping_proof(
         [{

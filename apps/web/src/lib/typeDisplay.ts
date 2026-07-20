@@ -105,11 +105,43 @@ export const REDSHIFT_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "VARBYTE", label: "VARBYTE", family: "binary" },
 ];
 
+/** Databricks / Spark SQL / Delta lakehouse native types. */
+export const DATABRICKS_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
+  { value: "STRING", label: "STRING", family: "string" },
+  { value: "BIGINT", label: "BIGINT", family: "int" },
+  { value: "INT", label: "INT", family: "int" },
+  { value: "DECIMAL(38,10)", label: "DECIMAL(38,10)", family: "decimal" },
+  { value: "DOUBLE", label: "DOUBLE", family: "decimal" },
+  { value: "BOOLEAN", label: "BOOLEAN", family: "bool" },
+  { value: "DATE", label: "DATE", family: "temporal" },
+  { value: "TIMESTAMP", label: "TIMESTAMP", family: "temporal" },
+  { value: "BINARY", label: "BINARY", family: "binary" },
+  { value: "MAP", label: "MAP / STRUCT — semi-structured", family: "json" },
+];
+
+/** Apache Iceberg table types (catalog / writer native). */
+export const ICEBERG_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
+  { value: "string", label: "string", family: "string" },
+  { value: "long", label: "long — 64-bit", family: "int" },
+  { value: "int", label: "int — 32-bit", family: "int" },
+  { value: "decimal(38,10)", label: "decimal(38,10)", family: "decimal" },
+  { value: "double", label: "double", family: "decimal" },
+  { value: "boolean", label: "boolean", family: "bool" },
+  { value: "date", label: "date", family: "temporal" },
+  { value: "timestamptz", label: "timestamptz", family: "temporal" },
+  { value: "timestamp", label: "timestamp — no TZ", family: "temporal" },
+  { value: "uuid", label: "uuid", family: "uuid" },
+  { value: "list", label: "list", family: "json" },
+  { value: "binary", label: "binary", family: "binary" },
+];
+
 export function typeOptionsForDest(destType?: string): { value: string; label: string; family: TypeFamily }[] {
   const d = (destType || "").toLowerCase();
   if (d.includes("snowflake")) return SNOWFLAKE_TYPE_OPTIONS;
   if (d.includes("bigquery")) return BIGQUERY_TYPE_OPTIONS;
   if (d.includes("redshift")) return REDSHIFT_TYPE_OPTIONS;
+  if (d.includes("databricks") || d.includes("spark") || d.includes("delta")) return DATABRICKS_TYPE_OPTIONS;
+  if (d.includes("iceberg")) return ICEBERG_TYPE_OPTIONS;
   if (d.includes("postgres") || d === "pg") return POSTGRES_TYPE_OPTIONS;
   if (d.includes("mysql") || d.includes("mariadb")) return MYSQL_TYPE_OPTIONS;
   return LOGICAL_TYPE_OPTIONS;
