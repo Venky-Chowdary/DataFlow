@@ -396,7 +396,8 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
               Move any schema <span className="lp-hero-title-b">anywhere</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping, eight preflight gates, and checksum proof — from Transfer Studio to MCP agents.
+              Semantic mapping, eight preflight gates, and checksum proof — so every load is destination-honest.
+              Transfer Studio, Pipelines, Pilot, and MCP share one governed engine.
               {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
             </p>
 
@@ -440,7 +441,7 @@ export function LandingHome({ onLogin, onGetStarted, onNavigate }: LandingHomePr
       </section>
 
       <section className="lp-logos lp-logos--float lp-band--center" aria-label="Trusted stacks">
-        <h5>Industry leaders move data with</h5>
+        <h5>Works with the stacks you already run</h5>
         <div className="lp-logos-float-row">
           {["postgresql", "snowflake", "bigquery", "mongodb", "sqlserver", "s3"].map((id, i) => (
             <span key={id} className="lp-logo-float" style={{ "--i": i } as CSSProperties} title={id}>

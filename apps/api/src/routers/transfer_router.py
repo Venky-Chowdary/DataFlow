@@ -298,6 +298,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "confidence_threshold": threshold,
         "destination_aware": bool(body.target_columns),
         "plan_summary": result.get("plan_summary", {}),
+        "mapping_proof": result.get("mapping_proof", {}),
         "quality_issues": result.get("quality_issues", []),
         "nested_fields": nested_fields,
     }

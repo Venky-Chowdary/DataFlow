@@ -1,5 +1,7 @@
 /** Inline SVG illustrations for marketing subpages — no external assets required. */
 
+import type { CSSProperties } from "react";
+
 type IllustrationKind =
   | "security"
   | "enterprise"
@@ -58,14 +60,40 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
 
   if (kind === "contact") {
     return (
-      <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Contact support">
-        <rect width="480" height="280" rx="16" fill="#f0fdfa" stroke="#99f6e4" />
-        <circle cx="240" cy="100" r="40" fill="#0d9488" opacity="0.15" />
-        <path d="M240 72v56M212 100h56" stroke="#0f766e" strokeWidth="3" strokeLinecap="round" />
-        <rect x="80" y="160" width="320" height="88" rx="12" fill="#fff" stroke="#e2e8f0" />
-        <text x="240" y="192" textAnchor="middle" fontSize="12" fill="#0f172a" fontWeight="650">Pilot plan in 48 hours</text>
-        <text x="240" y="214" textAnchor="middle" fontSize="10" fill="#64748b">Sources · Destinations · Compliance review</text>
-        <text x="240" y="234" textAnchor="middle" fontSize="10" fill="#0f766e">Dedicated solutions engineer</text>
+      <svg className={`${cls} lp-mkt-illustration--contact`} viewBox="0 0 480 300" role="img" aria-label="Sales engagement network">
+        <defs>
+          <linearGradient id="lp-contact-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#042f2e" />
+            <stop offset="55%" stopColor="#0f2744" />
+            <stop offset="100%" stopColor="#07111f" />
+          </linearGradient>
+          <radialGradient id="lp-contact-glow" cx="50%" cy="40%" r="50%">
+            <stop offset="0%" stopColor="#14b8a6" stopOpacity="0.45" />
+            <stop offset="100%" stopColor="#14b8a6" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+        <rect width="480" height="300" rx="18" fill="url(#lp-contact-bg)" />
+        <ellipse cx="240" cy="120" rx="160" ry="90" fill="url(#lp-contact-glow)" className="lp-contact-pulse" />
+        <circle cx="240" cy="140" r="78" fill="none" stroke="#14b8a6" strokeOpacity="0.25" strokeWidth="1" className="lp-contact-ring" />
+        <circle cx="240" cy="140" r="112" fill="none" stroke="#5eead4" strokeOpacity="0.18" strokeWidth="1" strokeDasharray="4 8" className="lp-contact-ring lp-contact-ring--slow" />
+        <circle cx="240" cy="140" r="36" fill="#0d9488" />
+        <text x="240" y="136" textAnchor="middle" fontSize="10" fill="#ecfdf5" fontWeight="700">SALES</text>
+        <text x="240" y="152" textAnchor="middle" fontSize="9" fill="#99f6e4">48h pilot</text>
+        {[
+          { x: 96, y: 72, label: "Sources" },
+          { x: 384, y: 72, label: "Dest" },
+          { x: 88, y: 210, label: "SSO" },
+          { x: 392, y: 210, label: "BYOK" },
+          { x: 240, y: 248, label: "Pilot" },
+        ].map((n) => (
+          <g key={n.label}>
+            <line x1="240" y1="140" x2={n.x} y2={n.y} stroke="#5eead4" strokeOpacity="0.35" strokeWidth="1.5" className="lp-contact-spoke" />
+            <circle cx={n.x} cy={n.y} r="22" fill="#0f172a" stroke="#14b8a6" strokeWidth="1.5" />
+            <text x={n.x} y={n.y + 4} textAnchor="middle" fontSize="9" fill="#ecfdf5" fontWeight="650">{n.label}</text>
+          </g>
+        ))}
+        <rect x="140" y="18" width="200" height="28" rx="14" fill="#042f2e" stroke="#14b8a6" strokeOpacity="0.5" />
+        <text x="240" y="36" textAnchor="middle" fontSize="11" fill="#99f6e4" fontWeight="650">Solutions engineer · 1 business day</text>
       </svg>
     );
   }
@@ -86,48 +114,84 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
 
   if (kind === "customers") {
     return (
-      <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Customer outcomes">
-        <rect width="480" height="280" rx="16" fill="#f8fafb" stroke="#e2e8f0" />
-        {[
-          { x: 60, label: "Retail", stat: "12k migrations" },
-          { x: 190, label: "Healthcare", stat: "HIPAA paths" },
-          { x: 320, label: "SaaS", stat: "Agent MCP" },
-        ].map((c) => (
-          <g key={c.label}>
-            <rect x={c.x} y="48" width="100" height="184" rx="12" fill="#fff" stroke="#e2e8f0" />
-            <text x={c.x + 50} y="88" textAnchor="middle" fontSize="11" fill="#0f172a" fontWeight="650">{c.label}</text>
-            <text x={c.x + 50} y="200" textAnchor="middle" fontSize="10" fill="#0f766e">{c.stat}</text>
-          </g>
-        ))}
+      <svg className={`${cls} lp-mkt-illustration--customers`} viewBox="0 0 480 300" role="img" aria-label="Customer proof mosaic">
+        <defs>
+          <linearGradient id="lp-cust-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#f0fdfa" />
+            <stop offset="100%" stopColor="#ecfdf5" />
+          </linearGradient>
+        </defs>
+        <rect width="480" height="300" rx="18" fill="url(#lp-cust-bg)" stroke="#99f6e4" />
+        <g className="lp-cust-tile" style={{ "--i": 0 } as CSSProperties}>
+          <rect x="24" y="24" width="200" height="120" rx="14" fill="#fff" stroke="#ccece7" />
+          <text x="40" y="54" fontSize="11" fill="#0f766e" fontWeight="700">RETAIL</text>
+          <text x="40" y="88" fontSize="22" fill="#0f172a" fontWeight="700">12k+</text>
+          <text x="40" y="112" fontSize="12" fill="#64748b">migrations governed</text>
+        </g>
+        <g className="lp-cust-tile" style={{ "--i": 1 } as CSSProperties}>
+          <rect x="240" y="24" width="216" height="120" rx="14" fill="#0f766e" />
+          <text x="256" y="54" fontSize="11" fill="#99f6e4" fontWeight="700">HEALTHCARE</text>
+          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">99.2%</text>
+          <text x="256" y="112" fontSize="12" fill="#ccfbf1">preflight pass rate</text>
+        </g>
+        <g className="lp-cust-tile" style={{ "--i": 2 } as CSSProperties}>
+          <rect x="24" y="160" width="140" height="116" rx="14" fill="#fff" stroke="#ccece7" />
+          <text x="40" y="196" fontSize="11" fill="#0f766e" fontWeight="700">SAAS</text>
+          <text x="40" y="228" fontSize="18" fill="#0f172a" fontWeight="700">MCP</text>
+          <text x="40" y="250" fontSize="11" fill="#64748b">agent-native ops</text>
+        </g>
+        <g className="lp-cust-tile" style={{ "--i": 3 } as CSSProperties}>
+          <rect x="180" y="160" width="140" height="116" rx="14" fill="#fff" stroke="#ccece7" />
+          <text x="196" y="196" fontSize="11" fill="#0f766e" fontWeight="700">FINANCE</text>
+          <text x="196" y="228" fontSize="18" fill="#0f172a" fontWeight="700">0</text>
+          <text x="196" y="250" fontSize="11" fill="#64748b">silent data loss</text>
+        </g>
+        <g className="lp-cust-tile" style={{ "--i": 4 } as CSSProperties}>
+          <rect x="336" y="160" width="120" height="116" rx="14" fill="#042f2e" />
+          <text x="352" y="196" fontSize="11" fill="#5eead4" fontWeight="700">PROOF</text>
+          <text x="352" y="228" fontSize="16" fill="#ecfdf5" fontWeight="700">Checksum</text>
+          <text x="352" y="250" fontSize="11" fill="#99f6e4">every load</text>
+        </g>
       </svg>
     );
   }
 
   if (kind === "pricing") {
     return (
-      <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Pricing tiers">
-        <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />
+      <svg className={`${cls} lp-mkt-illustration--pricing`} viewBox="0 0 480 300" role="img" aria-label="Plan scale visualization">
+        <defs>
+          <linearGradient id="lp-price-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#07111f" />
+            <stop offset="100%" stopColor="#0f2744" />
+          </linearGradient>
+        </defs>
+        <rect width="480" height="300" rx="18" fill="url(#lp-price-bg)" />
+        <text x="40" y="42" fontSize="12" fill="#94a3b8" fontWeight="650">PLAN SCALE</text>
         {[
-          { x: 48, h: 160, featured: false, label: "Starter" },
-          { x: 176, h: 200, featured: true, label: "Team" },
-          { x: 304, h: 160, featured: false, label: "Enterprise" },
-        ].map((t) => (
-          <g key={t.label}>
+          { x: 40, w: 120, h: 140, label: "Starter", sub: "Free", featured: false },
+          { x: 180, w: 140, h: 180, label: "Team", sub: "Custom", featured: true },
+          { x: 340, w: 100, h: 160, label: "Ent", sub: "Custom", featured: false },
+        ].map((t, i) => (
+          <g key={t.label} className="lp-price-bar" style={{ "--i": i } as CSSProperties}>
             <rect
               x={t.x}
-              y={280 - t.h - 40}
-              width="128"
+              y={260 - t.h}
+              width={t.w}
               height={t.h}
               rx="12"
-              fill="#fff"
-              stroke={t.featured ? "#0d9488" : "#e2e8f0"}
+              fill={t.featured ? "#0d9488" : "#1e293b"}
+              stroke={t.featured ? "#5eead4" : "#334155"}
               strokeWidth={t.featured ? 2 : 1}
             />
-            <text x={t.x + 64} y={280 - t.h - 16} textAnchor="middle" fontSize="11" fill={t.featured ? "#0f766e" : "#64748b"} fontWeight="650">
+            <text x={t.x + t.w / 2} y={260 - t.h + 28} textAnchor="middle" fontSize="13" fill={t.featured ? "#ecfdf5" : "#e2e8f0"} fontWeight="700">
               {t.label}
+            </text>
+            <text x={t.x + t.w / 2} y={260 - t.h + 52} textAnchor="middle" fontSize="11" fill={t.featured ? "#99f6e4" : "#94a3b8"}>
+              {t.sub}
             </text>
           </g>
         ))}
+        <text x="40" y="286" fontSize="11" fill="#64748b">Start free · Scale when pipelines &amp; SSO matter</text>
       </svg>
     );
   }

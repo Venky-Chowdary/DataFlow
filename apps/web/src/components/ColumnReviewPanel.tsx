@@ -34,6 +34,10 @@ interface ColumnReviewPanelProps {
   compact?: boolean;
   destinationFields?: string[];
   destinationLabel?: string;
+  /** Destination connector/db type — drives dest-aware DDL labels (e.g. Snowflake NUMBER). */
+  destType?: string;
+  /** True while destination schema introspection is in flight. */
+  destSchemaLoading?: boolean;
   showTransforms?: boolean;
   hideTitle?: boolean;
   focusSource?: string | null;
@@ -70,6 +74,8 @@ export function ColumnReviewPanel({
   compact = false,
   destinationFields = [],
   destinationLabel,
+  destType,
+  destSchemaLoading = false,
   showTransforms = true,
   hideTitle = false,
   focusSource = null,
@@ -424,6 +430,17 @@ export function ColumnReviewPanel({
           </div>
         )}
 
+        {!destSchemaLoading && destColumnSet.size === 0 && (
+          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
+            <DtIcon name="sparkle" size={16} />
+            <span>
+              <strong>New destination table</strong>
+              {" — identity mapping; types will CREATE on first write"}
+              {destType ? ` with ${destType}-native DDL` : ""}.
+            </span>
+          </div>
+        )}
+
 
       </div>
 
@@ -487,14 +504,14 @@ export function ColumnReviewPanel({
                       />
                       <select
                         className="df2-input df2-select df2-column-dest-type-select"
-                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR")}
+                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)}
                         onChange={(e) =>
                           updateMapping(index, { destType: e.target.value, approved: false })
                         }
                         aria-label={`Destination type for ${m.source}`}
                         title="Destination logical type"
                       >
-                        {destTypeSelectOptions(m.destType || m.inferredType).map((opt) => (
+                        {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
                           </option>

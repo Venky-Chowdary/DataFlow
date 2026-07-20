@@ -2,6 +2,7 @@
 
 from services.transform_resolver import (
     ENGINE_TO_UI,
+    UI_TO_ENGINE,
     attach_transforms_to_mappings,
     resolve_transform,
 )
@@ -12,13 +13,18 @@ def test_ui_transform_maps_to_engine():
     assert resolve_transform({"source": "a", "target": "b", "transform": "hash_pii"}) == "hash_pii"
 
 
+def test_none_transform_does_not_resolve_to_trim():
+    assert UI_TO_ENGINE["none"] == "none"
+    assert resolve_transform({"source": "name", "target": "name", "transform": "none"}) == "none"
+
+
 def test_infer_when_no_transform():
     t = resolve_transform(
         {"source": "AMT", "target": "amount"},
         column_types={"AMT": "VARCHAR"},
         dest_types={"amount": "DECIMAL"},
     )
-    assert t in {"decimal", "trim"}
+    assert t in {"decimal", "none"}
 
 
 def test_attach_transforms_to_all_mappings():
@@ -33,3 +39,5 @@ def test_attach_transforms_to_all_mappings():
 def test_engine_to_ui_coverage():
     assert ENGINE_TO_UI["decimal"] == "cast_number"
     assert ENGINE_TO_UI["datetime"] == "date_iso"
+    assert ENGINE_TO_UI["none"] == "none"
+    assert ENGINE_TO_UI["identity"] == "none"

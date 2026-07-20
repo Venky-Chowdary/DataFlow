@@ -125,6 +125,18 @@ interface ValidateDashboardProps {
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced column mappings. */
   onReviewMappings?: () => void;
+  /** Open Mapping proof drawer — how columns match, confidence evidence, fidelity risks. */
+  onOpenMappingProof?: () => void;
+  /** Compact Map proof KPIs for Validate (exact overlaps / risks / mode). */
+  mappingProofSummary?: {
+    destMode?: string;
+    mappedCount?: number;
+    exactOverlaps?: number;
+    riskCount?: number;
+    reviewCount?: number;
+    avgConfidence?: number;
+    maxConfidence?: number;
+  } | null;
   /** Trigger preflight from the dashboard (same as the rail CTA). */
   onRunPreflight?: () => void;
 }
@@ -427,6 +439,8 @@ export function ValidateDashboard({
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
+  onOpenMappingProof,
+  mappingProofSummary = null,
   onRunPreflight,
 }: ValidateDashboardProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -884,6 +898,17 @@ export function ValidateDashboard({
               <DtIcon name="shield" size={13} />
               Fix bad data…
             </button>
+            {onOpenMappingProof && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-mapping_proof"
+                onClick={onOpenMappingProof}
+                disabled={remediating}
+              >
+                <DtIcon name="sparkle" size={13} />
+                Mapping proof
+              </button>
+            )}
             {onReviewMappings && (
               <button
                 type="button"
@@ -991,6 +1016,11 @@ export function ValidateDashboard({
               ))}
             </ul>
             <div className="df2-vd-cell-preview-actions">
+              {onOpenMappingProof && (
+                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
+                  <DtIcon name="sparkle" size={14} /> Mapping proof
+                </button>
+              )}
               {onReviewMappings && (
                 <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onReviewMappings}>
                   <DtIcon name="layers" size={14} /> Review mappings
@@ -1025,6 +1055,54 @@ export function ValidateDashboard({
           </div>
         );
       })()}
+
+      {!running && mappingProofSummary && onOpenMappingProof && (
+        <div className="df2-vd-map-proof-card" aria-label="Column match proof summary">
+          <div className="df2-vd-map-proof-card-head">
+            <div>
+              <strong>Column matches</strong>
+              <span>
+                {mappingProofSummary.destMode === "create_new"
+                  ? "Create-new — DDL on first write"
+                  : "Matched to destination schema"}
+                {" · "}
+                every pair has confidence evidence and fidelity risks
+              </span>
+            </div>
+            <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
+              <DtIcon name="sparkle" size={14} /> Open mapping proof
+            </button>
+          </div>
+          <div className="df2-vd-map-proof-kpis">
+            <div>
+              <span>Pairs</span>
+              <strong>{mappingProofSummary.mappedCount ?? 0}</strong>
+            </div>
+            <div>
+              <span>Exact overlaps</span>
+              <strong>{mappingProofSummary.exactOverlaps ?? 0}</strong>
+            </div>
+            <div>
+              <span>Avg / max conf</span>
+              <strong>
+                {mappingProofSummary.avgConfidence != null
+                  ? `${Math.round(mappingProofSummary.avgConfidence * 100)}%`
+                  : "—"}
+                {" / "}
+                {mappingProofSummary.maxConfidence != null
+                  ? `${Math.round(mappingProofSummary.maxConfidence * 100)}%`
+                  : "—"}
+              </strong>
+            </div>
+            <div>
+              <span>Risks / review</span>
+              <strong>
+                {mappingProofSummary.riskCount ?? 0} / {mappingProofSummary.reviewCount ?? 0}
+              </strong>
+            </div>
+          </div>
+        </div>
+      )}
 
       {!running && preflight && (
         <div className="df2-vd-metrics">

@@ -1266,6 +1266,7 @@ export async function mapTransferColumns(payload: {
   confidence_threshold: number;
   llm?: { llm_used?: boolean; llm_provider?: string; strategy?: string };
   plan_summary?: Record<string, unknown>;
+  mapping_proof?: Record<string, unknown>;
   coercion_issues?: Array<Record<string, unknown>>;
 }> {
   const res = await apiFetch(`${API_BASE}/transfer/map`, {

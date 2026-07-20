@@ -9,7 +9,7 @@ from services.type_system import normalize_logical_type
 
 # Frontend MappingTransform → engine transform id
 UI_TO_ENGINE: dict[str, str] = {
-    "none": "trim",
+    "none": "none",
     "trim": "trim",
     "upper": "upper",
     "lower": "lower",
@@ -24,8 +24,10 @@ UI_TO_ENGINE: dict[str, str] = {
 }
 
 ENGINE_TO_UI: dict[str, str] = {
-    "trim": "none",
-    "trim_id": "none",
+    "none": "none",
+    "identity": "none",
+    "trim": "trim",
+    "trim_id": "trim",
     "uuid": "none",
     "upper": "upper",
     "lower": "lower",
@@ -126,7 +128,7 @@ def attach_transforms_to_mappings(
 
 def mapping_for_api(m: dict) -> dict[str, Any]:
     """Normalize mapping for API responses."""
-    engine = m.get("transform") or "trim"
+    engine = m.get("transform") or "none"
     return {
         **m,
         "transform": engine,

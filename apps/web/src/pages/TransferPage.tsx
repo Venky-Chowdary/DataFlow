@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -22,6 +22,10 @@ import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail"
 import { ValidateDashboard } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
+import {
+  MappingProofDrawer,
+  mergeMappingProof,
+} from "../components/MappingProofDrawer";
 import { useActiveData } from "../lib/DataContext";
 import { useStudioActions, type StudioAction } from "../lib/StudioActionsContext";
 import {
@@ -322,6 +326,8 @@ export function TransferPage({
   const [liveRouteCount, setLiveRouteCount] = useState<number | null>(null);
   const [transferLaunch, setTransferLaunch] = useState<{ jobId: string; rows: number } | null>(null);
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
+  const [mappingProof, setMappingProof] = useState<import("../components/MappingProofDrawer").MappingProof | null>(null);
+  const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [runStartupProgress, setRunStartupProgress] = useState(0);
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
@@ -749,6 +755,7 @@ export function TransferPage({
           ),
         );
         setLlmMappingUsed(Boolean(result.llm?.llm_used));
+        setMappingProof((result as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null);
       } catch (e) {
         console.error("Mapping pipeline failed:", e);
         const fallback = buildMappingsFromSource(analysisCols, targetCols);
@@ -761,6 +768,7 @@ export function TransferPage({
           });
         }
         setLlmMappingUsed(false);
+        setMappingProof(null);
       }
     },
     [parsed, analysis, transferPlan, validationMode, file, sourceKind, sourceConnector, buildSourceSamples, ensurePersistedPlan, buildMappingsFromSource, toast],
@@ -1085,6 +1093,7 @@ export function TransferPage({
           destSchemaMap,
         ));
         setLlmMappingUsed(Boolean(pipeline.llm?.llm_used));
+        setMappingProof((pipeline as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null);
       } catch (pipeErr) {
         console.error("Mapping pipeline failed:", pipeErr);
         const fallback = buildMappingsFromSource(
@@ -1137,6 +1146,7 @@ export function TransferPage({
     setPreflight(null);
     setPersistedPlanId(null);
     setLlmMappingUsed(false);
+    setMappingProof(null);
     setUploading(true);
     try {
       let data: ParsedUpload;
@@ -2555,6 +2565,28 @@ export function TransferPage({
         : `New schema will be created in ${targetDb}.${targetCollection || "collection"}`;
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
 
+  const effectiveMappingProof = useMemo(
+    () =>
+      mergeMappingProof(mappingProof, columnMappings, {
+        destColumns,
+        destType: destKindMode === "file_export" ? exportFormat : destType,
+      }),
+    [mappingProof, columnMappings, destColumns, destKindMode, exportFormat, destType],
+  );
+  const mappingProofSummary = useMemo(() => {
+    if (!columnMappings.length) return null;
+    const rows = effectiveMappingProof.mappings ?? [];
+    return {
+      destMode: effectiveMappingProof.dest_mode,
+      mappedCount: effectiveMappingProof.summary?.mapped_count ?? rows.length,
+      exactOverlaps: rows.filter((r) => r.match_quality === "exact_name").length,
+      riskCount: effectiveMappingProof.summary?.risk_count ?? 0,
+      reviewCount: effectiveMappingProof.summary?.review_count ?? 0,
+      avgConfidence: effectiveMappingProof.summary?.avg_confidence,
+      maxConfidence: effectiveMappingProof.summary?.max_confidence,
+    };
+  }, [columnMappings.length, effectiveMappingProof]);
+
   // Keep Data Pilot fed with the active validation/job IDs for NL triage & remediations.
   useEffect(() => {
     if (!preflight && !activeJobId) return;
@@ -2779,6 +2811,7 @@ export function TransferPage({
     setDestTableExists(null);
     setTransferLaunch(null);
     setLlmMappingUsed(false);
+    setMappingProof(null);
     setRunStartupProgress(0);
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     autoSelectedConnector.current = false;
@@ -2849,6 +2882,9 @@ export function TransferPage({
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           sourceColumnCount={mapSourceColumnCount}
           llmUsed={llmMappingUsed}
+          mappingProof={mappingProof}
+          proofOpen={mappingProofOpen}
+          onProofOpenChange={setMappingProofOpen}
           onChangeMappings={setColumnMappings}
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToPreflight()}
@@ -3597,9 +3633,21 @@ export function TransferPage({
             onQuarantineAndRerun={quarantineAndRerun}
             cellPreview={cellPreview}
             onReviewMappings={() => setStep(STEP_MAP)}
+            onOpenMappingProof={() => setMappingProofOpen(true)}
+            mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
           />
         </div>
+      )}
+
+      {mappingProofOpen && columnMappings.length > 0 && step !== STEP_MAP && (
+        <MappingProofDrawer
+          open={mappingProofOpen}
+          onClose={() => setMappingProofOpen(false)}
+          proof={effectiveMappingProof}
+          sourceLabel={sourceLabel}
+          destLabel={mapDestRouteLabel}
+        />
       )}
 
       {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (

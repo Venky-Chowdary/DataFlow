@@ -10,6 +10,11 @@ interface MarketingHeroBandProps {
   tone?: "light" | "ink";
   /** Optional trail above the kicker (e.g. Home › Knowledge hub). */
   breadcrumb?: ReactNode;
+  /**
+   * Page-specific motion language so Pricing / Contact / Customers
+   * do not all share the same float + aurora feel.
+   */
+  motion?: "default" | "pricing" | "contact" | "customers";
 }
 
 /** Full-width hero used on every marketing subpage. */
@@ -21,11 +26,20 @@ export function MarketingHeroBand({
   visual,
   tone = "light",
   breadcrumb,
+  motion = "default",
 }: MarketingHeroBandProps) {
   return (
-    <section className={`lp-mkt-hero-band ${tone === "ink" ? "lp-mkt-hero-band--ink" : ""}`.trim()}>
+    <section
+      className={[
+        "lp-mkt-hero-band",
+        tone === "ink" ? "lp-mkt-hero-band--ink" : "",
+        motion !== "default" ? `lp-mkt-hero-band--${motion}` : "",
+      ].filter(Boolean).join(" ")}
+    >
       <div className="lp-mkt-hero-band-glow" aria-hidden />
       <div className="lp-mkt-hero-band-mesh" aria-hidden />
+      {motion === "contact" ? <div className="lp-mkt-hero-band-beams" aria-hidden /> : null}
+      {motion === "pricing" ? <div className="lp-mkt-hero-band-ruler" aria-hidden /> : null}
       <div className={`lp-mkt-hero-grid ${visual ? "" : "lp-mkt-hero-grid--solo"}`.trim()}>
         <div className="lp-mkt-hero-copy">
           {breadcrumb ? <p className="lp-mkt-breadcrumb">{breadcrumb}</p> : null}

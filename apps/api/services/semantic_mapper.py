@@ -607,6 +607,11 @@ def _alternatives(
     return ranked[:limit]
 
 
+# Create-new / identity passthrough is "will CREATE", not "proven against existing dest".
+# Reserve 0.99 for existing-dest exact+sample match.
+IDENTITY_PASSTHROUGH_CONFIDENCE = 0.92
+
+
 def map_columns(
     source_columns: list[str],
     target_columns: list[str],
@@ -614,8 +619,10 @@ def map_columns(
     source_schemas: list[dict] | None = None,
     target_schemas: list[dict] | None = None,
     threshold: float = 0.85,
+    destination_db_type: str = "",
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
+    from services.type_system import ddl_type
 
     floor = max(0.55, threshold - 0.3)
     src_roles: dict[str, str] = {}
@@ -623,6 +630,7 @@ def map_columns(
     src_types: dict[str, str] = {}
     tgt_types: dict[str, str] = {}
     src_samples: dict[str, list[str]] = {}
+    dest_db = (destination_db_type or "").strip().lower()
 
     if source_schemas:
         for s in source_schemas:
@@ -643,23 +651,30 @@ def map_columns(
             tgt_types[t] = "VARCHAR"
 
     if not target_columns:
-        # Destination schema is unknown/empty — preserve source columns and types.
-        # This is a passthrough identity mapping: source columns become the target
-        # schema, and the source type is carried forward so writers can create the
-        # destination table with safe, fidelity-preserving types.
-        return [
-            {
-                "source": src,
-                "target": _semantic_form(src),
-                "confidence": 0.95,
-                "reasoning": "Target schema unknown — preserving source column and type",
-                "user_override": False,
-                "source_type": src_types.get(src, "VARCHAR"),
-                "target_type": src_types.get(src, "VARCHAR"),
-                "assignment_strategy": "identity_passthrough",
-            }
-            for src in source_columns
-        ]
+        # Destination schema is unknown/empty — identity passthrough for create-new.
+        # Types are projected to destination-native DDL when dest family is known so
+        # writers CREATE with accurate types (e.g. MySQL INT → Snowflake NUMBER(38,0)).
+        out: list[dict] = []
+        for src in source_columns:
+            src_type = src_types.get(src, "VARCHAR")
+            dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
+            out.append(
+                {
+                    "source": src,
+                    "target": _semantic_form(src),
+                    "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
+                    "reasoning": (
+                        f"New destination table — identity mapping; "
+                        f"types will CREATE on first write as {dest_native}"
+                    ),
+                    "user_override": False,
+                    "source_type": src_type,
+                    "target_type": dest_native,
+                    "assignment_strategy": "identity_passthrough",
+                    "create_new": True,
+                }
+            )
+        return out
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]

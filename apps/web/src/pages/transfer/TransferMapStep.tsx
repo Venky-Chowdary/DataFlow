@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { ColumnReviewPanel } from "../../components/ColumnReviewPanel";
 import { MappingIntelligencePanel } from "../../components/MappingIntelligencePanel";
+import {
+  MappingProofDrawer,
+  mergeMappingProof,
+  type MappingProof,
+} from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
@@ -27,6 +32,11 @@ interface TransferMapStepProps {
   sampleRows?: Record<string, unknown>[];
   sourceColumnCount?: number;
   llmUsed?: boolean;
+  /** Structured proof from mapping pipeline (preferred). */
+  mappingProof?: MappingProof | null;
+  /** Controlled proof drawer (shared with Validate). */
+  proofOpen?: boolean;
+  onProofOpenChange?: (open: boolean) => void;
   onChangeMappings: (mappings: EditableMapping[]) => void;
   onBack: () => void;
   onContinue: () => void;
@@ -55,6 +65,9 @@ export function TransferMapStep({
   rowCount,
   sampleRows,
   llmUsed,
+  mappingProof,
+  proofOpen: proofOpenProp,
+  onProofOpenChange,
   onChangeMappings,
   onBack,
   onContinue,
@@ -63,6 +76,9 @@ export function TransferMapStep({
   const [filter, setFilter] = useState<ColumnFilter>("all");
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
+  const [proofOpenLocal, setProofOpenLocal] = useState(false);
+  const proofOpen = proofOpenProp ?? proofOpenLocal;
+  const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");
@@ -103,6 +119,15 @@ export function TransferMapStep({
 
   const visualItems = filteredForVisual.slice(0, INTELLIGENCE_PAIR_LIMIT);
 
+  /** Prefer API proof; refresh pair list from live edits so operators see current transforms. */
+  const effectiveProof = useMemo(
+    () => mergeMappingProof(mappingProof, columnMappings, {
+      destColumns,
+      destType: destDisplayType,
+    }),
+    [mappingProof, columnMappings, destColumns, destDisplayType],
+  );
+
   const jumpToSource = (source: string) => {
     setSearch(source);
     setFilter("all");
@@ -130,16 +155,27 @@ export function TransferMapStep({
             {columnMappings.length} mappings · {approvedCount} ready
             {mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}
             {llmUsed ? " · semantic engine" : ""}
+            {destColumns.length === 0 && !destSchemaLoading ? " · create-new table" : ""}
           </p>
         </div>
-        <button
-          type="button"
-          className="df2-btn df2-btn-sm df2-btn-ghost"
-          onClick={() => setMapDialogOpen(true)}
-          title="Open full mapping table in a dialog"
-        >
-          <DtIcon name="expand" size={14} /> Expand mapping table
-        </button>
+        <div className="df2-map-step-head-actions">
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm"
+            onClick={() => setProofOpen(true)}
+            title="Inspect how this map works — confidence evidence, transforms, fidelity risks"
+          >
+            <DtIcon name="sparkle" size={14} /> Mapping proof
+          </button>
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm df2-btn-ghost"
+            onClick={() => setMapDialogOpen(true)}
+            title="Open full mapping table in a dialog"
+          >
+            <DtIcon name="expand" size={14} /> Expand mapping table
+          </button>
+        </div>
       </div>
 
       <div className="df2-card-body df2-map-step-body">
@@ -152,6 +188,8 @@ export function TransferMapStep({
             onChange={onChangeMappings}
             destinationFields={destColumns}
             destinationLabel={destRouteLabel}
+            destType={destDisplayType}
+            destSchemaLoading={destSchemaLoading}
             compact
             hideTitle
             search={search}
@@ -211,6 +249,8 @@ export function TransferMapStep({
           onChange={onChangeMappings}
           destinationFields={destColumns}
           destinationLabel={destRouteLabel}
+          destType={destDisplayType}
+          destSchemaLoading={destSchemaLoading}
           search={search}
           onSearchChange={setSearch}
           filter={filter}
@@ -219,6 +259,14 @@ export function TransferMapStep({
           onFocusHandled={() => setFocusSource(null)}
         />
       </Dialog>
+
+      <MappingProofDrawer
+        open={proofOpen}
+        onClose={() => setProofOpen(false)}
+        proof={effectiveProof}
+        sourceLabel={sourceLabel}
+        destLabel={destRouteLabel}
+      />
     </div>
   );
 }

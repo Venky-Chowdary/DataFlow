@@ -56,7 +56,7 @@ def test_infer_transform_chooses_phone_for_string_target():
 
 
 def test_infer_transform_preserves_currency_for_string_target():
-    assert infer_transform_for_mapping("price", "price", "VARCHAR", "VARCHAR") == "trim"
+    assert infer_transform_for_mapping("price", "price", "VARCHAR", "VARCHAR") == "none"
 
 
 def test_infer_transform_parses_currency_for_decimal_target():

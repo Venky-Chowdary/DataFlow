@@ -619,7 +619,7 @@ def infer_transform_for_mapping(
     # For string/unknown targets, preserve currency/percentage as text to avoid
     # data loss (e.g. '$100' should not be silently stripped to 100).
     if semantic in {"currency", "percentage"}:
-        return "trim"
+        return "none"
     if semantic == "phone":
         return "phone"
     if semantic == "email":
@@ -664,7 +664,8 @@ def infer_transform_for_mapping(
         return "trim_id"
     if "qty" in tgt_name or "quantity" in tgt_name:
         return "integer" if src == "integer" else "decimal"
-    return "trim"
+    # Prefer preserve/identity over trim — operators who want strip choose Trim.
+    return "none"
 
 
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:

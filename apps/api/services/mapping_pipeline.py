@@ -218,6 +218,7 @@ def run_mapping_pipeline(
         target_columns,
         source_schemas=source_schemas,
         target_schemas=target_schemas,
+        destination_db_type=destination_db_type,
     )
 
     # If the destination schema is unknown, derive it from the identity mapping.
@@ -408,6 +409,16 @@ def run_mapping_pipeline(
     if unmapped_after_prune:
         plan_summary["entailment_unmapped"] = unmapped_after_prune
 
+    from services.mapping_proof import build_mapping_proof
+
+    mapping_proof = build_mapping_proof(
+        enriched_mappings,
+        target_columns=target_columns,
+        destination_db_type=destination_db_type,
+    )
+    plan_summary["dest_mode"] = mapping_proof.get("dest_mode")
+    plan_summary["mapping_proof_summary"] = mapping_proof.get("summary")
+
     agents_used = [
         "FormatClassifierAgent",
         "ColumnEnrichmentAgent",
@@ -418,6 +429,7 @@ def run_mapping_pipeline(
         "DataIntegrityAgent",
         "TransformCodegenAgent",
         "ValidationCriticAgent",
+        "MappingProofAgent",
     ]
     if llm_meta.get("llm_used"):
         agents_used.insert(3, "LLMMappingAgent")
@@ -432,6 +444,7 @@ def run_mapping_pipeline(
         "semantic_analysis": semantic_analysis,
         "pruned_sources": dropped,
         "plan_summary": plan_summary,
+        "mapping_proof": mapping_proof,
         "quality_issues": quality_issues,
         "coercion_issues": coercion_issues,
         "sample_quality": sample_quality_report,

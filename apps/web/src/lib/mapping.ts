@@ -78,7 +78,7 @@ export function widenMappingToVarchar(m: EditableMapping): EditableMapping {
   return {
     ...m,
     destType: "VARCHAR",
-    transform: m.transform === "cast_boolean" ? "trim" : m.transform,
+    transform: m.transform === "cast_boolean" ? "none" : m.transform,
     approved: false,
     requiresReview: false,
     reason: [m.reason, "Widened to VARCHAR (string enum — not boolean)"].filter(Boolean).join(" · "),
@@ -118,9 +118,16 @@ export function normalizeMappingTarget(name: string, col?: Pick<ColumnAnalysis, 
     .toLowerCase();
 }
 
-function boostIdentityConfidence(source: string, target: string, confidence: number): number {
+function boostIdentityConfidence(
+  source: string,
+  target: string,
+  confidence: number,
+  createNew = false,
+): number {
   const norm = normalizeMappingTarget(source);
   if (norm === target || source.toLowerCase() === target.toLowerCase()) {
+    // Create-new identity is "ready to CREATE", not proven 99% against existing dest.
+    if (createNew) return Math.min(Math.max(confidence, 0.9), 0.93);
     return Math.max(confidence, 0.95);
   }
   return confidence;
@@ -209,7 +216,7 @@ export function buildPreflightMappings(
 }
 
 export function engineTransformToUi(engine?: string): MappingTransform {
-  if (!engine) return "none";
+  if (!engine || engine === "none" || engine === "identity") return "none";
   const map: Record<string, MappingTransform> = {
     trim: "trim",
     trim_id: "trim",
@@ -242,6 +249,8 @@ export function editableFromPipelineMappings(
     target_type?: string;
     is_pii?: boolean;
     semantic_role?: string;
+    assignment_strategy?: string;
+    create_new?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -249,6 +258,9 @@ export function editableFromPipelineMappings(
   destSchema?: Record<string, string>,
 ): EditableMapping[] {
   const destSet = new Set((destColumns ?? []).map((c) => c.toLowerCase()));
+  const createNew =
+    (destColumns?.length ?? 0) === 0
+    || mappings.some((m) => m.assignment_strategy === "identity_passthrough" || m.create_new);
   const destTypeByLower = new Map(
     Object.entries(destSchema || {}).map(([k, v]) => [k.toLowerCase(), v]),
   );
@@ -256,7 +268,7 @@ export function editableFromPipelineMappings(
     const sampleVal = sampleRows?.find((r) => r[m.source] != null)?.[m.source];
     const existsInDest = destSet.has(m.target.toLowerCase());
     const liveDestType = destTypeByLower.get(m.target.toLowerCase());
-    const conf = boostIdentityConfidence(m.source, m.target, m.confidence);
+    const conf = boostIdentityConfidence(m.source, m.target, m.confidence, createNew);
     const requiresReview = Boolean(m.requires_review);
     const identityMatch = normalizeMappingTarget(m.source) === m.target.toLowerCase();
     const base: EditableMapping = {

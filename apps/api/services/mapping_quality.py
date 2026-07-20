@@ -13,6 +13,30 @@ PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
 DATE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}/\d{2}/\d{2})(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
 BOOL_VALUES = {"true", "false", "yes", "no", "y", "n", "1", "0", "t", "f"}
 
+# Create-new identity is "ready to CREATE", not proven against an existing dest.
+IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
+
+_TEMPORAL_NAME_TERMS = frozenset({"date", "time", "dt", "timestamp", "created", "updated"})
+_TEMPORAL_TYPE_TOKENS = (
+    "DATE",
+    "TIME",
+    "TIMESTAMP",
+    "DATETIME",
+    "TIMESTAMPTZ",
+    "TIMESTAMP_TZ",
+    "TIMESTAMP_NTZ",
+    "TIMESTAMP_LTZ",
+)
+_STRING_TYPE_TOKENS = (
+    "VARCHAR",
+    "CHAR",
+    "TEXT",
+    "STRING",
+    "CLOB",
+    "NVARCHAR",
+    "NCHAR",
+)
+
 
 def _non_empty(samples: list[str]) -> list[str]:
     return [s.strip() for s in samples if s is not None and str(s).strip()]
@@ -25,7 +49,7 @@ def _null_rate(samples: list[str]) -> float:
     return empty / len(samples)
 
 
-def _contains_term(name: str, terms: set[str]) -> bool:
+def _contains_term(name: str, terms: set[str] | frozenset[str]) -> bool:
     lowered = name.lower()
     return any(term in lowered for term in terms)
 
@@ -40,6 +64,25 @@ def _pattern_rate(values: list[str], pattern: re.Pattern[str]) -> float:
     if not values:
         return 0.0
     return sum(1 for v in values if pattern.match(v)) / len(values)
+
+
+def _is_temporal_type(type_str: str) -> bool:
+    t = str(type_str or "").upper()
+    return any(tok in t for tok in _TEMPORAL_TYPE_TOKENS)
+
+
+def _is_string_type(type_str: str) -> bool:
+    t = str(type_str or "").upper()
+    if not t:
+        return False
+    return any(tok in t for tok in _STRING_TYPE_TOKENS)
+
+
+def _target_is_temporal(target_name: str, target_type: str) -> bool:
+    """True when dest type family is temporal OR name tokens clearly say so."""
+    if _is_temporal_type(target_type):
+        return True
+    return _contains_term(target_name, _TEMPORAL_NAME_TERMS)
 
 
 def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
@@ -110,14 +153,25 @@ def score_mapping_pair(
     tgt = (target_name or mapping.get("target", "")).lower()
     src_lower = src.lower()
     profile = source_profile or {}
+    is_identity = mapping.get("assignment_strategy") == "identity_passthrough" or mapping.get("create_new")
+    tgt_type = str(mapping.get("target_type") or mapping.get("dest_type") or "").upper()
+    src_type = str(mapping.get("source_type") or mapping.get("inferred_type") or "").upper()
 
     # Semantic role alignment boosts
     if profile.get("likely_email") and ("email" in tgt or "mail" in tgt):
         delta += 0.05
         notes.append("email pattern aligned")
-    elif profile.get("likely_email") and "email" not in tgt:
-        delta -= 0.08
-        notes.append("email-like source mapped to non-email target")
+    elif profile.get("likely_email") and "email" not in tgt and "mail" not in tgt:
+        # VARCHAR/STRING is a valid physical home for email on Snowflake etc.
+        # Frame as PII/semantic classification, not a type-mismatch defect.
+        if _is_string_type(tgt_type):
+            notes.append(
+                "email-like values (PII) — choose Mask / hash / tokenize / preserve; "
+                "VARCHAR is a valid physical type"
+            )
+        else:
+            delta -= 0.08
+            notes.append("email-like source mapped to non-string target")
 
     if profile.get("likely_uuid") and ("uuid" in tgt or tgt.endswith("_id") or tgt == "id"):
         delta += 0.04
@@ -138,12 +192,15 @@ def score_mapping_pair(
         delta += 0.04
         notes.append("phone pattern aligned")
 
-    if profile.get("likely_date") and any(k in tgt for k in ("date", "time", "dt", "timestamp", "created", "updated")):
-        delta += 0.04
-        notes.append("date-like source aligned to temporal target")
-    elif profile.get("likely_date") and not any(k in tgt for k in ("date", "time", "dt", "timestamp", "created", "updated")):
-        delta -= 0.03
-        notes.append("date-like source mapped to non-temporal target")
+    # Temporal gate is type-aware: TIMESTAMP→TIMESTAMP must not warn even when
+    # the target name lacks date/time tokens (e.g. last_login TIMESTAMP).
+    if profile.get("likely_date"):
+        if _target_is_temporal(tgt, tgt_type):
+            delta += 0.04
+            notes.append("date-like source aligned to temporal target")
+        else:
+            delta -= 0.03
+            notes.append("date-like source mapped to non-temporal target")
 
     if profile.get("likely_boolean") and any(k in tgt for k in ("flag", "is_", "active", "enabled", "verified")):
         delta += 0.03
@@ -156,20 +213,18 @@ def score_mapping_pair(
     if overlap and float(mapping.get("confidence", 0)) < 0.8:
         delta += min(0.03 * len(overlap), 0.06)
 
-    # Strong exact / normalized-name match boost. If the source and target names
-    # are the same (or obvious variants), the mapping is highly reliable —
-    # unless samples prove a type mismatch (handled below).
-    if src_lower == tgt:
-        delta += 0.75
-    elif src_lower in tgt or tgt in src_lower:
-        delta += 0.45
-    elif overlap and float(mapping.get("confidence", 0)) < 0.7:
-        delta += 0.25
+    # Strong exact / normalized-name match boost — skip for create-new identity
+    # passthrough so we do not inflate "will CREATE" into 0.99.
+    if not is_identity:
+        if src_lower == tgt:
+            delta += 0.75
+        elif src_lower in tgt or tgt in src_lower:
+            delta += 0.45
+        elif overlap and float(mapping.get("confidence", 0)) < 0.7:
+            delta += 0.25
 
     # String enum → BOOLEAN is a common false positive (status=active/invalidated).
     # Apply AFTER name boost so exact-name matches cannot hide the type conflict.
-    tgt_type = str(mapping.get("target_type") or mapping.get("dest_type") or "").upper()
-    src_type = str(mapping.get("source_type") or mapping.get("inferred_type") or "").upper()
     samples = [str(x).strip() for x in (profile.get("samples") or []) if str(x).strip()]
     if not samples and profile.get("sample_values"):
         samples = [str(x).strip() for x in profile["sample_values"] if str(x).strip()]
@@ -211,6 +266,9 @@ def refine_mappings_with_quality(
         delta, notes = score_mapping_pair(m, source_profile=profile)
         out = dict(m)
         conf = min(0.99, max(0.0, float(m.get("confidence", 0.0)) + delta))
+        is_identity = m.get("assignment_strategy") == "identity_passthrough" or m.get("create_new")
+        if is_identity:
+            conf = min(conf, IDENTITY_PASSTHROUGH_CONF_CAP)
         out["confidence"] = round(conf, 3)
         if notes:
             reason = m.get("reasoning", "")

@@ -51,10 +51,15 @@ def refine_mapping_confidence(
     conf = float(mapping.get("confidence", 0.0))
 
     if rate >= 0.95 and len(samples) >= 2:
-        conf = min(0.99, conf + 0.04)
+        is_identity = mapping.get("assignment_strategy") == "identity_passthrough" or mapping.get("create_new")
+        # Existing-dest sample proof may reach 0.99; create-new stays capped.
+        conf = min(0.93 if is_identity else 0.99, conf + 0.04)
         reason = mapping.get("reasoning", "")
         if "sample-validated" not in reason.lower():
-            out["reasoning"] = f"{reason} · sample-validated ({int(rate * 100)}%)".strip(" ·")
+            n = len(samples)
+            out["reasoning"] = (
+                f"{reason} · sample-validated ({int(rate * 100)}%, n={n})"
+            ).strip(" ·")
     elif rate < 0.5 and len(samples) >= 2:
         conf = max(0.55, conf - 0.12)
         out["requires_review"] = True
