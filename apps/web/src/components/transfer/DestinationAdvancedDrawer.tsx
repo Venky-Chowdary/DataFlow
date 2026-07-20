@@ -92,6 +92,10 @@ interface DestinationAdvancedDrawerProps {
   multiSubnetFailover?: boolean;
   onMultiSubnetFailoverChange?: (value: boolean) => void;
   showMultiSubnetFailover?: boolean;
+  /** SQL Server CDC TVF row_filter_option (all / all update old / net). */
+  cdcRowFilter?: "all" | "all update old" | "net";
+  onCdcRowFilterChange?: (value: "all" | "all update old" | "net") => void;
+  showCdcRowFilter?: boolean;
   /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
   writeViaStaging?: boolean;
   onWriteViaStagingChange?: (value: boolean) => void;
@@ -183,6 +187,9 @@ export function DestinationAdvancedDrawer({
   multiSubnetFailover = false,
   onMultiSubnetFailoverChange,
   showMultiSubnetFailover = false,
+  cdcRowFilter = "all",
+  onCdcRowFilterChange,
+  showCdcRowFilter = false,
   writeViaStaging = false,
   onWriteViaStagingChange,
   showVectorOptions = false,
@@ -365,6 +372,32 @@ export function DestinationAdvancedDrawer({
                   </small>
                 </span>
               </label>
+            )}
+            {showCdcRowFilter && onCdcRowFilterChange && (
+              <div className="df2-field" style={{ marginTop: "0.75rem" }}>
+                <label className="df2-label" htmlFor="cdc-row-filter">
+                  SQL Server CDC row filter
+                </label>
+                <select
+                  id="cdc-row-filter"
+                  className="df2-input"
+                  value={cdcRowFilter}
+                  onChange={(e) =>
+                    onCdcRowFilterChange(e.target.value as "all" | "all update old" | "net")
+                  }
+                >
+                  <option value="all">all — every change row (insert / update-before+after / delete)</option>
+                  <option value="all update old">all update old — pair before-image on updates</option>
+                  <option value="net">net — net changes TVF (requires @supports_net_changes=1)</option>
+                </select>
+                <small className="df2-label-hint">
+                  Maps to Microsoft <code>row_filter_option</code> on{" "}
+                  <code>cdc.fn_cdc_get_all_changes_*</code> /{" "}
+                  <code>cdc.fn_cdc_get_net_changes_*</code>. Default <code>all</code> is safest;
+                  <code>net</code> collapses multiple updates to the latest row per PK in the LSN
+                  window.
+                </small>
+              </div>
             )}
           </div>
         )}

@@ -155,6 +155,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
   const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
   const isVectorDest = ["pgvector", "qdrant", "weaviate", "pinecone", "milvus"].includes(resolved);
+  const isIceberg = resolved === "iceberg";
 
   const authModes: AuthModeConfig[] = [];
 
@@ -167,6 +168,35 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       auth("connection_string", "URL or object-store URI", [text("connection_string", "URL or URI", { placeholder: "s3://bucket/path or https://host/file.csv" })], (values) =>
         required(values, "connection_string", "URL or URI")
       )
+    );
+    return {
+      type: resolved,
+      label,
+      defaultAuthMode: "file_path",
+      authModes,
+      commonFields: [],
+    };
+  }
+
+  // Apache Iceberg — filesystem / mounted warehouse root (REST catalog later).
+  if (isIceberg) {
+    authModes.push(
+      auth(
+        "file_path",
+        "Warehouse path",
+        [
+          text("connection_string", "Warehouse root", {
+            placeholder: "/data/iceberg-warehouse or file:///mnt/lake",
+            hint: "Local or mounted path where Iceberg metadata + data files are written. REST/Glue catalog committers are not required for this writer.",
+          }),
+          text("database", "Default namespace (optional)", {
+            optional: true,
+            placeholder: "analytics",
+            hint: "Used as the Iceberg namespace folder under the warehouse when set. Table name is chosen in Transfer Studio.",
+          }),
+        ],
+        (values) => required(values, "connection_string", "Warehouse root"),
+      ),
     );
     return {
       type: resolved,

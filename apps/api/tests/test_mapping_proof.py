@@ -272,3 +272,36 @@ def test_pipeline_returns_mapping_proof():
     assert result["mapping_proof"]["dest_mode"] == "create_new"
     assert result["mapping_proof"]["mappings"][0]["confidence"] <= 0.93
     assert "confidence_breakdown" in result["mapping_proof"]["mappings"][0]["evidence"]
+
+
+def test_mapping_proof_or_build_prefers_persisted():
+    from services.mapping_proof import mapping_proof_or_build
+
+    existing = {
+        "dest_mode": "match_existing",
+        "mappings": [{"source": "a", "target": "b", "confidence": 0.8}],
+        "summary": {"mapped_count": 1},
+    }
+    out = mapping_proof_or_build(
+        [{"source": "a", "target": "b", "confidence": 0.5}],
+        existing=existing,
+        destination_db_type="postgresql",
+    )
+    assert out is existing
+
+    rebuilt = mapping_proof_or_build(
+        [{
+            "source": "id",
+            "target": "id",
+            "source_type": "INTEGER",
+            "target_type": "INTEGER",
+            "confidence": 0.9,
+            "create_new": True,
+            "assignment_strategy": "identity_passthrough",
+        }],
+        destination_db_type="snowflake",
+        sync_mode="cdc",
+    )
+    assert rebuilt["mappings"]
+    assert rebuilt["summary"]["mapped_count"] == 1
+    assert rebuilt.get("sync_mode") == "cdc" or rebuilt["summary"].get("cdc_detected")

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import type { PreflightResult } from "../../lib/types";
@@ -13,6 +14,8 @@ interface ValidateActionsRailProps {
   /** Extra execute block (e.g. non-CDC multi-stream). */
   executeBlocked?: boolean;
   executeBlockedReason?: string;
+  /** CDC retention Check control (SQL Server / Oracle). */
+  cdcRetentionSlot?: ReactNode;
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
@@ -31,6 +34,7 @@ export function ValidateActionsRail({
   savingContract,
   executeBlocked = false,
   executeBlockedReason,
+  cdcRetentionSlot,
   onBack,
   onRunPreflight,
   onApproveMappings,
@@ -69,6 +73,12 @@ export function ValidateActionsRail({
           </div>
         ) : null}
 
+        {cdcRetentionSlot ? (
+          <div className="df2-validate-rail-panel" aria-label="CDC retention">
+            {cdcRetentionSlot}
+          </div>
+        ) : null}
+
         {preflighting && (
           <div className="df2-validate-rail-panel df2-validate-status live">
             <div className="df2-validate-rail-score">
@@ -88,6 +98,11 @@ export function ValidateActionsRail({
             <p>
               <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
             </p>
+            {passed && (
+              <p className="df2-validate-rail-hint">
+                Review every gate card on the left — rules, duration, and blockers — then Execute.
+              </p>
+            )}
             {preflight.run_id && (
               <p className="df2-validate-rail-runid" title="Paste into Data Pilot to triage this validation">
                 Run <code>{preflight.run_id}</code>
@@ -212,9 +227,14 @@ export function ValidateActionsRail({
             {executeBlocked
               ? "Execute (blocked)"
               : passed
-                ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
+                ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
                 : "Execute (blocked)"}
           </Button>
+        )}
+        {passed && !transferLaunch && !executeBlocked && (
+          <p className="df2-validate-rail-explain">
+            Execute starts the write. You stay on Validate until you choose to run.
+          </p>
         )}
         {executeBlocked && executeBlockedReason && (
           <p className="df2-validate-rail-explain" role="alert">

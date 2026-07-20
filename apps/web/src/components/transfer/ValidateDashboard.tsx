@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
-import { explainPreflight, type CellPreviewResult } from "../../lib/api";
+import { explainPreflight, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -13,6 +13,7 @@ import type {
 import { isLocalPreflight } from "../../lib/localPreflight";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 interface GateMeta {
   key: string;
@@ -139,6 +140,12 @@ interface ValidateDashboardProps {
   } | null;
   /** Trigger preflight from the dashboard (same as the rail CTA). */
   onRunPreflight?: () => void;
+  /** Current Studio mappings for durable repair apply. */
+  repairMappings?: RepairMapping[];
+  /** After Approve & apply — merge updated mappings into Studio. */
+  onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
+  /** Optional job id stamped onto the repair proposal. */
+  repairJobId?: string;
 }
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
@@ -442,11 +449,17 @@ export function ValidateDashboard({
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
+  repairMappings = [],
+  onRepairMappingsApplied,
+  repairJobId = "",
 }: ValidateDashboardProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
   const [explaining, setExplaining] = useState(false);
+  const [repairOpen, setRepairOpen] = useState(false);
+  const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
   const [badDataOpen, setBadDataOpen] = useState(false);
   const [remediating, setRemediating] = useState(false);
@@ -577,25 +590,14 @@ export function ValidateDashboard({
     return () => window.clearInterval(timer);
   }, [running]);
 
-  // After results return, reveal gates in engine order paced by real duration_ms.
+  // Show every gate result as soon as the engine returns — operators must be able
+  // to read rules/status before Execute. duration_ms still appears on each card.
   useEffect(() => {
     if (running || !preflight?.gates?.length) {
       setRevealCount(0);
       return;
     }
-    setRevealCount(0);
-    let i = 0;
-    let timer = 0;
-    const advance = () => {
-      i += 1;
-      setRevealCount(i);
-      if (i >= (preflight.gates?.length ?? 0)) return;
-      const justShown = preflight.gates[i - 1];
-      const pace = Math.min(900, Math.max(140, Number(justShown?.duration_ms) || 180));
-      timer = window.setTimeout(advance, pace);
-    };
-    timer = window.setTimeout(advance, 60);
-    return () => window.clearTimeout(timer);
+    setRevealCount(preflight.gates.length);
   }, [running, preflight?.run_id, preflight?.gates]);
 
   const proof = preflight?.proof_bundle;
@@ -702,6 +704,28 @@ export function ValidateDashboard({
       setBadDataOpen(false);
     } finally {
       setRemediating(false);
+    }
+  };
+
+  const proposeDurableRepair = async () => {
+    if (!preflight) return;
+    setRepairBusy(true);
+    try {
+      const proposal = await proposeRepairFromPreflight({
+        preflight: preflight as unknown as Record<string, unknown>,
+        coercion_report: (preflight.coercion_report || {}) as unknown as Record<string, unknown>,
+        job_id: repairJobId,
+      });
+      setRepairProposal(proposal);
+      setRepairOpen(true);
+    } catch (e) {
+      pushRemediation(
+        "Repair propose failed",
+        (e as Error).message || "Could not create repair proposal",
+        "Failed",
+      );
+    } finally {
+      setRepairBusy(false);
     }
   };
 
@@ -1345,6 +1369,31 @@ export function ValidateDashboard({
                             {action.label}
                           </button>
                         ))}
+                        <button
+                          type="button"
+                          className="df2-vd-chip kind-review_mappings"
+                          onClick={() => void proposeDurableRepair()}
+                          disabled={repairBusy || !preflight}
+                          title="Persist a human-gated repair proposal with audit trail"
+                        >
+                          <DtIcon name="sparkle" size={13} />
+                          {repairBusy ? "Proposing…" : "Propose durable repair"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {explain.suggested_actions.length === 0 && !explain.passed && (
+                    <div className="df2-vd-assist-actions">
+                      <div className="df2-vd-chip-row">
+                        <button
+                          type="button"
+                          className="df2-vd-chip kind-review_mappings"
+                          onClick={() => void proposeDurableRepair()}
+                          disabled={repairBusy || !preflight}
+                        >
+                          <DtIcon name="sparkle" size={13} />
+                          {repairBusy ? "Proposing…" : "Propose durable repair"}
+                        </button>
                       </div>
                     </div>
                   )}
@@ -1554,6 +1603,28 @@ export function ValidateDashboard({
         onExplainWithAI={() => {
           setBadDataOpen(false);
           void runExplain();
+        }}
+      />
+      <RepairProposalDrawer
+        open={repairOpen}
+        proposal={repairProposal}
+        mappings={repairMappings}
+        onClose={() => setRepairOpen(false)}
+        onApplied={(updated) => {
+          onRepairMappingsApplied?.(updated);
+          pendingVerifyRef.current = true;
+          pushRemediation(
+            "Repair applied",
+            `${updated.length} mapping(s) updated from approved proposal ${repairProposal?.id || ""}`,
+            "Applied — re-run Validate",
+          );
+        }}
+        onDecided={(p) => {
+          pushRemediation(
+            p.status === "rejected" ? "Repair rejected" : "Repair approved",
+            p.summary || p.id,
+            p.status,
+          );
         }}
       />
     </section>

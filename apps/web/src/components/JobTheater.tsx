@@ -4,7 +4,7 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
 import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
-import { cancelJob, resumeJob, streamJobProgress } from "../lib/api";
+import { cancelJob, fetchJobMappingProof, resumeJob, streamJobProgress } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
@@ -15,9 +15,19 @@ import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
+import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
+import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
+import { hashForScreen } from "../lib/appNavigation";
+
+function asMappingProof(raw: unknown): MappingProof | null {
+  if (!raw || typeof raw !== "object") return null;
+  const proof = raw as MappingProof;
+  if (!Array.isArray(proof.mappings) || proof.mappings.length === 0) return null;
+  return proof;
+}
 
 interface JobTheaterProps {
   jobId: string;
@@ -328,6 +338,29 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
+
+  useEffect(() => {
+    const fromJob = asMappingProof(job.mapping_proof);
+    if (fromJob) {
+      setResolvedProof(fromJob);
+      return;
+    }
+    let cancelled = false;
+    void fetchJobMappingProof(jobId)
+      .then((res) => {
+        if (cancelled) return;
+        setResolvedProof(asMappingProof(res.mapping_proof));
+      })
+      .catch(() => {
+        /* optional — job may predate mapping_proof persistence */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, job.mapping_proof]);
+
   const failureHint = isFailed
     ? inferTransferFailureHint(
       job.error || job.message,
@@ -580,6 +613,16 @@ export function JobTheaterView({
       {isFailed && (
         <CdcCursorGapPanel job={job} onResume={onResume} resuming={resuming} />
       )}
+      <CdcRetentionPanel
+        status={job.cdc_retention_status}
+        resume={job.cdc_retention_resume}
+        retained={job.cdc_retention_retained}
+        message={job.cdc_retention_message}
+        dialect={job.cdc_retention_dialect}
+        cursorKey={job.cdc_lease_cursor_key}
+        onResume={onResume}
+        resuming={resuming}
+      />
 
       {(isComplete || isFailed || isCancelled || isQuarantine) && (
         <JobTrustScoreCard
@@ -757,6 +800,18 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {job.cdc_row_filter && (
+          <article
+            className="df2-theater-v3-metric"
+            title="SQL Server CDC TVF row_filter_option used for this run"
+          >
+            <DtIcon name="layers" size={16} />
+            <div>
+              <strong className="df2-mono">{job.cdc_row_filter}</strong>
+              <span>CDC row filter</span>
+            </div>
+          </article>
+        )}
         {job.replication_lag_bytes != null && Number.isFinite(Number(job.replication_lag_bytes)) && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="database" size={16} />
@@ -857,6 +912,18 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {job.cdc_retention_status && job.cdc_retention_status !== "n_a" && (
+          <article
+            className="df2-theater-v3-metric"
+            title={job.cdc_retention_message || `Retention ${job.cdc_retention_status}`}
+          >
+            <DtIcon name={job.cdc_retention_status === "gap" || job.cdc_retention_status === "at_risk" ? "alert" : "gate"} size={16} />
+            <div>
+              <strong>{job.cdc_retention_status}</strong>
+              <span>CDC retention</span>
+            </div>
+          </article>
+        )}
       </div>
 
       {Array.isArray(job.streams) && job.streams.length > 1 && (
@@ -880,7 +947,7 @@ export function JobTheaterView({
         </div>
       )}
 
-      {(job.cdc_shared_reader || job.snapshot_mode) && (
+      {(job.cdc_shared_reader || job.snapshot_mode || job.cdc_row_filter) && (
         <div className="df2-theater-v3-cdc-meta" aria-label="CDC topology">
           {job.cdc_shared_reader && (
             <span className="df2-theater-cdc-chip is-ok">Shared log reader · one slot / server_id</span>
@@ -890,6 +957,11 @@ export function JobTheaterView({
           )}
           {job.cdc_delivery && (
             <span className="df2-theater-cdc-chip">{job.cdc_delivery} delivery</span>
+          )}
+          {job.cdc_row_filter && (
+            <span className="df2-theater-cdc-chip" title="SQL Server CDC row_filter_option">
+              Row filter · {job.cdc_row_filter}
+            </span>
           )}
         </div>
       )}
@@ -986,6 +1058,52 @@ export function JobTheaterView({
               : undefined
           }
         />
+      )}
+
+      {resolvedProof && (
+        <section className="df2-theater-v3-mapping-proof" aria-label="Mapping proof">
+          <div className="df2-theater-v3-mapping-proof-copy">
+            <strong>Mapping proof</strong>
+            <p>
+              Per-column match evidence for this run
+              {resolvedProof.summary?.mapped_count != null
+                ? ` · ${resolvedProof.summary.mapped_count} pairs`
+                : ""}
+              . Explains mapping decisions — not Gate-8 row fidelity.
+            </p>
+          </div>
+          <div className="df2-theater-v3-mapping-proof-actions">
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-primary"
+              onClick={() => setMappingProofOpen(true)}
+            >
+              <DtIcon name="layers" size={14} /> Open mapping proof
+            </button>
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              onClick={() => {
+                const link = `${window.location.origin}${window.location.pathname}${hashForScreen("jobs", {
+                  jobId,
+                  panel: "mapping-proof",
+                })}`;
+                void navigator.clipboard.writeText(link).then(() => {
+                  /* best-effort */
+                });
+              }}
+            >
+              <DtIcon name="globe" size={14} /> Copy deep-link
+            </button>
+          </div>
+          <MappingProofDrawer
+            open={mappingProofOpen}
+            onClose={() => setMappingProofOpen(false)}
+            proof={resolvedProof}
+            sourceLabel={sourceLabel}
+            destLabel={destLabel}
+          />
+        </section>
       )}
 
       {isComplete && !isQuarantine && (

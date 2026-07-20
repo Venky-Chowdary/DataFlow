@@ -116,6 +116,7 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     if slot_name is None:
         slot_name = getattr(cdc, "slot_name", None)
     lease_fields: dict[str, Any] = {}
+    row_filter = None
     lease = getattr(cdc, "_lease", None)
     if lease is not None and hasattr(lease, "theater_fields"):
         try:
@@ -137,7 +138,18 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
                     lease_fields[key] = meta[key]
         except Exception:
             pass
-    return {
+    if hasattr(cdc, "cdc_metadata"):
+        try:
+            meta = cdc.cdc_metadata() or {}
+            if meta.get("cdc_row_filter"):
+                row_filter = meta.get("cdc_row_filter")
+            elif meta.get("row_filter"):
+                row_filter = meta.get("row_filter")
+        except Exception:
+            pass
+    if row_filter is None:
+        row_filter = getattr(cdc, "row_filter", None)
+    out: dict[str, Any] = {
         "replication_lag_bytes": lag_bytes,
         "cdc_lag_seconds": lag_seconds,
         "cdc_last_ddl_at": last_ddl,
@@ -147,7 +159,11 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         "cdc_delivery": "at-least-once",
         **lease_fields,
         **_source_ha_lag_fields(cdc),
+        **_cdc_retention_lag_fields(cdc),
     }
+    if row_filter:
+        out["cdc_row_filter"] = str(row_filter)
+    return out
 
 
 def _source_ha_lag_fields(cdc: Any) -> dict[str, Any]:
@@ -156,6 +172,15 @@ def _source_ha_lag_fields(cdc: Any) -> dict[str, Any]:
         return {}
     try:
         return dict(probe.job_fields())
+    except Exception:
+        return {}
+
+
+def _cdc_retention_lag_fields(cdc: Any) -> dict[str, Any]:
+    try:
+        from services.cdc_retention_probe import retention_lag_fields
+
+        return retention_lag_fields(cdc)
     except Exception:
         return {}
 
@@ -777,6 +802,14 @@ def _run_cdc_shared_multi_table(
         ha = attach_source_ha(cdc, src_cfg)
         if ha is not None:
             ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
+    except Exception:
+        pass
+    try:
+        from services.cdc_retention_probe import attach_cdc_retention
+
+        ret = attach_cdc_retention(cdc, src_cfg, table=tables[0] if tables else "")
+        if ret is not None:
+            ddl_log.append(f"cdc_retention status={ret.status}")
     except Exception:
         pass
 
@@ -1433,6 +1466,14 @@ def _run_cdc_single_stream(
             ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
     except Exception:
         pass
+    try:
+        from services.cdc_retention_probe import attach_cdc_retention
+
+        ret = attach_cdc_retention(cdc, src_cfg, table=table_name)
+        if ret is not None:
+            ddl_log.append(f"cdc_retention status={ret.status}")
+    except Exception:
+        pass
 
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
     # Resume from durable job checkpoint watermark when present.
@@ -1584,6 +1625,7 @@ def _run_cdc_single_stream(
                     "cdc_plugin": lag_fields.get("cdc_plugin"),
                     "cdc_slot_name": lag_fields.get("cdc_slot_name"),
                     "cdc_delivery": lag_fields.get("cdc_delivery"),
+                    "cdc_row_filter": lag_fields.get("cdc_row_filter"),
                     "cdc_lease_holder": lag_fields.get("cdc_lease_holder"),
                     "cdc_lease_resource": lag_fields.get("cdc_lease_resource"),
                     "cdc_lease_stale": lag_fields.get("cdc_lease_stale"),
@@ -1595,6 +1637,10 @@ def _run_cdc_single_stream(
                     "source_ha_group": lag_fields.get("source_ha_group"),
                     "source_ha_replica": lag_fields.get("source_ha_replica"),
                     "source_ha_message": lag_fields.get("source_ha_message"),
+                    "cdc_retention_status": lag_fields.get("cdc_retention_status"),
+                    "cdc_retention_resume": lag_fields.get("cdc_retention_resume"),
+                    "cdc_retention_retained": lag_fields.get("cdc_retention_retained"),
+                    "cdc_retention_message": lag_fields.get("cdc_retention_message"),
                     "watermark": state.running_cursor,
                     "cdc": {
                         "inserts": state.inserts,
@@ -1664,6 +1710,7 @@ def _run_cdc_single_stream(
     summary["cdc_plugin"] = lag_fields.get("cdc_plugin")
     summary["cdc_slot_name"] = lag_fields.get("cdc_slot_name")
     summary["cdc_delivery"] = lag_fields.get("cdc_delivery")
+    summary["cdc_row_filter"] = lag_fields.get("cdc_row_filter")
     summary["cdc_lease_holder"] = lag_fields.get("cdc_lease_holder")
     summary["cdc_lease_resource"] = lag_fields.get("cdc_lease_resource")
     summary["cdc_lease_stale"] = lag_fields.get("cdc_lease_stale")
@@ -1677,6 +1724,12 @@ def _run_cdc_single_stream(
         "source_ha_replica",
         "source_ha_open_mode",
         "source_ha_message",
+        "cdc_row_filter",
+        "cdc_retention_status",
+        "cdc_retention_resume",
+        "cdc_retention_retained",
+        "cdc_retention_message",
+        "cdc_retention_dialect",
     ):
         if lag_fields.get(ha_key) is not None:
             summary[ha_key] = lag_fields.get(ha_key)

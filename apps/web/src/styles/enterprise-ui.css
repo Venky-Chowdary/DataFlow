@@ -1522,6 +1522,236 @@
   margin: 12px 0;
 }
 
+.df2-jobs-evidence {
+  margin: 12px 0 16px;
+}
+
+.df2-jobs-evidence-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.df2-jobs-evidence-head strong {
+  font-size: 13px;
+}
+
+.df2-jobs-evidence-head span {
+  font-size: 12px;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-jobs-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.df2-jobs-evidence-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: start;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface, #fff);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.df2-jobs-evidence-card:hover {
+  border-color: #94a3b8;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+}
+
+.df2-jobs-evidence-card.tone-ok {
+  border-left: 3px solid #059669;
+}
+
+.df2-jobs-evidence-card.tone-warn {
+  border-left: 3px solid #d97706;
+}
+
+.df2-jobs-evidence-card.tone-danger {
+  border-left: 3px solid #dc2626;
+}
+
+.df2-jobs-evidence-icon {
+  display: inline-flex;
+  color: #475569;
+  margin-top: 2px;
+}
+
+.df2-jobs-evidence-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df2-jobs-evidence-copy strong {
+  font-size: 13px;
+  color: var(--df-text, #0f172a);
+}
+
+.df2-jobs-evidence-copy span {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-jobs-evidence-copy em {
+  font-style: normal;
+  font-size: 11px;
+  color: #475569;
+  margin-top: 4px;
+}
+
+.df2-jobs-evidence-chevron {
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.df2-jobs-overview-note {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-jobs-map-overview {
+  margin-bottom: 14px;
+}
+
+.df2-jobs-log-table-wrap {
+  overflow: auto;
+  max-height: min(70vh, 640px);
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 10px;
+}
+
+.df2-jobs-log-table td {
+  vertical-align: top;
+}
+
+.df2-jobs-log-col-n {
+  width: 3.5rem;
+  color: #94a3b8;
+}
+
+.df2-jobs-log-stamp {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 11px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-jobs-log-line {
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.df2-jobs-log-empty {
+  margin: 0;
+}
+
+.df2-jobs-explanation-prose {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.df2-jobs-preflight-blockers {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #475569;
+}
+
+.df2-jobs-preflight-blockers li + li {
+  margin-top: 8px;
+}
+
+.df2-jobs-writer-raw {
+  margin-top: 14px;
+  font-size: 13px;
+}
+
+.df2-jobs-writer-raw summary {
+  cursor: pointer;
+  color: #475569;
+}
+
+.df2-jobs-writer-json {
+  margin: 8px 0 0;
+  padding: 12px;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.df2-jobs-v3-mappings.is-drawer {
+  overflow: auto;
+  max-height: min(70vh, 640px);
+}
+
+.df2-validate-rail-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-theater-v3-mapping-proof,
+.df2-result-mapping-proof {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-panel, 12px);
+  background: var(--df-surface, #fff);
+}
+
+.df2-theater-v3-mapping-proof strong,
+.df2-result-mapping-proof strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.df2-theater-v3-mapping-proof p,
+.df2-result-mapping-proof p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--df-text-muted, #64748b);
+  max-width: 52ch;
+}
+
+.df2-theater-v3-mapping-proof-actions,
+.df2-result-mapping-proof-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 @media (max-width: 720px) {
   .df2-result-cdc-strip dl {
     grid-template-columns: 1fr;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { CopyIdChip } from "../ui/CopyIdChip";
@@ -12,6 +12,16 @@ import { QuarantinePanel } from "./QuarantinePanel";
 import { Gate8ProofCard } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
+import { CdcRetentionPanel } from "./CdcRetentionPanel";
+import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
+import { hashForScreen } from "../../lib/appNavigation";
+
+function asMappingProof(raw: unknown): MappingProof | null {
+  if (!raw || typeof raw !== "object") return null;
+  const proof = raw as MappingProof;
+  if (!Array.isArray(proof.mappings) || proof.mappings.length === 0) return null;
+  return proof;
+}
 
 interface TransferResultDashboardProps {
   result: TransferResult;
@@ -19,6 +29,8 @@ interface TransferResultDashboardProps {
   sourceType?: string;
   destLabel?: string;
   destType?: string;
+  /** Optional Studio-session proof; falls back to result.mapping_proof. */
+  mappingProof?: MappingProof | null;
   onNewTransfer?: () => void;
   onViewJobs?: () => void;
   onSchedule?: () => void;
@@ -59,12 +71,15 @@ export function TransferResultDashboard({
   sourceType = "file",
   destLabel = "Destination",
   destType = "database",
+  mappingProof: mappingProofProp = null,
   onNewTransfer,
   onViewJobs,
   onSchedule,
   onOpenValidate,
 }: TransferResultDashboardProps) {
   const { setActiveData } = useActiveData();
+  const [proofOpen, setProofOpen] = useState(false);
+  const resolvedProof = asMappingProof(mappingProofProp) || asMappingProof(result.mapping_proof);
   const ds = result.destination_summary;
   const rec = result.records_transferred ?? 0;
   const errDetails = (result.error_details || {}) as Record<string, unknown>;
@@ -333,7 +348,49 @@ export function TransferResultDashboard({
         />
       )}
 
-      {(result.cdc_plugin || result.cdc_delivery || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder || result.source_ha_role) && (
+      {resolvedProof && (
+        <section className="df2-result-mapping-proof" aria-label="Mapping proof">
+          <div>
+            <strong>Mapping proof</strong>
+            <p className="df2-muted">
+              Column match evidence for this run
+              {resolvedProof.summary?.mapped_count != null
+                ? ` · ${resolvedProof.summary.mapped_count} pairs`
+                : ""}
+              . Explains mapping decisions — not Gate-8 row fidelity.
+            </p>
+          </div>
+          <div className="df2-result-mapping-proof-actions">
+            <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => setProofOpen(true)}>
+              <DtIcon name="layers" size={14} /> Open mapping proof
+            </button>
+            {result.job_id && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => {
+                  const link = `${window.location.origin}${window.location.pathname}${hashForScreen("jobs", {
+                    jobId: result.job_id,
+                    panel: "mapping-proof",
+                  })}`;
+                  void navigator.clipboard.writeText(link);
+                }}
+              >
+                <DtIcon name="globe" size={14} /> Copy Jobs deep-link
+              </button>
+            )}
+          </div>
+          <MappingProofDrawer
+            open={proofOpen}
+            onClose={() => setProofOpen(false)}
+            proof={resolvedProof}
+            sourceLabel={sourceLabel}
+            destLabel={destLabel}
+          />
+        </section>
+      )}
+
+      {(result.cdc_plugin || result.cdc_delivery || result.cdc_row_filter || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder || result.source_ha_role) && (
         <section className="df2-result-cdc-strip" aria-label="CDC run summary">
           <header>
             <DtIcon name="activity" size={14} />
@@ -342,6 +399,9 @@ export function TransferResultDashboard({
           </header>
           <dl>
             {result.cdc_plugin && <div><dt>Plugin</dt><dd>{result.cdc_plugin}</dd></div>}
+            {result.cdc_row_filter && (
+              <div><dt>Row filter</dt><dd className="df2-mono">{result.cdc_row_filter}</dd></div>
+            )}
             {result.snapshot_mode && <div><dt>Snapshot</dt><dd>{result.snapshot_mode}</dd></div>}
             {result.cdc_shared_reader && <div><dt>Topology</dt><dd>Shared log reader</dd></div>}
             {result.source_ha_role && (
@@ -354,6 +414,12 @@ export function TransferResultDashboard({
                     : ""}
                   {result.source_ha_group ? ` · ${result.source_ha_group}` : ""}
                 </dd>
+              </div>
+            )}
+            {result.cdc_retention_status && result.cdc_retention_status !== "n_a" && (
+              <div>
+                <dt>Retention</dt>
+                <dd title={result.cdc_retention_message || ""}>{result.cdc_retention_status}</dd>
               </div>
             )}
             {result.cdc_lag_seconds != null && Number.isFinite(Number(result.cdc_lag_seconds)) && (
@@ -384,6 +450,16 @@ export function TransferResultDashboard({
             error: result.error,
             watermark: result.watermark,
           } as import("../../lib/types").JobProgress}
+        />
+      )}
+      {(result.cdc_retention_status === "gap" || result.cdc_retention_status === "at_risk") && (
+        <CdcRetentionPanel
+          status={result.cdc_retention_status}
+          resume={result.cdc_retention_resume}
+          retained={result.cdc_retention_retained}
+          message={result.cdc_retention_message}
+          dialect={result.cdc_retention_dialect}
+          cursorKey={result.cdc_lease_cursor_key}
         />
       )}
 

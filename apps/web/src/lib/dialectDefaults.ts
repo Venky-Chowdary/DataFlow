@@ -21,6 +21,7 @@ const DEFAULTS: Record<string, string | null> = {
   databricks: "default",
   presto: "public",
   trino: "default",
+  iceberg: null,
 };
 
 const ALIASES: Record<string, string> = {

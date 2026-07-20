@@ -15,18 +15,47 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { cancelJob, fetchJob, renameJob, retryJob, resumeJob } from "../lib/api";
+import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
+import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
+import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { inferTransferFailureHint } from "../lib/transferFailure";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
-import { LiveEventLog } from "../components/ui/LiveEventLog";
 import { readJobEventLog } from "../lib/jobEventLog";
+import { MappingProofDrawer, type MappingProof } from "../components/MappingProofDrawer";
+import { Drawer } from "../components/ui/Drawer";
+import {
+  JobEvidenceLaunchGrid,
+  JobLogTable,
+  JobOverviewNote,
+} from "../components/jobs/JobEvidenceLaunch";
+
+function asMappingProof(raw: unknown): MappingProof | null {
+  if (!raw || typeof raw !== "object") return null;
+  const proof = raw as MappingProof;
+  if (!Array.isArray(proof.mappings) || proof.mappings.length === 0) return null;
+  return proof;
+}
+
+type JobEvidenceDrawer =
+  | null
+  | "gate8"
+  | "run-meta"
+  | "timeline"
+  | "mapping-proof"
+  | "mapping-table"
+  | "event-log"
+  | "ddl-log"
+  | "explanation"
+  | "streams"
+  | "preflight"
+  | "writer";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
@@ -78,6 +107,8 @@ interface JobsPageProps {
   onRefresh?: () => void;
   onStartTransfer?: () => void;
   initialJobId?: string;
+  /** Deep-link panel (e.g. mapping-proof). */
+  initialPanel?: string;
 }
 
 type JobFilter = "all" | "running" | "completed" | "failed";
@@ -136,7 +167,7 @@ function duplicateJobNameError(
   return null;
 }
 
-export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: JobsPageProps) {
+export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -153,6 +184,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const [renameSaving, setRenameSaving] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
+  const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
+  const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
 
   const counts = useMemo(() => ({
     all: jobs.length,
@@ -202,13 +236,42 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     setFilter("all");
     setJobSearch("");
     setSelectedId(initialJobId);
+    if (initialPanel === "mapping-proof") {
+      setDetailTab("mapping");
+      setEvidenceDrawer("mapping-proof");
+      setMappingProofOpen(true);
+    }
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${initialJobId}`)?.scrollIntoView({
         behavior: "smooth",
         block: "nearest",
       });
     });
-  }, [initialJobId, jobs]);
+  }, [initialJobId, initialPanel, jobs]);
+
+  useEffect(() => {
+    if (!selectedId || !liveJob) {
+      setMappingProof(asMappingProof(liveJob?.mapping_proof));
+      return;
+    }
+    const fromJob = asMappingProof(liveJob.mapping_proof);
+    if (fromJob) {
+      setMappingProof(fromJob);
+      return;
+    }
+    let cancelled = false;
+    void fetchJobMappingProof(selectedId)
+      .then((res) => {
+        if (cancelled) return;
+        setMappingProof(asMappingProof(res.mapping_proof));
+      })
+      .catch(() => {
+        if (!cancelled) setMappingProof(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, liveJob]);
 
   useEffect(() => {
     if (filter === "failed" && counts.failed > 0 && !selectedId) {
@@ -243,6 +306,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
     if (!selectedId) {
       setLiveJob(null);
       setDetailLoading(false);
+      setEvidenceDrawer(null);
       return;
     }
     setDetailLoading(true);
@@ -424,6 +488,25 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
   const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
   const syncModeLabel = formatSyncModeLabel(
     liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode,
+  );
+  const jobPreflight = liveJob?.preflight;
+  const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
+  const loadHistory =
+    liveJob?.load_history_report
+    || (destSummary.load_history_report && typeof destSummary.load_history_report === "object"
+      ? destSummary.load_history_report as NonNullable<JobDetailRecord["load_history_report"]>
+      : undefined);
+  const writerRps = liveJob?.records_per_second
+    ?? (typeof destSummary.records_per_second === "number" ? destSummary.records_per_second : undefined);
+  const writerChunkSize = liveJob?.chunk_size
+    ?? (typeof destSummary.chunk_size === "number" ? destSummary.chunk_size : undefined);
+  const hasWriterEvidence = Boolean(
+    Object.keys(destSummary).length
+    || writerRps != null
+    || writerChunkSize != null
+    || loadHistory
+    || liveJob?.chunk_current != null
+    || liveJob?.checkpoint,
   );
   const showQuarantineTab = Boolean(
     liveJob
@@ -835,6 +918,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       >
                         {detailTab === "detail" && (
                           <div className="df2-jobs-detail-pane">
+                            <JobOverviewNote>
+                              Overview of this run. Open evidence panels from the right for Gate-8,
+                              run metadata, timeline, and logs — keep this pane scannable.
+                            </JobOverviewNote>
                             <JobTrustScoreCard
                               job={liveJob}
                               onOpenQuarantine={
@@ -847,87 +934,110 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                                   : undefined
                               }
                             />
-                            {recon && (
-                              <Gate8ProofCard
-                                report={recon}
-                                explanation={liveJob.explanation}
-                                onOpenValidate={onStartTransfer}
-                                onOpenQuarantine={
-                                  showQuarantineTab
-                                    ? () => setDetailTab("quarantine")
-                                    : undefined
-                                }
-                              />
-                            )}
 
-                            <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
-                              {triggeredBy && (
-                                <div><dt>Run by</dt><dd>{triggeredBy}</dd></div>
-                              )}
-                              {jobDuration && (
-                                <div><dt>Duration</dt><dd>{jobDuration}</dd></div>
-                              )}
-                              {liveJob.started_at && (
-                                <div><dt>Started</dt><dd>{new Date(liveJob.started_at).toLocaleString()}</dd></div>
-                              )}
-                              {liveJob.completed_at && (
-                                <div><dt>Completed</dt><dd>{new Date(liveJob.completed_at).toLocaleString()}</dd></div>
-                              )}
-                              {syncModeLabel !== "—" && (
-                                <div><dt>Sync mode</dt><dd>{syncModeLabel}</dd></div>
-                              )}
-                              {(liveJob.schema_policy || liveJob.transfer_request?.schema_policy) && (
-                                <div>
-                                  <dt>Schema policy</dt>
-                                  <dd>{formatSyncModeLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
-                                </div>
-                              )}
-                              {(liveJob.validation_mode || liveJob.transfer_request?.validation_mode) && (
-                                <div>
-                                  <dt>Validation</dt>
-                                  <dd>{formatSyncModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
-                                </div>
-                              )}
-                              {liveJob.watermark && (
-                                <div><dt>CDC watermark</dt><dd className="df2-mono" title={liveJob.watermark}>{liveJob.watermark.slice(0, 48)}{liveJob.watermark.length > 48 ? "…" : ""}</dd></div>
-                              )}
-                              {liveJob.cdc_plugin && (
-                                <div><dt>CDC plugin</dt><dd>{liveJob.cdc_plugin}</dd></div>
-                              )}
-                              {liveJob.cdc_delivery && (
-                                <div><dt>CDC delivery</dt><dd>{liveJob.cdc_delivery}</dd></div>
-                              )}
-                              {liveJob.cdc_shared_reader && (
-                                <div><dt>CDC topology</dt><dd>Shared log reader (one slot / server_id)</dd></div>
-                              )}
-                              {liveJob.snapshot_mode && (
-                                <div><dt>Snapshot mode</dt><dd>{liveJob.snapshot_mode}</dd></div>
-                              )}
-                              {(liveJob.cdc_lease_holder || liveJob.cdc_lease_conflict) && (
-                                <div>
-                                  <dt>CDC lease</dt>
-                                  <dd>
-                                    {liveJob.cdc_lease_conflict
-                                      ? `Conflict — held by ${liveJob.cdc_lease_holder || "another worker"}`
-                                      : `${liveJob.cdc_lease_holder || "—"}${liveJob.cdc_lease_backend ? ` · ${liveJob.cdc_lease_backend}` : ""}${liveJob.cdc_lease_stale ? " (stale)" : ""}`}
-                                  </dd>
-                                </div>
-                              )}
-                              {liveJob.cdc_lease_resource && (
-                                <div><dt>Lease resource</dt><dd className="df2-mono">{liveJob.cdc_lease_resource}</dd></div>
-                              )}
-                              {liveJob.cdc_lease_generation != null && (
-                                <div><dt>Lease generation</dt><dd>{liveJob.cdc_lease_generation}</dd></div>
-                              )}
-                              {liveJob.cdc_lease_cursor_key && (
-                                <div><dt>Lease cursor</dt><dd className="df2-mono">{liveJob.cdc_lease_cursor_key}</dd></div>
-                              )}
-                            </dl>
-
-                            <div className="df2-jobs-v3-timeline-block">
-                              <h3>Timeline</h3>
-                              <JobTimeline entries={timelineEntries} />
-                            </div>
+                            <JobEvidenceLaunchGrid
+                              label="Evidence panels"
+                              items={[
+                                {
+                                  id: "gate8",
+                                  title: "Gate-8 reconcile",
+                                  description: "Source vs destination row counts and checksums",
+                                  icon: "shield",
+                                  meta: recon
+                                    ? (recon.passed ? "Passed" : "Needs review")
+                                    : "Not captured",
+                                  tone: recon ? (recon.passed ? "ok" : "warn") : "default",
+                                  disabled: !recon,
+                                  onOpen: () => setEvidenceDrawer("gate8"),
+                                },
+                                {
+                                  id: "preflight",
+                                  title: "Validate / preflight",
+                                  description: "Gate results captured when this job ran",
+                                  icon: "gate",
+                                  meta: jobPreflight
+                                    ? `${jobPreflight.passed_count}/${jobPreflight.total_gates} · ${jobPreflight.readiness_score}%`
+                                    : "Not on job",
+                                  tone: jobPreflight
+                                    ? (jobPreflight.passed ? "ok" : "warn")
+                                    : "default",
+                                  disabled: !jobPreflight?.gates?.length,
+                                  onOpen: () => setEvidenceDrawer("preflight"),
+                                },
+                                {
+                                  id: "writer",
+                                  title: "Writer & throughput",
+                                  description: "RPS, chunk progress, destination summary, load history",
+                                  icon: "speed",
+                                  meta: writerRps != null
+                                    ? `${Math.round(writerRps).toLocaleString()} r/s`
+                                    : loadHistory
+                                      ? "Load history"
+                                      : undefined,
+                                  disabled: !hasWriterEvidence,
+                                  onOpen: () => setEvidenceDrawer("writer"),
+                                },
+                                {
+                                  id: "run-meta",
+                                  title: "Run metadata",
+                                  description: "Operator, duration, sync mode, CDC lease & watermark",
+                                  icon: "activity",
+                                  meta: syncModeLabel !== "—" ? syncModeLabel : undefined,
+                                  onOpen: () => setEvidenceDrawer("run-meta"),
+                                },
+                                {
+                                  id: "timeline",
+                                  title: "Phase timeline",
+                                  description: "Queued → read → gates → write → reconcile",
+                                  icon: "clock",
+                                  meta: `${timelineEntries.length} events`,
+                                  disabled: timelineEntries.length === 0,
+                                  onOpen: () => setEvidenceDrawer("timeline"),
+                                },
+                                {
+                                  id: "mapping-proof",
+                                  title: "Mapping proof",
+                                  description: "Column match evidence for this job",
+                                  icon: "layers",
+                                  meta: mappingProof?.summary?.mapped_count != null
+                                    ? `${mappingProof.summary.mapped_count} pairs`
+                                    : mappingCount
+                                      ? `${mappingCount} columns`
+                                      : undefined,
+                                  disabled: !mappingProof && mappingCount === 0,
+                                  onOpen: () => {
+                                    setDetailTab("mapping");
+                                    setEvidenceDrawer(mappingProof ? "mapping-proof" : "mapping-table");
+                                  },
+                                },
+                                {
+                                  id: "event-log",
+                                  title: "Event log",
+                                  description: "Durable operator events for this job",
+                                  icon: "activity",
+                                  meta: eventLog.length ? `${eventLog.length} lines` : "Empty",
+                                  disabled: eventLog.length === 0,
+                                  onOpen: () => setEvidenceDrawer("event-log"),
+                                },
+                                {
+                                  id: "ddl-log",
+                                  title: "DDL & stream log",
+                                  description: "Schema statements and stream progress lines",
+                                  icon: "code",
+                                  meta: ddlLog.length ? `${ddlLog.length} lines` : "Empty",
+                                  disabled: ddlLog.length === 0,
+                                  onOpen: () => setEvidenceDrawer("ddl-log"),
+                                },
+                                {
+                                  id: "explanation",
+                                  title: "Pipeline explanation",
+                                  description: "Plain-language summary of what this transfer did",
+                                  icon: "book",
+                                  disabled: !liveJob.explanation,
+                                  onOpen: () => setEvidenceDrawer("explanation"),
+                                },
+                              ]}
+                            />
 
                             {liveJob.message && (
                               <dl className="df2-jobs-v3-summary-dl">
@@ -1024,6 +1134,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                                   : undefined
                               }
                             />
+                            <CdcRetentionPanel
+                              status={liveJob.cdc_retention_status}
+                              resume={liveJob.cdc_retention_resume}
+                              retained={liveJob.cdc_retention_retained}
+                              message={liveJob.cdc_retention_message}
+                              dialect={liveJob.cdc_retention_dialect}
+                              cursorKey={liveJob.cdc_lease_cursor_key}
+                              onResume={
+                                liveJob.checkpoint || liveJob.chunk_current != null
+                                  ? () => void handleResume()
+                                  : undefined
+                              }
+                            />
 
                             {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
                               <div className="df2-data-integrity" role="note">
@@ -1081,56 +1204,55 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
                         {detailTab === "mapping" && (
                           <div className="df2-jobs-detail-pane">
-                            {mappingCount > 0 ? (
-                              <div className="df2-jobs-v3-mappings is-tab">
-                                <div className="df2-jobs-v3-mappings-head">
-                                  <h3>Column mapping</h3>
-                                  <span className="df2-jobs-v3-mappings-count">
-                                    {mappingCount.toLocaleString()} columns
-                                  </span>
-                                </div>
-                                <div className="df2-jobs-v3-mappings-scroll">
-                                  <table className="df2-table">
-                                    <thead>
-                                      <tr>
-                                        <th>Source</th>
-                                        <th>Target</th>
-                                        <th>Type</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {jobMappings.length > 0
-                                        ? jobMappings.map((m, i) => {
-                                            const src = String(m.source ?? m.source_column ?? "").trim() || "—";
-                                            const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
-                                            const typ =
-                                              columnTypes[src]
-                                              ?? m.source_type
-                                              ?? m.target_type
-                                              ?? columnTypes[tgt]
-                                              ?? columnTypes[src.toLowerCase()]
-                                              ?? columnTypes[tgt.toLowerCase()]
-                                              ?? "—";
-                                            return (
-                                              <tr key={`${src}-${tgt}-${i}`}>
-                                                <td title={src}>{src}</td>
-                                                <td title={tgt}>{tgt}</td>
-                                                <td className="df2-cell-mono" title={typ}>{typ}</td>
-                                              </tr>
-                                            );
-                                          })
-                                        : Object.entries(columnTypes).map(([col, typ]) => (
-                                            <tr key={col}>
-                                              <td title={col}>{col}</td>
-                                              <td title={col}>{col}</td>
-                                              <td className="df2-cell-mono" title={String(typ)}>{String(typ)}</td>
-                                            </tr>
-                                          ))}
-                                    </tbody>
-                                  </table>
-                                </div>
+                            <JobOverviewNote>
+                              Mapping overview for this job. Open proof or the column table in a
+                              right-side panel — do not scroll three evidence dumps in one pane.
+                            </JobOverviewNote>
+                            <div className="df2-drawer-facts df2-jobs-map-overview">
+                              <div className="df2-drawer-fact">
+                                <span>Columns</span>
+                                <strong>{mappingCount.toLocaleString()}</strong>
                               </div>
-                            ) : (
+                              <div className="df2-drawer-fact">
+                                <span>Proof pairs</span>
+                                <strong>
+                                  {mappingProof?.summary?.mapped_count != null
+                                    ? mappingProof.summary.mapped_count
+                                    : mappingProof
+                                      ? (mappingProof.mappings?.length ?? 0)
+                                      : "—"}
+                                </strong>
+                              </div>
+                              <div className="df2-drawer-fact">
+                                <span>Risks / review</span>
+                                <strong>
+                                  {(mappingProof?.summary?.risk_count ?? 0)} / {(mappingProof?.summary?.review_count ?? 0)}
+                                </strong>
+                              </div>
+                            </div>
+                            <JobEvidenceLaunchGrid
+                              label="Mapping evidence"
+                              items={[
+                                {
+                                  id: "mapping-proof",
+                                  title: "Mapping proof",
+                                  description: "Confidence, fidelity, and per-column match evidence",
+                                  icon: "layers",
+                                  disabled: !mappingProof,
+                                  onOpen: () => setEvidenceDrawer("mapping-proof"),
+                                },
+                                {
+                                  id: "mapping-table",
+                                  title: "Column map table",
+                                  description: "Source → target → type for every mapped column",
+                                  icon: "connectors",
+                                  meta: mappingCount ? `${mappingCount} columns` : undefined,
+                                  disabled: mappingCount === 0,
+                                  onOpen: () => setEvidenceDrawer("mapping-table"),
+                                },
+                              ]}
+                            />
+                            {mappingCount === 0 && !mappingProof && (
                               <EmptyState
                                 compact
                                 icon="connectors"
@@ -1176,89 +1298,73 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
-                            {eventLog.length > 0 ? (
-                              <div className="df2-jobs-v3-log is-tab is-terminal">
-                                <LiveEventLog
-                                  lines={eventLog}
-                                  live={
-                                    liveJob?.status === "running"
-                                    || liveJob?.status === "queued"
-                                    || selected?.status === "running"
-                                    || selected?.status === "queued"
-                                  }
-                                  variant="jobs"
-                                  title="Event log"
-                                  empty="No events yet"
-                                />
+                            <JobOverviewNote>
+                              Logs are split into three evidence panels so Event, DDL, and
+                              Pipeline explanation are readable one at a time — not stacked terminals.
+                            </JobOverviewNote>
+                            <div className="df2-drawer-facts df2-jobs-map-overview">
+                              <div className="df2-drawer-fact">
+                                <span>Event lines</span>
+                                <strong>{eventLog.length.toLocaleString()}</strong>
                               </div>
-                            ) : null}
-                            {ddlLog.length > 0 ? (
-                              <div className="df2-jobs-v3-log is-tab is-terminal">
-                                <LiveEventLog
-                                  lines={ddlLog}
-                                  variant="jobs"
-                                  title="DDL & stream log"
-                                  empty="No DDL lines"
-                                />
+                              <div className="df2-drawer-fact">
+                                <span>DDL / stream</span>
+                                <strong>{ddlLog.length.toLocaleString()}</strong>
                               </div>
-                            ) : null}
-                            {eventLog.length === 0 && ddlLog.length === 0 && (
+                              <div className="df2-drawer-fact">
+                                <span>Explanation</span>
+                                <strong>{liveJob.explanation ? "Yes" : "—"}</strong>
+                              </div>
+                            </div>
+                            <JobEvidenceLaunchGrid
+                              label="Log panels"
+                              items={[
+                                {
+                                  id: "event-log",
+                                  title: "Event log",
+                                  description: "Phase / message / row milestones for operators",
+                                  icon: "activity",
+                                  meta: eventLog.length ? `${eventLog.length} lines` : "No events yet",
+                                  disabled: eventLog.length === 0,
+                                  onOpen: () => setEvidenceDrawer("event-log"),
+                                },
+                                {
+                                  id: "ddl-log",
+                                  title: "DDL & stream log",
+                                  description: "CREATE/ALTER statements and stream progress",
+                                  icon: "code",
+                                  meta: ddlLog.length ? `${ddlLog.length} lines` : "No DDL lines",
+                                  disabled: ddlLog.length === 0,
+                                  onOpen: () => setEvidenceDrawer("ddl-log"),
+                                },
+                                {
+                                  id: "explanation",
+                                  title: "Pipeline explanation",
+                                  description: "Human-readable summary of mappings and write path",
+                                  icon: "book",
+                                  disabled: !liveJob.explanation,
+                                  onOpen: () => setEvidenceDrawer("explanation"),
+                                },
+                                {
+                                  id: "streams",
+                                  title: "CDC stream health",
+                                  description: "Per-stream status, lag, and watermark table",
+                                  icon: "zap",
+                                  meta: Array.isArray(liveJob.streams) && liveJob.streams.length
+                                    ? `${liveJob.streams.length} streams`
+                                    : undefined,
+                                  disabled: !(Array.isArray(liveJob.streams) && liveJob.streams.length > 0),
+                                  onOpen: () => setEvidenceDrawer("streams"),
+                                },
+                              ]}
+                            />
+                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && (
                               <EmptyState
                                 compact
                                 icon="jobs"
                                 title="No log yet"
                                 description="Run a transfer to capture event and DDL logs. Older jobs may not have a durable log stored."
                               />
-                            )}
-                            {liveJob.explanation && (
-                              <div className="df2-jobs-v3-log is-tab is-terminal">
-                                <header className="df2-jobs-terminal-head">
-                                  <strong>Pipeline explanation</strong>
-                                </header>
-                                <div className="df2-jobs-terminal" role="log">
-                                  <div className="df2-jobs-terminal-line is-meta">{liveJob.explanation}</div>
-                                </div>
-                              </div>
-                            )}
-                            {Array.isArray(liveJob.streams) && liveJob.streams.length > 0 && (
-                              <div className="df2-jobs-cdc-streams">
-                                <h3>CDC stream health</h3>
-                                <table className="df2-jobs-cdc-table">
-                                  <thead>
-                                    <tr>
-                                      <th>Stream</th>
-                                      <th>Status</th>
-                                      <th>Records</th>
-                                      <th>Lag</th>
-                                      <th>Watermark</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {liveJob.streams.map((s) => (
-                                      <tr key={s.name}>
-                                        <td>{s.name}</td>
-                                        <td>{s.status || "—"}</td>
-                                        <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
-                                        <td>
-                                          {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))
-                                            ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
-                                            : "—"}
-                                        </td>
-                                        <td className="df2-mono" title={s.watermark || undefined}>
-                                          {s.watermark
-                                            ? `${String(s.watermark).slice(0, 28)}${String(s.watermark).length > 28 ? "…" : ""}`
-                                            : "—"}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            )}
-                            {liveJob.message && (
-                              <dl className="df2-jobs-v3-summary-dl">
-                                <div><dt>Latest message</dt><dd>{liveJob.message}</dd></div>
-                              </dl>
                             )}
                           </div>
                         )}
@@ -1278,6 +1384,431 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
           </>
         )}
       </PageFrame>
+
+      {liveJob && evidenceDrawer === "gate8" && recon && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Gate-8 reconcile"
+          subtitle="Source vs destination row counts and content fingerprints"
+          icon={<DtIcon name="shield" size={18} />}
+          width={640}
+        >
+          <Gate8ProofCard
+            report={recon}
+            explanation={liveJob.explanation}
+            onOpenValidate={onStartTransfer}
+            onOpenQuarantine={
+              showQuarantineTab
+                ? () => {
+                    setEvidenceDrawer(null);
+                    setDetailTab("quarantine");
+                  }
+                : undefined
+            }
+          />
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "preflight" && jobPreflight && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Validate / preflight"
+          subtitle={
+            jobPreflight.run_id
+              ? `Run ${jobPreflight.run_id} · ${jobPreflight.passed_count}/${jobPreflight.total_gates} · ${jobPreflight.readiness_score}%`
+              : `${jobPreflight.passed_count}/${jobPreflight.total_gates} gates · ${jobPreflight.readiness_score}% readiness`
+          }
+          icon={<DtIcon name="gate" size={18} />}
+          width={720}
+        >
+          <div className="df2-drawer-facts" style={{ marginBottom: 14 }}>
+            <div className="df2-drawer-fact">
+              <span>Decision</span>
+              <strong>{jobPreflight.passed ? "Passed" : "Blocked"}</strong>
+            </div>
+            <div className="df2-drawer-fact">
+              <span>Readiness</span>
+              <strong>{jobPreflight.readiness_score}%</strong>
+            </div>
+            <div className="df2-drawer-fact">
+              <span>Blockers</span>
+              <strong>{jobPreflight.blockers?.length ?? 0}</strong>
+            </div>
+          </div>
+          <div className="df2-jobs-log-table-wrap">
+            <table className="df2-table">
+              <thead>
+                <tr>
+                  <th>Gate</th>
+                  <th>Status</th>
+                  <th>Duration</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(jobPreflight.gates || []).map((g) => (
+                  <tr key={g.id}>
+                    <td className="df2-cell-mono">{g.id}</td>
+                    <td>{g.status}</td>
+                    <td className="df2-cell-mono">
+                      {g.duration_ms != null && g.duration_ms > 0 ? `${g.duration_ms} ms` : "—"}
+                    </td>
+                    <td>{g.message || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {(jobPreflight.blockers?.length ?? 0) > 0 && (
+            <ul className="df2-jobs-preflight-blockers">
+              {jobPreflight.blockers.slice(0, 8).map((b) => (
+                <li key={b.id}>
+                  <strong>{b.id}</strong> — {b.message}
+                  {b.guidance?.fix ? <span className="df2-muted"> Fix: {b.guidance.fix}</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "writer" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Writer & throughput"
+          subtitle="Destination write path, batching, and prior-load comparison"
+          icon={<DtIcon name="speed" size={18} />}
+          width={720}
+        >
+          <dl className="df2-jobs-v3-summary-dl">
+            {writerRps != null && (
+              <div><dt>Throughput</dt><dd>{Math.round(writerRps).toLocaleString()} rows/s</dd></div>
+            )}
+            {writerChunkSize != null && writerChunkSize > 0 && (
+              <div><dt>Chunk size</dt><dd>{writerChunkSize.toLocaleString()}</dd></div>
+            )}
+            {(liveJob.chunk_current != null || liveJob.chunk_total != null) && (
+              <div>
+                <dt>Chunk progress</dt>
+                <dd>
+                  {liveJob.chunk_current != null ? liveJob.chunk_current.toLocaleString() : "—"}
+                  {" / "}
+                  {liveJob.chunk_total != null ? liveJob.chunk_total.toLocaleString() : "—"}
+                </dd>
+              </div>
+            )}
+            {liveJob.checkpoint && (
+              <div>
+                <dt>Checkpoint</dt>
+                <dd>
+                  batch {liveJob.checkpoint.chunk_index ?? 0}
+                  {liveJob.checkpoint.rows_processed != null
+                    ? ` · ${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows committed`
+                    : ""}
+                </dd>
+              </div>
+            )}
+            {typeof destSummary.load_method === "string" && destSummary.load_method && (
+              <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
+            )}
+            {typeof destSummary.database === "string" && destSummary.database && (
+              <div><dt>Database</dt><dd>{String(destSummary.database)}</dd></div>
+            )}
+            {(typeof destSummary.table === "string" || typeof destSummary.collection === "string") && (
+              <div>
+                <dt>Table / collection</dt>
+                <dd>{String(destSummary.table || destSummary.collection)}</dd>
+              </div>
+            )}
+            {typeof destSummary.checksum === "string" && destSummary.checksum && (
+              <div><dt>Writer checksum</dt><dd className="df2-mono">{String(destSummary.checksum)}</dd></div>
+            )}
+          </dl>
+          {Object.keys(destSummary).length > 0 && (
+            <details className="df2-jobs-writer-raw">
+              <summary>Raw destination summary</summary>
+              <pre className="df2-jobs-writer-json">{JSON.stringify(destSummary, null, 2)}</pre>
+            </details>
+          )}
+          {loadHistory && (
+            <div style={{ marginTop: 16 }}>
+              <LoadHistoryPanel report={loadHistory} title="Compared to prior loads" />
+            </div>
+          )}
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "run-meta" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Run metadata"
+          subtitle={jobRouteLabel(liveJob)}
+          icon={<DtIcon name="activity" size={18} />}
+          width={560}
+        >
+          <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
+            {triggeredBy && (
+              <div><dt>Run by</dt><dd>{triggeredBy}</dd></div>
+            )}
+            {jobDuration && (
+              <div><dt>Duration</dt><dd>{jobDuration}</dd></div>
+            )}
+            {liveJob.started_at && (
+              <div><dt>Started</dt><dd>{new Date(liveJob.started_at).toLocaleString()}</dd></div>
+            )}
+            {liveJob.completed_at && (
+              <div><dt>Completed</dt><dd>{new Date(liveJob.completed_at).toLocaleString()}</dd></div>
+            )}
+            {syncModeLabel !== "—" && (
+              <div><dt>Sync mode</dt><dd>{syncModeLabel}</dd></div>
+            )}
+            {(liveJob.schema_policy || liveJob.transfer_request?.schema_policy) && (
+              <div>
+                <dt>Schema policy</dt>
+                <dd>{formatSyncModeLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
+              </div>
+            )}
+            {(liveJob.validation_mode || liveJob.transfer_request?.validation_mode) && (
+              <div>
+                <dt>Validation</dt>
+                <dd>{formatSyncModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
+              </div>
+            )}
+            {liveJob.watermark && (
+              <div><dt>CDC watermark</dt><dd className="df2-mono">{liveJob.watermark}</dd></div>
+            )}
+            {liveJob.cdc_plugin && (
+              <div><dt>CDC plugin</dt><dd>{liveJob.cdc_plugin}</dd></div>
+            )}
+            {liveJob.cdc_row_filter && (
+              <div>
+                <dt>CDC row filter</dt>
+                <dd className="df2-mono" title="SQL Server CDC TVF row_filter_option used for this run">
+                  {liveJob.cdc_row_filter}
+                </dd>
+              </div>
+            )}
+            {liveJob.cdc_delivery && (
+              <div><dt>CDC delivery</dt><dd>{liveJob.cdc_delivery}</dd></div>
+            )}
+            {liveJob.source_ha_role && (
+              <div>
+                <dt>Source HA</dt>
+                <dd title={liveJob.source_ha_message || ""}>
+                  {liveJob.source_ha_role}
+                  {liveJob.source_ha_topology && liveJob.source_ha_topology !== "none"
+                    ? ` · ${liveJob.source_ha_topology}`
+                    : ""}
+                  {liveJob.source_ha_group ? ` · ${liveJob.source_ha_group}` : ""}
+                </dd>
+              </div>
+            )}
+            {liveJob.cdc_shared_reader && (
+              <div><dt>CDC topology</dt><dd>Shared log reader (one slot / server_id)</dd></div>
+            )}
+            {liveJob.snapshot_mode && (
+              <div><dt>Snapshot mode</dt><dd>{liveJob.snapshot_mode}</dd></div>
+            )}
+            {(liveJob.cdc_lease_holder || liveJob.cdc_lease_conflict) && (
+              <div>
+                <dt>CDC lease</dt>
+                <dd>
+                  {liveJob.cdc_lease_conflict
+                    ? `Conflict — held by ${liveJob.cdc_lease_holder || "another worker"}`
+                    : `${liveJob.cdc_lease_holder || "—"}${liveJob.cdc_lease_backend ? ` · ${liveJob.cdc_lease_backend}` : ""}${liveJob.cdc_lease_stale ? " (stale)" : ""}`}
+                </dd>
+              </div>
+            )}
+            {liveJob.cdc_lease_resource && (
+              <div><dt>Lease resource</dt><dd className="df2-mono">{liveJob.cdc_lease_resource}</dd></div>
+            )}
+            {liveJob.cdc_lease_generation != null && (
+              <div><dt>Lease generation</dt><dd>{liveJob.cdc_lease_generation}</dd></div>
+            )}
+            {liveJob.cdc_lease_cursor_key && (
+              <div><dt>Lease cursor</dt><dd className="df2-mono">{liveJob.cdc_lease_cursor_key}</dd></div>
+            )}
+            {liveJob.message && (
+              <div><dt>Latest message</dt><dd>{liveJob.message}</dd></div>
+            )}
+          </dl>
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "timeline" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Phase timeline"
+          subtitle="Job phase history for this run"
+          icon={<DtIcon name="clock" size={18} />}
+          width={560}
+        >
+          <JobTimeline entries={timelineEntries} />
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "mapping-table" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Column map"
+          subtitle={`${mappingCount.toLocaleString()} columns`}
+          icon={<DtIcon name="connectors" size={18} />}
+          width={640}
+        >
+          {mappingCount > 0 ? (
+            <div className="df2-jobs-v3-mappings is-drawer">
+              <table className="df2-table">
+                <thead>
+                  <tr>
+                    <th>Source</th>
+                    <th>Target</th>
+                    <th>Type</th>
+                    <th>Confidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {jobMappings.length > 0
+                    ? jobMappings.map((m, i) => {
+                        const src = String(m.source ?? m.source_column ?? "").trim() || "—";
+                        const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
+                        const typ =
+                          columnTypes[src]
+                          ?? m.source_type
+                          ?? m.target_type
+                          ?? columnTypes[tgt]
+                          ?? columnTypes[src.toLowerCase()]
+                          ?? columnTypes[tgt.toLowerCase()]
+                          ?? "—";
+                        const conf = typeof m.confidence === "number"
+                          ? `${Math.round(m.confidence * 100)}%`
+                          : "—";
+                        return (
+                          <tr key={`${src}-${tgt}-${i}`}>
+                            <td title={src}>{src}</td>
+                            <td title={tgt}>{tgt}</td>
+                            <td className="df2-cell-mono" title={typ}>{typ}</td>
+                            <td className="df2-cell-mono">{conf}</td>
+                          </tr>
+                        );
+                      })
+                    : Object.entries(columnTypes).map(([col, typ]) => (
+                        <tr key={col}>
+                          <td title={col}>{col}</td>
+                          <td title={col}>{col}</td>
+                          <td className="df2-cell-mono" title={String(typ)}>{String(typ)}</td>
+                          <td className="df2-cell-mono">—</td>
+                        </tr>
+                      ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="df2-muted">No column mappings recorded on this job.</p>
+          )}
+        </Drawer>
+      )}
+
+      {liveJob && mappingProof && (evidenceDrawer === "mapping-proof" || mappingProofOpen) && (
+        <MappingProofDrawer
+          open
+          onClose={() => {
+            setEvidenceDrawer(null);
+            setMappingProofOpen(false);
+          }}
+          proof={mappingProof}
+          sourceLabel={liveJob.source_name}
+          destLabel={
+            liveJob.destination_collection
+            || liveJob.destination_database
+            || liveJob.destination_type
+          }
+        />
+      )}
+
+      {liveJob && evidenceDrawer === "event-log" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Event log"
+          subtitle={`${eventLog.length.toLocaleString()} durable operator events`}
+          icon={<DtIcon name="activity" size={18} />}
+          width={720}
+        >
+          <JobLogTable lines={eventLog} empty="No events yet" />
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "ddl-log" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="DDL & stream log"
+          subtitle={`${ddlLog.length.toLocaleString()} schema / stream lines`}
+          icon={<DtIcon name="code" size={18} />}
+          width={720}
+        >
+          <JobLogTable lines={ddlLog.map(String)} empty="No DDL lines" />
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "explanation" && liveJob.explanation && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Pipeline explanation"
+          subtitle="Plain-language summary from the transfer engine"
+          icon={<DtIcon name="book" size={18} />}
+          width={640}
+        >
+          <p className="df2-jobs-explanation-prose">{liveJob.explanation}</p>
+        </Drawer>
+      )}
+
+      {liveJob && evidenceDrawer === "streams" && Array.isArray(liveJob.streams) && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="CDC stream health"
+          subtitle={`${liveJob.streams.length} stream(s)`}
+          icon={<DtIcon name="zap" size={18} />}
+          width={720}
+        >
+          <table className="df2-table df2-jobs-cdc-table">
+            <thead>
+              <tr>
+                <th>Stream</th>
+                <th>Status</th>
+                <th>Records</th>
+                <th>Lag</th>
+                <th>Watermark</th>
+              </tr>
+            </thead>
+            <tbody>
+              {liveJob.streams.map((s) => (
+                <tr key={s.name}>
+                  <td>{s.name}</td>
+                  <td>{s.status || "—"}</td>
+                  <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
+                  <td>
+                    {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))
+                      ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
+                      : "—"}
+                  </td>
+                  <td className="df2-mono" title={s.watermark || undefined}>
+                    {s.watermark || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Drawer>
+      )}
     </PageShell>
   );
 }

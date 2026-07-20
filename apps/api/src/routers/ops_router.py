@@ -189,3 +189,52 @@ async def post_source_ha_probe(body: SourceHaProbeBody) -> dict[str, Any]:
     }
     probe = probe_source_ha_safe(cfg)
     return {"ok": True, "source_ha": probe.to_dict(), **probe.job_fields()}
+
+
+class CdcRetentionProbeBody(BaseModel):
+    type: str = Field(..., min_length=1, max_length=64)
+    host: str = ""
+    port: int = 0
+    database: str = ""
+    username: str = ""
+    password: str = ""
+    schema_name: str = Field("", alias="schema")
+    connection_string: str = ""
+    ssl: bool = False
+    table: str = ""
+    cursor_key: str = Field("", max_length=512)
+    watermark: str | None = None
+    multi_subnet_failover: bool = False
+
+    model_config = {"populate_by_name": True}
+
+
+@router.post("/cdc-retention/probe")
+async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any]:
+    """Probe watermark vs live CDC retention (SQL Server min_lsn / Oracle oldest SCN).
+
+    Honesty: ``gap`` means reset watermark + re-snapshot. Continuous CDC across
+    the retention window is not claimed.
+    """
+    from services.cdc_retention_probe import probe_cdc_retention
+
+    cfg = {
+        "type": body.type,
+        "host": body.host,
+        "port": body.port,
+        "database": body.database,
+        "username": body.username,
+        "password": body.password,
+        "schema": body.schema_name,
+        "connection_string": body.connection_string,
+        "ssl": body.ssl,
+        "multi_subnet_failover": body.multi_subnet_failover,
+    }
+    probe = probe_cdc_retention(
+        cfg,
+        table=body.table,
+        schema=body.schema_name,
+        cursor_key=body.cursor_key,
+        watermark=body.watermark,
+    )
+    return {"ok": True, "retention": probe.to_dict(), **probe.job_fields()}

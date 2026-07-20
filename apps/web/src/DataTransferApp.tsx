@@ -34,7 +34,7 @@ import { DocsPage } from "./pages/DocsPage";
 import { BenchmarksPage } from "./pages/BenchmarksPage";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
-import { readAppHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, readAppHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -130,8 +130,16 @@ function AppShell({
 
   useEffect(() => {
     const onHash = () => {
-      const fromHash = readAppHash();
-      if (fromHash) setScreen(fromHash);
+      const focus = focusFromHash(window.location.hash);
+      if (!focus) return;
+      setScreen(focus.screen);
+      if (focus.jobId || focus.panel) {
+        setSearchFocus({
+          screen: focus.screen,
+          jobId: focus.jobId,
+          panel: focus.panel,
+        });
+      }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -678,6 +686,7 @@ function AppShell({
                     onRefresh={loadJobs}
                     onStartTransfer={() => setScreen("transfer")}
                     initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
+                    initialPanel={searchFocus?.screen === "jobs" ? searchFocus.panel : undefined}
                   />
                 </PageErrorBoundary>
                 </div>

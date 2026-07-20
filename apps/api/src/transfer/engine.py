@@ -371,6 +371,22 @@ def _build_explanation(
     )
 
 
+def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
+    """Durable per-mapping evidence for Theater/Jobs — rebuilt from the run request."""
+    from services.mapping_proof import build_mapping_proof
+
+    mappings = list(request.mappings or [])
+    if not mappings:
+        return {}
+    return build_mapping_proof(
+        mappings,
+        destination_db_type=(request.destination.format or "").lower(),
+        source_kind=request.source.kind or "",
+        dest_kind=request.destination.kind or "",
+        sync_mode=request.sync_mode or "",
+    )
+
+
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
     """Introspect destination column types for schema-aware preflight and transforms.
 
@@ -488,6 +504,7 @@ _CDC_JOB_FIELDS = (
     "cdc_cursor_gap_resume",
     "cdc_cursor_gap_retained",
     "cdc_append_only_sink",
+    "cdc_row_filter",
     "source_ha_role",
     "source_ha_topology",
     "source_ha_enabled",
@@ -495,6 +512,11 @@ _CDC_JOB_FIELDS = (
     "source_ha_replica",
     "source_ha_open_mode",
     "source_ha_message",
+    "cdc_retention_status",
+    "cdc_retention_resume",
+    "cdc_retention_retained",
+    "cdc_retention_message",
+    "cdc_retention_dialect",
     "watermark",
     "cdc_shared_reader",
     "snapshot_mode",
@@ -1557,6 +1579,7 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                mapping_proof=_mapping_proof_for_request(request),
                 reconciliation=recon,
                 load_history_report=dest_summary.get("load_history_report") or {},
                 ddl_executed=list(ddl_log or [])[:500],
@@ -1631,6 +1654,7 @@ class UniversalTransferEngine:
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
+                mapping_proof=_mapping_proof_for_request(request),
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
@@ -2021,6 +2045,7 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                mapping_proof=_mapping_proof_for_request(request),
                 reconciliation=recon,
                 load_history_report=load_history_report or {},
                 ddl_executed=list(ddl_log or [])[:500],
@@ -2069,6 +2094,7 @@ class UniversalTransferEngine:
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
+                mapping_proof=_mapping_proof_for_request(request),
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
@@ -2383,6 +2409,7 @@ class UniversalTransferEngine:
                 rejected_details=(dest_summary.get("rejected_details") or [])[:200],
                 destination_summary=dest_summary,
                 explanation=explanation,
+                mapping_proof=_mapping_proof_for_request(request),
                 reconciliation=recon,
                 load_history_report=load_history_report or {},
                 ddl_executed=list(ddl_log or [])[:500],
@@ -2430,6 +2457,7 @@ class UniversalTransferEngine:
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
+                mapping_proof=_mapping_proof_for_request(request),
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
@@ -2459,7 +2487,7 @@ class UniversalTransferEngine:
             or request.destination.format
             or "destination"
         )
-        return mongo.create_transfer_job({
+        job_doc: dict[str, Any] = {
             "source_type": request.source.kind,
             "source_name": source_name,
             "name": f"{source_name} → {dest_label}",
@@ -2483,7 +2511,11 @@ class UniversalTransferEngine:
             "validation_mode": request.validation_mode,
             "triggered_by": (request.triggered_by or "").strip(),
             "retry_of": None,
-        })
+        }
+        proof = _mapping_proof_for_request(request)
+        if proof:
+            job_doc["mapping_proof"] = proof
+        return mongo.create_transfer_job(job_doc)
 
     def _read_source(self, request: TransferRequest) -> tuple[list, list[str], dict[str, str]]:
         if request.source.kind == "file":

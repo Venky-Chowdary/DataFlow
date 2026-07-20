@@ -84,7 +84,7 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 ### Recommended next step
 
-1. Connect-scale CDC ops / Oracle·SQL Server fleet depth.
+1. Connect-scale CDC ops / Oracle·SQL Server fleet depth (retention probe shipped; deepen live cleanup IT).
 2. Optional dual-node AG/DG live matrix when infra is available (`DATAFLOW_AG_LIVE` / `DATAFLOW_DG_LIVE`).
 
 ---
@@ -123,6 +123,7 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 | Semantic vector routing                                                                              | **Shipped** — embed / metadata / exclude_pii / skip; Studio Apply + writer enforcement                 |
 | Durable embedding cache                                                                              | **Shipped** — SQLite L2 + process L1; Studio toggle / stats / clear; `endpoint.extra`                 |
 | Source HA role probe (AG / Data Guard)                                                               | **Shipped** — live DMV/`v$database` probe + Theater/Results/Trust + MultiSubnetFailover; dual-node failover IT still open |
+| CDC retention health probe                                                                           | **Shipped** — ok/at_risk/gap vs min_lsn/oldest SCN; ops API + Validate/Theater/Results; gap recovery CTA                 |
 
 
 **Verdict:** DataFlow can win evaluations that prioritize *provable trust*. It cannot yet win evaluations that prioritize *CDC platform coverage*. Say so in sales decks.
@@ -154,7 +155,7 @@ Airbyte ships five vector destinations and an official RAG pipeline guide. DataF
 
 ### Recommended next step
 
-Connect-scale CDC ops / optional dual-node AG·DG live matrix when infra exists.
+Oracle·SQL Server fleet depth / optional dual-node AG·DG live matrix when infra exists.
 
 ---
 
@@ -199,10 +200,11 @@ Connect-scale CDC ops / optional dual-node AG·DG live matrix when infra exists.
 - **Semantic vector routing** — `recommend_vector_field_roles` → Studio Apply + `exclude_pii_columns` enforced in `vectorize_records`.
 - **Durable embedding cache** — SQLite L2 (`embedding_cache.py`) + process L1; Studio Advanced toggle/stats/clear; writers honor `durable_embedding_cache`.
 - **Source HA probe** — SQL Server AG DMVs + Oracle `v$database`; stamped on CDC jobs; connector Test + Theater/Results/Trust; MultiSubnetFailover for AG listeners. Dual-node failover IT still open.
+- **CDC retention health** — proactive ok/at_risk/gap vs min_lsn / oldest SCN; `POST /ops/cdc-retention/probe`; Validate Check + Theater/Results; reset-watermark CTA.
 
 ### Recommended next step
 
-Connect-scale CDC ops / optional dual-node AG·DG live matrix when infra exists.
+Oracle·SQL Server fleet depth / optional dual-node AG·DG live matrix when infra exists.
 
 ---
 
@@ -222,7 +224,7 @@ Combining extraction, semantic typing, and embedding is whitespace no ELT vendor
 
 ### Recommended next step
 
-Connect-scale CDC ops / optional dual-node AG·DG live matrix when infra exists.
+Oracle·SQL Server fleet depth / optional dual-node AG·DG live matrix when infra exists.
 
 ---
 
@@ -270,34 +272,38 @@ Add `GET /api/v1/semantic/export?format=osi` and version the type registry per t
 
 **Target:** "Why did the AI map this?" + one-click rollback.
 
-### Status: partially implemented
+### Status: explainability + repair approve loop shipped; transfer undo still open
 
 - Pipeline explanations exist in `services/pipeline_explanation.py`.
-- No per-mapping evidence record.
-- No transfer-level rollback via staging-table swap or Iceberg branch.
+- Per-mapping evidence is built by `services/mapping_proof.py` and returned from the mapping pipeline.
+- **Shipped:** `mapping_proof` is persisted on transfer-plan revisions, stamped onto jobs at create + terminal status, exposed via `GET /transfer/{job_id}/mapping-proof`, and opened from Transfer Studio Results, Job Theater, and Jobs → Mapping (deep-link `#/jobs?jobId=…&panel=mapping-proof`).
+- **Shipped:** Agentic repair propose → human decide → apply (`services/agentic_repair.py`, `/repair/*`). Studio Validate: **Propose durable repair** + Approve & apply to mappings. Jobs Quarantine: **Propose repair** (audit trail; apply mappings from Validate).
+- Honesty: proof explains column match / transform / confidence — not Gate-8 row-level write fidelity, and not exactly-once CDC. Repair does **not** roll back written destination rows.
+- **Still open:** transfer-level undo/rollback via staging-table swap or Iceberg branch.
 
 ### Recommended next step
 
-Make `_auto_map` return an `evidence` field for each mapping and store it on the job record.
+Ship undo/rollback (staging swap or Iceberg branch) — do not claim rollback until that path is real.
 
 ---
 
 ## G8: Iceberg / lakehouse destination
 
-**Target:** Apache Iceberg v3 writer with REST catalog, schema evolution, time travel.
+**Target:** Apache Iceberg writer with schema evolution, CoW upsert, and (later) REST/Glue catalog + time travel.
 
-### Status: not started
+### Status: filesystem writer live — catalog committers open
 
-- BigQuery, Snowflake, S3, GCS, ADLS writers exist.
-- No Iceberg writer.
+- **Shipped:** `connectors/iceberg_writer.py` — filesystem / mounted warehouse, Iceberg V2 metadata + Parquet/JSONL, additive schema evolution, CoW upsert with `_df_lsn` guard. Transfer-live type `iceberg` (+ aliases `apache_iceberg` / `iceberg_rest` / `nessie` → driver). Studio Destination form: warehouse path, namespace, table. Connector form: warehouse auth mode.
+- **Proof:** `tests/test_iceberg_upsert.py`.
+- **Not yet:** REST / Glue / Nessie catalog committers, Iceberg v3, multi-engine time-travel UI, branch-based undo. Do not claim “Snowflake/Databricks/Athena catalog-compatible writer” until a catalog committer is proven.
 
 ### Why it matters
 
-Iceberg is the de-facto table-format standard; an Iceberg writer makes DataFlow compatible with Snowflake, Databricks, Athena, DuckDB, Trino.
+Iceberg is the de-facto table-format standard; closing the catalog gap makes DataFlow compatible with Snowflake, Databricks, Athena, DuckDB, Trino without a second copy path.
 
 ### Recommended next step
 
-Spike `pyiceberg` destination writer with S3/GCS catalog and schema evolution from the pivot schema.
+Spike `pyiceberg` REST catalog committer against a real warehouse + assert schema evolution from the pivot schema; keep filesystem CoW as the default offline path.
 
 ---
 
@@ -339,11 +345,11 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 | --------------------------- | -------------- | ---------------- | ---------------------------------------------------------------- |
 | Batch reliability           | 8/10           | 9/10             | small                                                            |
 | Connector depth             | 4/10           | 9/10             | large                                                            |
-| CDC / real-time             | **6.8/10**     | 8/10             | large (LSN+SCN gap + HA probe + append-only gate; dual-node AG IT open) |
+| CDC / real-time             | **7.0/10**     | 8/10             | large (row_filter stamped + Jobs evidence; dual-node AG IT gated) |
 | Vector / AI-ready           | 2/10           | 6/10             | large                                                            |
 | Data contracts / governance | 6/10           | 5/10             | small lead                                                       |
 | GitOps / as-code            | **7/10**       | 5/10             | lead (CLI+HTTP+UI+CI+signed CD gate)                             |
-| Lakehouse / Iceberg         | 2/10           | 5/10             | medium (CoW upsert + LSN path landed)                            |
+| Lakehouse / Iceberg         | **4/10**       | 5/10             | medium (filesystem CoW + Studio form; REST catalog open)         |
 | Semantic mapping            | 7/10           | 3/10             | lead                                                             |
 | UX (Transfer Studio)        | 7/10           | 6/10             | small lead                                                       |
 | Enterprise SSO/audit/RBAC   | 5/10           | 8/10             | medium                                                           |

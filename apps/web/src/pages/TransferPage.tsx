@@ -57,6 +57,7 @@ import {
   type VectorFieldRouting,
   type VectorRoutingPlan,
 } from "../lib/api";
+import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import {
   defaultSchemaForDriver,
   foldSchemaForDriver,
@@ -350,6 +351,8 @@ export function TransferPage({
   const [snapshotMode, setSnapshotMode] = useState("initial");
   const [allowAppendOnly, setAllowAppendOnly] = useState(false);
   const [multiSubnetFailover, setMultiSubnetFailover] = useState(false);
+  /** SQL Server CDC TVF row filter: all | all update old | net. */
+  const [cdcRowFilter, setCdcRowFilter] = useState<"all" | "all update old" | "net">("all");
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
@@ -419,6 +422,7 @@ export function TransferPage({
   const buildDestinationEndpoint = () => {
     const isMongo = destDriverType === "mongodb";
     const isDynamo = destDriverType === "dynamodb";
+    const isIceberg = destDriverType === "iceberg";
     const isVector =
       destDriverType === "pgvector" ||
       destDriverType === "qdrant" ||
@@ -433,15 +437,23 @@ export function TransferPage({
       kind: "database",
       format: destType,
       connector_id: connectorId || undefined,
-      host: destHost,
-      port: destPort,
-      database: isDynamo ? (targetCollection || targetDb) : targetDb,
-      schema: destSchema,
+      host: isIceberg ? "" : destHost,
+      port: isIceberg ? 0 : destPort,
+      // Iceberg: warehouse path prefers connection_string; schema holds namespace.
+      // Do not put namespace into database — `_warehouse_root` would treat it as the lake path.
+      database: isDynamo
+        ? (targetCollection || targetDb)
+        : isIceberg
+          ? undefined
+          : targetDb,
+      schema: isIceberg ? (destSchema || undefined) : destSchema,
       table: isMongo ? undefined : targetCollection || undefined,
       collection: isMongo ? targetCollection : undefined,
-      username: destUsername || undefined,
-      password: destPassword || undefined,
-      connection_string: destConnectionString || undefined,
+      username: isIceberg ? undefined : (destUsername || undefined),
+      password: isIceberg ? undefined : (destPassword || undefined),
+      connection_string: isIceberg
+        ? (destConnectionString || undefined)
+        : (destConnectionString || undefined),
       warehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
       auth_source: selectedDestConnector?.auth_source || undefined,
       auth_mode: selectedDestConnector?.auth_mode || undefined,
@@ -1187,6 +1199,13 @@ export function TransferPage({
     if (conn.schema) setDestSchema(conn.schema);
     setDestHost(conn.host || getConnectorDefaults(conn.type).host);
     setDestPort(conn.port || defaultPortForType(conn.type));
+    if (resolveDriverType(conn.type) === "iceberg") {
+      setDestConnectionString(conn.connection_string || "");
+      setDestSchema(conn.database || conn.schema || "");
+      setTargetDb(conn.database || "");
+    } else {
+      setDestConnectionString(conn.connection_string || "");
+    }
     setTargetCollection("");
   };
 
@@ -2499,10 +2518,10 @@ export function TransferPage({
               tone: "warning",
             });
           } else {
-            setStep(STEP_RUN);
+            // Stay on Validate so operators can review every gate/rule before Execute.
             toast({
               title: "Ready to transfer",
-              message: `All ${pf.total_gates} checks passed. Plan ${planId.slice(0, 8)} approved — moved to Run step.`,
+              message: `All ${pf.total_gates} checks passed. Review the gate cards, then Execute when ready.`,
               tone: "success",
             });
           }
@@ -2581,10 +2600,9 @@ export function TransferPage({
           tone: "warning",
         });
       } else {
-        setStep(STEP_RUN);
         toast({
           title: "Ready to transfer",
-          message: `All ${pf.total_gates} checks passed. Moved to Run step — execute when ready.`,
+          message: `All ${pf.total_gates} checks passed. Review the gate cards and rules below, then Execute when ready.`,
           tone: "success",
         });
       }
@@ -2601,10 +2619,9 @@ export function TransferPage({
         });
         setPreflight(pf);
         if (pf.passed) {
-          setStep(STEP_RUN);
           toast({
             title: "Validated locally",
-            message: "API unavailable — browser preflight passed for file export demo.",
+            message: "API unavailable — browser preflight passed. Review gates, then Execute for local export.",
             tone: "warning",
           });
         } else {
@@ -2723,10 +2740,22 @@ export function TransferPage({
         backfillNewFields,
         writeViaStaging,
         enableOcr,
-        sourceExtra:
-          syncMode === "cdc" && multiSubnetFailover
-            ? { multi_subnet_failover: true }
-            : undefined,
+        sourceExtra: (() => {
+          if (syncMode !== "cdc") return undefined;
+          const extra: Record<string, unknown> = {};
+          if (multiSubnetFailover) extra.multi_subnet_failover = true;
+          const sqlServerCdc = [
+            "sqlserver",
+            "mssql",
+            "azure_sql_database",
+            "microsoft_sql_server",
+            "amazon_rds_sql_server",
+          ].includes(resolveDriverType(sourceConnector?.type || ""));
+          if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
+            extra.cdc_row_filter = cdcRowFilter;
+          }
+          return Object.keys(extra).length ? extra : undefined;
+        })(),
         destExtra:
           destDriverType === "pgvector" ||
           destDriverType === "qdrant" ||
@@ -2856,11 +2885,13 @@ export function TransferPage({
       },
       reconciliation: job.reconciliation,
       explanation: job.explanation,
+      mapping_proof: job.mapping_proof,
       ddl_executed: job.ddl_executed ?? job.ddl_log,
       event_log: job.event_log?.length ? job.event_log : (job._id ? readJobEventLog(job._id) : undefined),
       cdc_lag_seconds: job.cdc_lag_seconds,
       cdc_plugin: job.cdc_plugin,
       cdc_delivery: job.cdc_delivery,
+      cdc_row_filter: job.cdc_row_filter,
       cdc_shared_reader: job.cdc_shared_reader,
       snapshot_mode: job.snapshot_mode,
       watermark: job.watermark,
@@ -2870,6 +2901,11 @@ export function TransferPage({
       source_ha_topology: job.source_ha_topology,
       source_ha_group: job.source_ha_group,
       source_ha_message: job.source_ha_message,
+      cdc_retention_status: job.cdc_retention_status,
+      cdc_retention_resume: job.cdc_retention_resume,
+      cdc_retention_retained: job.cdc_retention_retained,
+      cdc_retention_message: job.cdc_retention_message,
+      cdc_retention_dialect: job.cdc_retention_dialect,
       cdc_cursor_gap: job.cdc_cursor_gap,
       cdc_cursor_gap_code: job.cdc_cursor_gap_code,
       cdc_cursor_gap_dialect: job.cdc_cursor_gap_dialect,
@@ -3270,6 +3306,8 @@ export function TransferPage({
     setSchemaPolicy("manual_review");
     setValidationMode("balanced");
     setBackfillNewFields(false);
+    setMultiSubnetFailover(false);
+    setCdcRowFilter("all");
     setCursorField("");
     setPrimaryKeyField("");
     setStreamFields({});
@@ -3884,10 +3922,38 @@ export function TransferPage({
               setTargetCollection("");
               setDestHost(getConnectorDefaults(type).host);
               setDestPort(defaultPortForType(type));
+              setDestConnectionString("");
+              setDestSchema(defaultSchemaForDriver(type));
+              if (resolveDriverType(type) === "iceberg") {
+                setTargetDb("");
+              }
             }}
           />
 
-          {!connectorId && destType && destType !== "bigquery" && (
+          {!connectorId && destType && destType !== "bigquery" && destDriverType === "iceberg" && (
+          <div className="df2-dest-section df2-dest-manual-fields df2-dest-iceberg">
+            <label className="df2-label">Iceberg warehouse</label>
+            <p className="df2-label-hint" style={{ marginTop: 0 }}>
+              Filesystem / mounted lakehouse root. Writes Iceberg V2 metadata + Parquet/JSONL data files
+              with additive schema evolution and CoW upsert (<code>_df_lsn</code>). REST/Glue catalog
+              committers are not required for this writer — do not claim multi-engine catalog yet.
+            </p>
+            <div className="df2-form-row">
+              <div className="df2-field df2-field-flex">
+                <label className="df2-label" htmlFor="dest-iceberg-warehouse">Warehouse path</label>
+                <input
+                  id="dest-iceberg-warehouse"
+                  className="df2-input"
+                  value={destConnectionString}
+                  onChange={(e) => setDestConnectionString(e.target.value)}
+                  placeholder="/data/iceberg-warehouse or file:///mnt/lake"
+                />
+              </div>
+            </div>
+          </div>
+          )}
+
+          {!connectorId && destType && destType !== "bigquery" && destDriverType !== "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields">
             <label className="df2-label">Connection</label>
             <div className="df2-form-row">
@@ -3955,7 +4021,10 @@ export function TransferPage({
 
           {connectorId && selectedDestConnector && (
             <p className="df2-connector-hint">
-              Using <strong>{selectedDestConnector.name}</strong> ({selectedDestConnector.host}:{selectedDestConnector.port})
+              Using <strong>{selectedDestConnector.name}</strong>
+              {resolveDriverType(selectedDestConnector.type) === "iceberg"
+                ? ` · warehouse ${selectedDestConnector.connection_string || selectedDestConnector.database || "(unset)"}`
+                : ` (${selectedDestConnector.host}:${selectedDestConnector.port})`}
             </p>
           )}
 
@@ -3976,11 +4045,32 @@ export function TransferPage({
                   ? "GCP Project ID"
                   : destDriverType === "dynamodb"
                     ? "AWS region or local endpoint"
-                    : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
-                      ? "Unused (optional)"
-                      : "Database"}
+                    : destDriverType === "iceberg"
+                      ? "Namespace (optional)"
+                      : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
+                        ? "Unused (optional)"
+                        : "Database"}
               </label>
-              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destDriverType === "bigquery" ? "my-gcp-project" : destDriverType === "dynamodb" ? "us-east-1" : destDriverType === "milvus" ? "default" : "test_db"} />
+              <input
+                id="dest-db"
+                className="df2-input"
+                value={destDriverType === "iceberg" ? destSchema : targetDb}
+                onChange={(e) => {
+                  if (destDriverType === "iceberg") setDestSchema(e.target.value);
+                  else setTargetDb(e.target.value);
+                }}
+                placeholder={
+                  destDriverType === "bigquery"
+                    ? "my-gcp-project"
+                    : destDriverType === "dynamodb"
+                      ? "us-east-1"
+                      : destDriverType === "iceberg"
+                        ? "analytics"
+                        : destDriverType === "milvus"
+                          ? "default"
+                          : "test_db"
+                }
+              />
             </div>
             {destDriverType === "bigquery" && (
               <div className="df2-field df2-field-flex">
@@ -3994,13 +4084,15 @@ export function TransferPage({
                   ? "Collection"
                   : destDriverType === "dynamodb"
                     ? "DynamoDB table"
-                    : destDriverType === "pinecone"
-                      ? "Namespace"
-                      : destDriverType === "weaviate"
-                        ? "Class name"
-                        : destDriverType === "qdrant" || destDriverType === "milvus"
-                          ? "Collection"
-                          : "Table"}
+                    : destDriverType === "iceberg"
+                      ? "Iceberg table"
+                      : destDriverType === "pinecone"
+                        ? "Namespace"
+                        : destDriverType === "weaviate"
+                          ? "Class name"
+                          : destDriverType === "qdrant" || destDriverType === "milvus"
+                            ? "Collection"
+                            : "Table"}
               </label>
               <input
                 id="dest-col"
@@ -4012,6 +4104,8 @@ export function TransferPage({
                     ? "my_collection"
                     : destDriverType === "dynamodb"
                       ? "orders"
+                      : destDriverType === "iceberg"
+                        ? "orders"
                       : destDriverType === "pinecone"
                         ? "default"
                         : destDriverType === "weaviate"
@@ -4160,6 +4254,14 @@ export function TransferPage({
             multiSubnetFailover={multiSubnetFailover}
             onMultiSubnetFailoverChange={setMultiSubnetFailover}
             showMultiSubnetFailover={
+              syncMode === "cdc"
+              && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+                resolveDriverType(sourceConnector?.type || ""),
+              )
+            }
+            cdcRowFilter={cdcRowFilter}
+            onCdcRowFilterChange={setCdcRowFilter}
+            showCdcRowFilter={
               syncMode === "cdc"
               && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
                 resolveDriverType(sourceConnector?.type || ""),
@@ -4323,6 +4425,45 @@ export function TransferPage({
             onOpenMappingProof={() => setMappingProofOpen(true)}
             mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
+            repairJobId={activeJobId || persistedPlanId || ""}
+            repairMappings={columnMappings.map((m) => ({
+              source: m.source,
+              destination: m.target,
+              destination_type: m.destType,
+              target_type: m.destType,
+              transform: m.transform || undefined,
+              transforms: m.transform ? [{ type: m.transform }] : [],
+            }))}
+            onRepairMappingsApplied={(updated) => {
+              setColumnMappings((prev) =>
+                prev.map((m) => {
+                  const hit = updated.find(
+                    (u) => u.source === m.source || u.destination === m.target || u.source === m.target,
+                  );
+                  if (!hit) return m;
+                  const xf =
+                    hit.transform
+                    || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
+                    || m.transform;
+                  const nextType = hit.destination_type || hit.target_type || m.destType;
+                  return {
+                    ...m,
+                    destType: String(nextType || m.destType || ""),
+                    transform: (xf as typeof m.transform) || m.transform,
+                    approved: false,
+                    requiresReview: true,
+                    reason: [m.reason, `Repair applied (${hit.destination_type || hit.transform || "update"})`]
+                      .filter(Boolean)
+                      .join(" · "),
+                  };
+                }),
+              );
+              toast({
+                title: "Repair applied to mappings",
+                message: "Re-run Validate to confirm gates pass with the approved fixes.",
+                tone: "success",
+              });
+            }}
           />
         </div>
       )}
@@ -4361,21 +4502,30 @@ export function TransferPage({
             <EmptyState
               icon="transfer"
               title="Ready to transfer"
-              description="Preflight passed — execute the transfer to move your data."
+              description="Preflight passed on Validate. Re-open gate cards anytime, or execute here to start the write."
               action={
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-primary df2-btn-lg"
-                  onClick={() => void executeTransfer()}
-                  disabled={multiStreamUnsupportedMode}
-                  title={
-                    multiStreamUnsupportedMode
-                      ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
-                      : undefined
-                  }
-                >
-                  <DtIcon name="transfer" size={18} /> Execute Transfer
-                </button>
+                <div className="df2-run-ready-actions">
+                  <button
+                    type="button"
+                    className="df2-btn"
+                    onClick={() => setStep(STEP_VALIDATE)}
+                  >
+                    ← Review Validate gates
+                  </button>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-primary df2-btn-lg"
+                    onClick={() => void executeTransfer()}
+                    disabled={multiStreamUnsupportedMode}
+                    title={
+                      multiStreamUnsupportedMode
+                        ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
+                        : undefined
+                    }
+                  >
+                    <DtIcon name="transfer" size={18} /> Execute Transfer
+                  </button>
+                </div>
               }
             />
           </div>
@@ -4456,6 +4606,7 @@ export function TransferPage({
             destLabel={mapDestRouteLabel}
             sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
             destType={destKindMode === "file_export" ? exportFormat : destType}
+            mappingProof={mappingProof}
             onNewTransfer={resetTransferStudio}
             onSchedule={() => void handleScheduleRoute()}
             onOpenValidate={() => setStep(STEP_VALIDATE)}
@@ -4476,6 +4627,30 @@ export function TransferPage({
           executeBlockedReason={
             multiStreamUnsupportedMode
               ? "Multi-stream SCD2/mirror is not supported — switch to full/incremental/CDC or a single stream."
+              : undefined
+          }
+          cdcRetentionSlot={
+            syncMode === "cdc"
+            && sourceConnector
+            && ["sqlserver", "mssql", "oracle", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+              resolveDriverType(sourceConnector.type),
+            )
+              ? (
+                <CdcRetentionPanel
+                  probeRequest={{
+                    type: sourceConnector.type,
+                    host: sourceConnector.host,
+                    port: sourceConnector.port,
+                    database: sourceConnector.database,
+                    username: sourceConnector.username,
+                    password: sourceConnector.password,
+                    schema: sourceConnector.schema,
+                    connection_string: sourceConnector.connection_string,
+                    table: primarySourceStream || "",
+                    multi_subnet_failover: multiSubnetFailover || undefined,
+                  }}
+                />
+              )
               : undefined
           }
           onBack={() => setStep(STEP_MAP)}

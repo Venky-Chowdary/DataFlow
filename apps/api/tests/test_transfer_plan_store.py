@@ -55,6 +55,49 @@ def test_mapping_revision_hashes():
     assert rev.source_schema_hash == fingerprint_schema(["AMT"], {"AMT": "DECIMAL"})
 
 
+def test_mapping_revision_persists_mapping_proof():
+    plan = create_plan({
+        "source_columns": ["AMT"],
+        "source_schema": {"AMT": "DECIMAL"},
+        "target_columns": ["payment_amount"],
+        "target_schema": {"payment_amount": "NUMERIC"},
+        "destination": {"kind": "database", "format": "snowflake"},
+        "source": {"kind": "file", "format": "csv"},
+    })
+    pipeline = {
+        "mappings": [{
+            "source": "AMT",
+            "target": "payment_amount",
+            "source_type": "DECIMAL",
+            "target_type": "NUMERIC",
+            "confidence": 0.92,
+            "transform": "decimal",
+        }],
+        "transforms": [{"source": "AMT", "target": "payment_amount", "transform": "decimal"}],
+        "validation": {"passed": True, "issues": []},
+        "agents_used": ["MappingReasonerAgent"],
+        "plan_summary": {"mapped_count": 1},
+        "mapping_proof": {
+            "dest_mode": "match_existing",
+            "mappings": [{"source": "AMT", "target": "payment_amount", "confidence": 0.92}],
+            "summary": {"mapped_count": 1},
+        },
+    }
+    updated = add_mapping_revision(plan.id, pipeline)
+    rev = updated.active_revision()
+    assert rev.mapping_proof.get("dest_mode") == "match_existing"
+    assert rev.mapping_proof["mappings"][0]["source"] == "AMT"
+
+    from services.transfer_plan_store import sync_ui_mappings
+    from services.transfer_plan_service import build_run_payload
+
+    synced = sync_ui_mappings(plan.id, pipeline["mappings"])
+    assert synced.active_revision().mapping_proof.get("mappings")
+    payload = build_run_payload(plan.id)
+    assert payload["mapping_proof"]["mappings"][0]["source"] == "AMT"
+    assert payload["mapping_hash"] == synced.active_revision().mapping_hash
+
+
 def test_preflight_run_persisted():
     plan = create_plan({"source_columns": ["a"], "target_columns": ["a"]})
     add_mapping_revision(plan.id, {

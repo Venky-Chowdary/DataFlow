@@ -741,6 +741,21 @@ export async function fetchJob(jobId: string): Promise<JobProgress> {
   );
 }
 
+export async function fetchJobMappingProof(jobId: string): Promise<{
+  job_id: string;
+  status?: string;
+  plan_id?: string;
+  mapping_version?: number;
+  mapping_hash?: string;
+  mapping_proof: Record<string, unknown>;
+  honesty?: string;
+}> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/mapping-proof`],
+    "Mapping proof not found"
+  );
+}
+
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
   const urls = [
     `${API_BASE}/connectors/jobs/${jobId}`,
@@ -900,6 +915,12 @@ export function streamJobProgress(
         ? raw.reconciliation as JobProgress["reconciliation"]
         : undefined,
       explanation: raw.explanation ? String(raw.explanation) : undefined,
+      mapping_proof: raw.mapping_proof && typeof raw.mapping_proof === "object"
+        ? raw.mapping_proof as JobProgress["mapping_proof"]
+        : undefined,
+      plan_id: raw.plan_id ? String(raw.plan_id) : undefined,
+      mapping_version: raw.mapping_version != null ? Number(raw.mapping_version) : undefined,
+      mapping_hash: raw.mapping_hash ? String(raw.mapping_hash) : undefined,
       ddl_executed: Array.isArray(raw.ddl_executed)
         ? raw.ddl_executed.map(String)
         : Array.isArray(raw.ddl_log)
@@ -932,6 +953,7 @@ export function streamJobProgress(
       cdc_plugin: raw.cdc_plugin ? String(raw.cdc_plugin) : null,
       cdc_slot_name: raw.cdc_slot_name ? String(raw.cdc_slot_name) : null,
       cdc_delivery: raw.cdc_delivery ? String(raw.cdc_delivery) : null,
+      cdc_row_filter: raw.cdc_row_filter ? String(raw.cdc_row_filter) : null,
       watermark: raw.watermark != null ? String(raw.watermark) : null,
       cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
       snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
@@ -956,6 +978,11 @@ export function streamJobProgress(
       source_ha_group: raw.source_ha_group != null ? String(raw.source_ha_group) : null,
       source_ha_replica: raw.source_ha_replica != null ? String(raw.source_ha_replica) : null,
       source_ha_message: raw.source_ha_message != null ? String(raw.source_ha_message) : null,
+      cdc_retention_status: raw.cdc_retention_status != null ? String(raw.cdc_retention_status) : null,
+      cdc_retention_resume: raw.cdc_retention_resume != null ? String(raw.cdc_retention_resume) : null,
+      cdc_retention_retained: raw.cdc_retention_retained != null ? String(raw.cdc_retention_retained) : null,
+      cdc_retention_message: raw.cdc_retention_message != null ? String(raw.cdc_retention_message) : null,
+      cdc_retention_dialect: raw.cdc_retention_dialect != null ? String(raw.cdc_retention_dialect) : null,
       cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
       trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
       trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
@@ -1514,6 +1541,47 @@ export async function clearCdcCursor(body: {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not clear CDC watermark"));
+  return res.json();
+}
+
+export interface CdcRetentionProbe {
+  ok: boolean;
+  cdc_retention_status: string;
+  cdc_retention_resume?: string | null;
+  cdc_retention_retained?: string | null;
+  cdc_retention_message?: string | null;
+  cdc_retention_dialect?: string | null;
+  retention?: {
+    status: string;
+    dialect: string;
+    resume?: string;
+    retained?: string;
+    cursor_key?: string;
+    message?: string;
+  };
+}
+
+/** Probe watermark vs live CDC retention (SQL Server min_lsn / Oracle oldest SCN). */
+export async function probeCdcRetention(body: {
+  type: string;
+  host?: string;
+  port?: number;
+  database?: string;
+  username?: string;
+  password?: string;
+  schema?: string;
+  connection_string?: string;
+  table?: string;
+  cursor_key?: string;
+  watermark?: string | null;
+  multi_subnet_failover?: boolean;
+}): Promise<CdcRetentionProbe> {
+  const res = await apiFetch(`${API_BASE}/ops/cdc-retention/probe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "CDC retention probe failed"));
   return res.json();
 }
 
@@ -2748,5 +2816,97 @@ export async function classifySchemaDrift(
     // Fallback: local classify via a thin mirror if endpoint missing
     throw new Error(await parseApiError(res, "Schema drift classify failed"));
   }
+  return res.json();
+}
+
+/** Agentic repair — durable propose → human decide → apply mappings. */
+export interface RepairProposal {
+  id: string;
+  job_id?: string;
+  source?: string;
+  status: string;
+  confidence?: string;
+  auto_applicable?: boolean;
+  summary?: string;
+  actions: Record<string, unknown>[];
+  diagnosis?: Record<string, unknown>;
+  created_at?: number;
+  decided_at?: number;
+  decided_by?: string;
+  apply_result?: {
+    applied?: boolean;
+    mappings?: RepairMapping[];
+    error?: string;
+  };
+}
+
+export interface RepairMapping {
+  source?: string;
+  destination?: string;
+  destination_type?: string;
+  target_type?: string;
+  transform?: string;
+  transforms?: { type?: string }[];
+  [key: string]: unknown;
+}
+
+export async function proposeRepairFromPreflight(body: {
+  preflight: Record<string, unknown>;
+  coercion_report?: Record<string, unknown>;
+  job_id?: string;
+}): Promise<RepairProposal> {
+  const res = await apiFetch(`${API_BASE}/repair/propose/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not propose repair"));
+  return res.json();
+}
+
+export async function proposeRepairFromQuarantine(body: {
+  rejected_details: Record<string, unknown>[];
+  job_id?: string;
+}): Promise<RepairProposal> {
+  const res = await apiFetch(`${API_BASE}/repair/propose/quarantine`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not propose quarantine repair"));
+  return res.json();
+}
+
+export async function listRepairProposals(opts?: {
+  job_id?: string;
+  status?: string;
+}): Promise<RepairProposal[]> {
+  const q = new URLSearchParams();
+  if (opts?.job_id) q.set("job_id", opts.job_id);
+  if (opts?.status) q.set("status", opts.status);
+  const suffix = q.toString() ? `?${q}` : "";
+  const res = await apiFetch(`${API_BASE}/repair/proposals${suffix}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not list repair proposals"));
+  const data = await res.json();
+  return Array.isArray(data.proposals) ? data.proposals : [];
+}
+
+export async function decideRepairProposal(
+  proposalId: string,
+  body: { approve: boolean; actor?: string; mappings?: RepairMapping[] },
+): Promise<RepairProposal> {
+  const res = await apiFetch(
+    `${API_BASE}/repair/proposals/${encodeURIComponent(proposalId)}/decide`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approve: body.approve,
+        actor: body.actor || "operator",
+        mappings: body.mappings || [],
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not decide repair proposal"));
   return res.json();
 }

@@ -190,3 +190,94 @@ def test_sqlserver_native_snapshot_poll_ack_and_df_lsn():
                     f"IF OBJECT_ID('dbo.[{table}]') IS NOT NULL DROP TABLE dbo.[{table}]"
                 )
             conn.commit()
+
+
+def test_sqlserver_retention_probe_gap_and_clear():
+    """Live: fabricate resume < min_lsn → probe gap → clear → no_watermark.
+
+    Honesty: this is the cleanup/AG gap *class* without requiring dual-node AG.
+    """
+    from connectors.sqlserver_cdc_native import encode_mssql_cdc_token
+    from services.cdc_cursor_gap import CdcLsnGapError
+    from services.cdc_retention_probe import probe_sqlserver_retention
+    from services.sync_cursor import clear_watermark, set_watermark
+
+    table = "cdc_ret_" + uuid.uuid4().hex[:8]
+    holder = f"it-ret-{table}"
+    ck = f"it:retention:{table}"
+    cfg = {**CFG, "lease_holder_id": holder, "job_id": holder, "type": "sqlserver"}
+    bootstrap = SqlServerNativeCdc(
+        cfg, table="cdc_native_orders", primary_key="id", schema="dbo"
+    )
+    with bootstrap._conn() as conn:
+        with conn.cursor() as cur:
+            _enable_cdc_on_table(cur, table)
+        conn.commit()
+
+    cdc = SqlServerNativeCdc(
+        cfg, table=table, primary_key="id", schema="dbo", batch_size=50, cursor_key=ck
+    )
+    try:
+        _wait_capture(cdc, table)
+        with cdc._conn() as conn:
+            with conn.cursor() as cur:
+                min_lsn = cdc._min_lsn(cur)
+        assert min_lsn, "expected capture min_lsn"
+
+        # Fabricate a resume LSN strictly before retention (gap class).
+        stale = encode_mssql_cdc_token("00", table=table, phase="streaming")
+        set_watermark(ck, stale)
+
+        probe = probe_sqlserver_retention(
+            cfg, table=table, schema="dbo", cursor_key=ck
+        )
+        assert probe.status == "gap", probe.to_dict()
+        assert probe.retained
+
+        # Poll must fail closed on the same gap class.
+        cdc2 = SqlServerNativeCdc(
+            cfg,
+            table=table,
+            primary_key="id",
+            schema="dbo",
+            batch_size=50,
+            cursor_key=ck,
+            resume_token=stale,
+        )
+        try:
+            with pytest.raises(CdcLsnGapError):
+                list(cdc2.poll())
+        finally:
+            try:
+                cdc2.close()
+            except Exception:
+                pass
+
+        clear_watermark(ck)
+        after = probe_sqlserver_retention(
+            cfg, table=table, schema="dbo", cursor_key=ck
+        )
+        assert after.status in {"no_watermark", "ok"}, after.to_dict()
+    finally:
+        try:
+            cdc.close()
+        except Exception:
+            pass
+        clear_watermark(ck)
+        with bootstrap._conn() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        f"""
+                        EXEC sys.sp_cdc_disable_table
+                            @source_schema = N'dbo',
+                            @source_name = N'{table}',
+                            @capture_instance = N'all';
+                        """
+                    )
+                except Exception:
+                    pass
+                cur.execute(
+                    f"IF OBJECT_ID('dbo.[{table}]') IS NOT NULL DROP TABLE dbo.[{table}]"
+                )
+            conn.commit()

@@ -108,8 +108,9 @@ def main() -> int:
             "notes": [
                 "PG/MySQL/Mongo live ITs run when services are up (CI enables PG wal_level=logical).",
                 "SQL Server CDC CI proves Change Tracking *and* native CDC (capture + LSN).",
-                "SQL Server resume < min_lsn fails closed (AG/cleanup gap class) — unit proofs.",
-                "Oracle resume < oldest redo / ORA-01291 class fails closed — unit proofs.",
+                "SQL Server resume < min_lsn fails closed (AG/cleanup gap class) — unit + retention probe classification.",
+                "Oracle resume < oldest redo / ORA-01291 class fails closed — unit + retention probe classification.",
+                "Proactive CDC retention probe (ok/at_risk/gap) on ops API + Studio Validate/Theater/Results.",
                 "Append-only CDC sinks fail-fast unless allow_append_only.",
                 "Oracle live IT is env-gated (DATAFLOW_ORACLE_ENABLE=1); optional cdc-oracle CI job.",
                 "Leases: Redis multi-node (fail-closed) or file single-host; fencing generation on steal.",

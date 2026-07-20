@@ -25,6 +25,50 @@ from services.value_serializer import cell_to_string
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
 
+def _stamp_job_mapping_artifacts(
+    job_id: str,
+    *,
+    status: str = "pending",
+    plan_id: str | None = None,
+    plan_payload: dict | None = None,
+    mappings: list | None = None,
+    destination_format: str = "",
+    source_kind: str = "",
+    dest_kind: str = "",
+    sync_mode: str = "",
+) -> None:
+    """Persist mapping_proof (+ plan linkage) on the job for Theater/Jobs deep-link."""
+    from services.mapping_proof import mapping_proof_or_build
+    from ..services.mongodb_service import get_mongodb_service
+
+    proof = mapping_proof_or_build(
+        list(mappings or []),
+        existing=(plan_payload or {}).get("mapping_proof") if plan_payload else None,
+        destination_db_type=(destination_format or "").lower(),
+        source_kind=source_kind or "",
+        dest_kind=dest_kind or "",
+        sync_mode=sync_mode or "",
+    )
+    updates: dict = {}
+    if proof:
+        updates["mapping_proof"] = proof
+    if plan_id:
+        updates["plan_id"] = plan_id
+        if plan_payload:
+            if plan_payload.get("mapping_version") is not None:
+                updates["mapping_version"] = plan_payload.get("mapping_version")
+            if plan_payload.get("mapping_hash"):
+                updates["mapping_hash"] = plan_payload.get("mapping_hash")
+    if not updates:
+        return
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id) or {}
+        mongo.update_job_status(job_id, job.get("status") or status, **updates)
+    except Exception:
+        pass
+
+
 def _destination_data_region(endpoint) -> str | None:
     """Infer the cloud region for S3-compatible destinations from host/endpoint."""
     if endpoint.format not in ("s3", "dynamodb"):
@@ -553,8 +597,11 @@ async def execute_transfer_json(
             if not request_obj.mappings:
                 request_obj.mappings = payload.get("mappings") or []
                 request_obj.column_types = payload.get("column_types") or {}
+            plan_payload = payload
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+    else:
+        plan_payload = None
 
     _residency_check(request, dst, region)
     engine = get_transfer_engine()
@@ -587,6 +634,17 @@ async def execute_transfer_json(
         from services.transfer_plan_store import attach_job
         attach_job(str(body.plan_id).strip(), job_id, status="running")
 
+    _stamp_job_mapping_artifacts(
+        job_id,
+        plan_id=str(body.plan_id).strip() if body.plan_id else None,
+        plan_payload=plan_payload,
+        mappings=list(request_obj.mappings or []),
+        destination_format=dst.format or "",
+        source_kind=src.kind or "",
+        dest_kind=dst.kind or "",
+        sync_mode=request_obj.sync_mode or "",
+    )
+
     if body.async_mode:
         background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
@@ -617,6 +675,8 @@ async def execute_transfer_json(
         "source": result.source_summary,
         "destination": result.destination_summary,
         "reconciliation": result.reconciliation,
+        "explanation": getattr(result, "explanation", "") or "",
+        "mapping_proof": getattr(result, "mapping_proof", None) or {},
     }
 
 
@@ -793,13 +853,14 @@ async def run_universal_transfer(
     form_sync_mode = (sync_mode or "").strip()
     form_schema_policy = (schema_policy or "").strip()
     form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
+    plan_payload = None
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import build_run_payload
-        from services.transfer_plan_store import attach_job
 
         try:
             payload = build_run_payload(plan_id.strip())
+            plan_payload = payload
             if not mappings_json.strip():
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
@@ -885,6 +946,17 @@ async def run_universal_transfer(
         from services.transfer_plan_store import attach_job
         attach_job(plan_id.strip(), job_id, status="running")
 
+    _stamp_job_mapping_artifacts(
+        job_id,
+        plan_id=plan_id.strip() if plan_id and plan_id.strip() else None,
+        plan_payload=plan_payload,
+        mappings=list(request_obj.mappings or []),
+        destination_format=dest_format or "",
+        source_kind=source_kind or "",
+        dest_kind=dest_kind or "",
+        sync_mode=request_obj.sync_mode or "",
+    )
+
     if async_mode.lower() in ("true", "1", "yes"):
         background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
@@ -922,6 +994,7 @@ async def run_universal_transfer(
         "payload_shape": result.payload_shape,
         "reconciliation": result.reconciliation,
         "explanation": result.explanation,
+        "mapping_proof": result.mapping_proof or {},
     }
 
 
@@ -941,6 +1014,56 @@ async def get_transfer_explanation(job_id: str):
         "job_id": job_id,
         "status": job.get("status"),
         "explanation": job.get("explanation", ""),
+        "mapping_proof": job.get("mapping_proof") or {},
+        "plan_id": job.get("plan_id") or "",
+    }
+
+
+@router.get("/{job_id}/mapping-proof")
+async def get_transfer_mapping_proof(job_id: str):
+    """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
+    from services.mapping_proof import mapping_proof_or_build
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
+    if not proof.get("mappings"):
+        req = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+        mappings = list(req.get("mappings") or [])
+        dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
+        src = req.get("source") if isinstance(req.get("source"), dict) else {}
+        proof = mapping_proof_or_build(
+            mappings,
+            destination_db_type=str(dest.get("format") or job.get("destination_type") or "").lower(),
+            source_kind=str(src.get("kind") or job.get("source_type") or ""),
+            dest_kind=str(dest.get("kind") or job.get("destination_kind") or ""),
+            sync_mode=str(job.get("sync_mode") or req.get("sync_mode") or ""),
+        )
+        if proof:
+            try:
+                mongo.update_job_status(job_id, job.get("status") or "completed", mapping_proof=proof)
+            except Exception:
+                pass
+
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "plan_id": job.get("plan_id") or "",
+        "mapping_version": job.get("mapping_version"),
+        "mapping_hash": job.get("mapping_hash") or "",
+        "mapping_proof": proof or {},
+        "honesty": (
+            "Mapping proof explains column match / transform / confidence decisions. "
+            "It is not row-level write fidelity (see Gate-8 reconcile) and does not imply "
+            "exactly-once CDC."
+        ),
     }
 
 

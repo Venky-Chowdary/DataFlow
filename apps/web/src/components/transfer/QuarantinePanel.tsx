@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
-import { downloadJobQuarantineCsv, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
+import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairProposal } from "../../lib/api";
+import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 type QuarantineRow = {
   row?: number;
@@ -118,6 +119,9 @@ export function QuarantinePanel({
   const [exporting, setExporting] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [rows, setRows] = useState<QuarantineRow[]>(() => initialDetails ?? []);
+  const [repairOpen, setRepairOpen] = useState(false);
+  const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
   const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
   const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
   const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
@@ -210,6 +214,37 @@ export function QuarantinePanel({
       }),
     );
     setEditIndex(null);
+  };
+
+  const proposeRepair = async () => {
+    if (!rows.length) {
+      toast({ title: "No findings", message: "Load quarantine rows before proposing a repair.", tone: "warning" });
+      return;
+    }
+    setRepairBusy(true);
+    try {
+      const proposal = await proposeRepairFromQuarantine({
+        job_id: jobId,
+        rejected_details: rows.map((r) => ({
+          column: r.column || r.target || "",
+          target: r.target || r.column || "",
+          reason: r.reason || "",
+          value: r.value,
+          suggested_transform: r.suggested_transform,
+        })),
+      });
+      setRepairProposal(proposal);
+      setRepairOpen(true);
+      toast({
+        title: "Repair proposed",
+        message: `${proposal.actions.length} action(s) — review and approve. Audit trail saved.`,
+        tone: "success",
+      });
+    } catch (e) {
+      toast({ title: "Propose failed", message: (e as Error).message, tone: "error" });
+    } finally {
+      setRepairBusy(false);
+    }
   };
 
   const replay = async () => {
@@ -340,6 +375,18 @@ export function QuarantinePanel({
           {isPreflight && onOpenValidate && (
             <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onOpenValidate}>
               <DtIcon name="gate" size={14} /> Open Validate (Strip / Fix)
+            </button>
+          )}
+          {rows.length > 0 && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-secondary"
+              onClick={() => void proposeRepair()}
+              disabled={repairBusy}
+              title="Create a durable repair proposal from quarantine findings (human approve required)"
+            >
+              <DtIcon name="sparkle" size={14} />
+              {repairBusy ? "Proposing…" : "Propose repair"}
             </button>
           )}
           {canReplay && (
@@ -528,6 +575,22 @@ export function QuarantinePanel({
           </div>
         </div>
       )}
+      <RepairProposalDrawer
+        open={repairOpen}
+        proposal={repairProposal}
+        onClose={() => setRepairOpen(false)}
+        onDecided={(p) => {
+          toast({
+            title: p.status === "rejected" ? "Repair rejected" : "Repair decided",
+            message: `${p.id} · ${p.status}. ${
+              p.status === "approved" || p.status === "applied"
+                ? "Open Validate / Map to apply the same fixes to the Studio mappings."
+                : "Audit trail recorded."
+            }`,
+            tone: p.status === "rejected" ? "warning" : "success",
+          });
+        }}
+      />
     </div>
   );
 }

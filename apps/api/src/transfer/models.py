@@ -239,6 +239,7 @@ class TransferResult:
     payload_shape: dict = field(default_factory=dict)
     contract_id: str = ""
     explanation: str = ""
+    mapping_proof: dict = field(default_factory=dict)
     elapsed_seconds: float = 0.0
     records_per_second: float = 0.0
     peak_memory_bytes: int = 0

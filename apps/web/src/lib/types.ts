@@ -166,6 +166,8 @@ export interface TransferJob {
   cdc_plugin?: string | null;
   cdc_slot_name?: string | null;
   cdc_delivery?: string | null;
+  /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
+  cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
@@ -200,6 +202,11 @@ export interface TransferJob {
   source_ha_group?: string | null;
   source_ha_replica?: string | null;
   source_ha_message?: string | null;
+  cdc_retention_status?: string | null;
+  cdc_retention_resume?: string | null;
+  cdc_retention_retained?: string | null;
+  cdc_retention_message?: string | null;
+  cdc_retention_dialect?: string | null;
   /** True when CDC was blocked because dest is append-only without opt-in. */
   cdc_append_only_sink?: boolean | null;
   /** Composite trust score 0–100 (persisted on terminal). */
@@ -293,6 +300,12 @@ export interface JobProgress extends TransferJob {
   };
   /** Plain-language pipeline explanation from the engine. */
   explanation?: string;
+  /** Persisted per-mapping evidence (confidence, fidelity, risks) for Theater/Jobs. */
+  mapping_proof?: Record<string, unknown>;
+  /** Transfer plan id when the job was started from Studio plan flow. */
+  plan_id?: string;
+  mapping_version?: number;
+  mapping_hash?: string;
   /** DDL / stream log lines (aliased as ddl_log for Jobs UI). */
   ddl_executed?: string[];
   ddl_log?: string[];
@@ -624,11 +637,13 @@ export interface TransferResult {
     };
   };
   explanation?: string;
+  mapping_proof?: Record<string, unknown>;
   job_id?: string;
   /** CDC operator signals copied from the completed job. */
   cdc_lag_seconds?: number | null;
   cdc_plugin?: string | null;
   cdc_delivery?: string | null;
+  cdc_row_filter?: string | null;
   cdc_shared_reader?: boolean | null;
   snapshot_mode?: string | null;
   watermark?: string | null;
@@ -639,6 +654,11 @@ export interface TransferResult {
   source_ha_topology?: string | null;
   source_ha_group?: string | null;
   source_ha_message?: string | null;
+  cdc_retention_status?: string | null;
+  cdc_retention_resume?: string | null;
+  cdc_retention_retained?: string | null;
+  cdc_retention_message?: string | null;
+  cdc_retention_dialect?: string | null;
   cdc_cursor_gap?: boolean | null;
   cdc_cursor_gap_code?: string | null;
   cdc_cursor_gap_dialect?: string | null;
@@ -807,6 +827,7 @@ export const CONNECTOR_CATALOG = [
   { id: "firebolt", label: "Firebolt", port: 443 },
   { id: "clickhouse", label: "ClickHouse", port: 8123 },
   { id: "duckdb", label: "DuckDB", port: 0 },
+  { id: "iceberg", label: "Apache Iceberg", port: 0 },
   { id: "trino", label: "Trino / Presto", port: 8080 },
   { id: "hive", label: "Apache Hive", port: 10000 },
   { id: "druid", label: "Apache Druid", port: 8082 },

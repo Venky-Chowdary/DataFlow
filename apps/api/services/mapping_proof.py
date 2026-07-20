@@ -494,6 +494,32 @@ def confidence_breakdown(
     return scaled
 
 
+def mapping_proof_or_build(
+    mappings: list[dict] | None,
+    *,
+    existing: dict[str, Any] | None = None,
+    target_columns: list[str] | None = None,
+    destination_db_type: str = "",
+    source_kind: str = "",
+    dest_kind: str = "",
+    sync_mode: str = "",
+) -> dict[str, Any]:
+    """Prefer a persisted proof; otherwise build from the mappings that ran."""
+    if isinstance(existing, dict) and existing.get("mappings"):
+        return existing
+    rows = list(mappings or [])
+    if not rows:
+        return {}
+    return build_mapping_proof(
+        rows,
+        target_columns=target_columns,
+        destination_db_type=destination_db_type,
+        source_kind=source_kind,
+        dest_kind=dest_kind,
+        sync_mode=sync_mode,
+    )
+
+
 def build_mapping_proof(
     mappings: list[dict],
     *,
