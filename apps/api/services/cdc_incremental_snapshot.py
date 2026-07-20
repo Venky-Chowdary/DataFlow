@@ -188,8 +188,12 @@ def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | N
         rows_data = _load()
         for i, r in enumerate(rows_data):
             if r.get("id") == signal_id:
+                # Do not resurrect a cancelled/failed/completed signal mid-chunk.
+                if r.get("status") not in ("pending", "running"):
+                    return SnapshotSignal.from_dict(r)
                 r["last_pk"] = last_pk
                 r["rows_snapshotted"] = int(r.get("rows_snapshotted") or 0) + int(rows)
+                r["status"] = "running"
                 r["updated_at"] = time.time()
                 rows_data[i] = r
                 _save(rows_data)
@@ -198,8 +202,22 @@ def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | N
 
 
 def complete_signal(signal_id: str, *, error: str = "") -> SnapshotSignal | None:
-    status = "failed" if error else "completed"
-    return update_signal(signal_id, status=status, error=error)
+    with _signal_store_lock():
+        rows = _load()
+        for i, r in enumerate(rows):
+            if r.get("id") != signal_id:
+                continue
+            if r.get("status") == "cancelled":
+                return SnapshotSignal.from_dict(r)
+            status = "failed" if error else "completed"
+            r["status"] = status
+            if error:
+                r["error"] = error
+            r["updated_at"] = time.time()
+            rows[i] = r
+            _save(rows)
+            return SnapshotSignal.from_dict(r)
+    return None
 
 
 def get_signal(signal_id: str) -> SnapshotSignal | None:

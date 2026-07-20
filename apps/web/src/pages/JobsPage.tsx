@@ -23,6 +23,7 @@ import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
+import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { inferTransferFailureHint } from "../lib/transferFailure";
@@ -32,9 +33,19 @@ import { MappingProofDrawer, type MappingProof } from "../components/MappingProo
 import { Drawer } from "../components/ui/Drawer";
 import {
   JobEvidenceLaunchGrid,
+  JobExplanationView,
   JobLogTable,
   JobOverviewNote,
 } from "../components/jobs/JobEvidenceLaunch";
+import type { RepairMapping } from "../lib/api";
+
+export type JobsStudioIntent = {
+  step?: "validate" | "map" | "source";
+  repairProposalId?: string;
+  jobId?: string;
+  /** Applied or job mappings to seed into Transfer Studio Map/Validate. */
+  mappings?: RepairMapping[];
+};
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -55,7 +66,8 @@ type JobEvidenceDrawer =
   | "explanation"
   | "streams"
   | "preflight"
-  | "writer";
+  | "writer"
+  | "quarantine";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
@@ -105,7 +117,8 @@ function formatSyncModeLabel(mode?: string): string {
 interface JobsPageProps {
   jobs: TransferJob[];
   onRefresh?: () => void;
-  onStartTransfer?: () => void;
+  /** Open Transfer Studio — optional intent lands on Validate / Map with repair context. */
+  onStartTransfer?: (intent?: JobsStudioIntent) => void;
   initialJobId?: string;
   /** Deep-link panel (e.g. mapping-proof). */
   initialPanel?: string;
@@ -187,6 +200,21 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
+
+  const openStudio = useCallback((intent?: JobsStudioIntent) => {
+    onStartTransfer?.(intent);
+  }, [onStartTransfer]);
+
+  const jobRepairMappings = useMemo((): RepairMapping[] => {
+    const maps = liveJob?.transfer_request?.mappings;
+    if (!Array.isArray(maps)) return [];
+    return maps.map((m) => ({
+      source: m.source || m.source_column || "",
+      destination: m.target || m.target_column || "",
+      destination_type: m.target_type || m.source_type,
+      target_type: m.target_type || m.source_type,
+    })).filter((m) => m.source);
+  }, [liveJob?.transfer_request?.mappings]);
 
   const counts = useMemo(() => ({
     all: jobs.length,
@@ -309,6 +337,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       setEvidenceDrawer(null);
       return;
     }
+    let cancelled = false;
     setDetailLoading(true);
     const listed = jobs.find((j) => j._id === selectedId);
     // Optimistic hydrate from list so the detail pane never goes blank on slow/404 get.
@@ -323,12 +352,22 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       });
     }
     fetchJob(selectedId)
-      .then(setLiveJob)
+      .then((job) => {
+        if (cancelled) return;
+        setLiveJob(job);
+      })
       .catch(() => {
+        if (cancelled) return;
         // Keep list snapshot if detail endpoint fails (workspace/isolation edge cases).
         if (!listed) setLiveJob(null);
       })
-      .finally(() => setDetailLoading(false));
+      .finally(() => {
+        if (cancelled) return;
+        setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedId, jobs]);
 
   const selected = jobs.find((j) => j._id === selectedId);
@@ -581,7 +620,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             description="Run a transfer from Transfer Studio — live batch progress, phases, and proof reports appear here."
             action={
               onStartTransfer ? (
-                <button type="button" className="df2-btn df2-btn-primary" onClick={onStartTransfer}>
+                <button type="button" className="df2-btn df2-btn-primary" onClick={() => openStudio()}>
                   <DtIcon name="transfer" size={14} /> Open Transfer Studio
                 </button>
               ) : undefined
@@ -927,7 +966,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                               onOpenQuarantine={
                                 showQuarantineTab ? () => setDetailTab("quarantine") : undefined
                               }
-                              onOpenValidate={onStartTransfer}
+                              onOpenValidate={() => openStudio({
+                                step: "validate",
+                                jobId: selected._id,
+                                mappings: jobRepairMappings,
+                              })}
                               onResume={
                                 liveJob.checkpoint || liveJob.chunk_current != null
                                   ? () => void handleResume()
@@ -1147,6 +1190,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   : undefined
                               }
                             />
+                            {(liveJob.cdc_plugin || liveJob.watermark || liveJob.cdc_delivery || liveJob.sync_mode === "cdc") && (
+                              <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
+                            )}
 
                             {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
                               <div className="df2-data-integrity" role="note">
@@ -1193,8 +1239,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   {retrying ? <ButtonLoader label="Retrying…" /> : <><DtIcon name="transfer" size={16} /> Retry from start</>}
                                 </button>
                                 {onStartTransfer && (
-                                  <button type="button" className="df2-btn" onClick={onStartTransfer}>
-                                    Open Transfer Studio
+                                  <button
+                                    type="button"
+                                    className="df2-btn"
+                                    onClick={() => openStudio({
+                                      step: "validate",
+                                      jobId: selected._id,
+                                      mappings: jobRepairMappings,
+                                    })}
+                                  >
+                                    Open Validate in Studio
                                   </button>
                                 )}
                               </div>
@@ -1265,33 +1319,54 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
 
                         {detailTab === "quarantine" && (
                           <div className="df2-jobs-detail-pane">
-                            <section className="df2-jobs-v3-quarantine is-tab" aria-label="Quarantined rows">
-                              <header className="df2-jobs-v3-quarantine-head">
-                                <div>
-                                  <h3>Quarantined rows</h3>
-                                  <p>
-                                    {rejectedCount > 0
-                                      ? `${rejectedCount.toLocaleString()} row(s) isolated — inspect columns, values, and reasons. Export CSV downloads to your machine.`
-                                      : "Inspect preflight / integrity findings for this job."}
-                                  </p>
-                                </div>
-                                {rejectedCount > 0 && (
-                                  <span className="df2-jobs-v3-quarantine-badge">
-                                    {rejectedCount.toLocaleString()} quarantined
-                                  </span>
-                                )}
-                              </header>
-                              <QuarantinePanel
-                                jobId={selected._id}
-                                rejectedRows={liveJob.rejected_rows}
-                                coercedNullRows={liveJob.coerced_null_rows}
-                                autoLoad
-                                initiallyOpen
-                                onOpenValidate={onStartTransfer}
-                                onReplayComplete={() => {
-                                  void onRefresh?.();
-                                }}
-                              />
+                            <section className="df2-jobs-quarantine-overview" aria-label="Quarantine overview">
+                              <JobOverviewNote>
+                                Quarantine is a small slice of bad cells — not the whole transfer.
+                              </JobOverviewNote>
+                              <p className="df2-jobs-quarantine-meaning">
+                                <strong>What “quarantined” means:</strong>{" "}
+                                {(liveJob.records_processed ?? 0).toLocaleString()} row(s) were processed.
+                                {" "}
+                                {rejectedCount > 0
+                                  ? `Only ${rejectedCount.toLocaleString()} row(s) / cell finding(s) failed type or integrity checks and were isolated — they were not written as clean destination rows. The rest of the load succeeded.`
+                                  : "No write-time quarantine count on this job yet — open details to inspect preflight / integrity findings."}
+                                {" "}
+                                Example: 100,000 transferred + 2 quarantined = 2 bad findings, not 99,998 failures.
+                              </p>
+                              <div className="df2-jobs-quarantine-metrics">
+                                <article className="df2-jobs-quarantine-metric">
+                                  <span>Processed</span>
+                                  <strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong>
+                                </article>
+                                <article className={`df2-jobs-quarantine-metric${rejectedCount > 0 ? " is-warn" : ""}`}>
+                                  <span>Quarantined</span>
+                                  <strong>{rejectedCount.toLocaleString()}</strong>
+                                </article>
+                                <article className="df2-jobs-quarantine-metric">
+                                  <span>Coerced to NULL</span>
+                                  <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                </article>
+                              </div>
+                              <div className="df2-jobs-quarantine-actions">
+                                <Button
+                                  variant="primary"
+                                  onClick={() => setEvidenceDrawer("quarantine")}
+                                  leadingIcon={<DtIcon name="alert" size={14} />}
+                                >
+                                  Inspect quarantine details
+                                </Button>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => openStudio({
+                                    step: "validate",
+                                    jobId: selected._id,
+                                    mappings: jobRepairMappings,
+                                  })}
+                                  leadingIcon={<DtIcon name="gate" size={14} />}
+                                >
+                                  Open Validate in Studio
+                                </Button>
+                              </div>
                             </section>
                           </div>
                         )}
@@ -1299,59 +1374,45 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
                             <JobOverviewNote>
-                              Logs are split into three evidence panels so Event, DDL, and
-                              Pipeline explanation are readable one at a time — not stacked terminals.
+                              Event, DDL, and pipeline explanation open as right-side panels — one at a time.
                             </JobOverviewNote>
-                            <div className="df2-drawer-facts df2-jobs-map-overview">
-                              <div className="df2-drawer-fact">
-                                <span>Event lines</span>
-                                <strong>{eventLog.length.toLocaleString()}</strong>
-                              </div>
-                              <div className="df2-drawer-fact">
-                                <span>DDL / stream</span>
-                                <strong>{ddlLog.length.toLocaleString()}</strong>
-                              </div>
-                              <div className="df2-drawer-fact">
-                                <span>Explanation</span>
-                                <strong>{liveJob.explanation ? "Yes" : "—"}</strong>
-                              </div>
-                            </div>
                             <JobEvidenceLaunchGrid
-                              label="Log panels"
+                              label="Logs"
                               items={[
                                 {
                                   id: "event-log",
                                   title: "Event log",
-                                  description: "Phase / message / row milestones for operators",
+                                  description: "Phase / message / row milestones",
                                   icon: "activity",
-                                  meta: eventLog.length ? `${eventLog.length} lines` : "No events yet",
+                                  meta: eventLog.length ? `${eventLog.length}` : "0",
                                   disabled: eventLog.length === 0,
                                   onOpen: () => setEvidenceDrawer("event-log"),
                                 },
                                 {
                                   id: "ddl-log",
-                                  title: "DDL & stream log",
-                                  description: "CREATE/ALTER statements and stream progress",
+                                  title: "DDL & stream",
+                                  description: "CREATE/ALTER and stream progress",
                                   icon: "code",
-                                  meta: ddlLog.length ? `${ddlLog.length} lines` : "No DDL lines",
+                                  meta: ddlLog.length ? `${ddlLog.length}` : "0",
                                   disabled: ddlLog.length === 0,
                                   onOpen: () => setEvidenceDrawer("ddl-log"),
                                 },
                                 {
                                   id: "explanation",
-                                  title: "Pipeline explanation",
-                                  description: "Human-readable summary of mappings and write path",
+                                  title: "Explanation",
+                                  description: "Human-readable pipeline summary",
                                   icon: "book",
+                                  meta: liveJob.explanation ? "Open" : undefined,
                                   disabled: !liveJob.explanation,
                                   onOpen: () => setEvidenceDrawer("explanation"),
                                 },
                                 {
                                   id: "streams",
-                                  title: "CDC stream health",
-                                  description: "Per-stream status, lag, and watermark table",
+                                  title: "CDC streams",
+                                  description: "Per-stream lag and watermark",
                                   icon: "zap",
                                   meta: Array.isArray(liveJob.streams) && liveJob.streams.length
-                                    ? `${liveJob.streams.length} streams`
+                                    ? `${liveJob.streams.length}`
                                     : undefined,
                                   disabled: !(Array.isArray(liveJob.streams) && liveJob.streams.length > 0),
                                   onOpen: () => setEvidenceDrawer("streams"),
@@ -1392,12 +1453,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Gate-8 reconcile"
           subtitle="Source vs destination row counts and content fingerprints"
           icon={<DtIcon name="shield" size={18} />}
-          width={640}
+          size="xl"
         >
           <Gate8ProofCard
             report={recon}
             explanation={liveJob.explanation}
-            onOpenValidate={onStartTransfer}
+            onOpenValidate={() => {
+              setEvidenceDrawer(null);
+              openStudio({
+                step: "validate",
+                jobId: selectedId || undefined,
+                mappings: jobRepairMappings,
+              });
+            }}
             onOpenQuarantine={
               showQuarantineTab
                 ? () => {
@@ -1421,7 +1489,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               : `${jobPreflight.passed_count}/${jobPreflight.total_gates} gates · ${jobPreflight.readiness_score}% readiness`
           }
           icon={<DtIcon name="gate" size={18} />}
-          width={720}
+          size="xl"
         >
           <div className="df2-drawer-facts" style={{ marginBottom: 14 }}>
             <div className="df2-drawer-fact">
@@ -1481,7 +1549,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Writer & throughput"
           subtitle="Destination write path, batching, and prior-load comparison"
           icon={<DtIcon name="speed" size={18} />}
-          width={720}
+          size="xl"
         >
           <dl className="df2-jobs-v3-summary-dl">
             {writerRps != null && (
@@ -1548,7 +1616,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Run metadata"
           subtitle={jobRouteLabel(liveJob)}
           icon={<DtIcon name="activity" size={18} />}
-          width={560}
+          size="lg"
         >
           <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
             {triggeredBy && (
@@ -1646,7 +1714,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Phase timeline"
           subtitle="Job phase history for this run"
           icon={<DtIcon name="clock" size={18} />}
-          width={560}
+          size="lg"
         >
           <JobTimeline entries={timelineEntries} />
         </Drawer>
@@ -1659,7 +1727,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Column map"
           subtitle={`${mappingCount.toLocaleString()} columns`}
           icon={<DtIcon name="connectors" size={18} />}
-          width={640}
+          size="xl"
         >
           {mappingCount > 0 ? (
             <div className="df2-jobs-v3-mappings is-drawer">
@@ -1738,7 +1806,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Event log"
           subtitle={`${eventLog.length.toLocaleString()} durable operator events`}
           icon={<DtIcon name="activity" size={18} />}
-          width={720}
+          size="full"
         >
           <JobLogTable lines={eventLog} empty="No events yet" />
         </Drawer>
@@ -1751,7 +1819,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="DDL & stream log"
           subtitle={`${ddlLog.length.toLocaleString()} schema / stream lines`}
           icon={<DtIcon name="code" size={18} />}
-          width={720}
+          size="full"
         >
           <JobLogTable lines={ddlLog.map(String)} empty="No DDL lines" />
         </Drawer>
@@ -1764,9 +1832,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Pipeline explanation"
           subtitle="Plain-language summary from the transfer engine"
           icon={<DtIcon name="book" size={18} />}
-          width={640}
+          size="xl"
         >
-          <p className="df2-jobs-explanation-prose">{liveJob.explanation}</p>
+          <JobExplanationView text={liveJob.explanation} />
         </Drawer>
       )}
 
@@ -1777,7 +1845,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="CDC stream health"
           subtitle={`${liveJob.streams.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
-          width={720}
+          size="full"
         >
           <table className="df2-table df2-jobs-cdc-table">
             <thead>
@@ -1800,13 +1868,68 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                       ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
                       : "—"}
                   </td>
-                  <td className="df2-mono" title={s.watermark || undefined}>
-                    {s.watermark || "—"}
+                  <td className="df2-cell-mono" title={s.watermark || ""}>
+                    {s.watermark
+                      ? `${String(s.watermark).slice(0, 40)}${String(s.watermark).length > 40 ? "…" : ""}`
+                      : "—"}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </Drawer>
+      )}
+
+      {liveJob && selectedId && evidenceDrawer === "quarantine" && (
+        <Drawer
+          open
+          onClose={() => setEvidenceDrawer(null)}
+          title="Quarantine details"
+          subtitle={
+            rejectedCount > 0
+              ? `${rejectedCount.toLocaleString()} finding(s) — bad cells isolated; other rows already transferred`
+              : "Inspect findings, propose repair, or promote / replay"
+          }
+          icon={<DtIcon name="alert" size={18} />}
+          size="full"
+        >
+          <QuarantinePanel
+            jobId={selectedId}
+            rejectedRows={liveJob.rejected_rows}
+            coercedNullRows={liveJob.coerced_null_rows}
+            autoLoad
+            initiallyOpen
+            repairMappings={jobRepairMappings}
+            onOpenValidate={() => {
+              setEvidenceDrawer(null);
+              openStudio({
+                step: "validate",
+                jobId: selectedId || undefined,
+                mappings: jobRepairMappings,
+              });
+            }}
+            onRepairDecided={(proposal) => {
+              setEvidenceDrawer(null);
+              if (proposal.status === "rejected") return;
+              const applied = proposal.apply_result?.mappings;
+              const maps = Array.isArray(applied) && applied.length
+                ? (applied as RepairMapping[])
+                : jobRepairMappings;
+              // Only reopen the drawer when the proposal can still be decided/applied.
+              const reopen =
+                proposal.status === "proposed"
+                || (proposal.status === "approved" && maps.length > 0);
+              openStudio({
+                step: "validate",
+                jobId: selectedId || undefined,
+                repairProposalId: reopen ? proposal.id : undefined,
+                mappings: maps,
+              });
+            }}
+            onReplayComplete={() => {
+              void onRefresh?.();
+            }}
+          />
         </Drawer>
       )}
     </PageShell>

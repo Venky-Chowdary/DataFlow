@@ -305,6 +305,9 @@ def resolve_connector_config(
             if key not in merged_cfg:
                 merged_cfg[key] = value
         cfg = merged_cfg
+    # Stamp connector_id so CDC fingerprints / incremental snapshots match adapters.
+    if endpoint.connector_id:
+        cfg["connector_id"] = endpoint.connector_id
     # Apply driver defaults for fields that are still missing.
     cfg["host"] = cfg["host"] or "localhost"
     cfg["port"] = cfg["port"] or default_port

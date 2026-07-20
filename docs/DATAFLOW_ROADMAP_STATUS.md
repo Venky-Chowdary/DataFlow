@@ -77,6 +77,7 @@ The product is **beta / early production** for batch transfers on supported driv
 - **SQL Server / Oracle shared multi-table CDC** readers + Pipelines contract breaker UX.
 - **CDC lease force-release** (`POST /ops/cdc-leases/force-release`) + Theater/Jobs Next-step CTAs (fencing-aware).
 - **Freshness SLO alerts** (`GET /ops/freshness` → `alerts` / `slo_status`) + Overview Open pipeline/job CTAs.
+- **Incremental snapshot operator UI** — job-scoped `GET/POST /transfer/{job_id}/cdc/snapshots` (+ cancel) resolves `source_key` from the job fingerprint; Theater + Jobs `CdcIncrementalSnapshotPanel` request/cancel/monitor. Still at-least-once upsert; not destination undo.
 
 ### Why it matters
 
@@ -345,7 +346,7 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 | --------------------------- | -------------- | ---------------- | ---------------------------------------------------------------- |
 | Batch reliability           | 8/10           | 9/10             | small                                                            |
 | Connector depth             | 4/10           | 9/10             | large                                                            |
-| CDC / real-time             | **7.0/10**     | 8/10             | large (row_filter stamped + Jobs evidence; dual-node AG IT gated) |
+| CDC / real-time             | **7.2/10**     | 8/10             | large (incremental snapshot UI + row_filter evidence; AG dual-node gated) |
 | Vector / AI-ready           | 2/10           | 6/10             | large                                                            |
 | Data contracts / governance | 6/10           | 5/10             | small lead                                                       |
 | GitOps / as-code            | **7/10**       | 5/10             | lead (CLI+HTTP+UI+CI+signed CD gate)                             |

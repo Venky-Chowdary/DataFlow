@@ -4,7 +4,7 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
 import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
-import { cancelJob, fetchJobMappingProof, resumeJob, streamJobProgress } from "../lib/api";
+import { cancelJob, fetchJobMappingProof, resumeJob, streamJobProgress, type RepairMapping } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
@@ -16,6 +16,7 @@ import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/t
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
+import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
@@ -623,6 +624,9 @@ export function JobTheaterView({
         onResume={onResume}
         resuming={resuming}
       />
+      {(job.cdc_plugin || job.watermark || job.cdc_delivery || job.sync_mode === "cdc") && job._id && (
+        <CdcIncrementalSnapshotPanel jobId={job._id} enabled />
+      )}
 
       {(isComplete || isFailed || isCancelled || isQuarantine) && (
         <JobTrustScoreCard
@@ -1171,7 +1175,17 @@ export function JobTheaterView({
             initialDetails={job.rejected_details}
             autoLoad
             initiallyOpen
+            repairMappings={(resolvedProof?.mappings || []).map((m): RepairMapping => ({
+              source: m.source,
+              destination: m.target || m.source,
+              destination_type: m.target_type || m.source_type,
+              target_type: m.target_type || m.source_type,
+              transform: m.transform || undefined,
+            }))}
             onOpenValidate={onBackToValidate}
+            onRepairDecided={() => {
+              onBackToValidate?.();
+            }}
           />
         </section>
       )}

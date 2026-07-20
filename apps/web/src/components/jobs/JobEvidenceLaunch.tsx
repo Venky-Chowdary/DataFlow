@@ -1,6 +1,6 @@
 /**
- * Jobs evidence launch cards — open right-side Drawers for deep evidence.
- * Keeps tab panes as clear overviews (DataFlow operator UX).
+ * Jobs evidence launch — compact single-row chips that open right-side Drawers.
+ * Keeps tab panes as clear overviews (not a wall of large cards).
  */
 import type { ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
@@ -19,36 +19,71 @@ export interface JobEvidenceLaunchItem {
 interface JobEvidenceLaunchGridProps {
   items: JobEvidenceLaunchItem[];
   label?: string;
+  /** Compact single-row chips (default). Pass "cards" only when needed. */
+  layout?: "row" | "cards";
 }
 
-export function JobEvidenceLaunchGrid({ items, label = "Open evidence" }: JobEvidenceLaunchGridProps) {
+export function JobEvidenceLaunchGrid({
+  items,
+  label = "Open evidence",
+  layout = "row",
+}: JobEvidenceLaunchGridProps) {
   const visible = items.filter((i) => !i.disabled);
   if (!visible.length) return null;
+
+  if (layout === "cards") {
+    return (
+      <section className="df2-jobs-evidence" aria-label={label}>
+        <header className="df2-jobs-evidence-head">
+          <strong>{label}</strong>
+          <span>Opens a right-side panel — keep the overview scannable</span>
+        </header>
+        <div className="df2-jobs-evidence-grid">
+          {visible.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`df2-jobs-evidence-card tone-${item.tone || "default"}`}
+              onClick={item.onOpen}
+              title={item.description}
+            >
+              <span className="df2-jobs-evidence-icon" aria-hidden>
+                <DtIcon name={item.icon} size={18} />
+              </span>
+              <span className="df2-jobs-evidence-copy">
+                <strong>{item.title}</strong>
+                <span>{item.description}</span>
+                {item.meta ? <em>{item.meta}</em> : null}
+              </span>
+              <span className="df2-jobs-evidence-chevron" aria-hidden>
+                <DtIcon name="chevron-right" size={16} />
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
   return (
-    <section className="df2-jobs-evidence" aria-label={label}>
+    <section className="df2-jobs-evidence is-row" aria-label={label}>
       <header className="df2-jobs-evidence-head">
         <strong>{label}</strong>
-        <span>Opens a right-side panel — keep the overview scannable</span>
+        <span>Click to open on the right</span>
       </header>
-      <div className="df2-jobs-evidence-grid">
+      <div className="df2-jobs-evidence-row" role="list">
         {visible.map((item) => (
           <button
             key={item.id}
             type="button"
-            className={`df2-jobs-evidence-card tone-${item.tone || "default"}`}
+            role="listitem"
+            className={`df2-jobs-evidence-chip tone-${item.tone || "default"}`}
             onClick={item.onOpen}
+            title={item.description}
           >
-            <span className="df2-jobs-evidence-icon" aria-hidden>
-              <DtIcon name={item.icon} size={18} />
-            </span>
-            <span className="df2-jobs-evidence-copy">
-              <strong>{item.title}</strong>
-              <span>{item.description}</span>
-              {item.meta ? <em>{item.meta}</em> : null}
-            </span>
-            <span className="df2-jobs-evidence-chevron" aria-hidden>
-              <DtIcon name="chevron-right" size={16} />
-            </span>
+            <DtIcon name={item.icon} size={14} />
+            <span className="df2-jobs-evidence-chip-label">{item.title}</span>
+            {item.meta ? <em>{item.meta}</em> : null}
           </button>
         ))}
       </div>
@@ -108,4 +143,51 @@ interface JobOverviewNoteProps {
 
 export function JobOverviewNote({ children }: JobOverviewNoteProps) {
   return <p className="df2-jobs-overview-note">{children}</p>;
+}
+
+/** Format engine pipeline explanation into readable sections (not one wall of text). */
+export function JobExplanationView({ text }: { text: string }) {
+  const blocks = splitExplanation(text);
+  if (!blocks.length) {
+    return <p className="df2-jobs-explanation-prose df2-muted">No explanation recorded.</p>;
+  }
+  return (
+    <div className="df2-jobs-explanation-view">
+      {blocks.map((b, i) =>
+        b.kind === "heading" ? (
+          <h3 key={`h-${i}`} className="df2-jobs-explanation-heading">{b.text}</h3>
+        ) : (
+          <p key={`p-${i}`} className="df2-jobs-explanation-prose">{b.text}</p>
+        ),
+      )}
+    </div>
+  );
+}
+
+function splitExplanation(raw: string): Array<{ kind: "heading" | "body"; text: string }> {
+  const text = String(raw || "").replace(/\r\n/g, "\n").trim();
+  if (!text) return [];
+  const parts = text.split(/\n{2,}|\n(?=#{1,3}\s|[A-Z][A-Za-z0-9 /&-]{2,40}:\s*$)/);
+  const out: Array<{ kind: "heading" | "body"; text: string }> = [];
+  for (const part of parts) {
+    const chunk = part.trim();
+    if (!chunk) continue;
+    const lines = chunk.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    const first = lines[0].replace(/^#+\s*/, "").replace(/:$/, "");
+    const looksHeading =
+      lines.length > 1
+      && (
+        /^#{1,3}\s/.test(lines[0])
+        || (/^[A-Z][A-Za-z0-9 /&-]{2,48}:?$/.test(lines[0]) && lines[0].length < 56)
+      );
+    if (looksHeading) {
+      out.push({ kind: "heading", text: first });
+      const body = lines.slice(1).join("\n").trim();
+      if (body) out.push({ kind: "body", text: body });
+    } else {
+      out.push({ kind: "body", text: chunk });
+    }
+  }
+  return out.length ? out : [{ kind: "body", text }];
 }

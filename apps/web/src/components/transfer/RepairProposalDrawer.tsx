@@ -16,13 +16,14 @@ export interface RepairProposalDrawerProps {
   onClose: () => void;
   /** Called after approve+apply with updated mappings (when mappings were supplied). */
   onApplied?: (updated: RepairMapping[], proposal: RepairProposal) => void;
-  /** Called after reject or approve-without-mappings. */
+  /** Called after reject, audit approve, or continue-without-decide. */
   onDecided?: (proposal: RepairProposal) => void;
 }
 
 /**
  * Human-gated agentic repair: review proposed actions, approve/reject with audit trail.
  * Approve with mappings runs the real ``apply_actions_to_mappings`` path on the API.
+ * Without mappings, Continue leaves status ``proposed`` so Validate can still Apply.
  */
 export function RepairProposalDrawer({
   open,
@@ -38,6 +39,13 @@ export function RepairProposalDrawer({
 
   if (!proposal) return null;
 
+  const canApply = mappings.length > 0;
+  const status = proposal.status;
+  const canDecide =
+    status === "proposed"
+    || (status === "approved" && canApply);
+  const canReject = status === "proposed" || status === "approved";
+
   const decide = async (approve: boolean) => {
     setBusy(true);
     setError(null);
@@ -45,7 +53,7 @@ export function RepairProposalDrawer({
       const decided = await decideRepairProposal(proposal.id, {
         approve,
         actor,
-        mappings: approve && mappings.length ? mappings : undefined,
+        mappings: approve && canApply ? mappings : undefined,
       });
       if (approve && decided.apply_result?.mappings && Array.isArray(decided.apply_result.mappings)) {
         onApplied?.(decided.apply_result.mappings as RepairMapping[], decided);
@@ -60,11 +68,17 @@ export function RepairProposalDrawer({
     }
   };
 
+  /** No mappings yet — do not audit-approve (that would lock Apply). Hand off to Validate. */
+  const continueWithoutDecide = () => {
+    onDecided?.(proposal);
+    onClose();
+  };
+
   return (
     <Drawer
       open={open}
       onClose={onClose}
-      width={560}
+      size="lg"
       title="Repair proposal"
       subtitle="Human-gated fix — nothing auto-applies without approve."
       icon={<DtIcon name="sparkle" size={18} />}
@@ -76,20 +90,31 @@ export function RepairProposalDrawer({
           <Button
             variant="secondary"
             onClick={() => void decide(false)}
-            disabled={busy || proposal.status !== "proposed"}
+            disabled={busy || !canReject}
           >
             Reject
           </Button>
-          <Button
-            variant="primary"
-            onClick={() => void decide(true)}
-            loading={busy}
-            loadingLabel="Applying…"
-            disabled={proposal.status !== "proposed"}
-            leadingIcon={<DtIcon name="check" size={14} />}
-          >
-            {mappings.length ? "Approve & apply" : "Approve"}
-          </Button>
+          {canApply ? (
+            <Button
+              variant="primary"
+              onClick={() => void decide(true)}
+              loading={busy}
+              loadingLabel="Applying…"
+              disabled={!canDecide}
+              leadingIcon={<DtIcon name="check" size={14} />}
+            >
+              Approve & apply mappings
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              onClick={continueWithoutDecide}
+              disabled={busy || status === "rejected" || status === "applied"}
+              leadingIcon={<DtIcon name="gate" size={14} />}
+            >
+              Continue in Validate
+            </Button>
+          )}
         </div>
       }
     >
@@ -131,10 +156,16 @@ export function RepairProposalDrawer({
             ))}
           </ul>
         )}
-        {!mappings.length && proposal.status === "proposed" && (
+        {canApply ? (
           <p className="df2-label-hint">
-            No Studio mappings attached — Approve records the decision in the audit trail without
-            mutating the map. Open Validate with mappings to Approve &amp; apply.
+            {mappings.length} Studio / job mapping(s) attached — Approve will apply the actions above
+            {status === "approved" ? " (proposal was audit-approved earlier)" : ""}
+            {" "}and then open Validate so you can re-run gates.
+          </p>
+        ) : (
+          <p className="df2-label-hint">
+            No mappings attached yet — Continue leaves this proposal open so you can Approve &amp; apply
+            against live Studio mappings on Validate.
           </p>
         )}
       </div>

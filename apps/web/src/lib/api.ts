@@ -2891,6 +2891,12 @@ export async function listRepairProposals(opts?: {
   return Array.isArray(data.proposals) ? data.proposals : [];
 }
 
+export async function fetchRepairProposal(proposalId: string): Promise<RepairProposal> {
+  const res = await apiFetch(`${API_BASE}/repair/proposals/${encodeURIComponent(proposalId)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load repair proposal"));
+  return res.json();
+}
+
 export async function decideRepairProposal(
   proposalId: string,
   body: { approve: boolean; actor?: string; mappings?: RepairMapping[] },
@@ -2908,5 +2914,73 @@ export async function decideRepairProposal(
     },
   );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not decide repair proposal"));
+  return res.json();
+}
+
+/** Debezium-style CDC incremental snapshot (job-scoped). */
+export interface CdcSnapshotSignal {
+  id: string;
+  source_key: string;
+  table: string;
+  status: string;
+  primary_key?: string;
+  chunk_size?: number;
+  last_pk?: string;
+  rows_snapshotted?: number;
+  created_at?: number;
+  updated_at?: number;
+  error?: string;
+  resolved_source_key?: string;
+  context?: Record<string, unknown>;
+}
+
+export async function listJobCdcSnapshots(
+  jobId: string,
+  status = "",
+): Promise<{
+  job_id: string;
+  signals: CdcSnapshotSignal[];
+  context?: {
+    source_key?: string;
+    source_keys?: string[];
+    table?: string;
+    primary_key?: string;
+    driver?: string;
+    honesty?: string;
+  };
+}> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots${q}`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not list CDC snapshots"));
+  return res.json();
+}
+
+export async function requestJobCdcSnapshot(
+  jobId: string,
+  body?: { table?: string; primary_key?: string; chunk_size?: number },
+): Promise<CdcSnapshotSignal> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not request CDC snapshot"));
+  return res.json();
+}
+
+export async function cancelJobCdcSnapshot(
+  jobId: string,
+  signalId: string,
+): Promise<CdcSnapshotSignal> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots/${encodeURIComponent(signalId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not cancel CDC snapshot"));
   return res.json();
 }

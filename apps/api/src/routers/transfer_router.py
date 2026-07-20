@@ -19,10 +19,20 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from services.team_store import can_write_workspace
+from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
+
+
+def _can_access_job(request: Request | None, job: dict) -> bool:
+    """Workspace gate for job-scoped transfer sub-resources (CDC snapshots, etc.)."""
+    if request is None:
+        return True
+    workspace_id = (job.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return True
+    return can_read_workspace(workspace_id, _actor_email(request))
 
 
 def _stamp_job_mapping_artifacts(
@@ -1065,6 +1075,100 @@ async def get_transfer_mapping_proof(job_id: str):
             "exactly-once CDC."
         ),
     }
+
+
+class JobCdcSnapshotBody(BaseModel):
+    table: str = ""
+    primary_key: str = ""
+    chunk_size: int = 1000
+
+
+@router.get("/{job_id}/cdc/snapshots")
+async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
+    """List incremental snapshot signals for this job's CDC source fingerprint."""
+    from services.cdc_job_snapshots import list_signals_for_job, resolve_job_cdc_snapshot_context
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        ctx = resolve_job_cdc_snapshot_context(job)
+        signals = list_signals_for_job(job, status=status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "job_id": job_id,
+        "signals": signals,
+        "context": {
+            "source_key": ctx["source_key"],
+            "source_keys": ctx["source_keys"],
+            "table": ctx["table"],
+            "primary_key": ctx["primary_key"],
+            "driver": ctx["driver"],
+            "honesty": ctx["honesty"],
+        },
+    }
+
+
+@router.post("/{job_id}/cdc/snapshots")
+async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
+    """Enqueue a Debezium-style incremental snapshot using the job's source_key."""
+    from services.cdc_job_snapshots import request_snapshot_for_job
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        return request_snapshot_for_job(
+            job,
+            table=body.table,
+            primary_key=body.primary_key,
+            chunk_size=body.chunk_size,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/{job_id}/cdc/snapshots/{signal_id}/cancel")
+async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request):
+    """Cancel a pending/running incremental snapshot signal for this job."""
+    from services.cdc_incremental_snapshot import cancel_signal, get_signal
+    from services.cdc_job_snapshots import resolve_job_cdc_snapshot_context
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        ctx = resolve_job_cdc_snapshot_context(job)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    sig = get_signal(signal_id)
+    if sig is None:
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
+    if sig.source_key not in ctx["source_keys"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Signal source_key does not match this job's CDC fingerprint",
+        )
+    cancelled = cancel_signal(signal_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
+    return cancelled.to_dict()
 
 
 @router.get("/download/{filename}")

@@ -79,15 +79,20 @@ async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
         updated = apply_actions_to_mappings(body.mappings, actions)
         return {"applied": True, "mappings": updated}
 
+    # Only apply when the caller supplies mappings — approve-without-mappings is audit-only.
+    apply_fn = _apply if body.approve and body.mappings else None
+
     try:
         p = decide_proposal(
             proposal_id,
             approve=body.approve,
             actor=body.actor,
-            apply_fn=_apply if body.approve and body.mappings else (None if not body.approve else _apply),
+            apply_fn=apply_fn,
         )
     except KeyError:
         raise HTTPException(404, "Proposal not found") from None
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     return p.to_dict()
 
 

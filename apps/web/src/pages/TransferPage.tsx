@@ -113,6 +113,22 @@ interface TransferPageProps {
   onFreshTransfer?: () => void;
   /** Pre-select a saved connection as the Transfer Studio source (from Connectors drawer). */
   seedSourceConnector?: { connectorId: string; token: number } | null;
+  /** Jobs → Studio deep-link: land on Validate/Map with optional repair + mappings. */
+  seedStudioIntent?: {
+    token: number;
+    step?: "validate" | "map" | "source";
+    repairProposalId?: string;
+    jobId?: string;
+    mappings?: Array<{
+      source?: string;
+      destination?: string;
+      destination_type?: string;
+      target_type?: string;
+      transform?: string;
+      transforms?: { type?: string }[];
+      [key: string]: unknown;
+    }>;
+  } | null;
 }
 
 /** File formats are never listed as database sources. */
@@ -257,6 +273,7 @@ export function TransferPage({
   onOpenContracts,
   onFreshTransfer,
   seedSourceConnector = null,
+  seedStudioIntent = null,
 }: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -376,6 +393,8 @@ export function TransferPage({
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
   const [mappingProof, setMappingProof] = useState<import("../components/MappingProofDrawer").MappingProof | null>(null);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [seedRepairProposalId, setSeedRepairProposalId] = useState<string | null>(null);
+  const appliedStudioIntentTokenRef = useRef<number | null>(null);
   const [runStartupProgress, setRunStartupProgress] = useState(0);
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
@@ -1266,6 +1285,69 @@ export function TransferPage({
     setSourceConnectorId(seeded.id);
     setStep(STEP_SOURCE);
   }, [seedSourceConnector, connectors]);
+
+  // Jobs → Studio: land on Validate/Map, seed mappings, open repair proposal.
+  useEffect(() => {
+    if (!seedStudioIntent?.token) return;
+    if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
+    appliedStudioIntentTokenRef.current = seedStudioIntent.token;
+
+    // Drop prior route evidence so Validate does not show a stale green result.
+    setPreflight(null);
+    setCellPreview(null);
+    setMappingProof(null);
+    setResult(null);
+    setActiveJobId(seedStudioIntent.jobId || null);
+
+    const maps = seedStudioIntent.mappings;
+    if (Array.isArray(maps) && maps.length > 0) {
+      setColumnMappings(
+        maps.map((m) => {
+          const xfRaw = m.transform
+            || (Array.isArray(m.transforms) && m.transforms[0]?.type)
+            || "none";
+          const xf = String(xfRaw) as EditableMapping["transform"];
+          return {
+            source: String(m.source || ""),
+            target: String(m.destination || m.source || ""),
+            confidence: 1,
+            destType: String(m.destination_type || m.target_type || ""),
+            approved: false,
+            requiresReview: true,
+            transform: xf && xf !== "none" ? xf : undefined,
+            reason: seedStudioIntent.jobId
+              ? `Seeded from job ${seedStudioIntent.jobId.slice(0, 8)}…`
+              : "Seeded from Jobs quarantine repair",
+          };
+        }).filter((m) => m.source),
+      );
+    }
+
+    if (seedStudioIntent.repairProposalId) {
+      setSeedRepairProposalId(seedStudioIntent.repairProposalId);
+    } else {
+      setSeedRepairProposalId(null);
+    }
+
+    if (seedStudioIntent.step === "map") {
+      setStep(STEP_MAP);
+    } else if (seedStudioIntent.step === "source") {
+      setStep(STEP_SOURCE);
+    } else {
+      setStep(STEP_VALIDATE);
+    }
+
+    const jobHint = seedStudioIntent.jobId
+      ? ` from job ${seedStudioIntent.jobId.slice(0, 8)}…`
+      : "";
+    toast({
+      title: "Opened Validate in Studio",
+      message: seedStudioIntent.repairProposalId
+        ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`
+        : `Continue remediation${jobHint}. Fix mappings or re-run Validate gates.`,
+      tone: "info",
+    });
+  }, [seedStudioIntent, toast]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");
@@ -4425,7 +4507,9 @@ export function TransferPage({
             onOpenMappingProof={() => setMappingProofOpen(true)}
             mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
-            repairJobId={activeJobId || persistedPlanId || ""}
+            repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
+            seedRepairProposalId={seedRepairProposalId}
+            onSeedRepairConsumed={() => setSeedRepairProposalId(null)}
             repairMappings={columnMappings.map((m) => ({
               source: m.source,
               destination: m.target,
@@ -4435,29 +4519,36 @@ export function TransferPage({
               transforms: m.transform ? [{ type: m.transform }] : [],
             }))}
             onRepairMappingsApplied={(updated) => {
-              setColumnMappings((prev) =>
-                prev.map((m) => {
-                  const hit = updated.find(
-                    (u) => u.source === m.source || u.destination === m.target || u.source === m.target,
-                  );
-                  if (!hit) return m;
+              setColumnMappings((prev) => {
+                const bySource = new Map(prev.map((m) => [m.source, m]));
+                for (const hit of updated) {
+                  const src = String(hit.source || "");
+                  if (!src) continue;
+                  const existing = bySource.get(src);
                   const xf =
                     hit.transform
                     || (Array.isArray(hit.transforms) && hit.transforms[0]?.type)
-                    || m.transform;
-                  const nextType = hit.destination_type || hit.target_type || m.destType;
-                  return {
-                    ...m,
-                    destType: String(nextType || m.destType || ""),
-                    transform: (xf as typeof m.transform) || m.transform,
+                    || existing?.transform;
+                  const nextType = hit.destination_type || hit.target_type || existing?.destType || "";
+                  bySource.set(src, {
+                    source: src,
+                    target: String(hit.destination || existing?.target || src),
+                    confidence: existing?.confidence ?? 1,
+                    destType: String(nextType),
                     approved: false,
                     requiresReview: true,
-                    reason: [m.reason, `Repair applied (${hit.destination_type || hit.transform || "update"})`]
-                      .filter(Boolean)
-                      .join(" · "),
-                  };
-                }),
-              );
+                    transform: (xf as EditableMapping["transform"]) || existing?.transform,
+                    reason: [
+                      existing?.reason,
+                      `Repair applied (${hit.destination_type || hit.transform || "update"})`,
+                    ].filter(Boolean).join(" · "),
+                    sample: existing?.sample,
+                    inferredType: existing?.inferredType,
+                    isPii: existing?.isPii,
+                  });
+                }
+                return [...bySource.values()];
+              });
               toast({
                 title: "Repair applied to mappings",
                 message: "Re-run Validate to confirm gates pass with the approved fixes.",

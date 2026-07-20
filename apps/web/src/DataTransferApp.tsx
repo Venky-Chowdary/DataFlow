@@ -25,7 +25,7 @@ import { PilotPage } from "./pages/PilotPage";
 import { TransferPage } from "./pages/TransferPage";
 import { ConnectorsPage } from "./pages/ConnectorsPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
-import { JobsPage } from "./pages/JobsPage";
+import { JobsPage, type JobsStudioIntent } from "./pages/JobsPage";
 import { ContractsPage } from "./pages/ContractsPage";
 import { McpPage } from "./pages/McpPage";
 import { QueryPage } from "./pages/QueryPage";
@@ -105,6 +105,8 @@ function AppShell({
   const [transferStudioKey, setTransferStudioKey] = useState(0);
   /** Seed Transfer Studio source from Connectors drawer (id + token so re-clicks re-apply). */
   const [transferSeedSource, setTransferSeedSource] = useState<{ connectorId: string; token: number } | null>(null);
+  /** Jobs → Studio deep-link (Validate / repair proposal / seeded mappings). */
+  const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
@@ -124,6 +126,7 @@ function AppShell({
 
   const openFreshTransfer = useCallback(() => {
     setTransferSeedSource(null);
+    setTransferStudioIntent(null);
     setTransferStudioKey((k) => k + 1);
     setScreen("transfer");
   }, [setScreen]);
@@ -616,6 +619,7 @@ function AppShell({
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
                     seedSourceConnector={transferSeedSource}
+                    seedStudioIntent={transferStudioIntent}
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
                     onFreshTransfer={openFreshTransfer}
@@ -684,7 +688,14 @@ function AppShell({
                   <JobsPage
                     jobs={jobs}
                     onRefresh={loadJobs}
-                    onStartTransfer={() => setScreen("transfer")}
+                    onStartTransfer={(intent) => {
+                      if (intent && (intent.step || intent.repairProposalId || intent.jobId || intent.mappings?.length)) {
+                        setTransferStudioIntent({ ...intent, token: Date.now() });
+                      } else {
+                        setTransferStudioIntent(null);
+                      }
+                      setScreen("transfer");
+                    }}
                     initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
                     initialPanel={searchFocus?.screen === "jobs" ? searchFocus.panel : undefined}
                   />

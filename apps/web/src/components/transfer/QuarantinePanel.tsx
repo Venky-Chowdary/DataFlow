@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
-import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairProposal } from "../../lib/api";
+import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 type QuarantineRow = {
@@ -36,6 +36,10 @@ export interface QuarantinePanelProps {
   onOpenValidate?: () => void;
   /** Closed-loop: after successful write-time replay. */
   onReplayComplete?: (childJobId: string) => void;
+  /** Job / Studio mappings so Approve can apply transforms (not audit-only). */
+  repairMappings?: RepairMapping[];
+  /** After approve / apply / reject — parent can deep-link to Validate. */
+  onRepairDecided?: (proposal: RepairProposal) => void;
 }
 
 function summarizeReasons(rows: QuarantineRow[]) {
@@ -111,6 +115,8 @@ export function QuarantinePanel({
   initialDetails,
   onOpenValidate,
   onReplayComplete,
+  repairMappings = [],
+  onRepairDecided,
 }: QuarantinePanelProps) {
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen || autoLoad || Boolean(initialDetails?.length));
@@ -372,7 +378,7 @@ export function QuarantinePanel({
           )}
         </div>
         <div className="df2-quarantine-next-actions">
-          {isPreflight && onOpenValidate && (
+          {onOpenValidate && (
             <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onOpenValidate}>
               <DtIcon name="gate" size={14} /> Open Validate (Strip / Fix)
             </button>
@@ -578,17 +584,31 @@ export function QuarantinePanel({
       <RepairProposalDrawer
         open={repairOpen}
         proposal={repairProposal}
+        mappings={repairMappings}
         onClose={() => setRepairOpen(false)}
-        onDecided={(p) => {
+        onApplied={(updated, p) => {
           toast({
-            title: p.status === "rejected" ? "Repair rejected" : "Repair decided",
-            message: `${p.id} · ${p.status}. ${
-              p.status === "approved" || p.status === "applied"
-                ? "Open Validate / Map to apply the same fixes to the Studio mappings."
-                : "Audit trail recorded."
-            }`,
-            tone: p.status === "rejected" ? "warning" : "success",
+            title: "Repair applied",
+            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate so you can re-run gates.`,
+            tone: "success",
           });
+          onRepairDecided?.(p);
+        }}
+        onDecided={(p) => {
+          if (p.status === "proposed") {
+            toast({
+              title: "Continue in Validate",
+              message: "Proposal kept open — Approve & apply once Studio mappings are loaded.",
+              tone: "info",
+            });
+          } else {
+            toast({
+              title: p.status === "rejected" ? "Repair rejected" : "Repair decided",
+              message: `${p.id} · ${p.status}.`,
+              tone: p.status === "rejected" ? "warning" : "success",
+            });
+          }
+          onRepairDecided?.(p);
         }}
       />
     </div>

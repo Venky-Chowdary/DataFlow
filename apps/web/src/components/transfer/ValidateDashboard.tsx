@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
-import { explainPreflight, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
+import { explainPreflight, fetchRepairProposal, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -146,6 +146,10 @@ interface ValidateDashboardProps {
   onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
   /** Optional job id stamped onto the repair proposal. */
   repairJobId?: string;
+  /** Open an existing repair proposal (Jobs → Studio deep-link). */
+  seedRepairProposalId?: string | null;
+  /** Clear seed after the drawer has opened (or failed). */
+  onSeedRepairConsumed?: () => void;
 }
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
@@ -452,6 +456,8 @@ export function ValidateDashboard({
   repairMappings = [],
   onRepairMappingsApplied,
   repairJobId = "",
+  seedRepairProposalId = null,
+  onSeedRepairConsumed,
 }: ValidateDashboardProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
@@ -496,6 +502,48 @@ export function ValidateDashboard({
       setBadDataOpen(true);
     }
   }, [running, encodingBlocks, hasEncodingIssue, preflight?.passed_count, preflight?.blockers?.length]);
+
+  // Jobs → Studio: open a durable repair proposal in the Validate drawer.
+  useEffect(() => {
+    if (!seedRepairProposalId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const proposal = await fetchRepairProposal(seedRepairProposalId);
+        if (cancelled) return;
+        // Skip terminal proposals — they would open a no-op drawer.
+        if (proposal.status === "applied" || proposal.status === "rejected" || proposal.status === "failed") {
+          pushRemediation(
+            "Repair already decided",
+            `${proposal.id} · ${proposal.status}`,
+            proposal.status,
+          );
+          return;
+        }
+        setRepairProposal(proposal);
+        setRepairOpen(true);
+        pushRemediation(
+          "Opened repair from Jobs",
+          proposal.summary || proposal.id,
+          proposal.status,
+        );
+      } catch (e) {
+        if (!cancelled) {
+          pushRemediation(
+            "Could not open repair proposal",
+            (e as Error).message || seedRepairProposalId,
+            "Failed",
+          );
+        }
+      } finally {
+        if (!cancelled) onSeedRepairConsumed?.();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedRepairProposalId]);
 
   // A new preflight run invalidates any prior explanation.
   useEffect(() => {

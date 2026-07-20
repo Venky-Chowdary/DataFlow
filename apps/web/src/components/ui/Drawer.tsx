@@ -2,6 +2,15 @@ import { ReactNode, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
 
+export type DrawerSize = "md" | "lg" | "xl" | "full";
+
+const DRAWER_WIDTH: Record<DrawerSize, number> = {
+  md: 560,
+  lg: 720,
+  xl: 960,
+  full: 1400,
+};
+
 interface DrawerProps {
   open: boolean;
   onClose: () => void;
@@ -13,8 +22,10 @@ interface DrawerProps {
   headerExtra?: ReactNode;
   /** Sticky footer content (e.g. primary/secondary actions). */
   footer?: ReactNode;
-  /** Panel width in px on desktop. Defaults to 560. */
+  /** Panel width in px on desktop. Prefer `size` for viewport-aware panels. */
   width?: number;
+  /** Viewport-aware width: md 560 · lg 720 · xl 960 · full ~1200 (uses available height). */
+  size?: DrawerSize;
   side?: "right" | "left";
   ariaLabel?: string;
   className?: string;
@@ -34,13 +45,15 @@ export function Drawer({
   icon,
   headerExtra,
   footer,
-  width = 560,
+  width,
+  size = "md",
   side = "right",
   ariaLabel,
   className = "",
   children,
 }: DrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const resolvedWidth = width ?? DRAWER_WIDTH[size];
 
   useEffect(() => {
     if (!open) return;
@@ -64,8 +77,13 @@ export function Drawer({
     <div className="df2-drawer-overlay" role="presentation" onClick={onClose}>
       <div
         ref={panelRef}
-        className={`df2-drawer df2-drawer-${side} ${className}`}
-        style={{ width: `min(${width}px, 96vw)` }}
+        className={`df2-drawer df2-drawer-${side} df2-drawer-size-${size} ${className}`}
+        style={{
+          width: size === "full"
+            ? `min(${resolvedWidth}px, 92vw)`
+            : `min(${resolvedWidth}px, 96vw)`,
+          maxWidth: size === "full" ? "92vw" : undefined,
+        }}
         role="dialog"
         aria-modal="true"
         aria-label={ariaLabel}

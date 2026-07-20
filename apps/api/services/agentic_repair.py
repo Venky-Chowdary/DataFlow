@@ -224,14 +224,25 @@ def decide_proposal(
     actor: str = "user",
     apply_fn: Any | None = None,
 ) -> RepairProposal:
-    """Approve/reject a proposal; on approve optionally run ``apply_fn(actions)``."""
+    """Approve/reject a proposal; on approve optionally run ``apply_fn(actions)``.
+
+    Transitions:
+    - proposed → rejected
+    - proposed → approved (audit-only, no apply_fn)
+    - proposed|approved → applied (when apply_fn succeeds)
+    Already terminal statuses (applied/rejected/failed) raise ValueError.
+    """
     with _LOCK:
         rows = _load_proposals()
         idx = next((i for i, r in enumerate(rows) if r.get("id") == proposal_id), -1)
         if idx < 0:
             raise KeyError(f"Unknown proposal: {proposal_id}")
         row = dict(rows[idx])
+        current = str(row.get("status") or "proposed")
+
         if not approve:
+            if current not in ("proposed", "approved"):
+                raise ValueError(f"Cannot reject proposal in status {current}")
             row["status"] = "rejected"
             row["decided_at"] = time.time()
             row["decided_by"] = actor
@@ -240,10 +251,12 @@ def decide_proposal(
             _audit("reject", {"proposal_id": proposal_id, "actor": actor})
             return _proposal_from_row(row)
 
-        row["status"] = "approved"
+        if current not in ("proposed", "approved"):
+            raise ValueError(f"Cannot approve proposal in status {current}")
+
         row["decided_at"] = time.time()
         row["decided_by"] = actor
-        apply_result: dict[str, Any] = {"applied": False}
+        apply_result: dict[str, Any] = dict(row.get("apply_result") or {}) or {"applied": False}
         if apply_fn is not None:
             try:
                 apply_result = dict(apply_fn(list(row.get("actions") or [])) or {})
@@ -252,6 +265,9 @@ def decide_proposal(
             except Exception as exc:
                 row["status"] = "failed"
                 apply_result = {"applied": False, "error": str(exc)}
+        else:
+            row["status"] = "approved"
+            apply_result = {"applied": False}
         row["apply_result"] = apply_result
         rows[idx] = row
         _save_proposals(rows)
@@ -280,10 +296,12 @@ def apply_actions_to_mappings(
             m["destination_type"] = action["to_type"]
             m["target_type"] = action["to_type"]
         elif kind == "add_transform" and action.get("transform"):
+            xf = action["transform"]
             transforms = list(m.get("transforms") or [])
-            transforms.append({"type": action["transform"]})
+            if not any((t.get("type") if isinstance(t, dict) else t) == xf for t in transforms):
+                transforms.append({"type": xf})
             m["transforms"] = transforms
-            m["transform"] = action["transform"]
+            m["transform"] = xf
         elif kind == "map_column" and action.get("target"):
             m["destination"] = action["target"]
     return out
