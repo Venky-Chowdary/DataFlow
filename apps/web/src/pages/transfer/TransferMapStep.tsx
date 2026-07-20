@@ -240,9 +240,13 @@ export function TransferMapStep({
       <Dialog
         open={mapDialogOpen}
         onClose={() => setMapDialogOpen(false)}
-        size="xl"
+        size="full"
         title="Edit column mappings"
-        subtitle={`${columnMappings.length} columns · choose destination names and logical types carefully — wrong types fail preflight, not silently.`}
+        subtitle={
+          destColumns.length > 0
+            ? `${columnMappings.length} columns · match existing destination fields — wrong types fail preflight, not silently.`
+            : `${columnMappings.length} columns · create-new destination — fields CREATE on first write (no existing table required).`
+        }
         ariaLabel="Full mapping table"
         className="df2-map-dialog"
         footer={
@@ -251,16 +255,26 @@ export function TransferMapStep({
           </button>
         }
       >
+        {destColumns.length === 0 && !destSchemaLoading && (
+          <div className="df2-map-dialog-banner" role="status">
+            <DtIcon name="sparkle" size={16} />
+            <span>
+              <strong>Create-new {destDisplayType || "destination"}</strong>
+              {" — "}
+              Every source column appears below as a destination field. No existing MongoDB collection or SQL table is required.
+            </span>
+          </div>
+        )}
         <ColumnReviewPanel
           mappings={columnMappings}
           rowCount={rowCount}
-          sampleRows={sampleRows}
           confidenceThreshold={confidenceThreshold}
           onChange={onChangeMappings}
           destinationFields={destColumns}
           destinationLabel={destRouteLabel}
           destType={destDisplayType}
           destSchemaLoading={destSchemaLoading}
+          presentation="dialog"
           search={search}
           onSearchChange={setSearch}
           filter={filter}

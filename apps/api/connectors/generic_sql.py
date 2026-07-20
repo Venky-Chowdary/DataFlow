@@ -182,6 +182,7 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "postgres": "postgresql+psycopg2",
     "redshift": "postgresql+psycopg2",
     "amazon_redshift": "postgresql+psycopg2",
+    "snowflake": "snowflake",
 }
 
 _DEFAULT_PORT_MAP: dict[str, int] = {
@@ -310,32 +311,32 @@ def _normalize_sqlalchemy_url_string(url: str, db_type: str = "") -> str:
 
     Users and saved connectors often store ``mysql://…`` / ``postgresql://…``.
     SQLAlchemy 2 requires an explicit DBAPI (``mysql+pymysql``, ``postgresql+psycopg2``).
+    Only the scheme prefix is rewritten — userinfo/password material is preserved.
     """
     raw = (url or "").strip()
     if not raw:
         return raw
     lower = raw.lower()
-    dt = (db_type or "").lower().strip()
 
+    # Longest-first so postgresql+psycopg2 is not mistreated as postgresql://.
     replacements: list[tuple[str, str]] = [
-        ("mysql+pymysql://", "mysql+pymysql://"),  # already correct
+        ("mysql+pymysql://", "mysql+pymysql://"),
+        ("mariadb+pymysql://", "mysql+pymysql://"),
         ("mysql://", "mysql+pymysql://"),
         ("mariadb://", "mysql+pymysql://"),
-        ("mariadb+pymysql://", "mysql+pymysql://"),
-        ("postgres://", "postgresql+psycopg2://"),
-        ("postgresql://", "postgresql+psycopg2://"),
         ("postgresql+psycopg2://", "postgresql+psycopg2://"),
+        ("postgresql://", "postgresql+psycopg2://"),
+        ("postgres://", "postgresql+psycopg2://"),
+        ("pgsql://", "postgresql+psycopg2://"),
+        ("redshift://", "postgresql+psycopg2://"),
     ]
     for src, dst in replacements:
-        if lower.startswith(src) and src != dst:
-            return dst + raw[len(src):]
-
-    # If type is mysql/mariadb but scheme is missing or opaque, leave as-is;
-    # host/port builders below handle structured cfg.
-    if dt in {"mysql", "mariadb"} and "://" not in raw and not lower.startswith("mysql"):
-        return raw
+        if not lower.startswith(src):
+            continue
+        if src == dst:
+            return raw
+        return dst + raw[len(src):]
     return raw
-
 
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
@@ -428,15 +429,22 @@ def _engine(cfg: dict[str, Any]) -> Any:
         # response instead of an unhandled ExceptionGroup crashing the worker.
         driver = getattr(url, "drivername", None) or str(url).split("://", 1)[0]
         dialect_key = str(db_type or str(driver).split("+", 1)[0]).lower()
+        driver_s = str(driver).lower()
         hint_by_dialect = {
             "mysql": "pymysql (scheme mysql+pymysql://)",
             "mariadb": "pymysql (scheme mysql+pymysql://)",
             "postgresql": "psycopg2-binary (scheme postgresql+psycopg2://)",
             "postgres": "psycopg2-binary (scheme postgresql+psycopg2://)",
+            "redshift": "psycopg2-binary (scheme postgresql+psycopg2://)",
             "snowflake": "snowflake-sqlalchemy",
             "databricks": "databricks-sqlalchemy",
         }
         hint = hint_by_dialect.get(dialect_key)
+        if not hint:
+            if "mysql" in driver_s or "mariadb" in driver_s:
+                hint = "pymysql (scheme mysql+pymysql://)"
+            elif "postgres" in driver_s or "redshift" in driver_s:
+                hint = "psycopg2-binary (scheme postgresql+psycopg2://)"
         detail = (
             f"SQLAlchemy dialect/driver for '{db_type or driver}' is not available "
             f"(tried '{driver}')."

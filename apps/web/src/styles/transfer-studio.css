@@ -1580,10 +1580,114 @@ th.df2-type-string .df2-type-badge {
   font-weight: 600;
 }
 
-.df2-structure-preview-dialog .df2-modal-body,
-.df2-map-dialog .df2-modal-body {
+.df2-structure-preview-dialog .df2-modal-body {
   max-height: min(72vh, 820px);
   overflow: auto;
+}
+
+.df2-map-dialog .df2-modal-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding-bottom: 12px;
+  max-height: none;
+}
+
+/* Map expand dialog — table-first layout; size comes from .df2-modal-full. */
+.df2-map-dialog.df2-modal-full {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-map-dialog .df2-modal-header,
+.df2-map-dialog .df2-modal-footer {
+  flex-shrink: 0;
+}
+
+.df2-map-dialog .df2-modal-subtitle {
+  max-width: none;
+}
+
+.df2-map-dialog-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #ccfbf1;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 13px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.df2-map-dialog-banner strong {
+  color: #115e59;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-chrome {
+  flex-shrink: 0;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-workbench-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-scroll {
+  flex: 1 1 auto;
+  min-height: 200px;
+  max-height: none;
+  overflow: auto;
+  border: none;
+  border-radius: 0;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-footer {
+  flex-shrink: 0;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-table th,
+.df2-map-dialog .df2-column-review.is-dialog .df2-column-review-table td {
+  padding: 8px 10px;
+  font-size: 12px;
+  vertical-align: middle;
 }
 
 /* ─────────────────────────────────────────────────────────────

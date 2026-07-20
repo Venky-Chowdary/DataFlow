@@ -3946,6 +3946,60 @@
   color: #b91c1c;
 }
 
+.df2-theater-v3-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #f8fafc 0%, #fff 100%);
+  min-width: 0;
+}
+
+.df2-theater-v3-next-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 220px;
+}
+
+.df2-theater-v3-next-copy strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.df2-theater-v3-next-copy span {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.df2-theater-v3-next-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (max-width: 720px) {
+  .df2-theater-v3-next {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .df2-theater-v3-next-actions {
+    justify-content: stretch;
+  }
+  .df2-theater-v3-next-actions .df2-btn {
+    flex: 1 1 auto;
+  }
+}
+
 .df2-theater-v3-alert p {
   margin: 2px 0 0;
   font-size: 12px;
@@ -5701,6 +5755,27 @@
 .df2-modal-xl {
   width: min(960px, 96vw) !important;
   max-width: 960px !important;
+}
+
+/* Declared AFTER xl so full is never overridden by xl when both classes appear. */
+.df2-modal.df2-modal-full,
+.df2-modal-full {
+  width: min(1320px, 98vw);
+  max-width: min(1320px, 98vw);
+  height: min(92vh, 980px);
+  max-height: min(92vh, 980px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.df2-modal-full .df2-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .df2-modal-header {

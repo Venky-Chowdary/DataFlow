@@ -2443,6 +2443,21 @@ export function TransferPage({
     if (success) onTransferComplete();
   };
 
+  /** Keep Job Theater mounted on fail/cancel so recovery CTAs remain visible. */
+  const leaveTheaterToValidate = useCallback(() => {
+    setActiveJobId(null);
+    setTransferring(false);
+    setResult(null);
+    setStep(STEP_VALIDATE);
+  }, []);
+
+  const leaveTheaterToMap = useCallback(() => {
+    setActiveJobId(null);
+    setTransferring(false);
+    setResult(null);
+    setStep(STEP_MAP);
+  }, []);
+
   const handleScheduleRoute = async () => {
     if (destKindMode !== "database" || !connectorId) {
       toast({
@@ -3742,7 +3757,9 @@ export function TransferPage({
               destType={destKindMode === "file_export" ? exportFormat : destType}
               preflight={preflight || undefined}
               onComplete={handleJobComplete}
-              onFailed={handleJobComplete}
+              onNewTransfer={resetTransferStudio}
+              onBackToValidate={leaveTheaterToValidate}
+              onBackToMap={leaveTheaterToMap}
             />
           </div>
         </div>

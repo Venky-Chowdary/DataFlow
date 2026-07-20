@@ -135,6 +135,21 @@ export const ICEBERG_TYPE_OPTIONS: { value: string; label: string; family: TypeF
   { value: "binary", label: "binary", family: "binary" },
 ];
 
+/** MongoDB BSON field types for create-new / match-existing Map pickers. */
+export const MONGODB_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
+  { value: "string", label: "string", family: "string" },
+  { value: "long", label: "long — Int64", family: "int" },
+  { value: "int", label: "int — Int32", family: "int" },
+  { value: "decimal", label: "decimal — Decimal128", family: "decimal" },
+  { value: "double", label: "double", family: "decimal" },
+  { value: "bool", label: "bool", family: "bool" },
+  { value: "date", label: "date", family: "temporal" },
+  { value: "object", label: "object — document", family: "json" },
+  { value: "array", label: "array", family: "json" },
+  { value: "binData", label: "binData", family: "binary" },
+  { value: "objectId", label: "objectId", family: "uuid" },
+];
+
 export function typeOptionsForDest(destType?: string): { value: string; label: string; family: TypeFamily }[] {
   const d = (destType || "").toLowerCase();
   if (d.includes("snowflake")) return SNOWFLAKE_TYPE_OPTIONS;
@@ -142,6 +157,7 @@ export function typeOptionsForDest(destType?: string): { value: string; label: s
   if (d.includes("redshift")) return REDSHIFT_TYPE_OPTIONS;
   if (d.includes("databricks") || d.includes("spark") || d.includes("delta")) return DATABRICKS_TYPE_OPTIONS;
   if (d.includes("iceberg")) return ICEBERG_TYPE_OPTIONS;
+  if (d.includes("mongo")) return MONGODB_TYPE_OPTIONS;
   if (d.includes("postgres") || d === "pg") return POSTGRES_TYPE_OPTIONS;
   if (d.includes("mysql") || d.includes("mariadb")) return MYSQL_TYPE_OPTIONS;
   return LOGICAL_TYPE_OPTIONS;
@@ -233,6 +249,18 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
     if (upper === "BYTEA" || upper === "BLOB" || upper === "BYTES" || upper === "BINARY") return "binary";
     if (upper === "BOOLEAN" || upper === "BOOL") return "boolean";
     if (upper === "UUID") return "uuid";
+  }
+  if (dest.includes("mongo")) {
+    if (upper === "INTEGER" || upper === "INT" || upper === "SMALLINT") return "int";
+    if (upper === "BIGINT" || upper === "LONG" || upper === "NUMBER(38,0)") return "long";
+    if (upper === "DECIMAL" || upper === "NUMERIC" || upper.startsWith("NUMBER")) return "decimal";
+    if (upper === "FLOAT" || upper === "DOUBLE") return "double";
+    if (upper === "VARCHAR" || upper === "TEXT" || upper === "STRING") return "string";
+    if (upper === "BOOLEAN" || upper === "BOOL") return "bool";
+    if (upper === "JSON" || upper === "JSONB" || upper === "OBJECT" || upper === "VARIANT") return "object";
+    if (upper === "ARRAY") return "array";
+    if (upper === "BINARY" || upper === "BYTEA" || upper === "BLOB" || upper === "BYTES") return "binData";
+    if (upper === "TIMESTAMP" || upper === "TIMESTAMPTZ" || upper === "DATETIME" || upper === "DATE") return "date";
   }
   return cur;
 }

@@ -22,6 +22,12 @@ interface JobTheaterProps {
   onComplete?: (job: JobProgress) => void;
   onFailed?: (job: JobProgress) => void;
   onCancelled?: (job: JobProgress) => void;
+  /** Clear cancel/fail dead-end — start a fresh transfer. */
+  onNewTransfer?: () => void;
+  /** Return to Validate with current mappings intact. */
+  onBackToValidate?: () => void;
+  /** Return to Map to adjust columns after a stop. */
+  onBackToMap?: () => void;
 }
 
 const PHASES = [
@@ -75,6 +81,9 @@ export function JobTheater({
   onComplete,
   onFailed,
   onCancelled,
+  onNewTransfer,
+  onBackToValidate,
+  onBackToMap,
 }: JobTheaterProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
@@ -207,6 +216,9 @@ export function JobTheater({
       preflight={preflight}
       cancelling={cancelling}
       onCancel={handleCancel}
+      onNewTransfer={onNewTransfer}
+      onBackToValidate={onBackToValidate}
+      onBackToMap={onBackToMap}
     />
   );
 }
@@ -224,6 +236,9 @@ interface JobTheaterViewProps {
   preflight?: PreflightResult;
   cancelling?: boolean;
   onCancel?: () => void;
+  onNewTransfer?: () => void;
+  onBackToValidate?: () => void;
+  onBackToMap?: () => void;
 }
 
 /** Presentational live-transfer theater. Pure — driven entirely by props. */
@@ -240,6 +255,9 @@ export function JobTheaterView({
   preflight,
   cancelling,
   onCancel,
+  onNewTransfer,
+  onBackToValidate,
+  onBackToMap,
 }: JobTheaterViewProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -382,7 +400,7 @@ export function JobTheaterView({
           <DtIcon name="x" size={18} />
           <div>
             <strong>Transfer cancelled</strong>
-            <p>{job.message || "The job was stopped before completing. Re-run from Transfer Studio when ready."}</p>
+            <p>{job.message || "The job was stopped before completing. Choose where to go next — mappings and validation are still available."}</p>
           </div>
         </div>
       )}
@@ -400,6 +418,36 @@ export function JobTheaterView({
                 ? `Resume from batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""} on Jobs.`
                 : "Use Resume on Jobs if a checkpoint was saved."}
             </p>
+          </div>
+        </div>
+      )}
+
+      {(isCancelled || isFailed) && (onNewTransfer || onBackToValidate || onBackToMap) && (
+        <div className="df2-theater-v3-next" role="navigation" aria-label="After cancelled or failed transfer">
+          <div className="df2-theater-v3-next-copy">
+            <strong>{isCancelled ? "What next?" : "Recover from failure"}</strong>
+            <span>
+              {isCancelled
+                ? "Start clean, or keep this route and adjust Map / Validate before re-running."
+                : "Fix mappings or destination issues, then re-run from Validate."}
+            </span>
+          </div>
+          <div className="df2-theater-v3-next-actions">
+            {onBackToMap && (
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onBackToMap}>
+                <DtIcon name="layers" size={14} /> Back to Map
+              </button>
+            )}
+            {onBackToValidate && (
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onBackToValidate}>
+                <DtIcon name="gate" size={14} /> Back to Validate
+              </button>
+            )}
+            {onNewTransfer && (
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onNewTransfer}>
+                <DtIcon name="plus" size={14} /> New transfer
+              </button>
+            )}
           </div>
         </div>
       )}

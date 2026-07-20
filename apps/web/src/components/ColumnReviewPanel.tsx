@@ -40,6 +40,8 @@ interface ColumnReviewPanelProps {
   destSchemaLoading?: boolean;
   showTransforms?: boolean;
   hideTitle?: boolean;
+  /** Expand-dialog layout: table-first, no nested preview, fixed scroll height. */
+  presentation?: "default" | "dialog";
   focusSource?: string | null;
   onFocusHandled?: () => void;
   search?: string;
@@ -78,6 +80,7 @@ export function ColumnReviewPanel({
   destSchemaLoading = false,
   showTransforms = true,
   hideTitle = false,
+  presentation = "default",
   focusSource = null,
   onFocusHandled,
   search: searchProp,
@@ -260,14 +263,25 @@ export function ColumnReviewPanel({
     );
   }
 
+  const isDialog = presentation === "dialog";
+  const showHead = !hideTitle && !isDialog;
+  const showPreview = !isDialog && !compact && Boolean(sampleRows && sampleRows.length > 0);
+
   const filterTabItems = FILTER_TABS.map((tab) => ({
     ...tab,
-    count: compact ? undefined : filterCounts[tab.id],
+    count: compact && !isDialog ? undefined : filterCounts[tab.id],
   }));
 
   return (
-    <div className={`df2-column-review ${compact ? "is-compact is-editor" : ""} ${compact && sampleRows && sampleRows.length > 0 ? "is-split" : ""}`}>
-      {!hideTitle && (
+    <div
+      className={[
+        "df2-column-review",
+        compact ? "is-compact is-editor" : "",
+        compact && sampleRows && sampleRows.length > 0 ? "is-split" : "",
+        isDialog ? "is-dialog" : "",
+      ].filter(Boolean).join(" ")}
+    >
+      {showHead && (
         <div className="df2-column-review-head">
           <div>
             <h3 className="df2-column-review-title">Edit mappings</h3>
@@ -289,7 +303,7 @@ export function ColumnReviewPanel({
         </div>
       )}
 
-      {sampleRows && sampleRows.length > 0 && (
+      {showPreview && (
         <div className="df2-column-review-data-preview">
           <StructurePreview
             columns={mappings.map((m) => m.source)}
@@ -346,8 +360,8 @@ export function ColumnReviewPanel({
 
       <div className="df2-column-review-editor">
       <div className="df2-column-review-chrome">
-        {!compact && (
-          <div className="df2-column-workbench-stats" role="status" aria-label="Mapping summary">
+        {(isDialog || !compact) && (
+          <div className="df2-column-workbench-stats" aria-label="Mapping summary">
             <div className="df2-column-workbench-stat">
               <span>Total columns</span>
               <strong>{mappings.length.toLocaleString()}</strong>
@@ -415,7 +429,7 @@ export function ColumnReviewPanel({
             )}
             {needsReview.length > 0 && (
               <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={approveAll}>
-                Approve all
+                <DtIcon name="check" size={14} /> Approve all {needsReview.length}
               </button>
             )}
           </div>
@@ -430,7 +444,7 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        {!destSchemaLoading && destColumnSet.size === 0 && (
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>

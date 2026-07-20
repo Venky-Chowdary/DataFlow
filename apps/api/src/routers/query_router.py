@@ -311,10 +311,12 @@ def _export_to_connector(
 
 
 def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequest):
-    if connector.type == "mongodb":
+    ctype = (connector.type or "").lower().strip()
+    if ctype == "mongodb":
         return _run_mongodb_query(connector, body)
-    if connector.type == "snowflake":
+    if ctype == "snowflake":
         return _run_snowflake_query(connector, body)
+    # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
     return _run_sql_query(connector, body)
 
 
