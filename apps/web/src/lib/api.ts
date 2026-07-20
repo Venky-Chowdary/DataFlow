@@ -823,6 +823,19 @@ export function streamJobProgress(
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
+      cdc_plugin: raw.cdc_plugin ? String(raw.cdc_plugin) : null,
+      cdc_slot_name: raw.cdc_slot_name ? String(raw.cdc_slot_name) : null,
+      cdc_delivery: raw.cdc_delivery ? String(raw.cdc_delivery) : null,
+      watermark: raw.watermark != null ? String(raw.watermark) : null,
+      cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
+      cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
+      cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),
+      cdc_lease_heartbeat_age_sec:
+        raw.cdc_lease_heartbeat_age_sec != null ? Number(raw.cdc_lease_heartbeat_age_sec) : null,
+      cdc_lease_backend: raw.cdc_lease_backend ? String(raw.cdc_lease_backend) : null,
+      cdc_lease_generation:
+        raw.cdc_lease_generation != null ? Number(raw.cdc_lease_generation) : null,
+      cdc_lease_conflict: raw.cdc_lease_conflict == null ? null : Boolean(raw.cdc_lease_conflict),
       streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]

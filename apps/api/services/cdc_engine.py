@@ -162,6 +162,12 @@ class ChangeBatch:
     deletes: list[str] = field(default_factory=list)  # primary key values
     unchanged: int = 0
     resume_token: Any = None  # log-based CDC checkpoint (e.g. MongoDB change stream)
+    """Source table/stream this batch belongs to (multi-table single-reader demux)."""
+    table: str | None = None
+    """True on the last demuxed batch for a shared LSN/GTID — safe to ack after apply.
+    Default True so single-table / legacy batches keep peek→apply→ack semantics.
+    """
+    ack_barrier: bool = True
 
     @property
     def total_changes(self) -> int:

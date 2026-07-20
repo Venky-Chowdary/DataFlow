@@ -152,9 +152,26 @@ export interface TransferJob {
   completed_at?: string;
   /** CDC heartbeat / event age in seconds (not end-to-end pipeline latency). */
   cdc_lag_seconds?: number | null;
+  /** Logical decoding plugin (pgoutput / test_decoding) or binlog engine. */
+  cdc_plugin?: string | null;
+  cdc_slot_name?: string | null;
+  cdc_delivery?: string | null;
   replication_lag_bytes?: number | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
+  /** Durable CDC resume cursor (slot/LSN, GTID, change-stream token). */
+  watermark?: string | null;
+  /** Active CDC lease holder (multi-worker fail-fast). */
+  cdc_lease_holder?: string | null;
+  cdc_lease_resource?: string | null;
+  cdc_lease_stale?: boolean | null;
+  cdc_lease_heartbeat_age_sec?: number | null;
+  /** Lease store backend: memory | file | redis. */
+  cdc_lease_backend?: string | null;
+  /** Fencing generation — increments on steal. */
+  cdc_lease_generation?: number | null;
+  /** True when this job failed because another worker holds the CDC resource. */
+  cdc_lease_conflict?: boolean | null;
   streams?: CdcStreamHealth[];
 }
 

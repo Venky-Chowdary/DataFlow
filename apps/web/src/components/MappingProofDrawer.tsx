@@ -195,7 +195,7 @@ export function buildClientMappingProof(
     quarantine_posture:
       "Bad or unparseable rows are quarantined and surfaced for review — DataFlow does not silently drop them.",
     delivery_semantics:
-      "Default delivery is at-least-once with upsert/idempotent write where supported; exactly-once is not claimed unless a route proves it.",
+      "Default delivery is at-least-once with upsert/idempotent write where supported; exactly-once is not claimed unless a route proves it. Incremental snapshots use Debezium-style windows (stream events win over snapshot READ on PK collision).",
     summary: {
       mapped_count: rows.length,
       create_ddl_count: destMode === "create_new" ? rows.length : rows.filter((r) => r.schema_decision?.startsWith("ADD")).length,

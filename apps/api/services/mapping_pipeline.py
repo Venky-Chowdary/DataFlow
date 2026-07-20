@@ -279,6 +279,14 @@ def run_mapping_pipeline(
             reasoning = f"{reasoning} · enriched: {enrichment}"
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
+        # Create-new / missing dest type: auto-widen unsigned 64-bit to DECIMAL.
+        if not tgt_type:
+            from services.type_system import normalize_logical_type
+
+            if normalize_logical_type(src_type) == "decimal" and "unsigned" in str(src_type).lower():
+                tgt_type = "DECIMAL"
+            else:
+                tgt_type = src_type
         enriched_mappings.append(
             {
                 **m,

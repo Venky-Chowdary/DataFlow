@@ -12,8 +12,9 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 _LOCK = threading.RLock()
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -66,11 +67,42 @@ def _load() -> list[dict[str, Any]]:
 
 
 def _save(signals: list[dict[str, Any]]) -> None:
+    from pathlib import Path
+
+    from services.atomic_file import write_json_atomic
+
+    write_json_atomic(Path(_PATH), {"signals": signals})
+
+
+@contextmanager
+def _signal_store_lock() -> Iterator[None]:
+    """Process + cross-process lock so concurrent CDC jobs cannot tear the store."""
     os.makedirs(_DATA_DIR, exist_ok=True)
-    tmp = _PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"signals": signals}, f, indent=2)
-    os.replace(tmp, _PATH)
+    lock_path = _PATH + ".lock"
+    lock_f = open(lock_path, "a+", encoding="utf-8")
+    locked = False
+    try:
+        try:
+            import fcntl
+
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            locked = True
+        except Exception:
+            locked = False
+        with _LOCK:
+            yield
+    finally:
+        if locked:
+            try:
+                import fcntl
+
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+        try:
+            lock_f.close()
+        except Exception:
+            pass
 
 
 def request_incremental_snapshot(
@@ -88,7 +120,7 @@ def request_incremental_snapshot(
         primary_key=primary_key,
         chunk_size=max(1, min(int(chunk_size), 50_000)),
     )
-    with _LOCK:
+    with _signal_store_lock():
         rows = _load()
         rows.append(sig.to_dict())
         _save(rows)
@@ -96,7 +128,7 @@ def request_incremental_snapshot(
 
 
 def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSignal]:
-    with _LOCK:
+    with _signal_store_lock():
         rows = _load()
     out = [SnapshotSignal.from_dict(r) for r in rows]
     if source_key:
@@ -112,7 +144,7 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
     Prefers an in-progress (``running``) signal so chunked snapshots resume,
     then the oldest ``pending`` signal. Optional ``table`` filters the claim.
     """
-    with _LOCK:
+    with _signal_store_lock():
         rows = _load()
         # 1) Resume running
         for i, r in enumerate(rows):
@@ -139,7 +171,7 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
 
 
 def update_signal(signal_id: str, **fields: Any) -> SnapshotSignal | None:
-    with _LOCK:
+    with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):
             if r.get("id") == signal_id:
@@ -152,7 +184,7 @@ def update_signal(signal_id: str, **fields: Any) -> SnapshotSignal | None:
 
 
 def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | None:
-    with _LOCK:
+    with _signal_store_lock():
         rows_data = _load()
         for i, r in enumerate(rows_data):
             if r.get("id") == signal_id:
@@ -168,3 +200,29 @@ def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | N
 def complete_signal(signal_id: str, *, error: str = "") -> SnapshotSignal | None:
     status = "failed" if error else "completed"
     return update_signal(signal_id, status=status, error=error)
+
+
+def get_signal(signal_id: str) -> SnapshotSignal | None:
+    with _signal_store_lock():
+        for r in _load():
+            if r.get("id") == signal_id:
+                return SnapshotSignal.from_dict(r)
+    return None
+
+
+def cancel_signal(signal_id: str) -> SnapshotSignal | None:
+    """Cancel a pending/running incremental snapshot (Debezium signal stop)."""
+    with _signal_store_lock():
+        rows = _load()
+        for i, r in enumerate(rows):
+            if r.get("id") != signal_id:
+                continue
+            status = str(r.get("status") or "")
+            if status in {"completed", "failed", "cancelled"}:
+                return SnapshotSignal.from_dict(r)
+            r["status"] = "cancelled"
+            r["updated_at"] = time.time()
+            rows[i] = r
+            _save(rows)
+            return SnapshotSignal.from_dict(r)
+    return None

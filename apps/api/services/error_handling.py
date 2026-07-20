@@ -107,6 +107,9 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "serialization",
     "schema",
     "partial write",
+    "refuse concurrent consumer",
+    "cdc lease",
+    "cdc_lease_conflict",
 }
 
 
@@ -153,6 +156,21 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
         exc_name = ""
     retriable = False
     evidence: list[str] = []
+
+    # Structured CDC lease conflict — never auto-retry into a live holder.
+    try:
+        from services.cdc_lease import CdcLeaseConflict
+
+        if isinstance(error, CdcLeaseConflict):
+            return {
+                "retriable": False,
+                "evidence": ["cdc_lease_conflict"],
+                "message": text,
+                "class": exc_name,
+                **error.to_dict(),
+            }
+    except Exception:
+        pass
 
     for sig in RETRIABLE_EXCEPTIONS:
         if sig in text or sig in exc_name:

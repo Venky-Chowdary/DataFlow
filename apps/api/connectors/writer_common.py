@@ -242,18 +242,36 @@ def dedupe_rows_by_pk_and_lsn(
 
 
 def extract_cdc_lsn(resume_token: Any) -> str | None:
-    """Pull a sortable LSN/position string from a CDC resume token."""
+    """Pull a sortable LSN/position string from a CDC resume token.
+
+    Supports PG ``lsn=``, MySQL ``file:pos`` / ``gtid``, Mongo ``_data``,
+    SQL Server LSN hex, and Oracle SCN. Used to stamp ``_df_lsn`` for
+    at-least-once upsert guards (not exactly-once).
+    """
     if resume_token is None:
         return None
     if isinstance(resume_token, dict):
+        # Nested PG hold / incremental wrappers
+        nested = resume_token.get("token")
+        if isinstance(nested, (dict, str)) and nested:
+            nested_lsn = extract_cdc_lsn(nested)
+            if nested_lsn:
+                return nested_lsn
         file_name = resume_token.get("file") or resume_token.get("filename")
         pos = resume_token.get("pos")
         if file_name is not None and pos is not None:
             return f"{file_name}:{pos}"
-        for key in ("lsn", "position", "resume_lsn", "pos"):
+        gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
+        if gtid is not None and str(gtid).strip():
+            return f"gtid:{str(gtid).strip()}"
+        for key in ("lsn", "scn", "position", "resume_lsn", "pos", "_data"):
             value = resume_token.get(key)
             if value is not None and str(value).strip():
                 return str(value).strip()
+        # Mongo resume token often is the whole dict with ``_data``.
+        data = resume_token.get("_data")
+        if data is not None and str(data).strip():
+            return str(data).strip()
         return None
     text = str(resume_token).strip()
     if not text or text in {"None", "null"}:
@@ -266,11 +284,23 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
 
 
 def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment: apply upsert only when EXCLUDED LSN is newer (pg_lsn cast)."""
+    """WHERE fragment for ON CONFLICT when ``_df_lsn`` is a real PG ``hi/lo`` LSN.
+
+    Mixed CDC stamps (``gtid:…``, ``file:pos``, Mongo tokens) must NOT use
+    ``::pg_lsn`` alone — that casts fail under MySQL/Mongo→Postgres load and
+    aborts the upsert. Non-PG stamps fall back to text inequality (at-least-once).
+    """
     # Identifiers are sanitized by callers; values are column/table names we control.
+    pg_pat = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
+    excl = f'EXCLUDED."{lsn_column}"'
+    dest = f'"{table_name}"."{lsn_column}"'
     return (
-        f'EXCLUDED."{lsn_column}"::pg_lsn > '
-        f'COALESCE("{table_name}"."{lsn_column}"::pg_lsn, \'0/0\'::pg_lsn)'
+        f"( "
+        f"({excl} ~ '{pg_pat}' AND COALESCE({dest}, '') ~ '{pg_pat}' "
+        f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
+        f"OR "
+        f"({excl} !~ '{pg_pat}' AND {excl} IS DISTINCT FROM {dest}) "
+        f")"
     )
 
 

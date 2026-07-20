@@ -24,7 +24,7 @@ Rules:
 COPILOT_PERSONA = DATA_PILOT_PERSONA  # backward compatible
 
 PRODUCT_CAPABILITIES = [
-    "Move data from CSV, JSON, JSONL, TSV files to MongoDB, PostgreSQL, Snowflake, and 600+ connectors",
+    "Move data from CSV, JSON, JSONL, TSV files to MongoDB, PostgreSQL, Snowflake, and other certified transfer-ready drivers (roadmap catalog tiles are labeled Planned, not live)",
     "AI semantic mapping: understands AMT=amount, cust=customer, 210+ semantic types",
     "8 preflight validation gates before every transfer — catch errors before they happen",
     "Automatic PII detection with GDPR, HIPAA, PCI-DSS, CCPA compliance tagging",
@@ -71,7 +71,7 @@ CONVERSATION_TEMPLATES: list[dict] = [
         "user": "Hello, what can you help me with?",
         "assistant": (
             "Welcome to DataTransfer.space! I'm your AI Copilot. I can help you:\n\n"
-            "• **Move data** — CSV, JSON, or any file to MongoDB, Snowflake, and 600+ destinations\n"
+            "• **Move data** — CSV, JSON, or files to MongoDB, Snowflake, and other certified destinations\n"
             "• **Map columns** — AI understands abbreviations like AMT, cust_id, qty\n"
             "• **Check PII & compliance** — GDPR, HIPAA, PCI-DSS before you transfer\n"
             "• **Run preflight checks** — 8 validation gates catch issues early\n\n"

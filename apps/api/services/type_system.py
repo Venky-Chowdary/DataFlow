@@ -114,13 +114,13 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "uint8": LOGICAL_INTEGER,
     "uint16": LOGICAL_INTEGER,
     "uint32": LOGICAL_INTEGER,
-    "uint64": LOGICAL_INTEGER,
+    "uint64": LOGICAL_DECIMAL,  # full unsigned 64-bit range — DECIMAL, not signed BIGINT
     "mediumint": LOGICAL_INTEGER,
     "mediumint unsigned": LOGICAL_INTEGER,
     "tinyint unsigned": LOGICAL_INTEGER,
     "smallint unsigned": LOGICAL_INTEGER,
     "int unsigned": LOGICAL_INTEGER,
-    "bigint unsigned": LOGICAL_INTEGER,
+    "bigint unsigned": LOGICAL_DECIMAL,  # MySQL BIGINT UNSIGNED → DECIMAL (fidelity)
     "smallserial": LOGICAL_INTEGER,
     "year": LOGICAL_INTEGER,
     "bit": LOGICAL_BOOLEAN,
@@ -357,6 +357,11 @@ def normalize_logical_type(inferred: str | None) -> str:
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
     key = key.replace("_", " ")
+    # Transfer fidelity: unsigned 64-bit integers must not land as signed BIGINT.
+    if "unsigned" in key and ("bigint" in key or key in {"uint64", "ubyte8"}):
+        return LOGICAL_DECIMAL
+    if key in {"uint64"}:
+        return LOGICAL_DECIMAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
 

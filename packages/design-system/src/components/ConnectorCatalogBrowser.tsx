@@ -62,7 +62,7 @@ export function ConnectorCatalogBrowser({
           className="df-input df-catalog-search"
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
-          placeholder="Search 600+ connectors…"
+          placeholder="Search connectors (certified + roadmap)…"
         />
         <select className="df-select df-catalog-filter" value={category} onChange={(e) => onCategoryChange(e.target.value)}>
           <option value="">All categories</option>

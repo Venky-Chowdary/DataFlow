@@ -156,7 +156,7 @@ export function ConnectorMarketplace({ mode = "source", selectedId, onSelect }: 
             Select {mode === "source" ? "Source" : "Destination"}
           </h2>
           <p className="dt-marketplace-subtitle">
-            Choose from 600+ enterprise-ready connectors
+            Certified transfer drivers plus roadmap catalog tiles — honest status labels
           </p>
         </div>
 

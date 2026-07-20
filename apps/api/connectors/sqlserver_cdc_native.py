@@ -67,6 +67,7 @@ class SqlServerNativeCdc:
         batch_size: int = 500,
         resume_token: str | None = None,
         capture_instance: str = "",
+        cursor_key: str = "",
     ) -> None:
         self.cfg = cfg
         self.table = table
@@ -78,6 +79,45 @@ class SqlServerNativeCdc:
         self.start_lsn = state.get("lsn") or ""
         self.phase = state.get("phase") or "initial"
         self._last_event_at: datetime | None = None
+        from services.cdc_schema_history import connection_fingerprint
+
+        self.source_key = connection_fingerprint(
+            {**cfg, "type": "sqlserver"},
+            connector_id=str(cfg.get("connector_id") or ""),
+        )
+        database = str(cfg.get("database") or "master")
+        self.cursor_key = (
+            cursor_key
+            or f"mssql-cdc:{database}:{self.schema}.{self.table}"
+        )
+        from services.cdc_lease import CdcLeaseGuard, mssql_cdc_resource
+
+        self._lease = CdcLeaseGuard(
+            cursor_key=self.cursor_key,
+            resource=mssql_cdc_resource(database, self.schema, self.table, mode="cdc"),
+            holder_id=str(cfg.get("lease_holder_id") or ""),
+            job_id=str(cfg.get("job_id") or ""),
+            meta={
+                "engine": "sqlserver_native",
+                "capture_instance": self.capture_instance,
+                "table": self.table,
+            },
+        )
+
+    def _acquire_cdc_lease(self) -> None:
+        self._lease.ensure()
+
+    def close(self) -> None:
+        self._lease.release()
+
+    def cdc_metadata(self) -> dict[str, Any]:
+        return {
+            "plugin": "sqlserver_native_cdc",
+            "phase": self.phase,
+            "delivery": "at-least-once",
+            "capture_instance": self.capture_instance,
+            **self._lease.theater_fields(),
+        }
 
     def _conn(self):
         from connectors.generic_sql import get_connection
@@ -135,6 +175,7 @@ class SqlServerNativeCdc:
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Initial dump + LSN handoff (Debezium initial snapshot)."""
+        self._acquire_cdc_lease()
         qualified = f"[{self.schema}].[{self.table}]"
         pk = self.primary_key
         offset = 0
@@ -176,10 +217,101 @@ class SqlServerNativeCdc:
             resume_token=encode_mssql_cdc_token(self.start_lsn, table=self.table, phase="streaming")
         )
 
+    def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """PK-ordered chunk for signal-driven incremental snapshots."""
+        from connectors.sql_identifiers import require_safe_identifier
+
+        pk_name = require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
+        pk = f"[{pk_name.replace(']', ']]')}]"
+        qualified = f"[{self.schema}].[{self.table}]"
+        limit = int(sig.chunk_size or self.batch_size)
+        last_pk = sig.last_pk or ""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if last_pk:
+                    cur.execute(
+                        f"""
+                        SELECT TOP ({limit}) *
+                        FROM {qualified}
+                        WHERE {pk} > %s
+                        ORDER BY {pk}
+                        """,
+                        (last_pk,),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        SELECT TOP ({limit}) *
+                        FROM {qualified}
+                        ORDER BY {pk}
+                        """
+                    )
+                cols = [d[0] for d in (cur.description or [])]
+                rows = cur.fetchall() or []
+        records = [
+            {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
+            for row in rows
+        ]
+        new_last = records[-1].get(pk_name) if records else last_pk
+        done = len(records) < limit
+        return records, str(new_last) if new_last is not None else last_pk, done
+
+    def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
+        """Non-acking CDC LSN peek for DDD-3 stream-wins during incremental snapshot."""
+        events: list[dict[str, Any]] = []
+        if not self.start_lsn:
+            return events
+        fn = f"cdc.fn_cdc_get_all_changes_{self.capture_instance}"
+        peek_limit = min(int(sig.chunk_size or self.batch_size), 200)
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    max_lsn = self._max_lsn(cur)
+                    if not max_lsn or max_lsn == self.start_lsn:
+                        return events
+                    cur.execute(
+                        f"""
+                        SELECT TOP ({peek_limit}) *
+                        FROM {fn}(%s, %s, 'all')
+                        ORDER BY __$start_lsn
+                        """,
+                        (_hex_to_lsn(self.start_lsn), _hex_to_lsn(max_lsn)),
+                    )
+                    cols = [d[0] for d in (cur.description or [])]
+                    for row in cur.fetchall() or []:
+                        rec = {cols[i]: row[i] for i in range(len(cols))}
+                        op = rec.get("__$operation")
+                        clean = {
+                            k: "" if v is None else str(v)
+                            for k, v in rec.items()
+                            if not str(k).startswith("__$")
+                        }
+                        key = clean.get(self.primary_key, "")
+                        if op == 1 and key:
+                            events.append({"op": "d", "pk": key, "row": {self.primary_key: key}})
+                        elif op == 2:
+                            events.append({"op": "c", "row": clean})
+                        elif op == 4:
+                            events.append({"op": "u", "row": clean})
+        except Exception:
+            return events
+        return events
+
     def poll(self) -> Iterator[ChangeBatch]:
+        self._acquire_cdc_lease()
         if self.phase != "streaming" or not self.start_lsn:
             yield from self.snapshot()
             return
+
+        from services.cdc_incremental_runner import interleave_incremental_snapshot
+
+        yield from interleave_incremental_snapshot(
+            self.source_key,
+            table=self.table,
+            fetch_chunk=self._fetch_incremental_chunk,
+            stream_events_during_chunk=self._peek_stream_events_during_chunk,
+            max_chunks_per_poll=1,
+        )
 
         fn = f"cdc.fn_cdc_get_all_changes_{self.capture_instance}"
         inserts: list[dict[str, Any]] = []

@@ -48,20 +48,36 @@ class MySqlChangeStreamCdc:
     def __init__(
         self,
         cfg: dict[str, Any],
-        table: str,
+        table: str | list[str],
         primary_key: str,
         columns: list[str] | None = None,
         resume_token: dict[str, Any] | str | None = None,
         batch_size: int = 1000,
         max_wait_seconds: float = 30.0,
+        cursor_key: str = "",
+        primary_keys: dict[str, str] | None = None,
     ) -> None:
+        from services.cdc_multi_table import normalize_table_list
+
         self.cfg = cfg
         self.database = cfg.get("database") or cfg.get("schema") or ""
-        self.table = table
-        self.primary_key = primary_key
+        self.tables = normalize_table_list(table)
+        if not self.tables:
+            raise ValueError("MySQL CDC requires at least one table")
+        self.table = self.tables[0]
+        self.primary_keys = {
+            t: str((primary_keys or {}).get(t) or primary_key or "id")
+            for t in self.tables
+        }
+        self.primary_key = self.primary_keys[self.table]
         self.columns = columns
         self.batch_size = batch_size
         self.max_wait_seconds = max_wait_seconds
+        self.cursor_key = cursor_key or (
+            f"mysql:{self.database}:{','.join(self.tables)}"
+            if len(self.tables) > 1
+            else f"mysql:{self.database}:{self.table}"
+        )
         self._column_names_cache: list[str] | None = None
         self.source_key = connection_fingerprint(
             {**cfg, "type": "mysql"},
@@ -72,6 +88,21 @@ class MySqlChangeStreamCdc:
         self._last_event_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
         self._schema_ready = False
+        self._processed_signal_ids: set[str] = set()
+        self.signal_table = str(cfg.get("signal_table") or "dataflow_signal")
+        self._signal_table_ready = False
+        self._last_signal_poll_at = 0.0
+        try:
+            import os as _os
+
+            self._signal_poll_interval_sec = float(
+                _os.getenv(
+                    "DATAFLOW_CDC_SIGNAL_POLL_SEC",
+                    str(cfg.get("signal_poll_interval_sec") or 15),
+                )
+            )
+        except Exception:
+            self._signal_poll_interval_sec = 15.0
         if isinstance(resume_token, str) and resume_token:
             try:
                 self.resume_token = json.loads(resume_token)
@@ -79,6 +110,32 @@ class MySqlChangeStreamCdc:
                 self.resume_token = None
         else:
             self.resume_token = resume_token or None
+        from services.cdc_lease import CdcLeaseGuard
+
+        self._lease = CdcLeaseGuard(
+            cursor_key=self.cursor_key,
+            resource=f"mysql_server_id:{self._mysql_server_id()}",
+            holder_id=str(cfg.get("lease_holder_id") or ""),
+            job_id=str(cfg.get("job_id") or ""),
+            meta={
+                "tables": list(self.tables),
+                "database": self.database,
+                "engine": "mysql",
+                "shared_reader": len(self.tables) > 1,
+            },
+        )
+
+    @property
+    def lease_holder_id(self) -> str:
+        return self._lease.holder_id
+
+    @lease_holder_id.setter
+    def lease_holder_id(self, value: str) -> None:
+        self._lease.holder_id = value
+
+    @property
+    def _lease_acquired(self) -> bool:
+        return self._lease.acquired
 
     def _conn(self):
         return get_connection(
@@ -91,42 +148,69 @@ class MySqlChangeStreamCdc:
             ssl=bool(self.cfg.get("ssl")),
         )
 
+    def _mysql_server_id(self) -> int:
+        configured = self.cfg.get("server_id") or self.cfg.get("binlog_server_id")
+        if configured is not None:
+            return int(configured)
+        import hashlib
+
+        # Shared multi-table readers must use one server_id for the whole set
+        # (Debezium-class); per-table hashing would open N concurrent consumers.
+        table_key = ",".join(sorted(t.lower() for t in self.tables))
+        digest = hashlib.sha1(  # noqa: S324
+            f"{self.cfg.get('host')}|{self.database}|{table_key}|{self.cursor_key}".encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+        return 10_000 + (int(digest[:6], 16) % 1_000_000)
+
+    def _acquire_cdc_lease(self) -> None:
+        self._lease.ensure()
+
+    def close(self) -> None:
+        self._lease.release()
+
     def is_available(self) -> bool:
+        """True when binlog is ON + ROW format and pymysqlreplication is importable.
+
+        Stream open is best-effort: missing REPLICATION privileges still return
+        True when server vars are correct so CI/integration can proceed; poll()
+        surfaces privilege errors clearly.
+        """
+        try:
+            import pymysqlreplication  # noqa: F401
+        except ImportError:
+            return False
         try:
             conn = self._conn()
             with conn.cursor() as cur:
                 cur.execute("SHOW VARIABLES LIKE 'log_bin'")
                 row = cur.fetchone()
                 if not row or str(row[1]).lower() not in {"on", "1", "true"}:
+                    conn.close()
                     return False
                 cur.execute("SHOW VARIABLES LIKE 'binlog_format'")
                 row = cur.fetchone()
                 if not row or (row[1] or "").upper() != "ROW":
+                    conn.close()
                     return False
             conn.close()
 
-            kwargs = self._binlog_kwargs(blocking=False, only_events=[])
-            from pymysqlreplication import BinLogStreamReader
+            try:
+                kwargs = self._binlog_kwargs(blocking=False, only_events=[])
+                from pymysqlreplication import BinLogStreamReader
 
-            stream = BinLogStreamReader(**kwargs)
-            stream.close()
+                stream = BinLogStreamReader(**kwargs)
+                stream.close()
+            except Exception:
+                # Vars OK — treat as available; poll will raise with detail.
+                pass
             return True
         except Exception:
             return False
 
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:
         # Unique server_id per connector/table so multi-stream CDC does not collide.
-        configured = self.cfg.get("server_id") or self.cfg.get("binlog_server_id")
-        if configured is not None:
-            server_id = int(configured)
-        else:
-            import hashlib
-
-            digest = hashlib.sha1(  # noqa: S324 — non-crypto server_id bookkeeping
-                f"{self.cfg.get('host')}|{self.database}|{self.table}".encode(),
-                usedforsecurity=False,
-            ).hexdigest()
-            server_id = 10_000 + (int(digest[:6], 16) % 1_000_000)
+        server_id = self._mysql_server_id()
         kwargs: dict[str, Any] = {
             "connection_settings": {
                 "host": self.cfg.get("host") or "localhost",
@@ -137,7 +221,8 @@ class MySqlChangeStreamCdc:
             "server_id": server_id,
             "blocking": blocking,
             "only_schemas": self.database if self.database else None,
-            "only_tables": self.table if self.table else None,
+            # pymysqlreplication accepts a list for multi-table single-reader.
+            "only_tables": list(self.tables) if len(self.tables) > 1 else (self.table or None),
         }
         # An empty ``only_events`` list is an allowlist matching NOTHING (the
         # reader would silently yield zero events). Only set it when non-empty;
@@ -145,17 +230,18 @@ class MySqlChangeStreamCdc:
         if only_events:
             kwargs["only_events"] = only_events
         # Prefer GTID auto-position (Debezium-class); fall back to file/pos.
+        # pymysqlreplication: ``auto_position`` accepts the GTID set string directly
+        # (older builds have no separate ``gtid_set`` kwarg).
         gtid = None
         if isinstance(self.resume_token, dict):
             gtid = self.resume_token.get("gtid") or self.resume_token.get("gtid_set")
         if gtid:
-            kwargs["auto_position"] = True
-            try:
-                # pymysqlreplication >=0.45
-                kwargs["gtid_set"] = gtid
-            except Exception:
-                pass
-        elif self.resume_token and self.resume_token.get("file") and self.resume_token.get("pos") is not None:
+            kwargs["auto_position"] = gtid
+        elif (
+            isinstance(self.resume_token, dict)
+            and self.resume_token.get("file")
+            and self.resume_token.get("pos") is not None
+        ):
             kwargs["log_file"] = self.resume_token["file"]
             kwargs["log_pos"] = self.resume_token["pos"]
         return kwargs
@@ -163,6 +249,7 @@ class MySqlChangeStreamCdc:
     def snapshot(self) -> Iterator[ChangeBatch]:
         # Capture binlog file/pos BEFORE the snapshot so poll() starts from a
         # consistent handoff point (at-least-once; duplicates possible, no gaps).
+        self._acquire_cdc_lease()
         start_pos = self._current_binlog_position() or {
             "table": self.table,
             "file": None,
@@ -285,6 +372,43 @@ class MySqlChangeStreamCdc:
     def heartbeat(self) -> None:
         self._last_heartbeat_at = datetime.now(timezone.utc)
 
+    def _poll_signal_table(self) -> None:
+        """Debezium-compatible signal table → incremental snapshot enqueue."""
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._signal_table_ready
+            and (now - self._last_signal_poll_at) < max(1.0, self._signal_poll_interval_sec)
+        ):
+            return
+        from services.cdc_signal_table import ensure_signal_table, poll_signal_table
+
+        conn = None
+        try:
+            conn = self._conn()
+            if not self._signal_table_ready:
+                ensure_signal_table(conn, table=self.signal_table, dialect="mysql")
+                self._signal_table_ready = True
+            _, self._processed_signal_ids = poll_signal_table(
+                conn,
+                source_key=self.source_key,
+                table=self.signal_table,
+                default_table=self.table,
+                primary_key=self.primary_key,
+                processed_ids=self._processed_signal_ids,
+                dialect="mysql",
+            )
+            self._last_signal_poll_at = now
+        except Exception as exc:
+            _logger.debug("MySQL CDC signal table poll skipped: %s", exc)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
     def _fetch_live_schema(self) -> dict[str, Any]:
         columns: dict[str, str] = {}
         nullable: dict[str, bool] = {}
@@ -372,12 +496,14 @@ class MySqlChangeStreamCdc:
     def _ddl_targets_table(self, query: str) -> bool:
         if not query or not _DDL_RE.search(query):
             return False
-        # Match `db.table` or bare `table` references in common DDL forms.
-        pattern = re.compile(
-            rf"(?:`?{re.escape(self.database)}`?\.)?`?{re.escape(self.table)}`?\b",
-            re.IGNORECASE,
-        )
-        return bool(pattern.search(query))
+        for table in self.tables:
+            pattern = re.compile(
+                rf"(?:`?{re.escape(self.database)}`?\.)?`?{re.escape(table)}`?\b",
+                re.IGNORECASE,
+            )
+            if pattern.search(query):
+                return True
+        return False
 
     def _ordered_columns(self) -> list[str]:
         """Ordered column names from information_schema.
@@ -432,9 +558,115 @@ class MySqlChangeStreamCdc:
         row = self._remap_positional(row)
         return {k: _serialize(v) for k, v in row.items()}
 
-    def _pk_value(self, row: dict[str, Any]) -> str:
+    def _pk_value(self, row: dict[str, Any], *, table: str | None = None) -> str:
         row = self._remap_positional(row)
-        return _serialize(row.get(self.primary_key))
+        pk = self.primary_keys.get(table or self.table, self.primary_key)
+        return _serialize(row.get(pk))
+
+    def _table_allowed(self, table: str) -> bool:
+        wanted = {t.lower() for t in self.tables}
+        return (table or "").lower() in wanted
+
+    def _canonical_table(self, table: str) -> str:
+        by_lower = {t.lower(): t for t in self.tables}
+        return by_lower.get((table or "").lower(), table or self.table)
+
+    def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """PK-ordered chunk reader for Debezium-style incremental snapshots."""
+        from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+
+        pk_name = sig.primary_key or self.primary_key
+        pk = quote_sql_identifier(require_safe_identifier(pk_name, preserve_case=True))
+        table = quote_sql_identifier(require_safe_identifier(self.table, preserve_case=True))
+        db = quote_sql_identifier(require_safe_identifier(self.database, preserve_case=True)) if self.database else ""
+        qualified = f"{db}.{table}" if db else table
+        limit = int(sig.chunk_size or self.batch_size)
+        last_pk = sig.last_pk or ""
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                if last_pk:
+                    cur.execute(
+                        f"SELECT * FROM {qualified} WHERE {pk} > %s ORDER BY {pk} LIMIT %s",
+                        (last_pk, limit),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT * FROM {qualified} ORDER BY {pk} LIMIT %s",
+                        (limit,),
+                    )
+                cols = [d[0] for d in (cur.description or [])]
+                rows = cur.fetchall() or []
+            conn.commit()
+        finally:
+            conn.close()
+        records = [
+            {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
+            for row in rows
+        ]
+        new_last = records[-1].get(pk_name) if records else last_pk
+        done = len(records) < limit
+        return records, str(new_last) if new_last is not None else last_pk, done
+
+    def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
+        """Non-acking binlog peek for DDD-3 stream-wins during incremental snapshot."""
+        events: list[dict[str, Any]] = []
+        try:
+            from pymysqlreplication import BinLogStreamReader
+            from pymysqlreplication.row_event import (
+                DeleteRowsEvent,
+                UpdateRowsEvent,
+                WriteRowsEvent,
+            )
+        except ImportError:
+            return []
+        kwargs = self._binlog_kwargs(
+            blocking=False,
+            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
+        )
+        # Distinct server_id so peek does not collide with the durable poll session.
+        kwargs["server_id"] = int(kwargs.get("server_id") or 10_000) + 7
+        # Bound peek — do not advance durable resume_token.
+        peek_limit = min(int(sig.chunk_size or self.batch_size), 200)
+        stream = BinLogStreamReader(**kwargs)
+        try:
+            count = 0
+            for binlog_event in stream:
+                if getattr(binlog_event, "schema", "") != self.database:
+                    continue
+                if not self._table_allowed(getattr(binlog_event, "table", "") or ""):
+                    continue
+                if isinstance(binlog_event, WriteRowsEvent):
+                    for row in getattr(binlog_event, "rows", []):
+                        values = (
+                            row.get("values")
+                            if isinstance(row, dict) and "values" in row
+                            else row
+                        )
+                        events.append({"op": "c", "row": self._row_to_record(values)})
+                        count += 1
+                elif isinstance(binlog_event, UpdateRowsEvent):
+                    for row in getattr(binlog_event, "rows", []):
+                        after = row.get("after_values") if isinstance(row, dict) else getattr(row, "after_values", {})
+                        events.append({"op": "u", "row": self._row_to_record(after)})
+                        count += 1
+                elif isinstance(binlog_event, DeleteRowsEvent):
+                    for row in getattr(binlog_event, "rows", []):
+                        values = row.get("values") if isinstance(row, dict) else getattr(row, "values", {})
+                        pk = self._pk_value(values)
+                        if pk:
+                            events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
+                            count += 1
+                if count >= peek_limit:
+                    break
+        except Exception:
+            return events
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        return events
 
     def poll(self) -> Iterator[ChangeBatch]:
         # Incomplete initial sync must finish before binlog streaming.
@@ -442,27 +674,80 @@ class MySqlChangeStreamCdc:
             yield from self.snapshot()
             return
 
+        self._acquire_cdc_lease()
+        self._poll_signal_table()
+
+        # Signal-driven incremental snapshot (DDD-3 window via shared runner).
+        from services.cdc_incremental_runner import interleave_incremental_snapshot
+
+        yield from interleave_incremental_snapshot(
+            self.source_key,
+            table=self.table,
+            fetch_chunk=self._fetch_incremental_chunk,
+            stream_events_during_chunk=self._peek_stream_events_during_chunk,
+            max_chunks_per_poll=1,
+        )
+
         from pymysqlreplication import BinLogStreamReader
-        from pymysqlreplication.event import QueryEvent, RotateEvent
+        from pymysqlreplication.event import QueryEvent, RotateEvent, XidEvent
         from pymysqlreplication.row_event import (
             DeleteRowsEvent,
             UpdateRowsEvent,
             WriteRowsEvent,
         )
+        from services.cdc_multi_table import MultiTableTransactionBuffer
 
         self._ensure_decode_schema(resume_offset=self.resume_token)
         self.heartbeat()
 
-        inserts: list[dict[str, str]] = []
-        updates: list[dict[str, str]] = []
-        deletes: list[str] = []
         last_position: dict[str, Any] | None = None
         deadline = datetime.now(timezone.utc).timestamp() + self.max_wait_seconds
+        buf = MultiTableTransactionBuffer()
+        emitted = False
+        event_count = 0
 
-        # Row changes + rotation + QueryEvent (DDL) for schema history.
+        def _pos_now() -> dict[str, Any]:
+            pos = {
+                "file": getattr(stream, "log_file", "") or (self.resume_token or {}).get("file"),
+                "pos": getattr(stream, "log_pos", None),
+                "tables": list(self.tables),
+            }
+            return {k: v for k, v in pos.items() if v is not None}
+
+        def _token_at(pos: dict[str, Any] | None) -> dict[str, Any]:
+            token = dict(pos or {"tables": list(self.tables)})
+            try:
+                current = self._current_binlog_position() or {}
+                if current.get("gtid"):
+                    token["gtid"] = current["gtid"]
+                if not token.get("file") and current.get("file"):
+                    token["file"] = current["file"]
+                    token["pos"] = current.get("pos")
+            except Exception:
+                pass
+            return token
+
+        def _emit_commit():
+            nonlocal emitted
+            for batch in buf.commit(
+                resume_token=_token_at(last_position),
+                table_order=self.tables,
+            ):
+                emitted = True
+                self.resume_token = batch.resume_token
+                yield batch
+
+        # Row changes + rotation + QueryEvent (DDL/BEGIN) + XidEvent (COMMIT).
         kwargs = self._binlog_kwargs(
             blocking=False,
-            only_events=[RotateEvent, QueryEvent, WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
+            only_events=[
+                RotateEvent,
+                QueryEvent,
+                XidEvent,
+                WriteRowsEvent,
+                UpdateRowsEvent,
+                DeleteRowsEvent,
+            ],
         )
         stream = BinLogStreamReader(**kwargs)
         try:
@@ -470,25 +755,43 @@ class MySqlChangeStreamCdc:
                 if datetime.now(timezone.utc).timestamp() > deadline:
                     break
                 if isinstance(binlog_event, RotateEvent):
-                    last_position = {"file": binlog_event.next_binlog, "pos": binlog_event.position}
+                    last_position = {
+                        "file": binlog_event.next_binlog,
+                        "pos": binlog_event.position,
+                        "tables": list(self.tables),
+                    }
                     continue
                 if isinstance(binlog_event, QueryEvent):
-                    query = getattr(binlog_event, "query", "") or ""
+                    query = (getattr(binlog_event, "query", "") or "").strip()
+                    upper = query.upper()
+                    if upper.startswith("BEGIN") or upper == "BEGIN":
+                        buf.begin(lsn=str(getattr(stream, "log_pos", "") or ""))
+                        continue
+                    if upper.startswith("ROLLBACK") or upper.startswith("ABORT"):
+                        buf.rollback()
+                        continue
                     if self._ddl_targets_table(query):
-                        pos = {
-                            "file": getattr(stream, "log_file", "") or (self.resume_token or {}).get("file"),
-                            "pos": getattr(stream, "log_pos", None) or getattr(binlog_event, "packet", None),
-                            "table": self.table,
-                        }
+                        pos = _pos_now()
                         if stream.log_pos:
                             pos["pos"] = stream.log_pos
                         self._record_schema_change(ddl=query.strip()[:2000], offset=pos)
                         self._last_event_at = datetime.now(timezone.utc)
                     continue
+                if isinstance(binlog_event, XidEvent):
+                    if stream.log_pos:
+                        last_position = {
+                            "file": getattr(stream, "log_file", ""),
+                            "pos": stream.log_pos,
+                            "tables": list(self.tables),
+                        }
+                    yield from _emit_commit()
+                    continue
                 if getattr(binlog_event, "schema", "") != self.database:
                     continue
-                if getattr(binlog_event, "table", "") != self.table:
+                event_table = getattr(binlog_event, "table", "") or ""
+                if not self._table_allowed(event_table):
                     continue
+                tbl = self._canonical_table(event_table)
 
                 event_ts = getattr(binlog_event, "timestamp", None)
                 if isinstance(event_ts, (int, float)) and event_ts > 0:
@@ -498,40 +801,60 @@ class MySqlChangeStreamCdc:
 
                 if isinstance(binlog_event, WriteRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
-                        # pymysqlreplication wraps write rows as {"values": {...}};
-                        # tolerate a flat dict too for forward/backward compatibility.
                         values = (
                             row.get("values")
                             if isinstance(row, dict) and "values" in row
                             else row
                         )
-                        inserts.append(self._row_to_record(values))
+                        buf.insert(tbl, self._row_to_record(values), lsn=str(stream.log_pos or ""))
+                        event_count += 1
                 elif isinstance(binlog_event, UpdateRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
-                        after = row.get("after_values") if isinstance(row, dict) else getattr(row, "after_values", {})
-                        updates.append(self._row_to_record(after))
+                        after = (
+                            row.get("after_values")
+                            if isinstance(row, dict)
+                            else getattr(row, "after_values", {})
+                        )
+                        buf.update(tbl, self._row_to_record(after), lsn=str(stream.log_pos or ""))
+                        event_count += 1
                 elif isinstance(binlog_event, DeleteRowsEvent):
                     for row in getattr(binlog_event, "rows", []):
-                        values = row.get("values") if isinstance(row, dict) else getattr(row, "values", {})
-                        pk = self._pk_value(values)
+                        values = (
+                            row.get("values")
+                            if isinstance(row, dict)
+                            else getattr(row, "values", {})
+                        )
+                        pk = self._pk_value(values, table=tbl)
                         if pk:
-                            deletes.append(pk)
+                            buf.delete(tbl, pk, lsn=str(stream.log_pos or ""))
+                            event_count += 1
 
                 if stream.log_pos:
-                    last_position = {"file": getattr(stream, "log_file", ""), "pos": stream.log_pos}
+                    last_position = {
+                        "file": getattr(stream, "log_file", ""),
+                        "pos": stream.log_pos,
+                        "tables": list(self.tables),
+                    }
 
-                if len(inserts) + len(updates) + len(deletes) >= self.batch_size:
+                if event_count >= self.batch_size and buf.open_xid is None:
                     break
         finally:
             stream.close()
 
-        if last_position:
-            self.resume_token = last_position
+        # Mid-window open txn: hold (do not flush). Next poll re-reads from resume.
+        if buf.open_xid is not None:
+            if not emitted:
+                yield ChangeBatch(
+                    resume_token={
+                        "txn_held": True,
+                        "open_xid": buf.open_xid,
+                        "token": _token_at(last_position or (self.resume_token if isinstance(self.resume_token, dict) else None)),
+                    }
+                )
+            return
 
-        if inserts or updates or deletes or last_position:
-            yield ChangeBatch(
-                inserts=inserts,
-                updates=updates,
-                deletes=deletes,
-                resume_token=last_position,
-            )
+        token = _token_at(last_position)
+        if token.get("file") or token.get("gtid") or token.get("pos") is not None:
+            self.resume_token = token
+        if not emitted and (token.get("file") or token.get("gtid") or token.get("pos") is not None):
+            yield ChangeBatch(resume_token=token)

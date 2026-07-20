@@ -1364,12 +1364,20 @@ def _upsert_batch(
             if dialect_name == "postgresql":
                 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+                from connectors.writer_common import DF_LSN_COL, postgres_lsn_update_guard_sql
+
                 stmt = pg_insert(table_obj).values(rows)
                 if update_cols:
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=conflict_cols,
-                        set_={c: stmt.excluded[c] for c in update_cols},
-                    )
+                    kwargs: dict[str, Any] = {
+                        "index_elements": conflict_cols,
+                        "set_": {c: stmt.excluded[c] for c in update_cols},
+                    }
+                    # At-least-once guard: only apply when incoming _df_lsn is newer.
+                    if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
+                        kwargs["where"] = sa.text(
+                            postgres_lsn_update_guard_sql(table_obj.name)
+                        )
+                    stmt = stmt.on_conflict_do_update(**kwargs)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
                 conn.execute(stmt)

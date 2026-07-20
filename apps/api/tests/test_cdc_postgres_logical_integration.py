@@ -125,6 +125,10 @@ def test_postgres_logical_snapshot_handoff_lsn_continuity():
             cdc.ack(batch.resume_token)
     finally:
         try:
+            cdc.close()
+        except Exception:
+            pass
+        try:
             with _connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -186,6 +190,10 @@ def test_postgres_logical_snapshot_then_poll_captures_real_cdc():
         after_ack = list(cdc.poll())
         assert not any(b.total_changes for b in after_ack), after_ack
     finally:
+        try:
+            cdc.close()
+        except Exception:
+            pass
         try:
             with _connect() as conn:
                 with conn.cursor() as cur:

@@ -78,6 +78,7 @@ class OracleFlashbackCdc:
         batch_size: int = 500,
         resume_token: str | None = None,
         columns: list[str] | None = None,
+        cursor_key: str = "",
     ) -> None:
         self.cfg = cfg
         self.table = table
@@ -90,6 +91,37 @@ class OracleFlashbackCdc:
         self.phase = str(state.get("phase") or "initial")
         self.snapshot_offset = int(state.get("offset") or 0)
         self._last_event_at: datetime | None = None
+        self.cursor_key = (
+            cursor_key or f"oracle-flashback:{self.schema}.{self.table.upper()}"
+        )
+        from services.cdc_lease import CdcLeaseGuard, oracle_cdc_resource
+
+        self._lease = CdcLeaseGuard(
+            cursor_key=self.cursor_key,
+            resource=oracle_cdc_resource(
+                self.schema,
+                self.table.upper(),
+                mode="flashback",
+                host=str(cfg.get("host") or ""),
+            ),
+            holder_id=str(cfg.get("lease_holder_id") or ""),
+            job_id=str(cfg.get("job_id") or ""),
+            meta={"engine": "oracle_flashback", "table": self.table},
+        )
+
+    def _acquire_cdc_lease(self) -> None:
+        self._lease.ensure()
+
+    def close(self) -> None:
+        self._lease.release()
+
+    def cdc_metadata(self) -> dict[str, Any]:
+        return {
+            "plugin": "oracle_flashback",
+            "phase": self.phase,
+            "delivery": "at-least-once",
+            **self._lease.theater_fields(),
+        }
 
     def _conn(self):
         from connectors.generic_sql import get_connection
@@ -133,6 +165,7 @@ class OracleFlashbackCdc:
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump at current SCN, then hand off to flashback versions."""
+        self._acquire_cdc_lease()
         qualified = self._qualified()
         pk = self.primary_key
         offset = self.snapshot_offset if self.phase == "snapshot" else 0
@@ -198,6 +231,7 @@ class OracleFlashbackCdc:
         )
 
     def poll(self) -> Iterator[ChangeBatch]:
+        self._acquire_cdc_lease()
         if self.phase == "snapshot" or (self.scn <= 0 and self.phase != "streaming"):
             yield from self.snapshot()
             return

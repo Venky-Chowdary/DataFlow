@@ -37,6 +37,12 @@ interface TransferMapStepProps {
   /** Controlled proof drawer (shared with Validate). */
   proofOpen?: boolean;
   onProofOpenChange?: (open: boolean) => void;
+  /** Multi-stream map: stream names for tab strip (comma-separated sources). */
+  streamNames?: string[];
+  activeStream?: string | null;
+  onActiveStreamChange?: (name: string) => void;
+  /** True when stream schemas differ — operator must review each tab. */
+  streamsDiverge?: boolean;
   onChangeMappings: (mappings: EditableMapping[]) => void;
   onBack: () => void;
   onContinue: () => void;
@@ -68,6 +74,10 @@ export function TransferMapStep({
   mappingProof,
   proofOpen: proofOpenProp,
   onProofOpenChange,
+  streamNames = [],
+  activeStream = null,
+  onActiveStreamChange,
+  streamsDiverge = false,
   onChangeMappings,
   onBack,
   onContinue,
@@ -156,6 +166,7 @@ export function TransferMapStep({
             {mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}
             {llmUsed ? " · semantic engine" : ""}
             {destColumns.length === 0 && !destSchemaLoading ? " · create-new table" : ""}
+            {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
           </p>
         </div>
         <div className="df2-map-step-head-actions">
@@ -187,6 +198,36 @@ export function TransferMapStep({
           </button>
         </div>
       </div>
+
+      {streamNames.length > 1 && (
+        <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
+          {streamNames.map((name) => (
+            <button
+              key={name}
+              type="button"
+              role="tab"
+              aria-selected={activeStream === name}
+              className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}`}
+              onClick={() => onActiveStreamChange?.(name)}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {streamsDiverge && streamNames.length > 1 && (
+        <div className="df2-map-stream-diverge" role="alert">
+          <DtIcon name="alert" size={16} />
+          <div>
+            <strong>Stream schemas differ</strong>
+            <p>
+              Review the mapping tab for each stream before Validate. Shared destinations with
+              incompatible columns should use separate transfers until per-stream write contracts ship.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="df2-card-body df2-map-step-body">
         <div className="df2-map-step-workspace">

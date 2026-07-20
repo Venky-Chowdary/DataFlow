@@ -34,7 +34,9 @@ export function resolveStreamFields(
 }
 
 /** Build API `stream_contracts` with per-stream cursor/PK when multi-stream. */
-export function buildStreamContracts(input: BuildStreamContractsInput): Record<string, unknown>[] {
+export function buildStreamContracts(input: BuildStreamContractsInput & {
+  streamMappings?: Record<string, { source: string; target: string; confidence?: number; transform?: string }[]>;
+}): Record<string, unknown>[] {
   return input.streamNames.map((name) => {
     const fields = resolveStreamFields(
       name,
@@ -42,6 +44,7 @@ export function buildStreamContracts(input: BuildStreamContractsInput): Record<s
       input.defaultCursor,
       input.defaultPrimaryKey,
     );
+    const maps = input.streamMappings?.[name];
     return {
       name,
       selected: true,
@@ -51,6 +54,16 @@ export function buildStreamContracts(input: BuildStreamContractsInput): Record<s
       schema_policy: input.schemaPolicy,
       field_count: input.fieldCount,
       validation_mode: input.validationMode,
+      ...(maps && maps.length
+        ? {
+            mappings: maps.map((m) => ({
+              source: m.source,
+              target: m.target,
+              confidence: m.confidence ?? 0,
+              transform: m.transform || "none",
+            })),
+          }
+        : {}),
     };
   });
 }

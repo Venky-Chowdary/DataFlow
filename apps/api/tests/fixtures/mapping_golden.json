@@ -1,0 +1,22 @@
+[
+  {"source": "cust_name", "target": "customer_name"},
+  {"source": "AMT", "target": "amount"},
+  {"source": "email_addr", "target": "email_address"},
+  {"source": "mobile_phone", "target": "phone_number"},
+  {"source": "cust_id", "target": "customer_id"},
+  {"source": "qty", "target": "quantity"},
+  {"source": "order_amt", "target": "total_amount"},
+  {"source": "fname", "target": "first_name"},
+  {"source": "lname", "target": "last_name"},
+  {"source": "created_at", "target": "created_timestamp"},
+  {"source": "updated_ts", "target": "updated_at"},
+  {"source": "prod_id", "target": "product_id"},
+  {"source": "ord_id", "target": "order_id"},
+  {"source": "ship_addr", "target": "shipping_address"},
+  {"source": "bill_zip", "target": "billing_postal_code"},
+  {"source": "acct_bal", "target": "account_balance"},
+  {"source": "txn_amt", "target": "transaction_amount"},
+  {"source": "usr_email", "target": "user_email"},
+  {"source": "ph_num", "target": "phone"},
+  {"source": "dob", "target": "date_of_birth"}
+]

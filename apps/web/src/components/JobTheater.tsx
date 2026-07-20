@@ -4,7 +4,7 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
 import { JobPhase, JobProgress, LoadHistoryReport, PreflightResult } from "../lib/types";
-import { cancelJob, streamJobProgress } from "../lib/api";
+import { cancelJob, resumeJob, streamJobProgress } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
@@ -28,6 +28,8 @@ interface JobTheaterProps {
   onBackToValidate?: () => void;
   /** Return to Map to adjust columns after a stop. */
   onBackToMap?: () => void;
+  /** Resume from last checkpoint without leaving Transfer Studio. */
+  onResumed?: (jobId: string) => void;
 }
 
 const PHASES = [
@@ -84,6 +86,7 @@ export function JobTheater({
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
+  onResumed,
 }: JobTheaterProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
@@ -91,6 +94,7 @@ export function JobTheater({
   const [throughput, setThroughput] = useState(0);
   const [log, setLog] = useState<string[]>([]);
   const [cancelling, setCancelling] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
@@ -193,6 +197,29 @@ export function JobTheater({
     }
   };
 
+  const handleResume = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      const res = await resumeJob(jobId);
+      const nextId = res.job_id || jobId;
+      toast({
+        title: "Resume started",
+        message: "Continuing from the last checkpoint in Transfer Studio.",
+        tone: "success",
+      });
+      onResumed?.(nextId);
+      if (nextId !== jobId) {
+        // Parent should swap jobId; local stream will remount via key/effect.
+        doneRef.current = false;
+      }
+    } catch (e) {
+      toast({ title: "Could not resume job", message: (e as Error).message, tone: "error" });
+    } finally {
+      setResuming(false);
+    }
+  };
+
   if (!job) {
     return (
       <div className="df2-theater-v3 df2-theater-v3-loading">
@@ -215,7 +242,9 @@ export function JobTheater({
       startedAtFallback={startRef.current}
       preflight={preflight}
       cancelling={cancelling}
+      resuming={resuming}
       onCancel={handleCancel}
+      onResume={handleResume}
       onNewTransfer={onNewTransfer}
       onBackToValidate={onBackToValidate}
       onBackToMap={onBackToMap}
@@ -235,7 +264,9 @@ interface JobTheaterViewProps {
   startedAtFallback?: number;
   preflight?: PreflightResult;
   cancelling?: boolean;
+  resuming?: boolean;
   onCancel?: () => void;
+  onResume?: () => void;
   onNewTransfer?: () => void;
   onBackToValidate?: () => void;
   onBackToMap?: () => void;
@@ -254,7 +285,9 @@ export function JobTheaterView({
   startedAtFallback,
   preflight,
   cancelling,
+  resuming,
   onCancel,
+  onResume,
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
@@ -415,24 +448,34 @@ export function JobTheaterView({
               {processed > 0 ? `${processed.toLocaleString()} rows written before failure. ` : "No rows committed. "}
               {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined. ` : ""}
               {job.chunk_current != null
-                ? `Resume from batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""} on Jobs.`
-                : "Use Resume on Jobs if a checkpoint was saved."}
+                ? `Resume from batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""} here or on Jobs.`
+                : "Use Resume below if a checkpoint was saved."}
             </p>
           </div>
         </div>
       )}
 
-      {(isCancelled || isFailed) && (onNewTransfer || onBackToValidate || onBackToMap) && (
+      {(isCancelled || isFailed) && (onNewTransfer || onBackToValidate || onBackToMap || onResume) && (
         <div className="df2-theater-v3-next" role="navigation" aria-label="After cancelled or failed transfer">
           <div className="df2-theater-v3-next-copy">
             <strong>{isCancelled ? "What next?" : "Recover from failure"}</strong>
             <span>
               {isCancelled
-                ? "Start clean, or keep this route and adjust Map / Validate before re-running."
-                : "Fix mappings or destination issues, then re-run from Validate."}
+                ? "Resume from checkpoint, adjust Map / Validate, or start clean."
+                : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
             </span>
           </div>
           <div className="df2-theater-v3-next-actions">
+            {onResume && (job.chunk_current != null || job.checkpoint) && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm df2-btn-primary"
+                onClick={onResume}
+                disabled={resuming}
+              >
+                <DtIcon name="play" size={14} /> {resuming ? "Resuming…" : "Resume from checkpoint"}
+              </button>
+            )}
             {onBackToMap && (
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onBackToMap}>
                 <DtIcon name="layers" size={14} /> Back to Map
@@ -444,7 +487,7 @@ export function JobTheaterView({
               </button>
             )}
             {onNewTransfer && (
-              <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onNewTransfer}>
+              <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onNewTransfer}>
                 <DtIcon name="plus" size={14} /> New transfer
               </button>
             )}
@@ -587,6 +630,15 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {(job.cdc_plugin || job.cdc_delivery) && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>{job.cdc_plugin || "CDC"}</strong>
+              <span>{job.cdc_delivery || "at-least-once"}{job.cdc_slot_name ? ` · ${job.cdc_slot_name}` : ""}</span>
+            </div>
+          </article>
+        )}
         {job.replication_lag_bytes != null && Number.isFinite(Number(job.replication_lag_bytes)) && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="database" size={16} />
@@ -599,6 +651,69 @@ export function JobTheaterView({
                     : `${Number(job.replication_lag_bytes)} B`}
               </strong>
               <span>WAL / binlog lag</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_heartbeat_at && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="activity" size={16} />
+            <div>
+              <strong>{String(job.cdc_heartbeat_at).replace("T", " ").slice(0, 19)}</strong>
+              <span>CDC heartbeat</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_last_ddl_at && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>{String(job.cdc_last_ddl_at).replace("T", " ").slice(0, 19)}</strong>
+              <span>Last DDL seen</span>
+            </div>
+          </article>
+        )}
+        {job.watermark && (
+          <article className="df2-theater-v3-metric">
+            <DtIcon name="gate" size={16} />
+            <div>
+              <strong title={String(job.watermark)}>
+                {String(job.watermark).length > 28
+                  ? `${String(job.watermark).slice(0, 28)}…`
+                  : String(job.watermark)}
+              </strong>
+              <span>CDC watermark</span>
+            </div>
+          </article>
+        )}
+        {(job.cdc_lease_holder || job.cdc_lease_conflict) && (
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              job.cdc_lease_conflict
+                ? `Lease conflict — held by ${job.cdc_lease_holder || "another worker"}${
+                    job.cdc_lease_resource ? ` · ${job.cdc_lease_resource}` : ""
+                  }`
+                : job.cdc_lease_resource
+                  ? String(job.cdc_lease_resource)
+                  : "CDC resource lease"
+            }
+          >
+            <DtIcon name={job.cdc_lease_conflict ? "alert" : "gate"} size={16} />
+            <div>
+              <strong>
+                {job.cdc_lease_conflict
+                  ? "Lease conflict"
+                  : String(job.cdc_lease_holder || "").length > 24
+                    ? `${String(job.cdc_lease_holder).slice(0, 24)}…`
+                    : job.cdc_lease_holder}
+              </strong>
+              <span>
+                {job.cdc_lease_conflict
+                  ? `Held by ${job.cdc_lease_holder || "another worker"}`
+                  : job.cdc_lease_stale
+                    ? `CDC lease (stale)${job.cdc_lease_backend ? ` · ${job.cdc_lease_backend}` : ""}`
+                    : `CDC lease${job.cdc_lease_backend ? ` · ${job.cdc_lease_backend}` : ""}`}
+              </span>
             </div>
           </article>
         )}

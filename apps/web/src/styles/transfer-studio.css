@@ -260,6 +260,56 @@
   opacity: 0.85;
 }
 
+.df2-map-stream-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.5rem 1.25rem 0;
+  border-bottom: 1px solid var(--df2-border, #e2e8f0);
+}
+
+.df2-map-stream-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px 6px 0 0;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--df2-muted, #64748b);
+}
+
+.df2-map-stream-tab.is-active {
+  color: var(--df2-fg, #0f172a);
+  border-color: var(--df2-border, #e2e8f0);
+  border-bottom-color: var(--df2-bg, #fff);
+  background: var(--df2-bg, #fff);
+  font-weight: 600;
+}
+
+.df2-map-stream-diverge {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  margin: 0.75rem 1.25rem 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #f59e0b55;
+  background: #fef3c740;
+  font-size: 0.875rem;
+}
+
+.df2-map-stream-diverge strong {
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.df2-map-stream-diverge p {
+  margin: 0;
+  color: var(--df2-muted, #64748b);
+}
+
 .df2-source-aside-multistream {
   gap: 10px;
 }

@@ -187,6 +187,8 @@ ABBREVIATIONS: dict[str, str] = {
     "email": "email_address",
     "e_mail": "email_address",
     "email_address": "email_address",
+    "usr": "user",
+    "user": "user",
     "phone": "phone",
     "tel": "phone",
     "phone_number": "phone_number",
@@ -428,7 +430,14 @@ def _score_pair(
     if source_role and target_role:
         boost = role_match_boost(source_role, target_role)
         if boost is not None:
-            return boost, f"Semantic role match: {source_role} → {target_role}"
+            # Tie-break same-role collisions (email_addr vs usr_email) with lexical form.
+            from difflib import SequenceMatcher
+
+            lex = SequenceMatcher(None, src_norm, tgt_norm).ratio()
+            adjusted = min(0.995, float(boost) * 0.82 + lex * 0.18)
+            if lex >= 0.72:
+                adjusted = max(adjusted, min(0.97, float(boost)))
+            return adjusted, f"Semantic role match: {source_role} → {target_role} (lex={lex:.2f})"
 
     boosted = lexicon_boost(source, target)
     if boosted is not None:

@@ -209,13 +209,29 @@ def changes_for_table(
     table: str,
 ) -> list[DecodedChange]:
     """Decode messages; keep txn markers and DML for ``schema.table``."""
-    out = []
+    return changes_for_tables(
+        decoder,
+        payload,
+        schema=schema,
+        tables={table},
+    )
+
+
+def changes_for_tables(
+    decoder: PgOutputDecoder,
+    payload: bytes | memoryview | str,
+    *,
+    schema: str,
+    tables: set[str] | list[str] | tuple[str, ...],
+) -> list[DecodedChange]:
+    """Decode messages; keep txn markers and DML for any table in ``tables``."""
+    wanted = {str(t).lower() for t in tables if t}
+    schema_l = (schema or "").lower()
+    out: list[DecodedChange] = []
     for change in decoder.feed(payload):
         if change.op in {"begin", "commit"}:
             out.append(change)
             continue
-        if change.namespace == schema and change.relation == table:
-            out.append(change)
-        elif change.namespace.lower() == schema.lower() and change.relation.lower() == table.lower():
+        if (change.namespace or "").lower() == schema_l and (change.relation or "").lower() in wanted:
             out.append(change)
     return out

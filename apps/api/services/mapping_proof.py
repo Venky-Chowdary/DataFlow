@@ -205,20 +205,41 @@ def _mapping_risks(
     # Per-SKU fidelity: unsigned MySQL integers into warehouse/PG/lakehouse.
     if "unsigned" in src_raw and src_logical in {"integer", "decimal"}:
         native = ddl_type(dest, src_type) if dest else tgt_type
+        native_l = (native or "").lower()
+        tgt_l = (tgt_type or "").lower()
+        widened = (
+            src_logical == "decimal"
+            or "decimal" in native_l
+            or "numeric" in native_l
+            or "number" in native_l
+            or "bignumeric" in native_l
+            or "decimal" in tgt_l
+            or "numeric" in tgt_l
+        )
         if _is_bigint_unsigned(src_raw):
-            risks.append({
-                "code": "unsigned_bigint_range",
-                "severity": "warn",
-                "message": (
-                    f"MySQL BIGINT UNSIGNED can exceed signed 64-bit max. Destination "
-                    f"{native} on {destination_db_type or 'dest'} may overflow — "
-                    "prefer DECIMAL/NUMBER or quarantine out-of-range values."
-                ),
-            })
+            if widened:
+                risks.append({
+                    "code": "unsigned_bigint_widened",
+                    "severity": "info",
+                    "message": (
+                        f"BIGINT UNSIGNED auto-widened to {native} on "
+                        f"{destination_db_type or 'dest'} so values above signed 2^63-1 are preserved."
+                    ),
+                })
+            else:
+                risks.append({
+                    "code": "unsigned_bigint_range",
+                    "severity": "warn",
+                    "message": (
+                        f"MySQL BIGINT UNSIGNED can exceed signed 64-bit max. Destination "
+                        f"{native} on {destination_db_type or 'dest'} may overflow — "
+                        "prefer DECIMAL/NUMBER or quarantine out-of-range values."
+                    ),
+                })
         else:
             risks.append({
                 "code": "unsigned_range",
-                "severity": "warn",
+                "severity": "warn" if not widened else "info",
                 "message": (
                     f"Source appears UNSIGNED ({src_type}). Destination {native} must cover "
                     "the full unsigned range or values can overflow / quarantine."

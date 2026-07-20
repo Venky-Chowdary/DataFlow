@@ -312,6 +312,9 @@ export function TransferPage({
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
+  /** Per-stream column mappings when source lists multiple tables. */
+  const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
+  const [mapActiveStream, setMapActiveStream] = useState<string | null>(null);
   const [destColumns, setDestColumns] = useState<string[]>([]);
   const [destSchemaMap, setDestSchemaMap] = useState<Record<string, string>>({});
   const [destSchemaLoading, setDestSchemaLoading] = useState(false);
@@ -546,6 +549,13 @@ export function TransferPage({
   const primarySourceStream = primaryStreamName(sourceStreamInputRaw);
   const isMultiStreamSource = multiStreamNames.length > 1;
   const advancedStreamNames = isMultiStreamSource ? multiStreamNames : [sourceStreamName];
+  const mapStreamsDiverge = useMemo(() => {
+    const ok = streamPreviews.filter((s) => s.status === "ok" && (s.columns?.length ?? 0) > 0);
+    if (ok.length < 2) return false;
+    const sig = (cols: string[]) => [...cols].map((c) => c.toLowerCase()).sort().join("|");
+    const first = sig(ok[0].columns || []);
+    return ok.some((s) => sig(s.columns || []) !== first);
+  }, [streamPreviews]);
   const streamContracts = buildStreamContracts({
     streamNames: advancedStreamNames,
     syncMode,
@@ -557,6 +567,12 @@ export function TransferPage({
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
     streamFields,
+    streamMappings: isMultiStreamSource
+      ? {
+          ...streamMappings,
+          [mapActiveStream || primarySourceStream]: columnMappings,
+        }
+      : undefined,
   });
   const streamNeedsReview = streamContractsNeedReview({
     streamNames: advancedStreamNames,
@@ -2904,7 +2920,26 @@ export function TransferPage({
           mappingProof={mappingProof}
           proofOpen={mappingProofOpen}
           onProofOpenChange={setMappingProofOpen}
-          onChangeMappings={setColumnMappings}
+          streamNames={isMultiStreamSource ? multiStreamNames : []}
+          activeStream={mapActiveStream || primarySourceStream}
+          streamsDiverge={mapStreamsDiverge}
+          onActiveStreamChange={(name) => {
+            // Persist current tab mappings, then swap to the selected stream.
+            const current = mapActiveStream || primarySourceStream;
+            setStreamMappings((prev) => ({ ...prev, [current]: columnMappings }));
+            const next = streamMappings[name];
+            if (next && next.length) {
+              setColumnMappings(next);
+            }
+            setMapActiveStream(name);
+          }}
+          onChangeMappings={(next) => {
+            setColumnMappings(next);
+            const current = mapActiveStream || primarySourceStream;
+            if (isMultiStreamSource && current) {
+              setStreamMappings((prev) => ({ ...prev, [current]: next }));
+            }
+          }}
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToPreflight()}
         />
@@ -3161,8 +3196,8 @@ export function TransferPage({
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each comma-separated name is a real table/collection. We never look up “sessions, users” as one object — the preview card opens one tab per stream. Mapping uses the first successful stream; configure cursor / primary key in Destination → Advanced settings for CDC."
-                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark."}
+                    ? "Each comma-separated name is a real table/collection. Preview opens one tab per stream. Mapping currently applies the primary stream schema to the shared map — open each stream tab to confirm columns match, or run one stream at a time for distinct schemas. Configure cursor / primary key per stream in Destination → Advanced for CDC."
+                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark. Distinct schemas across streams require separate transfers until per-stream mapping ships."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -3760,6 +3795,11 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
+              onResumed={(nextId) => {
+                setActiveJobId(nextId);
+                setTransferring(true);
+                setResult(null);
+              }}
             />
           </div>
         </div>

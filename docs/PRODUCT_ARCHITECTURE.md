@@ -30,7 +30,7 @@
 |--------|---------|--------|
 | **Dashboard** | Active transfers, success rate, records processed, AI accuracy | Built |
 | **New Transfer** | Source → AI Analysis → Mapping → Destination → Execute | In progress |
-| **Connectors** | 600+ catalog + saved connections + test/save | Built (MongoDB live) |
+| **Connectors** | Catalog (certified + roadmap) + saved connections + test/save | Built (certified drivers live; roadmap Planned) |
 | **Connections** | Credential vault, health scores, last used | Partial |
 | **Pipelines** | Scheduled/recurring syncs | Planned |
 | **Monitoring** | Live throughput, errors, SLA | Planned |

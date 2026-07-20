@@ -29,7 +29,8 @@ CFG = {
     "host": "localhost",
     "port": 27017,
     "database": "dataflow_cdc",
-    "connection_string": "mongodb://localhost:27017/dataflow_cdc",
+    # directConnection avoids RS hostname redirect issues for single-node sets.
+    "connection_string": "mongodb://localhost:27017/dataflow_cdc?directConnection=true",
     "ssl": False,
 }
 

@@ -98,11 +98,11 @@ class TransactionBuffer:
         self._open = None
 
     def flush_open(self, *, resume_token: Any = None) -> ChangeBatch | None:
-        """Force-flush an open txn (used when stream ends mid-txn / peek window).
+        """Deprecated for peek windows — prefer holding until COMMIT.
 
-        Debezium holds until COMMIT; for SQL peek windows that truncate mid-txn
-        we emit what we have so progress is not stuck, tagged with the last LSN.
-        Prefer COMMIT boundaries when the stream provides them.
+        Kept for callers that intentionally force-flush (tests / non-peek
+        streams). PostgreSQL logical CDC uses peek + no flush so WAL is
+        redelivered until a real COMMIT (Debezium-class).
         """
         if self._open is None:
             return None

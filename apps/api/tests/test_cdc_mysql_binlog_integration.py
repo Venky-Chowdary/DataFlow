@@ -50,6 +50,10 @@ def _connect():
 
 def _mysql_binlog_ready() -> bool:
     try:
+        import pymysqlreplication  # noqa: F401
+    except ImportError:
+        return False
+    try:
         with socket.create_connection(("localhost", 3306), timeout=1):
             pass
     except OSError:
@@ -89,8 +93,15 @@ def test_mysql_binlog_snapshot_then_poll_captures_real_cdc():
     _exec(f"CREATE TABLE {table} (id INT PRIMARY KEY, amount DECIMAL(10,2))")
     _exec(f"INSERT INTO {table} (id, amount) VALUES (1, 10.00), (2, 20.00)")
 
+    holder = f"it-mysql-{table}"
+    cfg = {**CFG, "lease_holder_id": holder, "job_id": holder}
+    cursor_key = f"it:mysql:{table}"
+    cdc = None
+    cdc_resume = None
     try:
-        cdc = MySqlChangeStreamCdc(CFG, table=table, primary_key="id", max_wait_seconds=8.0)
+        cdc = MySqlChangeStreamCdc(
+            cfg, table=table, primary_key="id", max_wait_seconds=8.0, cursor_key=cursor_key
+        )
 
         # Real binlog capability probe (opens a BinLogStreamReader under the hood).
         assert cdc.is_available() is True
@@ -107,9 +118,15 @@ def test_mysql_binlog_snapshot_then_poll_captures_real_cdc():
         _exec(f"UPDATE {table} SET amount = 99.00 WHERE id = 1")
         _exec(f"DELETE FROM {table} WHERE id = 2")
 
-        # Poll the binlog from the captured resume token — this is the real reader.
+        # Same lease holder may reopen for poll (crash-resume style).
+        cdc.close()
         cdc_resume = MySqlChangeStreamCdc(
-            CFG, table=table, primary_key="id", resume_token=resume, max_wait_seconds=8.0
+            cfg,
+            table=table,
+            primary_key="id",
+            resume_token=resume,
+            max_wait_seconds=8.0,
+            cursor_key=cursor_key,
         )
         changes = list(cdc_resume.poll())
 
@@ -123,4 +140,10 @@ def test_mysql_binlog_snapshot_then_poll_captures_real_cdc():
         ), f"update not captured: {updates}"
         assert "2" in deletes, f"delete not captured: {deletes}"
     finally:
+        for obj in (cdc_resume, cdc):
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
         _exec(f"DROP TABLE IF EXISTS {table}")

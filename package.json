@@ -17,6 +17,7 @@
     "test": "npm run test:api && npm run test:preflight",
     "test:preflight": "cd packages/preflight && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests -v'",
     "test:api": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests -v'",
+    "test:cdc": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python scripts/cdc_matrix_report.py'",
     "test:e2e": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests/test_e2e_pipeline.py tests/test_schema_inference.py tests/test_sample_files.py tests/test_catalog_api.py tests/test_connectors_flow.py -v'",
     "audit": "npm audit",
     "docker:secrets": "bash scripts/generate-production-secrets.sh",

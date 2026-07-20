@@ -2,7 +2,7 @@
 
 **Report:** `dataflow_research_report.md` (July 2026)  
 **Branch:** `devin/backend-hardening-p5`  
-**Last updated:** 2026-07-11  
+**Last updated:** 2026-07-20  
 
 This document tracks every item from the market/algorithm research report against the current codebase so progress is transparent and the remaining work is explicit.
 
@@ -17,7 +17,7 @@ Backend batch reliability is now solid:
 - Universal route matrix: **529 passed / 121 skipped**
 - Full backend test suite green on PR #16
 
-The product is **beta / early production** for batch transfers on supported drivers. It is **not yet a 10/10 Airbyte/Fivetran-scale platform** because the remaining gaps are architectural and require multi-week implementation (CDC at parity, vector destinations, GitOps, Iceberg, broad cloud validation).
+The product is **beta / early production** for batch transfers on supported drivers. CDC is a **strong partial** (PG/MySQL/Mongo live-proven; shared multi-table reader + Redis/file leases with fencing; SQL Server/Oracle thinner). It is **not** “100% CDC” and **not** platform-wide better than Airbyte/Debezium — integrity (mapping/preflight/quarantine/reconcile) can win *trust*; Airbyte/Debezium still win *CDC fleet coverage, edge-case years, and Connect-scale ops*.
 
 ---
 
@@ -25,26 +25,44 @@ The product is **beta / early production** for batch transfers on supported driv
 
 **Target:** Debezium-style log-based capture from Postgres, MySQL, MongoDB, SQL Server, Oracle.
 
-### Status: partial / in progress
+### Status: strong partial (at-least-once) — load-hardened July 2026
 
 | What is implemented | Where |
 |---------------------|-------|
 | Query-cursor CDC fallback | `src/transfer/cdc_transfer.py` |
-| MongoDB Change Streams CDC | `connectors/mongodb_change_stream.py` |
-| PostgreSQL logical decoding (`test_decoding`) CDC | `connectors/postgresql_change_stream.py` |
-| MySQL binlog CDC (`python-mysql-replication`) | `connectors/mysql_change_stream.py` |
+| MongoDB Change Streams (+ signal collection, peek stream-wins) | `connectors/mongodb_change_stream.py` |
+| PostgreSQL `pgoutput` binary peek/ack + publication-before-slot + txn hold | `connectors/postgresql_change_stream.py` |
+| MySQL binlog + GTID auto_position + XidEvent commit boundary | `connectors/mysql_change_stream.py` |
+| SQL Server native CDC + Oracle LogMiner (+ incremental peek) | `connectors/sqlserver_cdc_native.py`, `connectors/oracle_logminer.py` |
+| Incremental snapshot signals (API + DB signal table) | `services/cdc_incremental_snapshot.py`, `services/cdc_signal_table.py` |
+| Side-channel token isolation (no watermark clobber under load) | `services/cdc_resume_tokens.py` |
+| Distributed CDC leases (Redis Lua + fencing; file/memory fallbacks) | `services/cdc_lease.py`, `services/cdc_lease_store.py` |
+| Multi-table single reader (one PG slot / one MySQL `server_id`, demux + ack barrier) | `services/cdc_multi_table.py`, `src/transfer/cdc_transfer.py` `_run_cdc_shared_multi_table`, live IT `tests/test_cdc_shared_reader_integration.py` |
+| Mixed `_df_lsn` upsert guard + effectively-once PK sink contract | `connectors/writer_common.py`, `services/cdc_effectively_once.py` |
 | `ChangeBatch` with `resume_token` | `services/cdc_engine.py` |
 | Watermark persistence | `services/sync_cursor.py`, `services/atomic_file.py` |
 
+### Delivery honesty
+
+- Default apply is **at-least-once upsert** (not exactly-once).
+- Live IT green locally for PG (`wal_level=logical`), MySQL ROW+GTID, Mongo single-node `rs0`.
+- Multi-worker **leases** via `CdcLeaseGuard` + pluggable store:
+  - **Redis** (`DATAFLOW_CDC_LEASE_BACKEND=redis` / `auto` + URL) — multi-node, Lua-atomic acquire, fencing `generation`, fail-closed if Redis down.
+  - **File** — single-host `fcntl` flock (default when no Redis URL).
+  - **Memory** — tests only.
+- **Multi-table shared reader** for PG + MySQL when ≥2 stream contracts are selected (one publication/slot or one binlog `server_id`; demux + `ack_barrier`). Falls back to sequential N readers if the shared path cannot start.
+- Shared-reader **ack-barrier chaos** (`tests/test_cdc_shared_ack_chaos.py`) + **live concurrent-write IT** (`tests/test_cdc_shared_reader_integration.py`).
+- **Effectively once for PK sinks** when destinations stamp/guard `_df_lsn` (`services/cdc_effectively_once.py`, `tests/test_cdc_effectively_once.py` incl. live PG upsert). Still **not** platform exactly-once.
+- Job Theater surfaces lease holder + backend + conflict (`cdc_lease_*` job fields).
+- CI: Postgres logical CDC in main job; Redis lease backend on CDC matrix; **SQL Server CDC** in `cdc-sqlserver`; **Oracle** optional `cdc-oracle` when `ENABLE_ORACLE_CDC` + secrets are set.
+- **Do not claim** “100% CDC”, “Debezium parity”, or “better than Airbyte CDC platform-wide” without a named live matrix.
+
 ### What is still missing
 
-- **Debezium Engine / `pgoutput` integration** for PostgreSQL. The current implementation uses `test_decoding`, which is simpler but does not give the structured change events that `pgoutput` provides and does not handle `TOAST` columns cleanly.
-- **Consistent snapshot + streaming LSN handoff:** the current path snapshots then polls, but does not prove that no gap exists between the snapshot end and the stream start. Production Debezium uses a transaction snapshot and starts streaming from the exact LSN captured at snapshot time.
-- **Incremental snapshots (DBLog algorithm)** for large tables so backfills do not lock the source.
-- **Replication-slot lag monitoring** for Postgres to prevent unconsumed WAL from filling disk.
-- **Schema-change events** carried through the same stream so the mapper can re-run semantic mapping on drift instead of failing.
-- **Exactly-once materializations** via idempotent upsert on `_lsn` or merge on PK.
-- **CDC for SQL Server CT/CDC tables and Oracle LogMiner**.
+- **Exactly-once pipeline delivery** — only PK-sink effectively-once via `_df_lsn`; append-only / no-guard sinks remain at-least-once.
+- **Oracle always-on CI** (image/license); optional gated job exists, default forks skip.
+- **TOAST / large-object edge cases** on Postgres and very large open transactions (buffer cap raises; no silent drop).
+- **SQL Server native CDC depth** beyond Change Tracking CI.
 
 ### Why it matters
 
@@ -52,11 +70,26 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 ### Recommended next step
 
-Embed Debezium Engine (or Debezium Server without Kafka) behind the existing connector adapter contract. Maintain the current query-cursor CDC as a fallback tier selected by endpoint capability probing.
+1. SQL Server native CDC depth + licensed Oracle always-on matrix.
+2. PG TOAST / large open-transaction buffer proofs.
+3. Lease store metrics / operator runbook for Redis HA.
 
 ---
 
-## G2: Vectorization / RAG destinations
+## CDC competitive honesty (July 2026)
+
+| Claim | Status |
+|-------|--------|
+| Better than Airbyte/Debezium **platform-wide** | **No** |
+| “100% CDC” / exactly-once | **No** — default is at-least-once upsert |
+| Better on **integrity wedge** (mapping · preflight · quarantine · reconcile · contracts on CDC path) | **Yes — defensible lead** |
+| PG/MySQL shared multi-table reader | **Shipped** — unit chaos + live concurrent-write IT |
+| Effectively once (PK + `_df_lsn`) | **Proven** for guarded upserts — not EO delivery |
+| Multi-node CDC leases | **Shipped** — Redis Lua + fencing; file single-host |
+| SQL Server / Oracle fleet depth | **Behind** Debezium/Airbyte (Oracle CI optional) |
+| Connect-scale ops / years of edge cases | **Behind** |
+
+**Verdict:** DataFlow can win evaluations that prioritize *provable trust*. It cannot yet win evaluations that prioritize *CDC platform coverage*. Say so in sales decks.
 
 **Target:** Move data into vector DBs so it is AI-ready.
 
@@ -246,17 +279,17 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 |-----------|----------------|------------------|-----|
 | Batch reliability | 8/10 | 9/10 | small |
 | Connector depth | 4/10 | 9/10 | large |
-| CDC / real-time | 4/10 | 8/10 | large |
+| CDC / real-time | **5.5/10** | 8/10 | large (shared multi-table reader landed; EO/fleet/SQL Server CI still open) |
 | Vector / AI-ready | 2/10 | 6/10 | large |
 | Data contracts / governance | 6/10 | 5/10 | small lead |
 | GitOps / as-code | 1/10 | 5/10 | large |
-| Lakehouse / Iceberg | 0/10 | 5/10 | large |
+| Lakehouse / Iceberg | 2/10 | 5/10 | medium (CoW upsert + LSN path landed) |
 | Semantic mapping | 7/10 | 3/10 | lead |
 | UX (Transfer Studio) | 7/10 | 6/10 | small lead |
 | Enterprise SSO/audit/RBAC | 5/10 | 8/10 | medium |
-| Overall | 6.5–7/10 | 8.5/10 | 1.5–2 years of focused work |
+| Overall | 6.5–7/10 | 8.5/10 | still ~1.5–2 years of focused work |
 
-The defensible moat is **provable, AI-assisted data movement**: semantic mapping + preflight gates + reconciliation + contracts. The gaps that prevent enterprise parity are **CDC depth, vector destinations, and operational maturity** (orchestration, GitOps, lakehouse).
+The defensible moat is **provable, AI-assisted data movement**: semantic mapping + preflight gates + quarantine + reconciliation + contracts **on the same path as CDC**. That integrity wedge can beat Airbyte on *trust*; it does **not** yet beat Airbyte on *CDC platform coverage* (multi-table reader, Connect-scale ops, Oracle/SQL Server fleet, years of edge cases).
 
 ---
 

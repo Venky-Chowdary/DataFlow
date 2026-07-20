@@ -84,6 +84,7 @@ class OracleLogMinerCdc:
         schema: str = "",
         batch_size: int = 500,
         resume_token: str | None = None,
+        cursor_key: str = "",
     ) -> None:
         self.cfg = cfg
         self.table = table.upper()
@@ -94,6 +95,41 @@ class OracleLogMinerCdc:
         self.scn = int(state.get("scn") or 0)
         self.phase = str(state.get("phase") or "initial")
         self._last_event_at: datetime | None = None
+        from services.cdc_schema_history import connection_fingerprint
+
+        self.source_key = connection_fingerprint(
+            {**cfg, "type": "oracle"},
+            connector_id=str(cfg.get("connector_id") or ""),
+        )
+        self.cursor_key = cursor_key or f"oracle-logminer:{self.schema}.{self.table}"
+        from services.cdc_lease import CdcLeaseGuard, oracle_cdc_resource
+
+        self._lease = CdcLeaseGuard(
+            cursor_key=self.cursor_key,
+            resource=oracle_cdc_resource(
+                self.schema,
+                self.table,
+                mode="logminer",
+                host=str(cfg.get("host") or ""),
+            ),
+            holder_id=str(cfg.get("lease_holder_id") or ""),
+            job_id=str(cfg.get("job_id") or ""),
+            meta={"engine": "oracle_logminer", "table": self.table},
+        )
+
+    def _acquire_cdc_lease(self) -> None:
+        self._lease.ensure()
+
+    def close(self) -> None:
+        self._lease.release()
+
+    def cdc_metadata(self) -> dict[str, Any]:
+        return {
+            "plugin": "oracle_logminer",
+            "phase": self.phase,
+            "delivery": "at-least-once",
+            **self._lease.theater_fields(),
+        }
 
     def _conn(self):
         from connectors.generic_sql import get_connection
@@ -130,6 +166,7 @@ class OracleLogMinerCdc:
             return False
 
     def snapshot(self) -> Iterator[ChangeBatch]:
+        self._acquire_cdc_lease()
         offset = 0
         handoff = 0
         pk = self.primary_key
@@ -178,10 +215,131 @@ class OracleLogMinerCdc:
             resume_token=encode_logminer_token(self.scn, table=self.table, phase="streaming")
         )
 
+    def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """PK-ordered chunk for signal-driven incremental snapshots."""
+        pk = (sig.primary_key or self.primary_key or "ID").upper()
+        limit = int(sig.chunk_size or self.batch_size)
+        last_pk = sig.last_pk or ""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if last_pk:
+                    cur.execute(
+                        f"""
+                        SELECT * FROM (
+                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                          FROM {self._qualified()} t
+                          WHERE t."{pk}" > :last_pk
+                        ) WHERE df_rn <= :lim
+                        """,
+                        {"last_pk": last_pk, "lim": limit},
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        SELECT * FROM (
+                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                          FROM {self._qualified()} t
+                        ) WHERE df_rn <= :lim
+                        """,
+                        {"lim": limit},
+                    )
+                cols = [d[0] for d in (cur.description or [])]
+                rows = cur.fetchall() or []
+        clean_cols = [c for c in cols if str(c).upper() != "DF_RN"]
+        rn_idx = next((i for i, c in enumerate(cols) if str(c).upper() == "DF_RN"), None)
+        records = []
+        for row in rows:
+            values = [row[i] for i in range(len(cols)) if i != rn_idx]
+            records.append(
+                {
+                    str(clean_cols[i]).upper(): "" if values[i] is None else str(values[i])
+                    for i in range(len(clean_cols))
+                }
+            )
+        new_last = records[-1].get(pk) if records else last_pk
+        done = len(records) < limit
+        return records, str(new_last) if new_last is not None else last_pk, done
+
+    def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
+        """Non-acking LogMiner peek for DDD-3 stream-wins (does not advance SCN)."""
+        events: list[dict[str, Any]] = []
+        if self.scn <= 0:
+            return events
+        peek_limit = min(int(sig.chunk_size or self.batch_size), 200)
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT current_scn FROM v$database")
+                    head = cur.fetchone()
+                    end_scn = int(head[0] or self.scn) if head else self.scn
+                    if end_scn <= self.scn:
+                        return events
+                    cur.execute(
+                        """
+                        BEGIN
+                          DBMS_LOGMNR.START_LOGMNR(
+                            STARTSCN => :start_scn,
+                            ENDSCN => :end_scn,
+                            OPTIONS => DBMS_LOGMNR.DICT_FROM_ONLINE_CATALOG
+                                      + DBMS_LOGMNR.CONTINUOUS_MINE
+                          );
+                        END;
+                        """,
+                        {"start_scn": self.scn + 1, "end_scn": end_scn},
+                    )
+                    cur.execute(
+                        """
+                        SELECT SCN, OPERATION, SQL_REDO
+                        FROM v$logmnr_contents
+                        WHERE SEG_OWNER = :owner
+                          AND TABLE_NAME = :tbl
+                          AND OPERATION IN ('INSERT','UPDATE','DELETE')
+                          AND SCN > :start_scn
+                          AND ROWNUM <= :lim
+                        ORDER BY SCN
+                        """,
+                        {
+                            "owner": self.schema,
+                            "tbl": self.table,
+                            "start_scn": self.scn,
+                            "lim": peek_limit,
+                        },
+                    )
+                    for _scn, operation, sql_redo in cur.fetchall() or []:
+                        op = _OP_MAP.get(str(operation or "").upper())
+                        if not op:
+                            continue
+                        row = _parse_sql_redo(sql_redo or "", op=op)
+                        key = row.get(self.primary_key, "")
+                        if op == "delete" and key:
+                            events.append({"op": "d", "pk": key, "row": {self.primary_key: key}})
+                        elif op == "insert":
+                            events.append({"op": "c", "row": row})
+                        else:
+                            events.append({"op": "u", "row": row})
+                    try:
+                        cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
+                    except Exception:
+                        pass
+        except Exception:
+            return events
+        return events
+
     def poll(self) -> Iterator[ChangeBatch]:
+        self._acquire_cdc_lease()
         if self.phase != "streaming" or self.scn <= 0:
             yield from self.snapshot()
             return
+
+        from services.cdc_incremental_runner import interleave_incremental_snapshot
+
+        yield from interleave_incremental_snapshot(
+            self.source_key,
+            table=self.table,
+            fetch_chunk=self._fetch_incremental_chunk,
+            stream_events_during_chunk=self._peek_stream_events_during_chunk,
+            max_chunks_per_poll=1,
+        )
 
         inserts: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []

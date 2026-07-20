@@ -112,6 +112,71 @@ def _evolve_schema(
     return {"type": "struct", "schema-id": schema_id, "fields": fields}, notes
 
 
+def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Load all rows referenced by current metadata data-files (JSONL/Parquet)."""
+    if not current_meta:
+        return []
+    rows: list[dict[str, Any]] = []
+    for ref in current_meta.get("data-files") or []:
+        rel = str(ref.get("path") or "")
+        if not rel:
+            continue
+        path = table_dir / rel
+        if not path.exists():
+            continue
+        if rel.endswith(".parquet"):
+            try:
+                import pyarrow.parquet as pq
+
+                table = pq.read_table(path)
+                for batch in table.to_pylist():
+                    rows.append({c: batch.get(c) for c in columns})
+            except Exception:
+                continue
+        else:
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    rows.append({c: obj.get(c) for c in columns})
+    return rows
+
+
+def _merge_upsert_rows(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+    *,
+    pk_cols: list[str],
+    lsn_col: str = "_df_lsn",
+) -> list[dict[str, Any]]:
+    """PK upsert with LSN guard: keep row with higher/equal LSN; no LSN → last wins."""
+    from connectors.writer_common import compare_lsn
+
+    def _key(row: dict[str, Any]) -> tuple:
+        return tuple(str(row.get(c, "")) for c in pk_cols)
+
+    best: dict[tuple, dict[str, Any]] = {}
+    for row in existing:
+        best[_key(row)] = dict(row)
+    for row in incoming:
+        key = _key(row)
+        prev = best.get(key)
+        if prev is None:
+            best[key] = dict(row)
+            continue
+        if lsn_col in row or lsn_col in prev:
+            if compare_lsn(row.get(lsn_col), prev.get(lsn_col)) >= 0:
+                best[key] = dict(row)
+        else:
+            best[key] = dict(row)
+    return list(best.values())
+
+
 def _row_as_dict(columns: list[str], row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return {c: row.get(c) for c in columns}
@@ -221,12 +286,12 @@ def write_mapped_rows(
     meta_dir = table_dir / "metadata"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
-    target_cols, logical = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {
         target_cols[i]: (
             mappings[i].get("target_type")
             or column_types.get(mappings[i]["source"])
-            or logical.get(target_cols[i], "string")
+            or (target_types[i] if i < len(target_types) else "string")
         )
         for i in range(len(target_cols))
     }
@@ -261,7 +326,27 @@ def write_mapped_rows(
         # Drop prior data refs; keep schema evolution
         current_meta = None
 
-    rel_path, n_written, checksum = _write_data_file(table_dir / "data", target_cols, mapped_rows)
+    mode = (write_mode or "append").lower()
+    upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+    if mode in upsert_modes:
+        pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
+        if not pk_cols:
+            pk_cols = [target_cols[0]] if target_cols else []
+        existing_rows = _load_existing_rows(table_dir, target_cols, current_meta)
+        incoming = [_row_as_dict(target_cols, r) for r in mapped_rows]
+        merged = _merge_upsert_rows(existing_rows, incoming, pk_cols=pk_cols)
+        rel_path, n_written, checksum = _write_data_file(table_dir / "data", target_cols, merged)
+        operation = "overwrite"  # Iceberg CoW upsert lands as overwrite snapshot
+        data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
+    else:
+        rel_path, n_written, checksum = _write_data_file(table_dir / "data", target_cols, mapped_rows)
+        operation = "overwrite" if mode in {"overwrite", "replace"} else "append"
+        data_files = list((current_meta or {}).get("data-files") or []) + [
+            {"path": rel_path, "record-count": n_written, "checksum": checksum}
+        ]
+        if mode in {"overwrite", "replace"}:
+            data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
+
     snapshot_id = int(time.time() * 1000)
     now_ms = snapshot_id
 
@@ -274,10 +359,11 @@ def write_mapped_rows(
         "snapshot-id": snapshot_id,
         "timestamp-ms": now_ms,
         "summary": {
-            "operation": "overwrite" if write_mode in {"overwrite", "replace"} else "append",
+            "operation": operation,
             "added-records": str(n_written),
             "added-data-files": "1",
             "dataflow.checksum": checksum,
+            "dataflow.write_mode": mode,
         },
         "manifest-list": rel_path,
         "schema-id": schema_json.get("schema-id", 0),
@@ -301,13 +387,10 @@ def write_mapped_rows(
             "write.format.default": "parquet" if rel_path.endswith(".parquet") else "jsonl",
             "dataflow.engine": "iceberg_writer",
             "dataflow.evolve": ",".join(evolve_notes) if evolve_notes else "",
+            "dataflow.write_mode": mode,
         },
-        "data-files": list((current_meta or {}).get("data-files") or []) + (
-            [] if write_mode in {"overwrite", "replace"} else []
-        ) + [{"path": rel_path, "record-count": n_written, "checksum": checksum}],
+        "data-files": data_files,
     }
-    if write_mode in {"overwrite", "replace"}:
-        metadata["data-files"] = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
 
     # Atomic commit: write temp then rename; update version-hint
     meta_path = meta_dir / f"v{new_version}.metadata.json"

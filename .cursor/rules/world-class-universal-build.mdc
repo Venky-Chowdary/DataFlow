@@ -1,0 +1,27 @@
+---
+description: World-class continuous product build — research, prove, never claim without evidence
+alwaysApply: true
+---
+
+# Universal Data Movement — Standing Build Mandate
+
+The product goal is the **single truth of universal transform**: any schema ↔ any schema, any source ↔ any destination, with operator-visible proof on every transfer. No competitor owns this full stack today (Airbyte/Fivetran = breadth; Debezium/Estuary/Flink CDC = streaming; xAQUA/QEagle = migration assurance). DataFlow wins only by **depth + honesty + proof**.
+
+## Before every non-trivial change
+1. **Research first** — competitor algorithms (Debezium DDD-3, pgoutput, Iceberg CoW/MoR MERGE, Estuary exactly-once claims, Fivetran/Airbyte sync modes), data types, ETL/ELT validation, CDC snapshot+LSN, quarantine, checksum reconcile. Prefer primary sources (docs, design docs, papers) over marketing blogs.
+2. **Implement for real** — no mocks-as-product, no POC left as production path. If you start a capability, finish it past competitor baseline for that capability or explicitly mark Planned.
+3. **Prove, don’t claim** — attach tests and proof artifacts (PRODUCTION_SKU, mapping golden eval, reconcile reports, CDC integration). Never invent “99%/100%/650+ live” without measured evidence.
+4. **Honesty bar** — catalog tiles ≠ transfer-ready drivers. CDC default is **at-least-once upsert** until exactly-once is proven. Silent data loss is forbidden — quarantine + surface.
+5. **Operator proof** — Map / Validate / Theater must show fidelity risks, gates, quarantine, lag/plugin, and the next correct action.
+
+## Accuracy language
+- “100%” means **measured on a named fixture/matrix**, not marketing.
+- Expand golden sets and CI matrices to earn higher floors; never lower the bar by inventing scores.
+
+## When reviewing own work
+- Run real tests (unit + integration when services are up). Report pass/fail/skip honestly.
+- Fix gaps found in review before declaring done (e.g. UI wiring that the engine does not consume).
+- Keep improving; the end state is serving every customer segment with certified routes — roadmap tiles stay labeled Planned until proven.
+
+## Priority wedge (defend, then expand)
+Semantic mapping + proof → preflight fail-fast → quarantine/replay → checksum reconcile → contracts → Debezium-class CDC → connector depth → lakehouse MERGE → GitOps/enterprise packaging.

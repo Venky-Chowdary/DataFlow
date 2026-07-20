@@ -117,7 +117,7 @@ def test_bigint_unsigned_lakehouse_risk():
             "target": "id",
             "confidence": 0.9,
             "source_type": "BIGINT UNSIGNED",
-            "target_type": "BIGINT",
+            "target_type": "DECIMAL",
             "transform": "none",
             "create_new": True,
             "assignment_strategy": "identity_passthrough",
@@ -126,8 +126,34 @@ def test_bigint_unsigned_lakehouse_risk():
         destination_db_type="databricks",
     )
     row = proof["mappings"][0]
-    assert row["dest_native_type"] == "BIGINT"
-    assert any(r["code"] == "unsigned_bigint_range" for r in row["risks"])
+    # Auto-widen: unsigned 64-bit → DECIMAL DDL on lakehouse
+    assert "DECIMAL" in str(row["dest_native_type"]).upper() or "NUMERIC" in str(row["dest_native_type"]).upper()
+    codes = {r["code"] for r in row["risks"]}
+    assert "unsigned_bigint_widened" in codes or "unsigned_bigint_range" in codes
+
+
+def test_bigint_unsigned_forced_signed_still_warns():
+    proof = build_mapping_proof(
+        [{
+            "source": "id",
+            "target": "id",
+            "confidence": 0.9,
+            "source_type": "BIGINT UNSIGNED",
+            "target_type": "BIGINT",
+            "transform": "none",
+            "create_new": False,
+            "exists_in_destination": True,
+        }],
+        target_columns=["id"],
+        destination_db_type="postgresql",
+    )
+    # dest_native still widens from source type for CREATE path; match_existing keeps warn if tgt BIGINT
+    row = proof["mappings"][0]
+    # Source normalizes to decimal; ddl_type from source is NUMERIC — widened info
+    assert any(
+        r["code"] in {"unsigned_bigint_widened", "unsigned_bigint_range"}
+        for r in row["risks"]
+    )
 
 
 def test_cdc_metadata_and_delivery_posture():

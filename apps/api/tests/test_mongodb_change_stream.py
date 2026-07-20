@@ -44,10 +44,12 @@ def test_snapshot_reads_collection_batch(base_cfg: dict) -> None:
         mock_read.return_value = batch
         changes = list(reader.snapshot())
 
-    assert len(changes) == 1
+    # Data batch + streaming handoff token (Debezium-class snapshot→stream).
+    assert len(changes) == 2
     assert isinstance(changes[0], ChangeBatch)
     assert len(changes[0].inserts) == 2
     assert changes[0].inserts[0] == {"_id": "1", "amount": "100.00"}
+    assert changes[1].resume_token is not None
     mock_read.assert_called_once()
 
 

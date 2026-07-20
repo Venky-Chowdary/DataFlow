@@ -1,4 +1,4 @@
-"""Generate 600+ connector catalog entries for DataFlow platform."""
+"""Generate connector catalog entries for DataFlow (certified + roadmap tiles)."""
 
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ def generate() -> list[dict]:
     for name in LOGISTICS:
         add(_entry(name, "logistics", "planned", f"{name} logistics and shipment data connector"))
 
-    # Pad to 600+ with regional / industry variants
+    # Roadmap breadth: regional / industry variants (Planned, not certified)
     regions = ["US", "EU", "APAC", "UK", "CA", "AU", "JP", "DE", "FR", "IN"]
     industries = ["Retail", "Manufacturing", "Energy", "Telecom", "Insurance", "Banking", "Government"]
     base_saas = SAAS[:40]

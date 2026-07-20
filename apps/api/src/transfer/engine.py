@@ -410,11 +410,42 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
     )
 
 
+def _persist_job_quarantine(job_id: str, dest_summary: dict[str, Any], request: Any = None) -> None:
+    """Best-effort durable DLQ write for rejected rows; never hide transfer success."""
+    details = dest_summary.get("rejected_details") or []
+    if not details:
+        return
+    try:
+        from services.quarantine_dlq import persist_rejected_rows
+
+        persist_rejected_rows(
+            job_id=job_id,
+            rejected_details=details,
+            workspace_id=str(getattr(request, "workspace_id", "") or "") if request else "",
+            source="universal_engine",
+        )
+    except Exception as exc:
+        dest_summary["quarantine_dlq_error"] = str(exc)[:300]
+        dest_summary["quarantine_durable"] = False
+    else:
+        dest_summary["quarantine_durable"] = True
+
+
 _CDC_JOB_FIELDS = (
     "cdc_lag_seconds",
     "replication_lag_bytes",
     "cdc_heartbeat_at",
     "cdc_last_ddl_at",
+    "cdc_plugin",
+    "cdc_slot_name",
+    "cdc_delivery",
+    "cdc_lease_holder",
+    "cdc_lease_resource",
+    "cdc_lease_stale",
+    "cdc_lease_heartbeat_age_sec",
+    "cdc_lease_backend",
+    "cdc_lease_generation",
+    "watermark",
 )
 
 
@@ -436,6 +467,34 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
     summary_streams = (checkpoint.get("destination_summary") or {}).get("streams")
     if isinstance(summary_streams, list) and summary_streams and "streams" not in update:
         update["streams"] = summary_streams
+
+
+def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build error_details + top-level job fields for a failed transfer."""
+    classification = classify_error(exc)
+    details: dict[str, Any] = {
+        "retriable": classification.get("retriable"),
+        "evidence": classification.get("evidence"),
+    }
+    extras: dict[str, Any] = {}
+    try:
+        from services.cdc_lease import CdcLeaseConflict, LeaseStoreError
+
+        if isinstance(exc, CdcLeaseConflict):
+            details.update(exc.to_dict())
+            details["retriable"] = False
+            extras = {
+                "cdc_lease_conflict": True,
+                "cdc_lease_holder": exc.holder_id or None,
+                "cdc_lease_resource": exc.resource or None,
+            }
+        elif isinstance(exc, LeaseStoreError):
+            details["code"] = "cdc_lease_store_unavailable"
+            details["retriable"] = True  # Redis blip — safe to retry once store is back
+            extras = {"cdc_lease_backend": "unavailable"}
+    except Exception:
+        pass
+    return details, extras
 
 
 def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -1262,6 +1321,7 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 load_history_report=dest_summary.get("load_history_report") or {},
             )
+            _persist_job_quarantine(job_id, dest_summary, request)
             try:
                 from services.usage_metering import record_transfer_usage
 
@@ -1331,24 +1391,25 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
+            error_details, lease_extras = _job_failure_fields(e)
             mongo.update_job_status(
                 job_id, status,
                 error=str(e), phase=status, progress_pct=0, message=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                error_details=error_details,
+                **lease_extras,
             )
             lineage.emit_run_failed(
                 run_id=job_id, job_id=job_id, error=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
-                retriable=error_classification.get("retriable", False),
+                error_details=error_details,
+                retriable=bool(error_details.get("retriable", False)),
             )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                error_details=error_details,
                 operation=request.operation,
                 contract_id=contract_id,
             )
@@ -1670,6 +1731,7 @@ class UniversalTransferEngine:
                 load_history_report=load_history_report or {},
                 **_cdc_fields_from_summary(dest_summary),
             )
+            _persist_job_quarantine(job_id, dest_summary, request)
 
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
@@ -1712,24 +1774,25 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
+            error_details, lease_extras = _job_failure_fields(e)
             mongo.update_job_status(
                 job_id, status,
                 error=str(e), phase=status, progress_pct=0, message=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                error_details=error_details,
+                **lease_extras,
             )
             lineage.emit_run_failed(
                 run_id=job_id, job_id=job_id, error=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
-                retriable=error_classification.get("retriable", False),
+                error_details=error_details,
+                retriable=bool(error_details.get("retriable", False)),
             )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                error_details=error_details,
                 operation=request.operation,
                 contract_id=contract_id,
             )
@@ -2020,6 +2083,7 @@ class UniversalTransferEngine:
                 reconciliation=recon,
                 load_history_report=load_history_report or {},
             )
+            _persist_job_quarantine(job_id, dest_summary, request)
 
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
@@ -2062,24 +2126,25 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            error_classification = classify_error(e)
             cancelled = isinstance(e, TransferCancelled)
             status = "cancelled" if cancelled else "failed"
+            error_details, lease_extras = _job_failure_fields(e)
             mongo.update_job_status(
                 job_id, status,
                 error=str(e), phase=status, progress_pct=0, message=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                error_details=error_details,
+                **lease_extras,
             )
             lineage.emit_run_failed(
                 run_id=job_id, job_id=job_id, error=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
-                retriable=error_classification.get("retriable", False),
+                error_details=error_details,
+                retriable=bool(error_details.get("retriable", False)),
             )
             return TransferResult(
                 success=False,
                 job_id=job_id,
                 error=str(e),
-                error_details={"retriable": error_classification.get("retriable"), "evidence": error_classification.get("evidence")},
+                error_details=error_details,
                 operation=request.operation,
                 contract_id=contract_id,
             )
