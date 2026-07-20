@@ -103,6 +103,8 @@ function AppShell({
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
   /** Bump to remount Transfer Studio and clear prior job/source/map cache. */
   const [transferStudioKey, setTransferStudioKey] = useState(0);
+  /** Seed Transfer Studio source from Connectors drawer (id + token so re-clicks re-apply). */
+  const [transferSeedSource, setTransferSeedSource] = useState<{ connectorId: string; token: number } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
@@ -121,6 +123,7 @@ function AppShell({
   }, []);
 
   const openFreshTransfer = useCallback(() => {
+    setTransferSeedSource(null);
     setTransferStudioKey((k) => k + 1);
     setScreen("transfer");
   }, [setScreen]);
@@ -600,6 +603,7 @@ function AppShell({
                     key={transferStudioKey}
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
+                    seedSourceConnector={transferSeedSource}
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
                     onFreshTransfer={openFreshTransfer}
@@ -631,7 +635,13 @@ function AppShell({
                     onEdit={openEditModal}
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
-                    onOpenTransfer={() => setScreen("transfer")}
+                    connectorEditorOpen={showModal && Boolean(editingConnector)}
+                    onOpenTransfer={(connectorId) => {
+                      if (connectorId) {
+                        setTransferSeedSource({ connectorId, token: Date.now() });
+                      }
+                      setScreen("transfer");
+                    }}
                     onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     showConnectionsTab={connectorsViewToken}
                     highlightConnectorId={

@@ -51,6 +51,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [runningId, setRunningId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [resumeDrawerAfterEdit, setResumeDrawerAfterEdit] = useState(false);
   const [pipelineTab, setPipelineTab] = useState<PipelineTab>(PIPELINE_TABS[0]);
   const [filter, setFilter] = useState<ScheduleFilter>("all");
   const [pipelineSearch, setPipelineSearch] = useState("");
@@ -129,6 +130,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   }, [schedules, filter, pipelineSearch]);
 
   const openCreate = () => {
+    setResumeDrawerAfterEdit(false);
     setEditing(null);
     setShowForm(true);
   };
@@ -144,6 +146,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const closeForm = () => {
     setShowForm(false);
     setEditing(null);
+    if (resumeDrawerAfterEdit && selectedId && schedules.some((s) => s.id === selectedId)) {
+      setResumeDrawerAfterEdit(false);
+      setDrawerOpen(true);
+      return;
+    }
+    setResumeDrawerAfterEdit(false);
   };
 
   const handleSubmit = async (input: Partial<ScheduleInput>) => {
@@ -393,12 +401,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
         onEdit={() => {
           if (!selectedSchedule) return;
+          setResumeDrawerAfterEdit(true);
           closeDrawer();
           openEdit(selectedSchedule);
         }}
         onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
         onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
         onOpenJob={(jobId) => {
+          setResumeDrawerAfterEdit(false);
           closeDrawer();
           onOpenJob?.(jobId);
         }}

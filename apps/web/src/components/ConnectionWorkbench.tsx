@@ -22,7 +22,7 @@ interface ConnectionWorkbenchProps {
   setConnectionTab: (tab: (typeof CONNECTION_TABS)[number]) => void;
   connectors: Connector[];
   onSelectConnection: (id: string) => void;
-  onOpenTransfer?: () => void;
+  onOpenTransfer?: (connectorId?: string) => void;
   /** Hide the identity header + connection picker (e.g. when embedded in a drawer already scoped to one connection). */
   hideHeader?: boolean;
 }
@@ -204,7 +204,15 @@ export function ConnectionWorkbench({
                 icon="activity"
                 title="No streams yet"
                 description={`Streams appear when you run a transfer or enable a pipeline from ${selectedConnection.name}.`}
-                action={onOpenTransfer ? <Button variant="primary" size="sm" onClick={onOpenTransfer}>New transfer</Button> : undefined}
+                action={onOpenTransfer ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => onOpenTransfer(selectedConnection.id)}
+                  >
+                    New transfer
+                  </Button>
+                ) : undefined}
               />
             )
           ) : (
@@ -261,31 +269,40 @@ export function ConnectionWorkbench({
         )}
         {connectionTab === "Mappings" && (
           selectedConnection ? (
-            <div className="df2-mapping-policy-grid">
-              <div>
-                <strong>Recent routes</strong>
-                <span>{workbench?.relatedJobs.length ?? 0} job(s) reference this connector.</span>
+            <div className="df2-mapping-policy">
+              <div className="df2-mapping-policy-grid">
+                <div>
+                  <strong>Recent routes</strong>
+                  <span>{workbench?.relatedJobs.length ?? 0} job(s) reference this connector.</span>
+                </div>
+                <div>
+                  <strong>Pipelines</strong>
+                  <span>{workbench?.relatedSchedules.length ?? 0} schedule(s) · {workbench?.enabledScheduleCount ?? 0} enabled.</span>
+                </div>
+                <div>
+                  <strong>Role</strong>
+                  <span>
+                    {roleLabel}
+                    {usageHint ? ` · ${usageHint}` : " · usable as source or destination"}
+                  </span>
+                </div>
+                <div>
+                  <strong>Edit mappings</strong>
+                  <span>Column mapping lives in Transfer Studio Map step (semantic + confidence).</span>
+                </div>
               </div>
-              <div>
-                <strong>Pipelines</strong>
-                <span>{workbench?.relatedSchedules.length ?? 0} schedule(s) · {workbench?.enabledScheduleCount ?? 0} enabled.</span>
-              </div>
-              <div>
-                <strong>Role</strong>
-                <span>
-                  {roleLabel}
-                  {usageHint ? ` · ${usageHint}` : " · usable as source or destination"}
-                </span>
-              </div>
-              <div>
-                <strong>Edit mappings</strong>
-                <span>Column mapping lives in Transfer Studio Map step (semantic + confidence).</span>
-                {onOpenTransfer ? (
-                  <Button variant="primary" size="sm" onClick={onOpenTransfer} style={{ marginTop: 8 }}>
+              {onOpenTransfer ? (
+                <div className="df2-mapping-policy-cta">
+                  <p>Continue with this connection as the Transfer Studio source.</p>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => onOpenTransfer(selectedConnection.id)}
+                  >
                     Open Transfer Studio
                   </Button>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
             </div>
           ) : (
             <EmptyState compact icon="sparkle" title="Select a connection" description="Choose a saved connection above to view mapping activity." />
@@ -325,7 +342,15 @@ export function ConnectionWorkbench({
                 icon="jobs"
                 title="No sync history"
                 description={`Run a transfer or enable a pipeline to populate history for ${selectedConnection.name}.`}
-                action={onOpenTransfer ? <Button variant="primary" size="sm" onClick={onOpenTransfer}>New transfer</Button> : undefined}
+                action={onOpenTransfer ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => onOpenTransfer(selectedConnection.id)}
+                  >
+                    New transfer
+                  </Button>
+                ) : undefined}
               />
             )
           ) : (
@@ -335,10 +360,33 @@ export function ConnectionWorkbench({
         {connectionTab === "Settings" && (
           selectedConnection ? (
             <div className="df2-settings-mini-grid">
-              <div><span>Sync frequency</span><strong>{workbench?.scheduleLabel ?? "Manual"}</strong></div>
-              <div><span>Database / bucket</span><strong>{selectedConnection.database || "—"}</strong></div>
-              <div><span>Endpoint</span><strong>{selectedConnection.host || "managed"}{selectedConnection.port ? `:${selectedConnection.port}` : ""}</strong></div>
-              <div><span>Pipelines</span><strong>{workbench?.relatedSchedules.length ?? 0} configured</strong></div>
+              <div>
+                <span>Sync frequency</span>
+                <strong>{workbench?.scheduleLabel ?? "Manual"}</strong>
+              </div>
+              <div>
+                <span>Database / bucket</span>
+                <strong title={selectedConnection.database || undefined}>
+                  {selectedConnection.database || "—"}
+                </strong>
+              </div>
+              <div className="df2-settings-mini-endpoint">
+                <span>Endpoint</span>
+                <strong
+                  title={
+                    selectedConnection.host
+                      ? `${selectedConnection.host}${selectedConnection.port ? `:${selectedConnection.port}` : ""}`
+                      : "managed"
+                  }
+                >
+                  {selectedConnection.host || "managed"}
+                  {selectedConnection.port ? `:${selectedConnection.port}` : ""}
+                </strong>
+              </div>
+              <div>
+                <span>Pipelines</span>
+                <strong>{workbench?.relatedSchedules.length ?? 0} configured</strong>
+              </div>
             </div>
           ) : (
             <EmptyState compact icon="settings" title="Select a connection" description="Choose a saved connection above to view settings." />

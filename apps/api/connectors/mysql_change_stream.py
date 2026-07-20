@@ -122,8 +122,9 @@ class MySqlChangeStreamCdc:
         else:
             import hashlib
 
-            digest = hashlib.sha1(
-                f"{self.cfg.get('host')}|{self.database}|{self.table}".encode()
+            digest = hashlib.sha1(  # noqa: S324 — non-crypto server_id bookkeeping
+                f"{self.cfg.get('host')}|{self.database}|{self.table}".encode(),
+                usedforsecurity=False,
             ).hexdigest()
             server_id = 10_000 + (int(digest[:6], 16) % 1_000_000)
         kwargs: dict[str, Any] = {

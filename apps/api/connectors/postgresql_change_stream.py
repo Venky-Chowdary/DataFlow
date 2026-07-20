@@ -36,7 +36,10 @@ _NEW_TUPLE_PREFIX = "new-tuple:"
 
 def _publication_name(database: str, table: str, cursor_key: str) -> str:
     """Stable publication name for pgoutput (must match slot scoping)."""
-    digest = hashlib.sha1(f"{database}|{table}|{cursor_key}".encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(  # noqa: S324 — non-crypto publication name digest
+        f"{database}|{table}|{cursor_key}".encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()[:10]
     raw = f"df_pub_{database}_{table}_{digest}".lower()
     return re.sub(r"[^a-z0-9_]", "_", raw)[:63]
 
@@ -549,26 +552,35 @@ class PostgreSqlChangeStreamCdc:
     def _pk_value(self, record: dict[str, str]) -> str:
         return record.get(self.primary_key, "") if record else ""
 
+    def _qualified_table(self) -> str:
+        from connectors.sql_identifiers import quote_table_ref
+
+        return quote_table_ref(self.table, self.schema or "public", dialect="postgresql")
+
     def _ensure_publication(self) -> None:
         """Create a FOR TABLE publication required by the pgoutput plugin."""
         if self.output_plugin != "pgoutput":
             return
-        qualified = f'"{self.schema}"."{self.table}"'
+        from connectors.sql_identifiers import require_safe_identifier
+
+        qualified = self._qualified_table()
+        # Publication names are [a-z0-9_]; reject anything that escaped hashing.
+        pub = require_safe_identifier(self.publication_name, preserve_case=False)
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM pg_publication WHERE pubname = %s",
-                    (self.publication_name,),
+                    (pub,),
                 )
                 if cur.fetchone() is None:
                     cur.execute(
-                        f"CREATE PUBLICATION {self.publication_name} FOR TABLE {qualified}"
+                        f"CREATE PUBLICATION {pub} FOR TABLE {qualified}"
                     )
                 else:
                     # Ensure the table is in the publication (idempotent best-effort).
                     try:
                         cur.execute(
-                            f"ALTER PUBLICATION {self.publication_name} ADD TABLE {qualified}"
+                            f"ALTER PUBLICATION {pub} ADD TABLE {qualified}"
                         )
                     except Exception:
                         try:
@@ -579,7 +591,7 @@ class PostgreSqlChangeStreamCdc:
 
     def _ensure_replica_identity(self) -> None:
         """Require FULL replica identity so UPDATE/DELETE emit old keys."""
-        qualified = f'"{self.schema}"."{self.table}"'
+        qualified = self._qualified_table()
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -619,10 +631,12 @@ class PostgreSqlChangeStreamCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk reader for Debezium-style incremental snapshots."""
-        from connectors.writer_common import quote_sql_identifier
+        from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 
-        pk = quote_sql_identifier(sig.primary_key or self.primary_key)
-        qualified = f'"{self.schema}"."{self.table}"'
+        pk = quote_sql_identifier(
+            require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
+        )
+        qualified = self._qualified_table()
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         with self._conn() as conn:

@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
+    quote_column_list,
+    quote_sql_identifier,
+    quote_table_ref,
+    require_safe_identifier,
+    sanitize_identifier,
+)
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
@@ -16,21 +22,6 @@ from services.transform_resolver import resolve_transform
 CHUNK_SIZE = int(os.getenv("DATAFLOW_CHUNK_SIZE", "20000"))
 TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantine").lower()
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
-
-
-def sanitize_identifier(name: str, preserve_case: bool = False) -> str:
-    cleaned = name.strip() if preserve_case else name.strip().lower()
-    s = re.sub(r"[^a-zA-Z0-9_]", "_", cleaned)
-    s = re.sub(r"_+", "_", s).rstrip("_")
-    if not s or s[0].isdigit():
-        s = f"col_{s or 'field'}"
-    return s[:63]
-
-
-def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
-    """Quote a SQL identifier and escape embedded quote characters."""
-    escaped = name.replace(quote_char, quote_char + quote_char)
-    return f"{quote_char}{escaped}{quote_char}"
 
 
 def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:

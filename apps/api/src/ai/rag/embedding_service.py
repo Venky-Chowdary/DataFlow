@@ -104,7 +104,7 @@ class DataTransferEmbeddingService:
         vec = np.zeros(self.EMBEDDING_DIM)
 
         for token in tokens:
-            h = int(hashlib.md5(token.encode()).hexdigest(), 16)
+            h = int(hashlib.md5(token.encode(), usedforsecurity=False).hexdigest(), 16)
             idx = h % self.EMBEDDING_DIM
             sign = 1 if (h >> 8) % 2 == 0 else -1
             weight = 1.0 + math.log1p(tokens.count(token))

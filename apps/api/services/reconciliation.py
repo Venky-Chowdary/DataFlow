@@ -441,10 +441,13 @@ def verify_postgres_table(
             connection_string=connection_string,
             ssl=ssl,
         )
+        from connectors.sql_identifiers import quote_table_ref
+
+        table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
         with conn.cursor() as cur:
-            cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{table_name}"')
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             count = int(cur.fetchone()[0])
-            cur.execute(f'SELECT * FROM "{schema}"."{table_name}"')
+            cur.execute(f"SELECT * FROM {table_ref}")
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
@@ -479,16 +482,19 @@ def verify_snowflake_table(
             warehouse=warehouse,
             connection_string=connection_string,
         )
+        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref, require_safe_identifier
+
         with conn.cursor() as cur:
             if warehouse:
                 try:
-                    cur.execute(f'USE WAREHOUSE "{warehouse}"')
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
                 except Exception:
                     pass
-            qualified_name = f'"{schema or "PUBLIC"}"."{table_name}"'
-            cur.execute(f'SELECT COUNT(*) FROM {qualified_name}')
+            qualified_name = quote_table_ref(table_name, schema or "PUBLIC", dialect="snowflake")
+            cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")
             count = int(cur.fetchone()[0])
-            cur.execute(f'SELECT * FROM {qualified_name}')
+            cur.execute(f"SELECT * FROM {qualified_name}")
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
@@ -519,10 +525,13 @@ def verify_mysql_table(
             username=username, password=password,
             connection_string=connection_string, ssl=ssl,
         )
+        from connectors.sql_identifiers import quote_table_ref
+
+        table_ref = quote_table_ref(table_name, dialect="mysql")
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM `{table_name}`")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM `{table_name}`")
+            cur.execute(f"SELECT * FROM {table_ref}")
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
@@ -691,11 +700,14 @@ def verify_sqlite_table(
         path = sqlite_file_path(database, connection_string, host)
         if not path:
             return -1, ""
+        from connectors.sql_identifiers import quote_table_ref
+
+        table_ref = quote_table_ref(table_name, dialect="sqlite")
         conn = sqlite3.connect(str(path))
         cur = conn.cursor()
-        cur.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+        cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
         count = cur.fetchone()[0]
-        cur.execute(f'SELECT * FROM "{table_name}"')
+        cur.execute(f"SELECT * FROM {table_ref}")
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
         checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
@@ -726,9 +738,12 @@ def verify_duckdb_table(
         path = connection_string or database
         if not path:
             return -1, ""
+        from connectors.sql_identifiers import quote_table_ref
+
+        table_ref = quote_table_ref(table_name, dialect="duckdb")
         conn = duckdb.connect(str(path))
-        count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-        cur = conn.execute(f'SELECT * FROM "{table_name}"')
+        count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]
+        cur = conn.execute(f"SELECT * FROM {table_ref}")
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
         checksum = canonical_checksum_from_iter(_iter_fetchmany(cur), columns, limit=limit)
@@ -1225,12 +1240,27 @@ def read_target_sample(
     sort_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read a small ordered sample from destination for value reconciliation."""
+    from connectors.sql_identifiers import (
+        quote_column_list,
+        quote_sql_identifier,
+        quote_table_ref,
+        require_safe_identifier,
+    )
+
     cols = columns or ["*"]
-    col_sql = ", ".join(f'"{c}"' for c in cols) if cols != ["*"] else "*"
     try:
         if db_type == "postgresql":
             from connectors.postgresql_conn import get_connection
 
+            col_sql = "*" if cols == ["*"] else quote_column_list(
+                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            )
+            table_ref = quote_table_ref(table_name, schema or "public", dialect="postgresql")
+            order_sql = (
+                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                if sort_key
+                else "1"
+            )
             conn = get_connection(
                 host=dest.get("host", ""),
                 port=dest.get("port", 5432),
@@ -1240,10 +1270,9 @@ def read_target_sample(
                 connection_string=dest.get("connection_string", ""),
                 ssl=dest.get("ssl", True),
             )
-            order_sql = f'"{sort_key.replace(chr(34), chr(34) + chr(34))}"' if sort_key else "1"
             with conn.cursor() as cur:
                 cur.execute(
-                    f'SELECT {col_sql} FROM "{schema}"."{table_name}" ORDER BY {order_sql} LIMIT %s',
+                    f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",
                     (limit,),
                 )
                 names = [d[0] for d in cur.description]
@@ -1254,7 +1283,16 @@ def read_target_sample(
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
 
-            mysql_col_sql = ", ".join(f"`{c}`" for c in cols) if cols != ["*"] else "*"
+            mysql_col_sql = "*" if cols == ["*"] else quote_column_list(
+                [require_safe_identifier(c, preserve_case=True) for c in cols],
+                quote_char="`",
+            )
+            table_ref = quote_table_ref(table_name, dialect="mysql")
+            mysql_order = (
+                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True), "`")
+                if sort_key
+                else "1"
+            )
             conn = get_connection(
                 host=dest.get("host", ""),
                 port=int(dest.get("port", 3306)),
@@ -1264,9 +1302,11 @@ def read_target_sample(
                 connection_string=dest.get("connection_string", ""),
                 ssl=dest.get("ssl", False),
             )
-            mysql_order = f"`{sort_key.replace('`', '``')}`" if sort_key else "1"
             with conn.cursor() as cur:
-                cur.execute(f"SELECT {mysql_col_sql} FROM `{table_name}` ORDER BY {mysql_order} LIMIT %s", (limit,))
+                cur.execute(
+                    f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",
+                    (limit,),
+                )
                 names = [d[0] for d in cur.description]
                 rows = cur.fetchall()
             conn.close()
@@ -1275,20 +1315,21 @@ def read_target_sample(
         if db_type == "duckdb":
             import duckdb
 
-            def _quote_id(name: str) -> str:
-                return '"' + str(name).replace('"', '""') + '"'
-
             path = dest.get("connection_string") or dest.get("database", "")
             if not path:
                 return []
+            duckdb_col_sql = "*" if cols == ["*"] else quote_column_list(
+                [require_safe_identifier(c, preserve_case=True) for c in cols]
+            )
+            table_ref = quote_table_ref(table_name, dialect="duckdb")
+            duckdb_order = (
+                quote_sql_identifier(require_safe_identifier(sort_key, preserve_case=True))
+                if sort_key
+                else "1"
+            )
             conn = duckdb.connect(str(path))
-            if cols == ["*"]:
-                duckdb_col_sql = "*"
-            else:
-                duckdb_col_sql = ", ".join(_quote_id(c) for c in cols)
-            duckdb_order = _quote_id(sort_key) if sort_key else "1"
             rows = conn.execute(
-                f"SELECT {duckdb_col_sql} FROM {_quote_id(table_name)} ORDER BY {duckdb_order} LIMIT ?",
+                f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT ?",
                 (int(limit),),
             ).fetchall()
             names = [d[0] for d in conn.description]

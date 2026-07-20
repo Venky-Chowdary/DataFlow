@@ -700,6 +700,10 @@ def _write_batch(
             "api_key": cfg.get("api_key", ""),
             "service_account": cfg.get("service_account", ""),
             "auth_source": cfg.get("auth_source", ""),
+            # MinIO / custom S3 / DynamoDB local — must reach writers (was dropped).
+            "endpoint_url": cfg.get("endpoint_url", "") or "",
+            "path_style": bool(cfg.get("path_style", False)),
+            "region": cfg.get("region", "") or "",
             "table_name": table_name,
             "headers": headers,
             "data_rows": data_rows,

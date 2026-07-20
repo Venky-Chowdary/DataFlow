@@ -7,12 +7,25 @@ from pathlib import Path
 
 from connectors.base import ReadBatch
 from connectors.snowflake_conn import get_connection, normalize_account
+from connectors.sql_identifiers import (
+    quote_column_list,
+    quote_sql_identifier,
+    quote_table_ref,
+    require_safe_identifier,
+)
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.value_serializer import cell_to_string
+
+
+def _use_warehouse(cur, warehouse: str) -> None:
+    if not warehouse:
+        return
+    wh = require_safe_identifier(warehouse, preserve_case=True)
+    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
 
 
 def count_table_rows(
@@ -42,10 +55,9 @@ def count_table_rows(
     )
     try:
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f'USE WAREHOUSE "{warehouse}"')
-            sch = schema or "PUBLIC"
-            cur.execute(f'SELECT COUNT(*) FROM "{sch}"."{table}"')
+            _use_warehouse(cur, warehouse)
+            table_ref = quote_table_ref(table, schema or "PUBLIC", dialect="snowflake")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             return int(cur.fetchone()[0])
     finally:
         conn.close()
@@ -81,9 +93,8 @@ def read_table_batch(
     )
     try:
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f'USE WAREHOUSE "{warehouse}"')
-            sch = schema or "PUBLIC"
+            _use_warehouse(cur, warehouse)
+            table_ref = quote_table_ref(table, schema or "PUBLIC", dialect="snowflake")
             if known_total_rows is not None:
                 total = known_total_rows
             else:
@@ -92,9 +103,13 @@ def read_table_batch(
                     schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
                     role=role,
                 )
-            col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
+            col_sql = (
+                quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
+                if columns
+                else "*"
+            )
             cur.execute(
-                f'SELECT {col_sql} FROM "{sch}"."{table}" LIMIT {int(limit)} OFFSET {int(offset)}'
+                f"SELECT {col_sql} FROM {table_ref} LIMIT {int(limit)} OFFSET {int(offset)}"
             )
             headers = [desc[0] for desc in cur.description]
             rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
@@ -135,20 +150,24 @@ def read_table_cursor_batch(
     )
     try:
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f'USE WAREHOUSE "{warehouse}"')
-            sch = schema or "PUBLIC"
-            col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
+            _use_warehouse(cur, warehouse)
+            table_ref = quote_table_ref(table, schema or "PUBLIC", dialect="snowflake")
+            col_sql = (
+                quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
+                if columns
+                else "*"
+            )
+            cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True))
             if cursor_after:
                 cur.execute(
-                    f'SELECT {col_sql} FROM "{sch}"."{table}" '
-                    f'WHERE "{cursor_column}" > %s ORDER BY "{cursor_column}" LIMIT %s',
+                    f"SELECT {col_sql} FROM {table_ref} "
+                    f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",
                     (cursor_after, limit),
                 )
             else:
                 cur.execute(
-                    f'SELECT {col_sql} FROM "{sch}"."{table}" '
-                    f'ORDER BY "{cursor_column}" LIMIT %s',
+                    f"SELECT {col_sql} FROM {table_ref} "
+                    f"ORDER BY {cursor_q} LIMIT %s",
                     (limit,),
                 )
             headers = [desc[0] for desc in cur.description]

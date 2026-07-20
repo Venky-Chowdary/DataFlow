@@ -95,6 +95,8 @@ interface TransferPageProps {
   onOpenContracts?: () => void;
   /** Remount studio and clear prior transfer cache (source, map, result). */
   onFreshTransfer?: () => void;
+  /** Pre-select a saved connection as the Transfer Studio source (from Connectors drawer). */
+  seedSourceConnector?: { connectorId: string; token: number } | null;
 }
 
 /** File formats are never listed as database sources. */
@@ -230,11 +232,14 @@ export function TransferPage({
   onOpenSchedules,
   onOpenContracts,
   onFreshTransfer,
+  seedSourceConnector = null,
 }: TransferPageProps) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
+  /** Last applied Connectors→Studio seed token (prevents re-seeding on connectors refresh). */
+  const appliedSeedTokenRef = useRef<number | null>(null);
   /** Last destination identity we auto-analyzed — empty means not analyzed yet. */
   const routeAnalyzedKeyRef = useRef("");
   const { setActiveData } = useActiveData();
@@ -904,6 +909,34 @@ export function TransferPage({
   useEffect(() => {
     autoSelectedSourceConnector.current = false;
   }, [sourceKind]);
+
+  // Carry selected connection from Connectors drawer into Transfer Studio source step.
+  // Apply once per seed token — do not re-run on connectors list refresh (that would
+  // yank the operator back to Source mid-wizard).
+  useEffect(() => {
+    if (!seedSourceConnector?.connectorId) {
+      appliedSeedTokenRef.current = null;
+      return;
+    }
+    if (appliedSeedTokenRef.current === seedSourceConnector.token) return;
+    const seeded = connectors.find((c) => c.id === seedSourceConnector.connectorId);
+    if (!seeded) return; // wait until connectors are loaded
+
+    if (CLOUD_SOURCE_TYPES.has(seeded.type)) {
+      setSourceKind("cloud");
+    } else if (!FILE_FORMAT_SOURCE_TYPES.has(seeded.type)) {
+      setSourceKind("database");
+    } else {
+      // File-format connector profiles are not valid Studio sources.
+      appliedSeedTokenRef.current = seedSourceConnector.token;
+      return;
+    }
+
+    appliedSeedTokenRef.current = seedSourceConnector.token;
+    autoSelectedSourceConnector.current = true;
+    setSourceConnectorId(seeded.id);
+    setStep(STEP_SOURCE);
+  }, [seedSourceConnector, connectors]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");

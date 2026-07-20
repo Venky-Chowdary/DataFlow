@@ -25,7 +25,7 @@ interface ConnectorDetailDrawerProps {
   onTest: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onOpenTransfer?: () => void;
+  onOpenTransfer?: (connectorId?: string) => void;
   onSelectConnection: (id: string) => void;
   onOpenJob?: (jobId: string) => void;
 }
@@ -94,7 +94,12 @@ export function ConnectorDetailDrawer({
             Edit
           </Button>
           {onOpenTransfer && (
-            <Button size="sm" variant="primary" onClick={onOpenTransfer} leadingIcon={<DtIcon name="transfer" size={14} />}>
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => onOpenTransfer(c.id)}
+              leadingIcon={<DtIcon name="transfer" size={14} />}
+            >
               New transfer
             </Button>
           )}
@@ -127,7 +132,7 @@ export function ConnectorDetailDrawer({
           <span>Database / bucket</span>
           <strong>{c.database || "—"}</strong>
         </div>
-        <div className="df2-drawer-fact">
+        <div className="df2-drawer-fact df2-drawer-fact-endpoint">
           <span>Endpoint</span>
           <strong title={endpoint}>{endpoint}</strong>
         </div>

@@ -226,6 +226,7 @@ def resolve_connector_config(
         "private_key": endpoint.private_key or "",
         "endpoint_url": endpoint.endpoint_url or "",
         "path_style": endpoint.path_style,
+        "region": endpoint.region or "",
     }
     # Keep "role" as the canonical key used by Snowflake connector functions.
     cfg["role"] = endpoint.auth_role or ""
@@ -269,7 +270,12 @@ def resolve_connector_config(
             "service_account": _pick(cfg.get("service_account"), conn_dict.get("service_account")),
             "private_key": _pick(cfg.get("private_key"), conn_dict.get("private_key")),
             "endpoint_url": _pick(cfg.get("endpoint_url"), conn_dict.get("endpoint_url")),
-            "path_style": _pick(cfg.get("path_style"), conn_dict.get("path_style")),
+            # EndpointConfig defaults path_style=False; do not clobber a saved
+            # MinIO connector that requires path-style addressing.
+            "path_style": (
+                True if cfg.get("path_style") else bool(conn_dict.get("path_style"))
+            ),
+            "region": _pick(cfg.get("region"), conn_dict.get("region")),
             "role": _pick(cfg.get("role"), conn_dict.get("role")),
         }
         # Preserve any extra keys from the inline endpoint or saved connector.
