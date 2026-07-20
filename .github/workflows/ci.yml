@@ -156,11 +156,14 @@ jobs:
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
 
-      - name: Init Change Tracking database
+      - name: Init Change Tracking + native CDC
         run: |
-          docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/init.sql
+          docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/ct_init.sql
+          docker cp apps/api/tests/sqlserver_cdc_init.sql dataflow-sqlserver:/tmp/cdc_init.sql
           docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/init.sql
+            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/ct_init.sql
+          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/cdc_init.sql
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -178,27 +181,45 @@ jobs:
         run: |
           python -m pytest \
             tests/test_cdc_sqlserver_ct_integration.py \
+            tests/test_cdc_sqlserver_native_integration.py \
+            tests/test_sqlserver_native_cdc.py \
             tests/test_sqlserver_oracle_cdc.py \
             -v --tb=short
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_CDC_LEASE_BACKEND: memory
 
-  # Optional: only when repo secrets + variable ENABLE_ORACLE_CDC=true are set.
-  # Does not block PRs — Oracle images/licenses are not free for every fork.
+  # Optional: enable via repo variable ENABLE_ORACLE_CDC=true.
+  # Secrets must NOT appear in job `if:` (GitHub rejects `secrets` there).
+  # Missing credentials → pytest skip via DATAFLOW_ORACLE_* gates.
   cdc-oracle:
     runs-on: ubuntu-latest
-    if: ${{ vars.ENABLE_ORACLE_CDC == 'true' && secrets.DATAFLOW_ORACLE_PASSWORD != '' }}
+    if: ${{ vars.ENABLE_ORACLE_CDC == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Require Oracle password secret
+        id: oracle_creds
+        env:
+          DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
+        run: |
+          if [ -z "${DATAFLOW_ORACLE_PASSWORD}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "DATAFLOW_ORACLE_PASSWORD secret not set — skipping Oracle CDC live IT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.oracle_creds.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install API deps + Oracle client
+        if: steps.oracle_creds.outputs.skip != 'true'
         run: |
           cd apps/api
           python -m pip install --upgrade pip
@@ -206,6 +227,7 @@ jobs:
           python -m pip install oracledb
 
       - name: Run Oracle CDC live IT
+        if: steps.oracle_creds.outputs.skip != 'true'
         working-directory: apps/api
         run: |
           python -m pytest \

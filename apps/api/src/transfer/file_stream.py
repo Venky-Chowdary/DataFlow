@@ -538,7 +538,7 @@ def stream_file_to_database(
     schema: dict[str, str],
     on_checkpoint: Callable[..., None] | None = None,
     *,
-    sync_mode: str = "full_refresh_overwrite",
+    sync_mode: str = "full_refresh_append",
     stream_contracts: list[dict] | None = None,
     job_id: str | None = None,
     checkpoint: Checkpoint | None = None,
@@ -615,19 +615,26 @@ def stream_file_to_database(
         from services.sync_cursor import (
             map_source_to_target,
             requires_upsert,
+            resolve_effective_sync_mode,
             resolve_sync_contract,
         )
     except ImportError:
         from src.services.sync_cursor import (
             map_source_to_target,
             requires_upsert,
+            resolve_effective_sync_mode,
             resolve_sync_contract,
         )
     contract = resolve_sync_contract(stream_contracts)
-    effective_sync = contract.sync_mode if contract else sync_mode
+    effective_sync = resolve_effective_sync_mode(
+        sync_mode,
+        contract.sync_mode if contract else None,
+    )
     pk_target_cols: list[str] = []
     if contract and contract.primary_key:
-        pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
+        pk_target_cols = [
+            map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+        ]
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
 
     checkpoint_service = checkpoint_service or CheckpointService()

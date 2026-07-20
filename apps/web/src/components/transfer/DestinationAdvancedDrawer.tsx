@@ -19,7 +19,8 @@ export type DestSchemaPolicy =
   | "manual_review"
   | "propagate_columns"
   | "propagate_all"
-  | "pause_on_change";
+  | "pause_on_change"
+  | "type_locked";
 
 export type DestValidationMode = "balanced" | "strict" | "maximum";
 
@@ -70,6 +71,17 @@ interface DestinationAdvancedDrawerProps {
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
   onStreamPrimaryKeyChange: (stream: string, value: string) => void;
+  /** Heuristic suggestions for empty cursor / PK selects. */
+  suggestedCursor?: string;
+  suggestedPrimaryKey?: string;
+  /** Priority-first sync: sort source by this column before write. */
+  priorityColumn?: string;
+  priorityDirection?: "asc" | "desc";
+  /** Soft row cap (0 = no limit). */
+  rowLimit?: number;
+  onPriorityColumnChange?: (value: string) => void;
+  onPriorityDirectionChange?: (value: "asc" | "desc") => void;
+  onRowLimitChange?: (value: number) => void;
 }
 
 /**
@@ -103,8 +115,17 @@ export function DestinationAdvancedDrawer({
   onBackfillChange,
   onStreamCursorChange,
   onStreamPrimaryKeyChange,
+  suggestedCursor = "",
+  suggestedPrimaryKey = "",
+  priorityColumn = "",
+  priorityDirection = "desc",
+  rowLimit = 0,
+  onPriorityColumnChange,
+  onPriorityDirectionChange,
+  onRowLimitChange,
 }: DestinationAdvancedDrawerProps) {
   const names = streamNames.length > 0 ? streamNames : ["source_stream"];
+  const activeMode = syncModes.find((m) => m.id === syncMode);
 
   return (
     <Drawer
@@ -130,6 +151,25 @@ export function DestinationAdvancedDrawer({
       }
     >
       <div className="df2-dest-advanced-drawer">
+        {activeMode && (
+          <aside className="df2-adv-behavior-callout" aria-label="Sync behavior">
+            <strong>{activeMode.label}</strong>
+            <p>{activeMode.detail}</p>
+            {syncMode === "full_refresh_overwrite" && (
+              <p className="is-warn">Replaces destination rows — existing data is dropped before load.</p>
+            )}
+            {syncMode === "full_refresh_append" && (
+              <p>Keeps existing destination rows and inserts the full snapshot again.</p>
+            )}
+            {syncMode === "cdc" && (
+              <p>Change delivery is <strong>at-least-once upsert</strong> until exactly-once is proven for your sink.</p>
+            )}
+            {syncMode === "mirror" && (
+              <p>Missing source keys are soft-deleted on the destination (not hard-deleted).</p>
+            )}
+          </aside>
+        )}
+
         <div className="df2-policy-grid">
           <div className="df2-field">
             <label className="df2-label">Sync mode</label>
@@ -166,6 +206,29 @@ export function DestinationAdvancedDrawer({
           </div>
         </div>
 
+        {(requiresCursor || requiresPrimaryKey) && (suggestedCursor || suggestedPrimaryKey) && (
+          <div className="df2-adv-suggest-row">
+            {requiresCursor && suggestedCursor && !defaultCursor && (
+              <button
+                type="button"
+                className="df2-adv-suggest-chip"
+                onClick={() => onStreamCursorChange(names[0], suggestedCursor)}
+              >
+                Use suggested cursor · <strong>{suggestedCursor}</strong>
+              </button>
+            )}
+            {requiresPrimaryKey && suggestedPrimaryKey && !defaultPrimaryKey && (
+              <button
+                type="button"
+                className="df2-adv-suggest-chip"
+                onClick={() => onStreamPrimaryKeyChange(names[0], suggestedPrimaryKey)}
+              >
+                Use suggested primary key · <strong>{suggestedPrimaryKey}</strong>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="df2-policy-toolbar">
           <div className="df2-field">
             <label className="df2-label">Validation</label>
@@ -181,7 +244,7 @@ export function DestinationAdvancedDrawer({
           <label className="df2-policy-toggle">
             <input
               type="checkbox"
-              checked={backfillNewFields}
+              checked={backfillNewFields || ["propagate_columns", "propagate_all"].includes(schemaPolicy)}
               disabled={!["propagate_columns", "propagate_all"].includes(schemaPolicy)}
               onChange={(e) => onBackfillChange(e.target.checked)}
             />
@@ -189,8 +252,8 @@ export function DestinationAdvancedDrawer({
               <strong>Backfill new fields</strong>
               <small>
                 {["propagate_columns", "propagate_all"].includes(schemaPolicy)
-                  ? "Requires automatic column propagation"
-                  : "Enable Column changes or All changes schema policy first"}
+                  ? "Propagate policies auto-enable additive destination columns"
+                  : "Enable Propagate columns / Propagate everything first"}
               </small>
             </span>
           </label>
@@ -302,6 +365,60 @@ export function DestinationAdvancedDrawer({
             {streamNeedsReview ? " Select a primary key above before running." : ""}
           </p>
         )}
+
+        <div className="df2-adv-load-controls">
+          <h4 className="df2-adv-section-title">Load controls</h4>
+          <p className="df2-label-hint">
+            Priority-first ordering and optional row caps — useful for smoke tests and high-value-first migrations.
+          </p>
+          <div className="df2-adv-load-grid">
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-adv-priority-col">Priority column</label>
+              <select
+                id="df2-adv-priority-col"
+                className="df2-input df2-select"
+                value={priorityColumn}
+                onChange={(e) => onPriorityColumnChange?.(e.target.value)}
+                disabled={!onPriorityColumnChange || sourceColumns.length === 0}
+              >
+                <option value="">None (source order)</option>
+                {sourceColumns.map((col) => (
+                  <option key={col} value={col}>
+                    {col}{sourceSchema[col] ? ` · ${sourceSchema[col]}` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-adv-priority-dir">Direction</label>
+              <select
+                id="df2-adv-priority-dir"
+                className="df2-input df2-select"
+                value={priorityDirection}
+                disabled={!priorityColumn || !onPriorityDirectionChange}
+                onChange={(e) => onPriorityDirectionChange?.(e.target.value as "asc" | "desc")}
+              >
+                <option value="desc">Highest first</option>
+                <option value="asc">Lowest first</option>
+              </select>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-adv-row-limit">Row limit</label>
+              <input
+                id="df2-adv-row-limit"
+                className="df2-input"
+                type="number"
+                min={0}
+                step={1000}
+                value={rowLimit || ""}
+                placeholder="0 = no limit"
+                onChange={(e) => onRowLimitChange?.(Math.max(0, Number(e.target.value) || 0))}
+                disabled={!onRowLimitChange}
+              />
+              <small className="df2-label-hint">0 means transfer all rows.</small>
+            </div>
+          </div>
+        </div>
       </div>
     </Drawer>
   );

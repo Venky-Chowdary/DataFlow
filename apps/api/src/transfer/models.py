@@ -92,7 +92,7 @@ class TransferRequest:
     # Optional on-disk path for the source file.  Used for billion-row streaming
     # when loading the whole file into memory would exhaust RAM.
     source_path: str = ""
-    sync_mode: str = "full_refresh_overwrite"
+    sync_mode: str = "full_refresh_append"
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
@@ -111,6 +111,8 @@ class TransferRequest:
     enforce_contract: bool = True
     # When True with contract_id, transfer fails unless the contract is SIGNED.
     require_signed_contract: bool = False
+    # Operator identity for Jobs audit (email / subject).
+    triggered_by: str = ""
 
     @property
     def operation(self) -> str:
@@ -177,6 +179,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "contract_id": request.contract_id,
         "enforce_contract": request.enforce_contract,
         "require_signed_contract": request.require_signed_contract,
+        "triggered_by": request.triggered_by,
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -192,7 +195,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         skip_preflight=bool(data.get("skip_preflight")),
         source_filename=data.get("source_filename") or "",
         source_content=b"",
-        sync_mode=data.get("sync_mode") or "full_refresh_overwrite",
+        sync_mode=data.get("sync_mode") or "full_refresh_append",
         schema_policy=data.get("schema_policy") or "manual_review",
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
@@ -206,6 +209,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         contract_id=data.get("contract_id") or "",
         enforce_contract=bool(data.get("enforce_contract", True)),
         require_signed_contract=bool(data.get("require_signed_contract", False)),
+        triggered_by=(data.get("triggered_by") or "").strip(),
     )
 
 

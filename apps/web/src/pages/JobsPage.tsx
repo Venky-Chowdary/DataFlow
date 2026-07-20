@@ -19,7 +19,9 @@ import { cancelJob, fetchJob, renameJob, retryJob, resumeJob } from "../lib/api"
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
+import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
+import { readJobEventLog } from "../lib/jobEventLog";
 
 interface JobDetailRecord extends JobProgress {
   transfer_request?: {
@@ -35,11 +37,35 @@ interface JobDetailRecord extends JobProgress {
     column_types?: Record<string, string>;
     sync_mode?: string;
     validation_mode?: string;
+    schema_policy?: string;
   };
   phases?: { name: string; status: "pending" | "active" | "done" | "failed" | "skipped"; message?: string }[];
   ddl_log?: string[];
+  ddl_executed?: string[];
+  explanation?: string;
+  triggered_by?: string;
+  created_by?: string;
   started_at?: string;
   completed_at?: string;
+}
+
+function formatJobDuration(startedAt?: string, completedAt?: string): string | null {
+  if (!startedAt) return null;
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return null;
+  const end = completedAt ? Date.parse(completedAt) : Date.now();
+  if (!Number.isFinite(end) || end < start) return null;
+  const s = Math.floor((end - start) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function formatSyncModeLabel(mode?: string): string {
+  if (!mode) return "—";
+  return mode.replace(/_/g, " ");
 }
 
 interface JobsPageProps {
@@ -381,9 +407,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
   const jobMappings = liveJob?.transfer_request?.mappings ?? [];
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
-  const ddlLog = liveJob?.ddl_log ?? [];
+  const ddlLog = liveJob?.ddl_executed ?? liveJob?.ddl_log ?? [];
+  const sessionEvents = selectedId ? readJobEventLog(selectedId) : [];
+  const eventLog = (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [];
+  const logLineCount = eventLog.length + ddlLog.length;
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
   const rejectedCount = liveJob?.rejected_rows ?? 0;
+  const recon = liveJob?.reconciliation;
+  const reconPassed = recon?.passed;
+  const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
+  const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
+  const syncModeLabel = formatSyncModeLabel(
+    liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode,
+  );
   const showQuarantineTab = Boolean(
     liveJob
     && (
@@ -687,26 +723,48 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       </article>
                       <article
                         className={`is-metric-reconcile${
-                          typeof liveJob.message === "string" && /fidelity|checksum|reconcil/i.test(liveJob.message)
+                          reconPassed === true
                             ? " is-ok"
-                            : isJobSuccess(liveJob.status)
-                              ? " is-ok"
-                              : selected.status === "failed"
-                                ? " is-bad"
+                            : reconPassed === false || selected.status === "failed"
+                              ? " is-bad"
+                              : isJobSuccess(liveJob.status)
+                                ? " is-ok"
                                 : ""
                         }`}
                       >
                         <strong>
-                          {typeof liveJob.message === "string" && /fidelity|checksum|reconcil/i.test(liveJob.message)
+                          {reconPassed === true
                             ? "Passed"
-                            : isJobSuccess(liveJob.status)
-                              ? "OK"
-                              : selected.status === "failed"
-                                ? "Failed"
-                                : "—"}
+                            : reconPassed === false
+                              ? "Failed"
+                              : isJobSuccess(liveJob.status)
+                                ? "OK"
+                                : selected.status === "failed"
+                                  ? "Failed"
+                                  : "—"}
                         </strong>
                         <span>Reconcile</span>
                       </article>
+                      {jobDuration && (
+                        <article className="is-metric-duration">
+                          <strong>{jobDuration}</strong>
+                          <span>Duration</span>
+                        </article>
+                      )}
+                      {triggeredBy && (
+                        <article className="is-metric-actor">
+                          <strong title={triggeredBy}>
+                            {triggeredBy.includes("@") ? triggeredBy.split("@")[0] : triggeredBy}
+                          </strong>
+                          <span>Run by</span>
+                        </article>
+                      )}
+                      {syncModeLabel !== "—" && (
+                        <article className="is-metric-mode">
+                          <strong title={syncModeLabel}>{syncModeLabel}</strong>
+                          <span>Sync mode</span>
+                        </article>
+                      )}
                       {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
                         <article className="is-metric-cdc">
                           <strong>{`${Number(liveJob.cdc_lag_seconds).toFixed(1)}s`}</strong>
@@ -732,7 +790,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                             { id: "detail" as const, label: "Detail", icon: "activity" },
                             { id: "mapping" as const, label: "Mapping", icon: "connectors", count: mappingCount || undefined },
                             { id: "quarantine" as const, label: "Quarantine", icon: "alert", count: rejectedCount || undefined, hidden: !showQuarantineTab },
-                            { id: "log" as const, label: "Log", icon: "jobs", count: ddlLog.length || undefined },
+                            { id: "log" as const, label: "Log", icon: "jobs", count: logLineCount || undefined },
                           ] as const
                         ).filter((t) => !("hidden" in t && t.hidden)).map((tab) => (
                           <button
@@ -762,6 +820,52 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       >
                         {detailTab === "detail" && (
                           <div className="df2-jobs-detail-pane">
+                            {recon && (
+                              <Gate8ProofCard
+                                report={recon}
+                                explanation={liveJob.explanation}
+                              />
+                            )}
+
+                            <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
+                              {triggeredBy && (
+                                <div><dt>Run by</dt><dd>{triggeredBy}</dd></div>
+                              )}
+                              {jobDuration && (
+                                <div><dt>Duration</dt><dd>{jobDuration}</dd></div>
+                              )}
+                              {liveJob.started_at && (
+                                <div><dt>Started</dt><dd>{new Date(liveJob.started_at).toLocaleString()}</dd></div>
+                              )}
+                              {liveJob.completed_at && (
+                                <div><dt>Completed</dt><dd>{new Date(liveJob.completed_at).toLocaleString()}</dd></div>
+                              )}
+                              {syncModeLabel !== "—" && (
+                                <div><dt>Sync mode</dt><dd>{syncModeLabel}</dd></div>
+                              )}
+                              {(liveJob.schema_policy || liveJob.transfer_request?.schema_policy) && (
+                                <div>
+                                  <dt>Schema policy</dt>
+                                  <dd>{formatSyncModeLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
+                                </div>
+                              )}
+                              {(liveJob.validation_mode || liveJob.transfer_request?.validation_mode) && (
+                                <div>
+                                  <dt>Validation</dt>
+                                  <dd>{formatSyncModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
+                                </div>
+                              )}
+                              {liveJob.watermark && (
+                                <div><dt>CDC watermark</dt><dd className="df2-mono" title={liveJob.watermark}>{liveJob.watermark.slice(0, 48)}{liveJob.watermark.length > 48 ? "…" : ""}</dd></div>
+                              )}
+                              {liveJob.cdc_plugin && (
+                                <div><dt>CDC plugin</dt><dd>{liveJob.cdc_plugin}</dd></div>
+                              )}
+                              {liveJob.cdc_delivery && (
+                                <div><dt>CDC delivery</dt><dd>{liveJob.cdc_delivery}</dd></div>
+                              )}
+                            </dl>
+
                             <div className="df2-jobs-v3-timeline-block">
                               <h3>Timeline</h3>
                               <JobTimeline entries={timelineEntries} />
@@ -962,18 +1066,72 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
 
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
+                            {eventLog.length > 0 ? (
+                              <div className="df2-jobs-v3-log is-tab">
+                                <h3>Event log</h3>
+                                <p className="df2-jobs-log-hint">
+                                  Phase changes, progress messages, and row milestones recorded for this job.
+                                </p>
+                                <pre>{eventLog.join("\n")}</pre>
+                              </div>
+                            ) : null}
                             {ddlLog.length > 0 ? (
                               <div className="df2-jobs-v3-log is-tab">
-                                <h3>DDL log</h3>
+                                <h3>DDL & stream log</h3>
+                                <p className="df2-jobs-log-hint">
+                                  Statements and stream steps the engine recorded while creating or altering destination objects.
+                                </p>
                                 <pre>{ddlLog.join("\n")}</pre>
                               </div>
-                            ) : (
+                            ) : null}
+                            {eventLog.length === 0 && ddlLog.length === 0 && (
                               <EmptyState
                                 compact
                                 icon="jobs"
-                                title="No DDL log"
-                                description="This job did not record DDL statements, or the log is empty."
+                                title="No log yet"
+                                description="Run a transfer to capture event and DDL logs. Older jobs may not have a durable log stored."
                               />
+                            )}
+                            {liveJob.explanation && (
+                              <div className="df2-jobs-v3-log is-tab">
+                                <h3>Pipeline explanation</h3>
+                                <pre>{liveJob.explanation}</pre>
+                              </div>
+                            )}
+                            {Array.isArray(liveJob.streams) && liveJob.streams.length > 0 && (
+                              <div className="df2-jobs-cdc-streams">
+                                <h3>CDC stream health</h3>
+                                <table className="df2-jobs-cdc-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Stream</th>
+                                      <th>Status</th>
+                                      <th>Records</th>
+                                      <th>Lag</th>
+                                      <th>Watermark</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {liveJob.streams.map((s) => (
+                                      <tr key={s.name}>
+                                        <td>{s.name}</td>
+                                        <td>{s.status || "—"}</td>
+                                        <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
+                                        <td>
+                                          {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))
+                                            ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
+                                            : "—"}
+                                        </td>
+                                        <td className="df2-mono" title={s.watermark || undefined}>
+                                          {s.watermark
+                                            ? `${String(s.watermark).slice(0, 28)}${String(s.watermark).length > 28 ? "…" : ""}`
+                                            : "—"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             )}
                             {liveJob.message && (
                               <dl className="df2-jobs-v3-summary-dl">

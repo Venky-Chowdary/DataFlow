@@ -540,6 +540,7 @@ async def execute_transfer_json(
         contract_id=body.contract_id or "",
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
+        triggered_by=_actor_email(request),
     )
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import build_run_payload
@@ -651,9 +652,9 @@ async def run_universal_transfer(
     async_mode: str = Form("true"),
     mappings_json: str = Form(""),
     plan_id: Optional[str] = Form(None),
-    sync_mode: str = Form("full_refresh_overwrite"),
+    sync_mode: str = Form("full_refresh_append"),
     schema_policy: str = Form("manual_review"),
-    validation_mode: str = Form("strict"),
+    validation_mode: str = Form("balanced"),
     source_filter_json: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
@@ -751,6 +752,7 @@ async def run_universal_transfer(
         workspace_id=workspace_id,
         data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
+        triggered_by=_actor_email(request),
     )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
@@ -774,6 +776,12 @@ async def run_universal_transfer(
                 request_obj.schema_policy = policies.get("schema_policy", request_obj.schema_policy)
             if not form_validation_mode:
                 request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
+            if policies.get("backfill_new_fields") and not request_obj.backfill_new_fields:
+                request_obj.backfill_new_fields = True
+            if not stream_contracts_json.strip():
+                plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
+                if isinstance(plan_contracts, list) and plan_contracts:
+                    request_obj.stream_contracts = plan_contracts
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip():
@@ -790,6 +798,13 @@ async def run_universal_transfer(
         request_obj.sync_mode = form_sync_mode
     if form_schema_policy:
         request_obj.schema_policy = form_schema_policy
+    # propagate_* implies additive columns even when the toggle was left off.
+    from services.batch_progress import effective_backfill_new_fields
+
+    request_obj.backfill_new_fields = effective_backfill_new_fields(
+        backfill_new_fields=request_obj.backfill_new_fields,
+        schema_policy=request_obj.schema_policy,
+    )
     if stream_contracts_json.strip():
         try:
             import json as _json

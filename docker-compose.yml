@@ -114,8 +114,8 @@ services:
           }
         '
 
-  # SQL Server Change Tracking for CDC integration tests.
-  # Auto-init CT after first boot (sqlserver-init). Manual: apps/api/tests/sqlserver_ct_init.sql
+  # SQL Server Change Tracking + native CDC for integration tests.
+  # Auto-init after first boot (sqlserver-init). Manual: sqlserver_ct_init.sql + sqlserver_cdc_init.sql
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
@@ -127,6 +127,7 @@ services:
     volumes:
       - mssqldata:/var/opt/mssql
       - ./apps/api/tests/sqlserver_ct_init.sql:/docker-init/sqlserver_ct_init.sql:ro
+      - ./apps/api/tests/sqlserver_cdc_init.sql:/docker-init/sqlserver_cdc_init.sql:ro
     healthcheck:
       test:
         [
@@ -145,13 +146,15 @@ services:
         condition: service_healthy
     restart: "no"
     volumes:
-      - ./apps/api/tests/sqlserver_ct_init.sql:/init.sql:ro
+      - ./apps/api/tests/sqlserver_ct_init.sql:/ct_init.sql:ro
+      - ./apps/api/tests/sqlserver_cdc_init.sql:/cdc_init.sql:ro
     entrypoint:
       - bash
       - -c
       - |
-        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /init.sql
-        echo "sqlserver CT init done"
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /ct_init.sql
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /cdc_init.sql
+        echo "sqlserver CT + native CDC init done"
 
 volumes:
   pgdata:

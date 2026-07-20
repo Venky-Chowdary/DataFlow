@@ -282,11 +282,14 @@ def _export_to_connector(
     )
 
     mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
-    write_mode = body.sync_mode.lower()
+    # Map aliases before the allow-list so overwrite → replace (not insert).
+    write_mode = (body.sync_mode or "insert").strip().lower()
+    if write_mode in {"overwrite", "full_refresh_overwrite", "truncate", "full_overwrite"}:
+        write_mode = "replace"
+    elif write_mode in {"append", "full_refresh_append", "full_append"}:
+        write_mode = "insert"
     if write_mode not in ("insert", "upsert", "replace"):
         write_mode = "insert"
-    if write_mode == "overwrite":
-        write_mode = "replace"
 
     try:
         rows_written, ddl_log, dest_summary = write_destination_database(

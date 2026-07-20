@@ -8,6 +8,7 @@ import type { LoadHistoryReport, TransferResult } from "../../lib/types";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
+import { Gate8ProofCard } from "./Gate8ProofCard";
 
 interface TransferResultDashboardProps {
   result: TransferResult;
@@ -272,6 +273,14 @@ export function TransferResultDashboard({
         className="df2-result-notify"
         compact
       />
+
+      {result.reconciliation && (
+        <Gate8ProofCard
+          report={result.reconciliation}
+          explanation={result.explanation}
+          className="df2-result-gate8"
+        />
+      )}
 
       <div className="df2-result-body">
         {!result.success && (

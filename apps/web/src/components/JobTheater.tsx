@@ -10,6 +10,8 @@ import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
+import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
+import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 
 interface JobTheaterProps {
@@ -121,9 +123,16 @@ export function JobTheater({
     startRef.current = Date.now();
     doneRef.current = false;
     prevRef.current = { loggedRows: 0 };
-    const append = (line: string) =>
-      setLog((l) => [...l.slice(-200), `${new Date().toLocaleTimeString()} — ${line}`]);
+    const append = (line: string) => {
+      const stamped = `${new Date().toLocaleTimeString()} — ${line}`;
+      setLog((l) => {
+        const next = [...l.slice(-200), stamped];
+        writeJobEventLog(jobId, next);
+        return next;
+      });
+    };
     setLog([`${new Date().toLocaleTimeString()} — Connecting to live job stream…`]);
+    writeJobEventLog(jobId, [`${new Date().toLocaleTimeString()} — Connecting to live job stream…`]);
     const stop = streamJobProgress(
       jobId,
       (update) => {
@@ -307,12 +316,17 @@ export function JobTheaterView({
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
 
-  // Reconcile reported progress with row-derived progress so the bar never
-  // looks frozen while a large batch is being written.
+  // Prefer row-derived progress when we have a denominator — never let phase
+  // theater (old 90% caps) outrun actual rows written.
   const reportedPct = job.progress_pct ?? 0;
-  const derivedPct = total > 0 ? (processed / total) * 100 : 0;
-  const rawProgress = Math.max(reportedPct, derivedPct);
-  const progress = isComplete ? 100 : Math.min(99, Math.max(isRunning ? 3 : 0, Math.round(rawProgress)));
+  const derivedPct = total > 0 ? (processed / Math.max(total, 1)) * 100 : null;
+  const indeterminate = Boolean((job as { progress_indeterminate?: boolean }).progress_indeterminate) && !(total > 0);
+  const rawProgress = derivedPct != null
+    ? derivedPct
+    : (indeterminate ? Math.min(reportedPct || 5, 5) : reportedPct);
+  const progress = isComplete
+    ? 100
+    : Math.min(99, Math.max(isRunning ? 1 : 0, Math.round(rawProgress)));
 
   // Detect a stalled bar: same progress value for a few seconds while running.
   const [stalled, setStalled] = useState(false);
@@ -522,12 +536,16 @@ export function JobTheaterView({
                 transform="rotate(-90 28 28)"
               />
             </svg>
-            <strong>{progress}%</strong>
+            <strong>{indeterminate && isRunning ? "…" : `${progress}%`}</strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
-            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isCancelled ? "Transfer cancelled" : isFailed ? "Transfer failed" : "Transferring data"}</h3>
+            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isCancelled ? "Transfer cancelled" : isFailed ? "Transfer failed" : indeterminate ? "Streaming changes" : "Transferring data"}</h3>
             <p title={job.message || phaseLabel}>
-              {job.message || (isRunning ? `${phaseLabel} — streaming rows to destination…` : "Job finished")}
+              {job.message || (isRunning
+                ? (indeterminate
+                  ? `${phaseLabel} — ${processed.toLocaleString()} change(s) applied…`
+                  : `${phaseLabel} — ${processed.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""} rows…`)
+                : "Job finished")}
             </p>
             <div className="df2-theater-v3-progress-tags">
               <span className="df2-theater-v3-chunk">
@@ -793,10 +811,32 @@ export function JobTheaterView({
         </article>
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
-          <strong>{checksum ? checksum.slice(0, 12) : "Pending"}</strong>
-          <small>{checksum ? "Writer checksum captured" : "Captured on completion"}</small>
+          <strong>
+            {job.reconciliation?.target_checksum
+              ? String(job.reconciliation.target_checksum).slice(0, 12)
+              : checksum
+                ? checksum.slice(0, 12)
+                : "Pending"}
+          </strong>
+          <small>
+            {job.reconciliation?.source_checksum && job.reconciliation?.target_checksum
+              ? (job.reconciliation.source_checksum === job.reconciliation.target_checksum
+                ? "Gate-8 source ↔ dest match"
+                : "Gate-8 checksum mismatch")
+              : checksum
+                ? "Writer checksum captured"
+                : "Captured on completion"}
+          </small>
         </article>
       </div>
+
+      {isComplete && job.reconciliation && (
+        <Gate8ProofCard
+          report={job.reconciliation}
+          explanation={job.explanation}
+          className="df2-theater-gate8"
+        />
+      )}
 
       {isComplete && !isQuarantine && (
         <div className="df2-theater-v3-alert success">

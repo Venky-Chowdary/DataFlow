@@ -33,12 +33,14 @@ The product is **beta / early production** for batch transfers on supported driv
 | MongoDB Change Streams (+ signal collection, peek stream-wins) | `connectors/mongodb_change_stream.py` |
 | PostgreSQL `pgoutput` binary peek/ack + publication-before-slot + txn hold | `connectors/postgresql_change_stream.py` |
 | MySQL binlog + GTID auto_position + XidEvent commit boundary | `connectors/mysql_change_stream.py` |
-| SQL Server native CDC + Oracle LogMiner (+ incremental peek) | `connectors/sqlserver_cdc_native.py`, `connectors/oracle_logminer.py` |
+| SQL Server native CDC + Change Tracking (+ LSN handoff, capture discovery) | `connectors/sqlserver_cdc_native.py`, `connectors/sqlserver_change_stream.py` |
+| Oracle LogMiner (+ incremental peek) | `connectors/oracle_logminer.py`, `connectors/oracle_change_stream.py` |
 | Incremental snapshot signals (API + DB signal table) | `services/cdc_incremental_snapshot.py`, `services/cdc_signal_table.py` |
 | Side-channel token isolation (no watermark clobber under load) | `services/cdc_resume_tokens.py` |
 | Distributed CDC leases (Redis Lua + fencing; file/memory fallbacks) | `services/cdc_lease.py`, `services/cdc_lease_store.py` |
 | Multi-table single reader (one PG slot / one MySQL `server_id`, demux + ack barrier) | `services/cdc_multi_table.py`, `src/transfer/cdc_transfer.py` `_run_cdc_shared_multi_table`, live IT `tests/test_cdc_shared_reader_integration.py` |
 | Mixed `_df_lsn` upsert guard + effectively-once PK sink contract | `connectors/writer_common.py`, `services/cdc_effectively_once.py` |
+| PG TOAST-aware update merge + typed txn buffer overflow | `services/cdc_toast.py`, `services/cdc_transaction_buffer.py`, `connectors/pgoutput_decoder.py` |
 | `ChangeBatch` with `resume_token` | `services/cdc_engine.py` |
 | Watermark persistence | `services/sync_cursor.py`, `services/atomic_file.py` |
 
@@ -53,16 +55,17 @@ The product is **beta / early production** for batch transfers on supported driv
 - **Multi-table shared reader** for PG + MySQL when ≥2 stream contracts are selected (one publication/slot or one binlog `server_id`; demux + `ack_barrier`). Falls back to sequential N readers if the shared path cannot start.
 - Shared-reader **ack-barrier chaos** (`tests/test_cdc_shared_ack_chaos.py`) + **live concurrent-write IT** (`tests/test_cdc_shared_reader_integration.py`).
 - **Effectively once for PK sinks** when destinations stamp/guard `_df_lsn` (`services/cdc_effectively_once.py`, `tests/test_cdc_effectively_once.py` incl. live PG upsert). Still **not** platform exactly-once.
+- **TOAST / large txn**: pgoutput merges unchanged TOAST from old tuple; incomplete sparse updates **fail closed**. Open-txn overflow raises ``CdcTxnBufferOverflow`` (no silent drop); ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS``.
 - Job Theater surfaces lease holder + backend + conflict (`cdc_lease_*` job fields).
-- CI: Postgres logical CDC in main job; Redis lease backend on CDC matrix; **SQL Server CDC** in `cdc-sqlserver`; **Oracle** optional `cdc-oracle` when `ENABLE_ORACLE_CDC` + secrets are set.
+- CI: Postgres logical CDC in main job; Redis lease backend on CDC matrix; **SQL Server CT + native CDC** in `cdc-sqlserver`; **Oracle** optional `cdc-oracle` when `ENABLE_ORACLE_CDC` + secrets are set.
 - **Do not claim** “100% CDC”, “Debezium parity”, or “better than Airbyte CDC platform-wide” without a named live matrix.
 
 ### What is still missing
 
 - **Exactly-once pipeline delivery** — only PK-sink effectively-once via `_df_lsn`; append-only / no-guard sinks remain at-least-once.
 - **Oracle always-on CI** (image/license); optional gated job exists, default forks skip.
-- **TOAST / large-object edge cases** on Postgres and very large open transactions (buffer cap raises; no silent drop).
-- **SQL Server native CDC depth** beyond Change Tracking CI.
+- **SQL Server** multi-table shared reader; AG/failover LSN quirks.
+- Disk-spill for extremely large open txns (today: fail-closed overflow; raise ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS``).
 
 ### Why it matters
 
@@ -70,9 +73,9 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 ### Recommended next step
 
-1. SQL Server native CDC depth + licensed Oracle always-on matrix.
-2. PG TOAST / large open-transaction buffer proofs.
-3. Lease store metrics / operator runbook for Redis HA.
+1. Lease metrics / Redis HA runbook.
+2. Prefer ``pgoutput`` as default in CI live matrix (TOAST path is binary-native).
+3. SQL Server multi-table shared reader / AG failover proofs.
 
 ---
 
@@ -86,7 +89,9 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 | PG/MySQL shared multi-table reader | **Shipped** — unit chaos + live concurrent-write IT |
 | Effectively once (PK + `_df_lsn`) | **Proven** for guarded upserts — not EO delivery |
 | Multi-node CDC leases | **Shipped** — Redis Lua + fencing; file single-host |
-| SQL Server / Oracle fleet depth | **Behind** Debezium/Airbyte (Oracle CI optional) |
+| SQL Server native CDC | **Shipped** — capture discovery, LSN IT, net/before-image filters |
+| PG TOAST / large open txn | **Shipped** — merge + fail-closed overflow (no silent drop) |
+| SQL Server / Oracle fleet depth | **Behind** Debezium on multi-table/AG; Oracle CI optional |
 | Connect-scale ops / years of edge cases | **Behind** |
 
 **Verdict:** DataFlow can win evaluations that prioritize *provable trust*. It cannot yet win evaluations that prioritize *CDC platform coverage*. Say so in sales decks.

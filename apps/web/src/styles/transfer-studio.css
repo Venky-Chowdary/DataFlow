@@ -841,8 +841,9 @@
   background: #fff;
   font-size: 12px;
   min-width: 0;
-  max-width: min(420px, 38vw);
+  max-width: min(560px, 52vw);
   flex-shrink: 1;
+  overflow: visible;
 }
 
 .df2-route-bar-live {
@@ -899,6 +900,8 @@
   padding-left: 4px;
   border-left: 1px solid #e2e8f0;
   margin-left: 2px;
+  white-space: nowrap;
+  overflow: visible;
 }
 
 /* ─── Main canvas: workspace + context rail ─── */
@@ -3938,6 +3941,17 @@ th.df2-type-string .df2-type-badge {
   border-radius: 999px;
   background: #dbe4ef;
   overflow: hidden;
+}
+
+.df2-run-launch-progress-track-indeterminate .df2-run-launch-progress-fill {
+  max-width: 40%;
+  animation: df2-launch-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes df2-launch-indeterminate {
+  0% { transform: translateX(-20%); opacity: 0.7; }
+  50% { transform: translateX(120%); opacity: 1; }
+  100% { transform: translateX(260%); opacity: 0.7; }
 }
 
 .df2-run-launch-progress-fill {

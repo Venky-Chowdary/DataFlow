@@ -825,7 +825,7 @@ def stream_database_transfer(
     schema: dict[str, str],
     on_checkpoint: Callable[..., None] | None = None,
     *,
-    sync_mode: str = "full_refresh_overwrite",
+    sync_mode: str = "full_refresh_append",
     stream_contracts: list[dict] | None = None,
     job_id: str | None = None,
     checkpoint: Checkpoint | None = None,
@@ -854,12 +854,16 @@ def stream_database_transfer(
         max_cursor_value,
         requires_incremental,
         requires_upsert,
+        resolve_effective_sync_mode,
         resolve_sync_contract,
         set_watermark,
     )
 
     contract = resolve_sync_contract(stream_contracts)
-    effective_sync = contract.sync_mode if contract else sync_mode
+    effective_sync = resolve_effective_sync_mode(
+        sync_mode,
+        contract.sync_mode if contract else None,
+    )
     incremental = requires_incremental(effective_sync)
     cursor_source_col = contract.cursor_field if contract else ""
     pk_target_cols: list[str] = []
@@ -1613,10 +1617,17 @@ def stream_scd2_mirror_transfer(
 
     from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
-    from services.sync_cursor import map_source_to_target, resolve_sync_contract
+    from services.sync_cursor import (
+        map_source_to_target,
+        resolve_effective_sync_mode,
+        resolve_sync_contract,
+    )
 
     contract = resolve_sync_contract(stream_contracts)
-    effective_sync = (contract.sync_mode if contract else sync_mode).lower()
+    effective_sync = resolve_effective_sync_mode(
+        sync_mode,
+        contract.sync_mode if contract else None,
+    ).lower()
 
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)

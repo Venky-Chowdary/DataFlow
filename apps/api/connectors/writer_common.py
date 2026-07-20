@@ -264,9 +264,14 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
         gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
         if gtid is not None and str(gtid).strip():
             return f"gtid:{str(gtid).strip()}"
-        for key in ("lsn", "scn", "position", "resume_lsn", "pos", "_data"):
+        for key in ("lsn", "scn", "version", "position", "resume_lsn", "pos", "_data"):
             value = resume_token.get(key)
             if value is not None and str(value).strip():
+                if key == "version":
+                    try:
+                        return f"{int(value):020d}"
+                    except (TypeError, ValueError):
+                        return str(value).strip()
                 return str(value).strip()
         # Mongo resume token often is the whole dict with ``_data``.
         data = resume_token.get("_data")
@@ -276,6 +281,29 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
     text = str(resume_token).strip()
     if not text or text in {"None", "null"}:
         return None
+    # JSON CDC tokens (SQL Server native / CT, Oracle LogMiner, etc.)
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            kind = str(data.get("kind") or "")
+            if kind == "mssql-cdc":
+                lsn = data.get("lsn")
+                if lsn is not None and str(lsn).strip():
+                    return str(lsn).strip()
+            if kind in {"mssql-ct", "sqlserver-ct"}:
+                ver = data.get("version")
+                if ver is not None and str(ver).strip():
+                    # Zero-pad so lexicographic compare stays monotonic for versions.
+                    try:
+                        return f"{int(ver):020d}"
+                    except (TypeError, ValueError):
+                        return str(ver).strip()
+            nested = extract_cdc_lsn(data)
+            if nested:
+                return nested
     if "lsn=" in text:
         for part in text.split("|"):
             if part.startswith("lsn=") and part[4:].strip():

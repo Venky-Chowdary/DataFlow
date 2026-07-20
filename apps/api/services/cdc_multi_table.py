@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from services.cdc_engine import ChangeBatch
+from services.cdc_transaction_buffer import (
+    CdcTxnBufferOverflow,
+    default_txn_buffer_max_events,
+)
 
 
 def normalize_table_list(tables: list[str] | tuple[str, ...] | str) -> list[str]:
@@ -76,14 +80,21 @@ class _OpenMultiTxn:
 class MultiTableTransactionBuffer:
     """Buffer DML by table until COMMIT; yield one ChangeBatch per touched table."""
 
-    def __init__(self, *, max_events: int = 50_000) -> None:
-        self.max_events = max(100, int(max_events))
+    def __init__(self, *, max_events: int | None = None) -> None:
+        if max_events is not None:
+            self.max_events = max(1, int(max_events))
+        else:
+            self.max_events = max(100, default_txn_buffer_max_events())
         self._open: _OpenMultiTxn | None = None
         self._anonymous_seq = 0
 
     @property
     def open_xid(self) -> str | None:
         return self._open.xid if self._open else None
+
+    @property
+    def open_event_count(self) -> int:
+        return int(self._open.event_count) if self._open else 0
 
     def begin(self, xid: str | None = None, *, lsn: str | None = None) -> None:
         if self._open is not None:
@@ -131,9 +142,14 @@ class MultiTableTransactionBuffer:
 
     def _maybe_overflow(self) -> None:
         if self._open and self._open.event_count > self.max_events:
-            raise RuntimeError(
-                f"CDC multi-table txn buffer exceeded max_events={self.max_events}; "
-                "refuse silent truncation (open txn held for redelivery)"
+            raise CdcTxnBufferOverflow(
+                f"CDC multi-table txn buffer exceeded max_events={self.max_events} "
+                f"(xid={self._open.xid}, events={self._open.event_count}); "
+                "increase DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS or reduce txn size — "
+                "refusing silent truncation (open txn held for redelivery)",
+                xid=self._open.xid,
+                max_events=self.max_events,
+                event_count=self._open.event_count,
             )
 
     def commit(

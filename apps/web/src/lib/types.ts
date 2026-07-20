@@ -137,6 +137,8 @@ export interface TransferJob {
   created_at: string;
   total_rows?: number;
   progress_pct?: number;
+  /** True when job has no finite row denominator (e.g. continuous CDC). */
+  progress_indeterminate?: boolean;
   phase?: string;
   message?: string;
   operation?: string;
@@ -173,6 +175,15 @@ export interface TransferJob {
   /** True when this job failed because another worker holds the CDC resource. */
   cdc_lease_conflict?: boolean | null;
   streams?: CdcStreamHealth[];
+  sync_mode?: string;
+  schema_policy?: string;
+  validation_mode?: string;
+  triggered_by?: string;
+  created_by?: string;
+  explanation?: string;
+  ddl_executed?: string[];
+  ddl_log?: string[];
+  event_log?: string[];
 }
 
 export interface JobPhase {
@@ -217,6 +228,19 @@ export interface JobProgress extends TransferJob {
     source_checksum?: string;
     target_checksum?: string;
   };
+  /** Plain-language pipeline explanation from the engine. */
+  explanation?: string;
+  /** DDL / stream log lines (aliased as ddl_log for Jobs UI). */
+  ddl_executed?: string[];
+  ddl_log?: string[];
+  /** Durable operator event lines (phase / message / row milestones). */
+  event_log?: string[];
+  sync_mode?: string;
+  schema_policy?: string;
+  validation_mode?: string;
+  /** Operator who started the job. */
+  triggered_by?: string;
+  created_by?: string;
   phases?: JobPhase[];
   notifications?: JobNotificationResult[];
   records_per_second?: number;
@@ -505,6 +529,7 @@ export interface TransferResult {
     source_checksum?: string;
     target_checksum?: string;
   };
+  explanation?: string;
   job_id?: string;
   /** Workspace notification dispatch results copied from the completed job. */
   notifications?: JobNotificationResult[];

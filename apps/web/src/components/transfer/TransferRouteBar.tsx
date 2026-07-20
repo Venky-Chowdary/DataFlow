@@ -1,4 +1,5 @@
 import { ConnectorIcon } from "../../app/brand-icons";
+import { formatRouteRowCount } from "../../lib/formatRouteRowCount";
 
 interface TransferRouteBarProps {
   sourceLabel: string;
@@ -8,6 +9,8 @@ interface TransferRouteBarProps {
   rowCount?: number;
   live?: boolean;
 }
+
+export { formatRouteRowCount };
 
 /** Compact source → destination strip — not a second stepper. */
 export function TransferRouteBar({
@@ -22,6 +25,8 @@ export function TransferRouteBar({
   const hasDest = destLabel !== "Choose destination" && Boolean(destType);
 
   if (!hasSource && !hasDest && !rowCount) return null;
+
+  const countLabel = rowCount != null && rowCount > 0 ? formatRouteRowCount(rowCount) : null;
 
   return (
     <div className={`df2-route-bar ${live ? "df2-route-bar-live" : ""}`} aria-label="Current route">
@@ -38,8 +43,10 @@ export function TransferRouteBar({
         )}
         <span className="df2-route-bar-label" title={destLabel}>{hasDest ? destLabel : "Choose destination"}</span>
       </div>
-      {rowCount != null && rowCount > 0 && (
-        <span className="df2-route-bar-meta">{rowCount.toLocaleString()} rows</span>
+      {countLabel && (
+        <span className="df2-route-bar-meta" title={countLabel.full}>
+          {countLabel.short}
+        </span>
       )}
     </div>
   );

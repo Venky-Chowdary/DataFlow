@@ -786,6 +786,7 @@ export function streamJobProgress(
       records_processed: Number(raw.records_processed ?? raw.rows_processed ?? 0),
       total_rows: Number(raw.total_rows ?? 0),
       progress_pct: Number(raw.progress_pct ?? 0),
+      progress_indeterminate: Boolean(raw.progress_indeterminate),
       phase: raw.phase ? String(raw.phase) : undefined,
       message: raw.message ? String(raw.message) : undefined,
       operation: raw.operation ? String(raw.operation) : undefined,
@@ -814,6 +815,27 @@ export function streamJobProgress(
       reconciliation: raw.reconciliation && typeof raw.reconciliation === "object"
         ? raw.reconciliation as JobProgress["reconciliation"]
         : undefined,
+      explanation: raw.explanation ? String(raw.explanation) : undefined,
+      ddl_executed: Array.isArray(raw.ddl_executed)
+        ? raw.ddl_executed.map(String)
+        : Array.isArray(raw.ddl_log)
+          ? raw.ddl_log.map(String)
+          : undefined,
+      ddl_log: Array.isArray(raw.ddl_log)
+        ? raw.ddl_log.map(String)
+        : Array.isArray(raw.ddl_executed)
+          ? raw.ddl_executed.map(String)
+          : undefined,
+      event_log: Array.isArray(raw.event_log) ? raw.event_log.map(String) : undefined,
+      sync_mode: raw.sync_mode ? String(raw.sync_mode) : undefined,
+      schema_policy: raw.schema_policy ? String(raw.schema_policy) : undefined,
+      validation_mode: raw.validation_mode ? String(raw.validation_mode) : undefined,
+      triggered_by: raw.triggered_by
+        ? String(raw.triggered_by)
+        : raw.created_by
+          ? String(raw.created_by)
+          : undefined,
+      created_by: raw.created_by ? String(raw.created_by) : undefined,
       records_per_second: Number.isFinite(rpsFromRoot as number)
         ? rpsFromRoot
         : Number.isFinite(rpsFromDs as number)
@@ -1435,6 +1457,9 @@ export async function runUniversalTransfer(options: {
   backfillNewFields?: boolean;
   streamContracts?: Record<string, unknown>[];
   planId?: string;
+  priorityColumn?: string;
+  priorityDirection?: "asc" | "desc";
+  limit?: number;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -1444,10 +1469,13 @@ export async function runUniversalTransfer(options: {
   formData.append("dest_format", options.destFormat || "mongodb");
   formData.append("dest_database", options.destDatabase || "test_db");
   formData.append("dest_schema", options.destSchema || "public");
-  formData.append("sync_mode", options.syncMode || "full_refresh_overwrite");
+  formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
+  if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
+  if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);
+  if (options.limit && options.limit > 0) formData.append("limit", String(options.limit));
   if (options.destTable) formData.append("dest_table", options.destTable);
   if (options.destCollection) formData.append("dest_collection", options.destCollection);
   formData.append("skip_preflight", options.skipPreflight === true ? "true" : "false");
@@ -1509,7 +1537,7 @@ export async function executeTransferJson(payload: {
       source: payload.source,
       destination: payload.destination,
       mappings: payload.mappings || [],
-      sync_mode: payload.syncMode || "full_refresh_overwrite",
+      sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
       skip_preflight: payload.skipPreflight === true,
@@ -1559,7 +1587,7 @@ export async function transferFile(
   formData.append("destination_collection", destinationCollection);
   formData.append("skip_preflight", options.skipPreflight === true ? "true" : "false");
   formData.append("dest_type", options.destType || "mongodb");
-  formData.append("sync_mode", options.syncMode || "full_refresh_overwrite");
+  formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");

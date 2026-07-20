@@ -81,6 +81,7 @@ import {
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
+import { readJobEventLog } from "../lib/jobEventLog";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import {
   buildStreamContracts,
@@ -152,17 +153,17 @@ type SyncMode =
   | "cdc"
   | "scd2"
   | "mirror";
-type SchemaPolicy = "manual_review" | "propagate_columns" | "propagate_all" | "pause_on_change";
+type SchemaPolicy = "manual_review" | "propagate_columns" | "propagate_all" | "pause_on_change" | "type_locked";
 type ValidationMode = "balanced" | "strict" | "maximum";
 
 const SYNC_MODES: { id: SyncMode; label: string; detail: string }[] = [
-  { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Complete snapshot replaces destination rows." },
-  { id: "full_refresh_append", label: "Full append", detail: "Complete snapshot appends to destination history." },
-  { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new-row sync." },
-  { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor plus key-backed final table." },
-  { id: "cdc", label: "CDC", detail: "Change stream with cursor and key contract." },
+  { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot." },
+  { id: "full_refresh_append", label: "Full append", detail: "Keep existing rows; append the full snapshot (100k + 100k → 200k)." },
+  { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new rows only — never rewrites history." },
+  { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts for a final table." },
+  { id: "cdc", label: "CDC", detail: "Log-based changes with cursor + key; at-least-once upsert until proven otherwise." },
   { id: "scd2", label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
-  { id: "mirror", label: "Mirror", detail: "Keep destination in sync with inferred deletes; requires primary key." },
+  { id: "mirror", label: "Mirror", detail: "Keep destination in sync with soft-deletes for missing keys; requires primary key." },
 ];
 
 const SCHEMA_POLICIES: { id: SchemaPolicy; label: string; detail: string }[] = [
@@ -174,17 +175,22 @@ const SCHEMA_POLICIES: { id: SchemaPolicy; label: string; detail: string }[] = [
   {
     id: "propagate_columns",
     label: "Propagate columns",
-    detail: "Auto-apply additive field adds/removes — type changes still need review.",
+    detail: "Auto-add new destination columns on transfer (type changes still need review).",
   },
   {
     id: "propagate_all",
     label: "Propagate everything",
-    detail: "Auto-apply streams, fields, and compatible type updates (higher blast radius).",
+    detail: "Auto-add columns like Propagate columns; incompatible type changes still need review.",
   },
   {
     id: "pause_on_change",
     label: "Pause on drift",
     detail: "Stop scheduled runs when schema changes — best for production warehouses.",
+  },
+  {
+    id: "type_locked",
+    label: "Type locked",
+    detail: "Reject type changes at the destination — fail closed on incompatible casts.",
   },
 ];
 
@@ -309,6 +315,9 @@ export function TransferPage({
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [cursorField, setCursorField] = useState("");
   const [primaryKeyField, setPrimaryKeyField] = useState("");
+  const [priorityColumn, setPriorityColumn] = useState("");
+  const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
+  const [rowLimit, setRowLimit] = useState(0);
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
@@ -2330,7 +2339,7 @@ export function TransferPage({
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
-      setRunStartupProgress(28);
+      setRunStartupProgress(24);
       setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
@@ -2368,11 +2377,14 @@ export function TransferPage({
         backfillNewFields,
         streamContracts,
         planId: persistedPlanId ?? undefined,
+        priorityColumn: priorityColumn || undefined,
+        priorityDirection,
+        limit: rowLimit > 0 ? rowLimit : undefined,
       });
-      setRunStartupProgress(88);
+      setRunStartupProgress(36);
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       if (data.job_id && (data as { async?: boolean }).async) {
-        setRunStartupProgress(100);
+        setRunStartupProgress(40);
         setActiveJobId(data.job_id);
         setTransferring(false);
         toast({
@@ -2451,6 +2463,9 @@ export function TransferPage({
           ?? job.load_history_report,
       },
       reconciliation: job.reconciliation,
+      explanation: job.explanation,
+      ddl_executed: job.ddl_executed ?? job.ddl_log,
+      event_log: job.event_log?.length ? job.event_log : (job._id ? readJobEventLog(job._id) : undefined),
       notifications: job.notifications,
       error_details: job.load_history_report
         ? { load_history_report: job.load_history_report }
@@ -2889,7 +2904,7 @@ export function TransferPage({
               ? exportFormat
               : destType || ""
           }
-          rowCount={parsed?.row_count}
+          rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           live={Boolean(activeJobId) || transferring}
         />
         </div>
@@ -3551,6 +3566,12 @@ export function TransferPage({
                 {syncMode === "scd2" ? "SCD Type 2" : "Mirror"} requires a primary key — open Advanced settings to set it.
               </p>
             )}
+            {isMultiStreamSource && syncMode !== "cdc" && (
+              <p className="df2-label-hint df2-dest-sync-warning" role="status">
+                Multi-stream full/incremental modes currently run the <strong>primary stream</strong> only
+                ({advancedStreamNames[0] || "first selected"}). Switch to <strong>CDC</strong> for shared-reader multi-table sync, or run streams one at a time.
+              </p>
+            )}
           </div>
 
           <DestinationAdvancedDrawer
@@ -3574,8 +3595,21 @@ export function TransferPage({
             requiresCursor={requiresCursor}
             requiresPrimaryKey={requiresPrimaryKey}
             streamNeedsReview={streamNeedsReview}
+            suggestedCursor={cursorCandidate}
+            suggestedPrimaryKey={primaryKeyCandidate}
+            priorityColumn={priorityColumn}
+            priorityDirection={priorityDirection}
+            rowLimit={rowLimit}
+            onPriorityColumnChange={setPriorityColumn}
+            onPriorityDirectionChange={setPriorityDirection}
+            onRowLimitChange={setRowLimit}
             onSyncModeChange={setSyncMode}
-            onSchemaPolicyChange={setSchemaPolicy}
+            onSchemaPolicyChange={(policy) => {
+              setSchemaPolicy(policy);
+              if (policy === "propagate_columns" || policy === "propagate_all") {
+                setBackfillNewFields(true);
+              }
+            }}
             onValidationModeChange={setValidationMode}
             onBackfillChange={setBackfillNewFields}
             onStreamCursorChange={(stream, value) => {
@@ -3752,13 +3786,13 @@ export function TransferPage({
               <strong title={mapDestRouteLabel}>{mapDestRouteLabel}</strong>
             </div>
 
-            <div className="df2-run-launch-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={runStartupProgress}>
+            <div className="df2-run-launch-progress" role="status" aria-live="polite">
               <div className="df2-run-launch-progress-meta">
                 <span>Initializing transfer job</span>
-                <strong>{runStartupProgress}%</strong>
+                <strong>Starting…</strong>
               </div>
-              <div className="df2-run-launch-progress-track">
-                <span className="df2-run-launch-progress-fill" style={{ width: `${runStartupProgress}%` }} />
+              <div className="df2-run-launch-progress-track df2-run-launch-progress-track-indeterminate">
+                <span className="df2-run-launch-progress-fill" style={{ width: `${Math.min(runStartupProgress, 40)}%` }} />
               </div>
             </div>
 

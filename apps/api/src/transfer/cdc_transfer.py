@@ -339,6 +339,8 @@ def _apply_change_batch(
     pk_target_col: str,
     chunk_idx: int,
     total_chunks: int,
+    *,
+    backfill_new_fields: bool = False,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     headers, mappings, column_types = _stamp_cdc_lsn(
@@ -368,7 +370,7 @@ def _apply_change_batch(
             rows_so_far=0,
             write_mode="upsert",
             conflict_columns=[pk_target_col] if pk_target_col else None,
-            backfill_new_fields=False,
+            backfill_new_fields=backfill_new_fields,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -394,7 +396,7 @@ def _apply_change_batch(
             rows_so_far=0,
             write_mode="upsert",
             conflict_columns=[pk_target_col] if pk_target_col else None,
-            backfill_new_fields=False,
+            backfill_new_fields=backfill_new_fields,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -731,6 +733,7 @@ def _run_cdc_shared_multi_table(
             pk_target,
             chunk_idx,
             max(1, chunk_idx + 1),
+            backfill_new_fields=backfill_new_fields,
         )
         chunk_idx += 1
         total_rows += rows_written + deleted
@@ -1356,6 +1359,7 @@ def _run_cdc_single_stream(
             pk_target_col,
             chunk_idx,
             total_chunks,
+            backfill_new_fields=backfill_new_fields,
         )
         state.rows_written += rows_written
         state.inserts += len(change.inserts)

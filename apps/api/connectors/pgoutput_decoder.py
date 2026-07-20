@@ -30,6 +30,8 @@ class DecodedChange:
     old_tuple: dict[str, str] | None = None
     new_tuple: dict[str, str] | None = None
     xid: str | None = None
+    toast_unchanged_cols: list[str] = field(default_factory=list)
+    toast_incomplete: bool = False
 
 
 class PgOutputDecoder:
@@ -112,6 +114,8 @@ class PgOutputDecoder:
         return DecodedChange("insert", rel.namespace, rel.relation, new_tuple=new_tuple)
 
     def _decode_update(self, buf: "_ByteReader") -> DecodedChange | None:
+        from services.cdc_toast import TOAST_UNCHANGED, merge_toast_aware_update
+
         oid = buf.read_int32()
         rel = self.relations.get(oid)
         if not rel:
@@ -121,19 +125,30 @@ class PgOutputDecoder:
         while buf.remaining() > 0:
             kind = buf.read_bytes(1)
             if kind in (b"K", b"O"):
-                old_tuple = self._read_tuple(buf, rel.columns)
+                old_tuple = self._read_tuple(buf, rel.columns, toast_sentinel=False)
             elif kind == b"N":
-                new_tuple = self._read_tuple(buf, rel.columns)
+                new_tuple = self._read_tuple(buf, rel.columns, toast_sentinel=True)
             else:
                 break
         if new_tuple is None and old_tuple is None:
             return None
+        merged = merge_toast_aware_update(
+            old_tuple, new_tuple, relation_columns=rel.columns
+        )
+        # Strip any residual sentinels before emit.
+        row = {
+            k: v
+            for k, v in merged.row.items()
+            if v is not TOAST_UNCHANGED
+        }
         return DecodedChange(
             "update",
             rel.namespace,
             rel.relation,
             old_tuple=old_tuple,
-            new_tuple=new_tuple or old_tuple,
+            new_tuple=row or (new_tuple or old_tuple),
+            toast_unchanged_cols=list(merged.toast_unchanged_cols),
+            toast_incomplete=bool(merged.toast_incomplete),
         )
 
     def _decode_delete(self, buf: "_ByteReader") -> DecodedChange | None:
@@ -144,19 +159,29 @@ class PgOutputDecoder:
         kind = buf.read_bytes(1)
         if kind not in (b"K", b"O"):
             return None
-        old_tuple = self._read_tuple(buf, rel.columns)
+        old_tuple = self._read_tuple(buf, rel.columns, toast_sentinel=False)
         return DecodedChange("delete", rel.namespace, rel.relation, old_tuple=old_tuple)
 
-    def _read_tuple(self, buf: "_ByteReader", columns: list[str]) -> dict[str, str]:
+    def _read_tuple(
+        self,
+        buf: "_ByteReader",
+        columns: list[str],
+        *,
+        toast_sentinel: bool = False,
+    ) -> dict[str, Any]:
+        from services.cdc_toast import TOAST_UNCHANGED
+
         natts = buf.read_int16()
-        out: dict[str, str] = {}
+        out: dict[str, Any] = {}
         for i in range(natts):
             col = columns[i] if i < len(columns) else f"col_{i}"
             kind = buf.read_bytes(1)
             if kind == b"n":
                 out[col] = ""
             elif kind == b"u":
-                # unchanged toast — leave absent
+                # unchanged toast — keep sentinel so merge can fill from old
+                if toast_sentinel:
+                    out[col] = TOAST_UNCHANGED
                 continue
             elif kind == b"t":
                 length = buf.read_int32()

@@ -11,17 +11,52 @@ on the destination). This buffer:
 3. On COMMIT — flush the full ChangeBatch atomically to the caller.
 4. On ROLLBACK / ABORT — discard the open transaction.
 
-This is strictly stronger than naive "emit every row as it arrives" parsers
-and matches Debezium's transactional ordering guarantees for at-least-once
-apply (destination upserts remain idempotent).
+Oversized open transactions **raise** :class:`CdcTxnBufferOverflow` — never
+silently truncate or drop events. Raise ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS``
+or split source transactions; WAL remains unacked for redelivery.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from services.cdc_engine import ChangeBatch
+
+
+def default_txn_buffer_max_events() -> int:
+    raw = os.getenv("DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS", "50000")
+    try:
+        return max(100, int(raw))
+    except (TypeError, ValueError):
+        return 50_000
+
+
+class CdcTxnBufferOverflow(RuntimeError):
+    """Open CDC transaction exceeded the in-memory event cap — fail closed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        xid: str = "",
+        max_events: int = 0,
+        event_count: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.xid = xid
+        self.max_events = max_events
+        self.event_count = event_count
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": "cdc_txn_buffer_overflow",
+            "message": str(self),
+            "xid": self.xid,
+            "max_events": self.max_events,
+            "event_count": self.event_count,
+        }
 
 
 @dataclass
@@ -36,14 +71,25 @@ class _OpenTxn:
 class TransactionBuffer:
     """Buffer DML until COMMIT; yield one ChangeBatch per committed txn."""
 
-    def __init__(self, *, max_events: int = 50_000) -> None:
-        self.max_events = max(100, int(max_events))
+    def __init__(self, *, max_events: int | None = None) -> None:
+        if max_events is not None:
+            self.max_events = max(1, int(max_events))
+        else:
+            self.max_events = max(100, default_txn_buffer_max_events())
         self._open: _OpenTxn | None = None
         self._anonymous_seq = 0
 
     @property
     def open_xid(self) -> str | None:
         return self._open.xid if self._open else None
+
+    @property
+    def open_event_count(self) -> int:
+        if self._open is None:
+            return 0
+        return (
+            len(self._open.inserts) + len(self._open.updates) + len(self._open.deletes)
+        )
 
     def begin(self, xid: str | None = None, *, lsn: str | None = None) -> None:
         if self._open is not None:
@@ -138,9 +184,14 @@ class TransactionBuffer:
     def _maybe_overflow(self) -> None:
         if self._open is None:
             return
-        n = len(self._open.inserts) + len(self._open.updates) + len(self._open.deletes)
+        n = self.open_event_count
         if n > self.max_events:
-            raise RuntimeError(
+            xid = self._open.xid
+            raise CdcTxnBufferOverflow(
                 f"CDC transaction buffer exceeded max_events={self.max_events} "
-                f"(xid={self._open.xid}); increase buffer or reduce txn size"
+                f"(xid={xid}, events={n}); increase DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS "
+                f"or reduce source txn size — refusing silent truncation",
+                xid=xid,
+                max_events=self.max_events,
+                event_count=n,
             )

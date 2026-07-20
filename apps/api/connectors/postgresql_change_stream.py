@@ -774,7 +774,13 @@ class PostgreSqlChangeStreamCdc:
             conn.commit()
 
     def _ensure_replica_identity(self) -> None:
-        """Require FULL replica identity so UPDATE/DELETE emit old keys."""
+        """Require FULL replica identity so UPDATE/DELETE emit old keys + TOAST.
+
+        Without FULL (or an identity index covering TOAST columns), pgoutput
+        marks unchanged TOAST as ``'u'`` with no old tuple — sparse updates
+        would wipe destination columns. Fail soft only when the table is
+        missing; log loudly otherwise.
+        """
         for table in self.tables:
             qualified = self._qualified_table(table)
             try:
@@ -783,7 +789,12 @@ class PostgreSqlChangeStreamCdc:
                         cur.execute(f"ALTER TABLE {qualified} REPLICA IDENTITY FULL")
                     conn.commit()
             except Exception as exc:
-                _logger.debug("Could not set REPLICA IDENTITY FULL on %s: %s", qualified, exc)
+                _logger.warning(
+                    "Could not set REPLICA IDENTITY FULL on %s (TOAST-safe updates "
+                    "may fail closed): %s",
+                    qualified,
+                    exc,
+                )
 
     def ack(self, resume_token: Any = None) -> None:
         """Advance the slot confirmed_flush_lsn after successful destination apply.
@@ -1045,6 +1056,15 @@ class PostgreSqlChangeStreamCdc:
                         )
                         buf.insert(tbl, change.new_tuple, lsn=lsn)
                     elif change.op == "update" and change.new_tuple:
+                        if change.toast_incomplete:
+                            from services.cdc_toast import CdcToastIncompleteError
+
+                            raise CdcToastIncompleteError(
+                                f"CDC UPDATE on {change.relation} has TOAST gaps "
+                                "without old-tuple merge; set REPLICA IDENTITY FULL",
+                                table=change.relation or self.table,
+                                columns=list(change.toast_unchanged_cols or []),
+                            )
                         tbl = table_by_lower.get(
                             (change.relation or "").lower(), change.relation or self.table
                         )
