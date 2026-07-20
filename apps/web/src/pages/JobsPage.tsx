@@ -20,8 +20,12 @@ import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtil
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
-import { inferTransferFailureHint, classifyJobLogLine } from "../lib/transferFailure";
+import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
+import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
+import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
+import { inferTransferFailureHint } from "../lib/transferFailure";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
+import { LiveEventLog } from "../components/ui/LiveEventLog";
 import { readJobEventLog } from "../lib/jobEventLog";
 
 interface JobDetailRecord extends JobProgress {
@@ -666,6 +670,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       onComplete={handleComplete}
                       onFailed={handleComplete}
                       onCancelled={handleComplete}
+                      onOpenJob={(jobId) => setSelectedId(jobId)}
                     />
                   </div>
                 ) : liveJob && selected ? (
@@ -830,10 +835,28 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                       >
                         {detailTab === "detail" && (
                           <div className="df2-jobs-detail-pane">
+                            <JobTrustScoreCard
+                              job={liveJob}
+                              onOpenQuarantine={
+                                showQuarantineTab ? () => setDetailTab("quarantine") : undefined
+                              }
+                              onOpenValidate={onStartTransfer}
+                              onResume={
+                                liveJob.checkpoint || liveJob.chunk_current != null
+                                  ? () => void handleResume()
+                                  : undefined
+                              }
+                            />
                             {recon && (
                               <Gate8ProofCard
                                 report={recon}
                                 explanation={liveJob.explanation}
+                                onOpenValidate={onStartTransfer}
+                                onOpenQuarantine={
+                                  showQuarantineTab
+                                    ? () => setDetailTab("quarantine")
+                                    : undefined
+                                }
                               />
                             )}
 
@@ -892,6 +915,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                               )}
                               {liveJob.cdc_lease_resource && (
                                 <div><dt>Lease resource</dt><dd className="df2-mono">{liveJob.cdc_lease_resource}</dd></div>
+                              )}
+                              {liveJob.cdc_lease_generation != null && (
+                                <div><dt>Lease generation</dt><dd>{liveJob.cdc_lease_generation}</dd></div>
+                              )}
+                              {liveJob.cdc_lease_cursor_key && (
+                                <div><dt>Lease cursor</dt><dd className="df2-mono">{liveJob.cdc_lease_cursor_key}</dd></div>
                               )}
                             </dl>
 
@@ -974,6 +1003,27 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                                 )}
                               </div>
                             )}
+
+                            {liveJob.cdc_lease_conflict && (
+                              <CdcLeaseConflictPanel
+                                job={liveJob}
+                                onResume={
+                                  liveJob.checkpoint || liveJob.chunk_current != null
+                                    ? () => void handleResume()
+                                    : undefined
+                                }
+                                onOpenJob={(jobId) => setSelectedId(jobId)}
+                              />
+                            )}
+
+                            <CdcCursorGapPanel
+                              job={liveJob}
+                              onResume={
+                                liveJob.checkpoint || liveJob.chunk_current != null
+                                  ? () => void handleResume()
+                                  : undefined
+                              }
+                            />
 
                             {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
                               <div className="df2-data-integrity" role="note">
@@ -1115,6 +1165,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                                 coercedNullRows={liveJob.coerced_null_rows}
                                 autoLoad
                                 initiallyOpen
+                                onOpenValidate={onStartTransfer}
+                                onReplayComplete={() => {
+                                  void onRefresh?.();
+                                }}
                               />
                             </section>
                           </div>
@@ -1124,44 +1178,28 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                           <div className="df2-jobs-detail-pane">
                             {eventLog.length > 0 ? (
                               <div className="df2-jobs-v3-log is-tab is-terminal">
-                                <header className="df2-jobs-terminal-head">
-                                  <strong>Event log</strong>
-                                  <span>{eventLog.length} events</span>
-                                </header>
-                                <p className="df2-jobs-log-hint">
-                                  Phase changes, progress messages, and row milestones recorded for this job.
-                                </p>
-                                <div className="df2-jobs-terminal" role="log">
-                                  {eventLog.map((line, i) => (
-                                    <div
-                                      key={`ev-${i}`}
-                                      className={`df2-jobs-terminal-line is-${classifyJobLogLine(line)}`}
-                                    >
-                                      {line}
-                                    </div>
-                                  ))}
-                                </div>
+                                <LiveEventLog
+                                  lines={eventLog}
+                                  live={
+                                    liveJob?.status === "running"
+                                    || liveJob?.status === "queued"
+                                    || selected?.status === "running"
+                                    || selected?.status === "queued"
+                                  }
+                                  variant="jobs"
+                                  title="Event log"
+                                  empty="No events yet"
+                                />
                               </div>
                             ) : null}
                             {ddlLog.length > 0 ? (
                               <div className="df2-jobs-v3-log is-tab is-terminal">
-                                <header className="df2-jobs-terminal-head">
-                                  <strong>DDL & stream log</strong>
-                                  <span>{ddlLog.length} lines</span>
-                                </header>
-                                <p className="df2-jobs-log-hint">
-                                  Statements and stream steps the engine recorded while creating or altering destination objects.
-                                </p>
-                                <div className="df2-jobs-terminal" role="log">
-                                  {ddlLog.map((line, i) => (
-                                    <div
-                                      key={`ddl-${i}`}
-                                      className={`df2-jobs-terminal-line is-${classifyJobLogLine(line)}`}
-                                    >
-                                      {line}
-                                    </div>
-                                  ))}
-                                </div>
+                                <LiveEventLog
+                                  lines={ddlLog}
+                                  variant="jobs"
+                                  title="DDL & stream log"
+                                  empty="No DDL lines"
+                                />
                               </div>
                             ) : null}
                             {eventLog.length === 0 && ddlLog.length === 0 && (

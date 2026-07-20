@@ -331,6 +331,11 @@ class MongoDBService:
                     "phases": 1,
                     "records_processed": 1,
                     "rejected_rows": 1,
+                    "coerced_null_rows": 1,
+                    "reconciliation": 1,
+                    "cdc_lag_seconds": 1,
+                    "cdc_lease_conflict": 1,
+                    "destination_summary": 1,
                     "reconcile": 1,
                     "event_log": 1,
                     "message": 1,
@@ -340,6 +345,13 @@ class MongoDBService:
         except Exception:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
+
+        try:
+            from services.job_trust import attach_trust_to_updates
+
+            attach_trust_to_updates(status, updates, previous=prev_doc)
+        except Exception:
+            pass
 
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
@@ -685,6 +697,13 @@ class MemoryMongoDBService:
             if existing_fence is not None and existing_fence != fence:
                 return False
             kwargs["lease_fence"] = fence
+
+        try:
+            from services.job_trust import attach_trust_to_updates
+
+            attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception:
+            pass
 
         prev_phase = rec.get("phase")
         prev_message = str(rec.get("message") or "").strip()

@@ -532,6 +532,11 @@ export function MappingProofDrawer({
               <li key={`${r.code}-${r.message}`} className={`sev-${r.severity}`}>
                 <span className="df2-map-proof-risk-code">{r.code}</span>
                 {r.message}
+                {r.code === "cdc_append_only_sink" && (
+                  <div className="df2-map-proof-risk-cta">
+                    Next step: pick a PK upsert destination, or enable <strong>Allow append-only CDC</strong> in Destination Advanced (duplicates on redelivery).
+                  </div>
+                )}
               </li>
             ))}
           </ul>

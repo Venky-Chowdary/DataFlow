@@ -55,8 +55,12 @@ __all__ = [
     "lease_backend_name",
     "lease_view",
     "mssql_cdc_resource",
+    "mssql_cdc_shared_resource",
     "new_holder_id",
     "oracle_cdc_resource",
+    "oracle_cdc_shared_resource",
+    "force_release_lease",
+    "parse_holder_job_id",
     "release_lease",
     "renew_lease",
     "reset_store",
@@ -131,6 +135,18 @@ def new_holder_id(job_id: str = "") -> str:
     host = socket.gethostname()[:32]
     jid = (job_id or "job")[:24]
     return f"{host}:{jid}:{uuid.uuid4().hex[:10]}"
+
+
+def parse_holder_job_id(holder_id: str) -> str | None:
+    """Best-effort job id from ``host:job_id:nonce`` holder format."""
+    parts = [p for p in str(holder_id or "").split(":") if p]
+    if len(parts) < 3:
+        return None
+    # host may itself contain colons (IPv6) — job id is second-to-last.
+    jid = parts[-2].strip()
+    if not jid or jid == "job":
+        return None
+    return jid
 
 
 def lease_backend_name() -> str:
@@ -215,6 +231,74 @@ def get_lease(cursor_key: str) -> CdcLease | None:
     return CdcLease.from_dict(raw) if raw else None
 
 
+def force_release_lease(
+    cursor_key: str,
+    *,
+    expected_generation: int | None = None,
+    reason: str = "",
+    actor: str = "",
+) -> dict[str, Any]:
+    """Operator break of a live CDC lease (fencing-aware).
+
+    Releases using the current holder + generation so zombies cannot renew.
+    When ``expected_generation`` is set and does not match, refuses to break
+    (another steal already advanced the fence).
+    """
+    key = (cursor_key or "").strip()
+    if not key:
+        return {"released": False, "reason": "missing_cursor_key", "cursor_key": ""}
+    view = lease_view(key)
+    if view is None:
+        return {
+            "released": False,
+            "reason": "not_found",
+            "cursor_key": key,
+            "backend": lease_backend_name(),
+        }
+    gen = int(view.get("generation") or 1)
+    if expected_generation is not None and int(expected_generation) != gen:
+        return {
+            "released": False,
+            "reason": "generation_mismatch",
+            "cursor_key": key,
+            "lease": view,
+            "backend": view.get("backend") or lease_backend_name(),
+        }
+    holder = str(view.get("holder_id") or "")
+    ok = release_lease(key, holder_id=holder, generation=gen)
+    result = {
+        "released": bool(ok),
+        "reason": "ok" if ok else "release_failed",
+        "cursor_key": key,
+        "prior": view,
+        "backend": view.get("backend") or lease_backend_name(),
+        "note": (reason or "")[:300],
+        "actor": (actor or "")[:120],
+        "holder_job_id": parse_holder_job_id(holder)
+        or (view.get("meta") or {}).get("job_id"),
+    }
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="cdc_lease.force_release",
+            resource=key,
+            actor=actor or "operator",
+            details={
+                "cursor_key": key,
+                "released": bool(ok),
+                "reason": result["reason"],
+                "generation": gen,
+                "holder_id": holder,
+                "resource": view.get("resource"),
+                "note": (reason or "")[:300],
+            },
+        )
+    except Exception:
+        pass
+    return result
+
+
 def lease_view(cursor_key: str) -> dict[str, Any] | None:
     """Operator-facing lease snapshot for Job Theater / lag fields."""
     lease = get_lease(cursor_key)
@@ -251,6 +335,23 @@ def mssql_cdc_resource(
     return f"mssql_{kind}:{db}:{sch}.{tbl}"
 
 
+def mssql_cdc_shared_resource(
+    database: str,
+    schema: str,
+    tables: list[str],
+    *,
+    mode: str = "cdc",
+) -> str:
+    """Lease for a shared multi-table SQL Server native CDC consumer."""
+    from services.cdc_multi_table import tables_digest
+
+    db = (database or "master").strip().lower()
+    sch = (schema or "dbo").strip().lower()
+    kind = "ct" if mode in {"ct", "change_tracking"} else "cdc"
+    digest = tables_digest(tables)
+    return f"mssql_{kind}_shared:{db}:{sch}:{digest}"
+
+
 def oracle_cdc_resource(
     schema: str,
     table: str,
@@ -266,6 +367,25 @@ def oracle_cdc_resource(
     if host_part:
         return f"oracle_{kind}:{host_part}:{sch}.{tbl}"
     return f"oracle_{kind}:{sch}.{tbl}"
+
+
+def oracle_cdc_shared_resource(
+    schema: str,
+    tables: list[str],
+    *,
+    mode: str = "logminer",
+    host: str = "",
+) -> str:
+    """Lease for a shared multi-table Oracle LogMiner consumer."""
+    from services.cdc_multi_table import tables_digest
+
+    sch = (schema or "").strip().upper()
+    kind = "flashback" if mode in {"flashback", "versions"} else "logminer"
+    digest = tables_digest([str(t).upper() for t in tables])
+    host_part = (host or "").strip().lower()
+    if host_part:
+        return f"oracle_{kind}_shared:{host_part}:{sch}:{digest}"
+    return f"oracle_{kind}_shared:{sch}:{digest}"
 
 
 @dataclass
@@ -306,12 +426,15 @@ class CdcLeaseGuard:
             self._generation = 0
         if not self.holder_id:
             self.holder_id = new_holder_id(self.job_id)
+        meta = dict(self.meta or {})
+        if self.job_id and "job_id" not in meta:
+            meta["job_id"] = self.job_id
         lease = acquire_lease(
             self.cursor_key,
             resource=self.resource,
             holder_id=self.holder_id,
             ttl_sec=self.ttl_sec,
-            meta=self.meta,
+            meta=meta,
         )
         self._acquired = True
         self._generation = int(lease.generation)

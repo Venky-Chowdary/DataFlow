@@ -85,6 +85,56 @@ interface DestinationAdvancedDrawerProps {
   onPriorityColumnChange?: (value: string) => void;
   onPriorityDirectionChange?: (value: "asc" | "desc") => void;
   onRowLimitChange?: (value: number) => void;
+  /** CDC → append-only dest opt-in (duplicates on redelivery). */
+  allowAppendOnly?: boolean;
+  onAllowAppendOnlyChange?: (value: boolean) => void;
+  /** SQL Server Always On listener: ODBC MultiSubnetFailover=Yes. */
+  multiSubnetFailover?: boolean;
+  onMultiSubnetFailoverChange?: (value: boolean) => void;
+  showMultiSubnetFailover?: boolean;
+  /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
+  writeViaStaging?: boolean;
+  onWriteViaStagingChange?: (value: boolean) => void;
+  /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
+  showVectorOptions?: boolean;
+  vectorContentColumn?: string;
+  vectorEmbeddingColumn?: string;
+  vectorMetadataColumns?: string;
+  vectorEmbeddingModel?: string;
+  vectorChunkSize?: number;
+  vectorChunkOverlap?: number;
+  onVectorContentColumnChange?: (value: string) => void;
+  onVectorEmbeddingColumnChange?: (value: string) => void;
+  onVectorMetadataColumnsChange?: (value: string) => void;
+  onVectorEmbeddingModelChange?: (value: string) => void;
+  onVectorChunkSizeChange?: (value: number) => void;
+  onVectorChunkOverlapChange?: (value: number) => void;
+  /** Semantic routing plan (embed / metadata / exclude_pii / skip). */
+  vectorRoutingFields?: Array<{
+    column: string;
+    action: string;
+    confidence: number;
+    reason: string;
+    is_pii?: boolean;
+  }>;
+  vectorRoutingLoading?: boolean;
+  vectorExcludePiiColumns?: string;
+  onApplyVectorRouting?: () => void;
+  /** Persist embeddings to SQLite across restarts (default on). */
+  vectorDurableCache?: boolean;
+  onVectorDurableCacheChange?: (value: boolean) => void;
+  embeddingCacheStats?: {
+    entries?: number;
+    models?: number;
+    approx_bytes?: number;
+    session_hits?: number;
+    session_misses?: number;
+    hit_rate?: number | null;
+    path?: string;
+  } | null;
+  embeddingCacheBusy?: boolean;
+  onRefreshEmbeddingCache?: () => void;
+  onClearEmbeddingCache?: () => void;
 }
 
 /**
@@ -128,6 +178,36 @@ export function DestinationAdvancedDrawer({
   onPriorityColumnChange,
   onPriorityDirectionChange,
   onRowLimitChange,
+  allowAppendOnly = false,
+  onAllowAppendOnlyChange,
+  multiSubnetFailover = false,
+  onMultiSubnetFailoverChange,
+  showMultiSubnetFailover = false,
+  writeViaStaging = false,
+  onWriteViaStagingChange,
+  showVectorOptions = false,
+  vectorContentColumn = "",
+  vectorEmbeddingColumn = "",
+  vectorMetadataColumns = "",
+  vectorEmbeddingModel = "",
+  vectorChunkSize = 512,
+  vectorChunkOverlap = 50,
+  onVectorContentColumnChange,
+  onVectorEmbeddingColumnChange,
+  onVectorMetadataColumnsChange,
+  onVectorEmbeddingModelChange,
+  onVectorChunkSizeChange,
+  onVectorChunkOverlapChange,
+  vectorRoutingFields = [],
+  vectorRoutingLoading = false,
+  vectorExcludePiiColumns = "",
+  onApplyVectorRouting,
+  vectorDurableCache = true,
+  onVectorDurableCacheChange,
+  embeddingCacheStats = null,
+  embeddingCacheBusy = false,
+  onRefreshEmbeddingCache,
+  onClearEmbeddingCache,
 }: DestinationAdvancedDrawerProps) {
   const names = streamNames.length > 0 ? streamNames : ["source_stream"];
   const activeMode = syncModes.find((m) => m.id === syncMode);
@@ -251,8 +331,41 @@ export function DestinationAdvancedDrawer({
               <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
             </select>
             <small className="df2-label-hint">
-              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps ``_df_lsn`` for PK effectively-once.
+              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps `_df_lsn` for PK effectively-once.
             </small>
+            {onAllowAppendOnlyChange && (
+              <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>
+                <input
+                  type="checkbox"
+                  checked={allowAppendOnly}
+                  onChange={(e) => onAllowAppendOnlyChange(e.target.checked)}
+                />
+                <span>
+                  <strong>Allow append-only CDC</strong>
+                  <small className="df2-label-hint">
+                    Opt in when the destination cannot upsert. Redelivery will duplicate rows —
+                    not effectively-once. Prefer a PK upsert sink.
+                  </small>
+                </span>
+              </label>
+            )}
+            {showMultiSubnetFailover && onMultiSubnetFailoverChange && (
+              <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>
+                <input
+                  type="checkbox"
+                  checked={multiSubnetFailover}
+                  onChange={(e) => onMultiSubnetFailoverChange(e.target.checked)}
+                />
+                <span>
+                  <strong>SQL Server MultiSubnetFailover</strong>
+                  <small className="df2-label-hint">
+                    Set ODBC <code>MultiSubnetFailover=Yes</code> when the source host is an Always On
+                    AG listener. Speeds failover reconnect — does not invent continuous CDC across a
+                    retention gap (still reset watermark + re-snapshot).
+                  </small>
+                </span>
+              </label>
+            )}
           </div>
         )}
 
@@ -284,8 +397,210 @@ export function DestinationAdvancedDrawer({
               </small>
             </span>
           </label>
+          {onWriteViaStagingChange && (
+            <label className="df2-policy-toggle">
+              <input
+                type="checkbox"
+                checked={writeViaStaging}
+                onChange={(e) => onWriteViaStagingChange(e.target.checked)}
+              />
+              <span>
+                <strong>Write via staging</strong>
+                <small>
+                  Load into <code>{"{table}_df_staging"}</code> first, then promote only clean rows to
+                  primary. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote
+                  entirely. SQL destinations only.
+                </small>
+              </span>
+            </label>
+          )}
         </div>
 
+        {showVectorOptions && (
+          <div className="df2-stream-contract" style={{ marginTop: "1rem" }} aria-label="Vector destination options">
+            <div className="df2-stream-head">
+              <strong>Vector / embedding</strong>
+              <span>Chunk → embed → upsert (at-least-once)</span>
+            </div>
+            <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
+              Requires <code>sentence-transformers</code> locally or an OpenAI model +{" "}
+              <code>OPENAI_API_KEY</code>. Precomputed vectors skip re-embedding when an embedding
+              column is set. PDF/DOCX/HTML uploads arrive as pre-chunked rows with{" "}
+              <code>page</code>/<code>heading</code> provenance — content column should be{" "}
+              <code>content</code>. Semantic routing excludes PII from embed content and metadata.
+            </p>
+            {onApplyVectorRouting && (
+              <div className="df2-policy-toolbar" style={{ marginBottom: 10, alignItems: "center", gap: 8 }}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={vectorRoutingLoading || !sourceColumns.length}
+                  onClick={onApplyVectorRouting}
+                >
+                  {vectorRoutingLoading ? "Routing…" : "Apply semantic routing"}
+                </Button>
+                {vectorExcludePiiColumns ? (
+                  <span className="df2-badge df2-badge-run" title="Excluded from vector metadata">
+                    PII excluded: {vectorExcludePiiColumns}
+                  </span>
+                ) : null}
+              </div>
+            )}
+            {vectorRoutingFields.length > 0 && (
+              <div className="df2-stream-table-wrap" style={{ marginBottom: 12, maxHeight: 180, overflow: "auto" }}>
+                <table className="df2-stream-table" aria-label="Semantic vector field routing">
+                  <thead>
+                    <tr>
+                      <th>Column</th>
+                      <th>Action</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vectorRoutingFields.map((row) => (
+                      <tr key={row.column}>
+                        <td>{row.column}</td>
+                        <td>
+                          <span className={`df2-badge ${row.action === "exclude_pii" ? "df2-badge-run" : row.action === "embed" ? "df2-badge-live" : ""}`}>
+                            {row.action}
+                          </span>
+                        </td>
+                        <td>
+                          <small>{row.reason}</small>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-vector-content">Content column</label>
+              <select
+                id="df2-vector-content"
+                className="df2-input"
+                value={vectorContentColumn}
+                onChange={(e) => onVectorContentColumnChange?.(e.target.value)}
+              >
+                <option value="">Auto (first long text column)</option>
+                {sourceColumns.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-vector-embed-col">Precomputed embedding column</label>
+              <select
+                id="df2-vector-embed-col"
+                className="df2-input"
+                value={vectorEmbeddingColumn}
+                onChange={(e) => onVectorEmbeddingColumnChange?.(e.target.value)}
+              >
+                <option value="">None — embed at write time</option>
+                {sourceColumns.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-vector-meta">Metadata columns</label>
+              <input
+                id="df2-vector-meta"
+                className="df2-input"
+                placeholder="Comma-separated (e.g. id, category)"
+                value={vectorMetadataColumns}
+                onChange={(e) => onVectorMetadataColumnsChange?.(e.target.value)}
+              />
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="df2-vector-model">Embedding model</label>
+              <input
+                id="df2-vector-model"
+                className="df2-input"
+                placeholder="sentence-transformers/all-MiniLM-L6-v2 or openai/text-embedding-3-small"
+                value={vectorEmbeddingModel}
+                onChange={(e) => onVectorEmbeddingModelChange?.(e.target.value)}
+              />
+            </div>
+            <div className="df2-policy-toolbar">
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="df2-vector-chunk">Chunk size</label>
+                <input
+                  id="df2-vector-chunk"
+                  className="df2-input"
+                  type="number"
+                  min={64}
+                  max={4096}
+                  value={vectorChunkSize}
+                  onChange={(e) => onVectorChunkSizeChange?.(Number(e.target.value) || 512)}
+                />
+              </div>
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="df2-vector-overlap">Chunk overlap</label>
+                <input
+                  id="df2-vector-overlap"
+                  className="df2-input"
+                  type="number"
+                  min={0}
+                  max={1024}
+                  value={vectorChunkOverlap}
+                  onChange={(e) => onVectorChunkOverlapChange?.(Number(e.target.value) || 0)}
+                />
+              </div>
+            </div>
+            {onVectorDurableCacheChange && (
+              <label className="df2-policy-toggle" style={{ marginTop: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={vectorDurableCache}
+                  onChange={(e) => onVectorDurableCacheChange(e.target.checked)}
+                />
+                <span>
+                  <strong>Durable embedding cache</strong>
+                  <small>
+                    Persist model outputs in SQLite under the data directory so restarts reuse
+                    vectors (process L1 + disk L2). Disable only for one-off experiments. Not a
+                    shared multi-node cache unless nodes share the same volume.
+                  </small>
+                </span>
+              </label>
+            )}
+            {(onRefreshEmbeddingCache || onClearEmbeddingCache) && (
+              <div className="df2-policy-toolbar" style={{ marginTop: 10, alignItems: "center", gap: 8 }}>
+                {embeddingCacheStats ? (
+                  <span className="df2-badge df2-badge-live" title={embeddingCacheStats.path || ""}>
+                    Cache: {embeddingCacheStats.entries ?? 0} entries
+                    {typeof embeddingCacheStats.hit_rate === "number"
+                      ? ` · ${(embeddingCacheStats.hit_rate * 100).toFixed(0)}% session hits`
+                      : ""}
+                  </span>
+                ) : (
+                  <span className="df2-badge">Cache stats unavailable</span>
+                )}
+                {onRefreshEmbeddingCache && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={embeddingCacheBusy}
+                    onClick={onRefreshEmbeddingCache}
+                  >
+                    Refresh
+                  </Button>
+                )}
+                {onClearEmbeddingCache && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={embeddingCacheBusy}
+                    onClick={onClearEmbeddingCache}
+                  >
+                    Clear cache
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         <div className="df2-stream-contract">
           <div className="df2-stream-head">
             <strong>Streams and fields</strong>

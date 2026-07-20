@@ -45,6 +45,16 @@ class EndpointConfig:
     @classmethod
     def from_dict(cls, kind: str, data: dict | None) -> "EndpointConfig":
         d = data or {}
+        known = {
+            "kind", "format", "type", "db_type", "connector_id", "host", "port",
+            "database", "schema", "table", "table_name", "collection",
+            "collection_name", "username", "password", "connection_string",
+            "warehouse", "ssl", "auth_mode", "auth_role", "auth_source", "api_key", "service_account",
+            "private_key", "ssh_private_key", "output_path", "region", "endpoint_url", "path_style",
+            "extra",
+        }
+        nested = d.get("extra") if isinstance(d.get("extra"), dict) else {}
+        flat_extra = {k: v for k, v in d.items() if k not in known}
         return cls(
             kind=kind,
             format=d.get("format", d.get("type", d.get("db_type", ""))),
@@ -70,13 +80,7 @@ class EndpointConfig:
             region=d.get("region", ""),
             endpoint_url=(d.get("endpoint_url") or "").strip(),
             path_style=bool(d.get("path_style", False)),
-            extra={k: v for k, v in d.items() if k not in {
-                "format", "type", "db_type", "connector_id", "host", "port",
-                "database", "schema", "table", "table_name", "collection",
-                "collection_name", "username", "password", "connection_string",
-                "warehouse", "ssl", "auth_mode", "auth_role", "auth_source", "api_key", "service_account",
-                "private_key", "ssh_private_key", "output_path", "region", "endpoint_url", "path_style",
-            }},
+            extra={**nested, **flat_extra},
         )
 
 
@@ -96,6 +100,8 @@ class TransferRequest:
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     backfill_new_fields: bool = False
+    # Load into {table}_df_staging first; promote only clean rows to primary.
+    write_via_staging: bool = False
     # Optional row-level source filter (column predicates, and/or composition).
     source_filter: dict = field(default_factory=dict)
     # Priority-first sync: sort source rows by this column before writing.
@@ -154,6 +160,7 @@ def endpoint_to_dict(ep: EndpointConfig) -> dict:
         "region": ep.region,
         "endpoint_url": ep.endpoint_url,
         "path_style": ep.path_style,
+        "extra": dict(ep.extra or {}),
     }
 
 
@@ -169,6 +176,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "schema_policy": request.schema_policy,
         "validation_mode": request.validation_mode,
         "backfill_new_fields": request.backfill_new_fields,
+        "write_via_staging": request.write_via_staging,
         "source_filter": request.source_filter,
         "priority_column": request.priority_column,
         "priority_direction": request.priority_direction,
@@ -199,6 +207,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         schema_policy=data.get("schema_policy") or "manual_review",
         validation_mode=data.get("validation_mode") or "strict",
         backfill_new_fields=bool(data.get("backfill_new_fields")),
+        write_via_staging=bool(data.get("write_via_staging")),
         source_filter=data.get("source_filter") or {},
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),

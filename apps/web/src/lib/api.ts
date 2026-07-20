@@ -164,6 +164,82 @@ export async function analyzeSchemaEnhanced(
   return res.json();
 }
 
+export interface VectorFieldRouting {
+  column: string;
+  action: "embed" | "metadata" | "exclude_pii" | "skip";
+  confidence: number;
+  reason: string;
+  semantic_role?: string;
+  is_pii?: boolean;
+}
+
+export interface VectorRoutingPlan {
+  fields: VectorFieldRouting[];
+  content_column: string | null;
+  embedding_column: string | null;
+  metadata_columns: string[];
+  exclude_pii_columns: string[];
+  skip_columns: string[];
+  summary?: {
+    embed?: string | null;
+    metadata_count?: number;
+    exclude_pii_count?: number;
+    skip_count?: number;
+  };
+}
+
+/** Recommend embed / metadata / exclude_pii / skip for vector destinations. */
+export async function fetchVectorRouting(payload: {
+  columns: string[];
+  samples?: Record<string, string[]>;
+  schema_types?: Record<string, string>;
+  analysis_columns?: Array<{ column_name: string; is_pii?: boolean; semantic_type?: string }>;
+}): Promise<VectorRoutingPlan> {
+  const res = await apiFetch(`${API_BASE}/ai/vector-routing`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Vector routing failed"));
+  return res.json();
+}
+
+export interface EmbeddingCacheStats {
+  path: string;
+  entries: number;
+  models: number;
+  approx_bytes: number;
+  session_hits: number;
+  session_misses: number;
+  session_writes: number;
+  durable_default: boolean;
+  hit_rate?: number | null;
+}
+
+/** Durable SQLite embedding cache status. */
+export async function fetchEmbeddingCacheStats(): Promise<EmbeddingCacheStats> {
+  const res = await apiFetch(`${API_BASE}/ai/embedding-cache`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Embedding cache status failed"));
+  return res.json();
+}
+
+/** Clear durable embedding cache (and process L1 by default). */
+export async function clearEmbeddingCache(options?: {
+  model?: string;
+  clearMemory?: boolean;
+}): Promise<{ deleted: number; model: string; memory_cleared: number }> {
+  const params = new URLSearchParams();
+  if (options?.model) params.set("model", options.model);
+  if (options?.clearMemory === false) params.set("clear_memory", "false");
+  const qs = params.toString();
+  const res = await apiFetch(`${API_BASE}/ai/embedding-cache${qs ? `?${qs}` : ""}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Clear embedding cache failed"));
+  return res.json();
+}
+
 export async function runPreflight(payload: {
   columns: string[];
   column_types: Record<string, string>;
@@ -867,7 +943,22 @@ export function streamJobProgress(
       cdc_lease_backend: raw.cdc_lease_backend ? String(raw.cdc_lease_backend) : null,
       cdc_lease_generation:
         raw.cdc_lease_generation != null ? Number(raw.cdc_lease_generation) : null,
+      cdc_lease_cursor_key: raw.cdc_lease_cursor_key ? String(raw.cdc_lease_cursor_key) : null,
       cdc_lease_conflict: raw.cdc_lease_conflict == null ? null : Boolean(raw.cdc_lease_conflict),
+      cdc_cursor_gap: raw.cdc_cursor_gap == null ? null : Boolean(raw.cdc_cursor_gap),
+      cdc_cursor_gap_code: raw.cdc_cursor_gap_code ? String(raw.cdc_cursor_gap_code) : null,
+      cdc_cursor_gap_dialect: raw.cdc_cursor_gap_dialect ? String(raw.cdc_cursor_gap_dialect) : null,
+      cdc_cursor_gap_resume: raw.cdc_cursor_gap_resume != null ? String(raw.cdc_cursor_gap_resume) : null,
+      cdc_cursor_gap_retained: raw.cdc_cursor_gap_retained != null ? String(raw.cdc_cursor_gap_retained) : null,
+      source_ha_role: raw.source_ha_role != null ? String(raw.source_ha_role) : null,
+      source_ha_topology: raw.source_ha_topology != null ? String(raw.source_ha_topology) : null,
+      source_ha_enabled: raw.source_ha_enabled == null ? null : Boolean(raw.source_ha_enabled),
+      source_ha_group: raw.source_ha_group != null ? String(raw.source_ha_group) : null,
+      source_ha_replica: raw.source_ha_replica != null ? String(raw.source_ha_replica) : null,
+      source_ha_message: raw.source_ha_message != null ? String(raw.source_ha_message) : null,
+      cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
+      trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
+      trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
       streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
@@ -1049,6 +1140,63 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   return res.json();
 }
 
+export async function exportDataflowManifest(): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export dataflow.yaml"));
+  return res.blob();
+}
+
+export async function exportScheduleYaml(id: string): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/export?format=yaml`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export pipeline YAML"));
+  return res.blob();
+}
+
+export async function planGitopsManifest(payload: Record<string, unknown>): Promise<{
+  dry_run: boolean;
+  resource_count: number;
+  creates: number;
+  updates: number;
+  skips: number;
+  actions: Array<{ kind: string; action: string; id?: string | null; name?: string | null; reason?: string }>;
+}> {
+  const res = await apiFetch(`${API_BASE}/schedules/gitops/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "GitOps plan failed"));
+  return res.json();
+}
+
+export async function applyGitopsManifest(
+  payload: Record<string, unknown>,
+  dryRun = false,
+  opts?: { requireSignedContracts?: boolean },
+): Promise<{
+  dry_run: boolean;
+  resource_count: number;
+  applied?: number;
+  failed?: number;
+  creates?: number;
+  updates?: number;
+  require_signed_contracts?: boolean;
+  results?: Array<{ kind: string; action: string; ok?: boolean; id?: string; name?: string; error?: string }>;
+  actions?: Array<{ kind: string; action: string }>;
+}> {
+  const params = new URLSearchParams();
+  if (dryRun) params.set("dry_run", "true");
+  if (opts?.requireSignedContracts) params.set("require_signed_contracts", "true");
+  const q = params.toString() ? `?${params.toString()}` : "";
+  const res = await apiFetch(`${API_BASE}/schedules/gitops/apply${q}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "GitOps apply failed"));
+  return res.json();
+}
+
 export async function testConnection(payload: {
   type: string;
   host?: string;
@@ -1068,7 +1216,7 @@ export async function testConnection(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
-}): Promise<{ success: boolean; message: string }> {
+}): Promise<{ success: boolean; message: string; source_ha?: Record<string, unknown> }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1159,9 +1307,13 @@ export async function updateConnector(
   return res.json();
 }
 
-export async function uploadFile(file: File): Promise<ParsedUpload> {
+export async function uploadFile(
+  file: File,
+  options?: { enableOcr?: boolean },
+): Promise<ParsedUpload> {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("enable_ocr", options?.enableOcr === true ? "true" : "false");
   const res = await apiFetch(`${API_BASE}/connectors/upload`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   if (!res.ok) throw new Error(await parseApiError(res, "Upload failed"));
   return res.json();
@@ -1248,6 +1400,21 @@ export async function fetchPlatformStatus(): Promise<{
 export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
   worst_lag_seconds: number | null;
   warn_threshold_seconds: number;
+  critical_threshold_seconds?: number;
+  heartbeat_stale_seconds?: number;
+  stale_count?: number;
+  critical_count?: number;
+  slo_status?: "ok" | "warn" | "critical" | "unknown" | string;
+  alerts?: Array<{
+    severity: string;
+    code: string;
+    title: string;
+    detail: string;
+    schedule_id?: string | null;
+    job_id?: string | null;
+    stream?: string | null;
+    lag_seconds?: number;
+  }>;
   pipelines: Array<{
     schedule_id: string;
     stream: string;
@@ -1255,7 +1422,9 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
     lag_seconds: number;
     polls_total: number;
     heartbeat_at?: number;
+    heartbeat_age_seconds?: number | null;
     stale: boolean;
+    severity?: string;
   }>;
   counters: Record<string, number>;
   gauges: Record<string, number>;
@@ -1273,6 +1442,78 @@ export async function fetchOpsDlq(limit = 50): Promise<{
 }> {
   const res = await apiFetch(`${API_BASE}/ops/dlq?limit=${limit}`);
   if (!res.ok) throw new Error("Failed to load quarantine DLQ");
+  return res.json();
+}
+
+export async function fetchCdcLease(cursorKey: string): Promise<{
+  found: boolean;
+  cursor_key: string;
+  backend?: string;
+  holder_job_id?: string | null;
+  lease?: {
+    holder_id?: string;
+    resource?: string;
+    generation?: number;
+    stale?: boolean;
+    age_sec?: number;
+    backend?: string;
+  };
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/ops/cdc-leases?cursor_key=${encodeURIComponent(cursorKey)}`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load CDC lease"));
+  return res.json();
+}
+
+export async function forceReleaseCdcLease(body: {
+  cursor_key: string;
+  expected_generation?: number | null;
+  reason?: string;
+}): Promise<{
+  released: boolean;
+  reason: string;
+  cursor_key: string;
+  prior?: Record<string, unknown>;
+  holder_job_id?: string | null;
+  backend?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/ops/cdc-leases/force-release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not force-release CDC lease"));
+  return res.json();
+}
+
+export async function fetchCdcCursor(cursorKey: string): Promise<{
+  cursor_key: string;
+  found: boolean;
+  watermark: string | null;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/ops/cdc-cursors?cursor_key=${encodeURIComponent(cursorKey)}`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load CDC cursor"));
+  return res.json();
+}
+
+export async function clearCdcCursor(body: {
+  cursor_key: string;
+  reason?: string;
+}): Promise<{
+  cleared: boolean;
+  cursor_key: string;
+  prior_watermark?: string | null;
+  reason?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/ops/cdc-cursors/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not clear CDC watermark"));
   return res.json();
 }
 
@@ -1465,6 +1706,13 @@ export async function runUniversalTransfer(options: {
   schemaPolicy?: string;
   validationMode?: string;
   backfillNewFields?: boolean;
+  writeViaStaging?: boolean;
+  /** Opt-in Tesseract OCR for scanned/image-only PDF sources. */
+  enableOcr?: boolean;
+  /** Destination writer options (vector embed fields, allow_append_only, …). */
+  destExtra?: Record<string, unknown>;
+  /** Source options (multi_subnet_failover, enable_ocr already separate, …). */
+  sourceExtra?: Record<string, unknown>;
   streamContracts?: Record<string, unknown>[];
   planId?: string;
   priorityColumn?: string;
@@ -1484,6 +1732,14 @@ export async function runUniversalTransfer(options: {
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
+  formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
+  formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
+  if (options.destExtra && Object.keys(options.destExtra).length) {
+    formData.append("dest_extra_json", JSON.stringify(options.destExtra));
+  }
+  if (options.sourceExtra && Object.keys(options.sourceExtra).length) {
+    formData.append("source_extra_json", JSON.stringify(options.sourceExtra));
+  }
   if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
   if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);
   if (options.limit && options.limit > 0) formData.append("limit", String(options.limit));
@@ -1957,7 +2213,19 @@ export interface QuarantineInfo {
     values?: Record<string, string>;
     chars?: string[];
     suggested_transform?: string;
+    _df_qid?: string;
   }[];
+  /** Destination-side DLQ table (`{table}_df_quarantine`) when written. */
+  dest_dlq?: {
+    table?: string | null;
+    rows_written?: number | null;
+    open_rows?: number | null;
+    ok?: boolean | null;
+    skipped?: boolean | null;
+    reason?: string | null;
+    error?: string | null;
+    supported?: boolean | null;
+  };
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -2066,6 +2334,13 @@ export interface QuarantineReplayResult {
   rows_attempted: number;
   status: string;
   destination_summary?: Record<string, unknown>;
+  dest_dlq_promoted?: {
+    updated?: number;
+    table?: string;
+    promoted_at?: string;
+    error?: string;
+    skipped?: boolean;
+  };
 }
 
 export async function replayJobQuarantine(

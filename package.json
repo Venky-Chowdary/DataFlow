@@ -19,6 +19,8 @@
     "test:api": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests -v'",
     "test:cdc": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python scripts/cdc_matrix_report.py'",
     "test:e2e": "cd apps/api && bash -c 'if [ -f ../../.venv/bin/activate ]; then . ../../.venv/bin/activate; fi; python -m pytest tests/test_e2e_pipeline.py tests/test_schema_inference.py tests/test_sample_files.py tests/test_catalog_api.py tests/test_connectors_flow.py -v'",
+    "dataflow": "bash -c 'if [ -f .venv/bin/activate ]; then . .venv/bin/activate; fi; PYTHONPATH=apps/api:apps/cli python -m dataflow_cli'",
+    "test:gitops": "bash -c 'if [ -f .venv/bin/activate ]; then . .venv/bin/activate; fi; PYTHONPATH=apps/api:apps/cli python -m dataflow_cli validate -f examples/gitops/dataflow.yaml && PYTHONPATH=apps/api:apps/cli python -m dataflow_cli validate -f examples/gitops/dataflow.staging.yaml && PYTHONPATH=apps/api:apps/cli python -m dataflow_cli plan -f examples/gitops/dataflow.yaml --local && cd apps/api && python -m pytest tests/test_gitops_plan_apply.py tests/test_dataflow_cli.py tests/test_enterprise_p0_p2.py::test_gitops_manifest_shape -q --tb=short'",
     "audit": "npm audit",
     "docker:secrets": "bash scripts/generate-production-secrets.sh",
     "docker:prod": "docker compose -f docker-compose.prod.yml up -d --build",

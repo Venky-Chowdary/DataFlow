@@ -119,10 +119,11 @@ def test_native_poll_ops_1_2_4() -> None:
         ("id",),
         ("amount",),
     ]
-    # resolve capture, schema history query (empty), max_lsn, then change rows
+    # resolve capture, min_lsn (arg eval), max_lsn, then change rows
     cur.fetchone.side_effect = [
         ("dbo_orders",),
-        (bytes.fromhex("0c"),),
+        (bytes.fromhex("0a"),),  # min_lsn ≤ resume
+        (bytes.fromhex("0c"),),  # max_lsn
     ]
     cur.fetchall.side_effect = [
         [],  # captured_columns
@@ -194,3 +195,175 @@ def test_normalize_and_classify_before_image_and_net() -> None:
     )
     assert cdc.row_filter == ROW_FILTER_NET
     assert "fn_cdc_get_net_changes_" in cdc._changes_tvf()
+
+
+def test_mssql_shared_reader_init_and_lease() -> None:
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app", "job_id": "j1"},
+        table=["orders", "users"],
+        primary_key="id",
+        primary_keys={"orders": "id", "users": "user_id"},
+        cursor_key="cdc-shared:sqlserver:app:x:j1",
+    )
+    assert cdc.tables == ["orders", "users"]
+    assert cdc._shared is True
+    assert cdc.primary_keys["users"] == "user_id"
+    assert cdc._lease.meta.get("shared_reader") is True
+    assert "mssql_cdc_shared:" in cdc._lease.resource
+
+
+def test_truncate_tagged_at_lsn_boundary() -> None:
+    tagged = [
+        ("0a", "01", "orders", {"__$operation": 2, "id": "1"}),
+        ("0b", "01", "orders", {"__$operation": 2, "id": "2"}),
+        ("0b", "02", "users", {"__$operation": 2, "id": "u1"}),
+    ]
+    keep = SqlServerNativeCdc._truncate_tagged_at_lsn_boundary(tagged, 2)
+    assert len(keep) == 1
+    assert keep[0][0] == "0a"
+
+
+def test_mssql_shared_poll_demuxes_two_tables() -> None:
+    token = encode_mssql_cdc_token(
+        "0a", table="orders,users", phase="streaming", capture_instance=""
+    )
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table=["orders", "users"],
+        primary_key="id",
+        primary_keys={"orders": "id", "users": "user_id"},
+        resume_token=token,
+        batch_size=50,
+    )
+    cdc.phase = "streaming"
+    cdc.start_lsn = "0a"
+
+    lsn_b = bytes.fromhex("0b")
+    orders_rows = [
+        (lsn_b, bytes.fromhex("01"), 2, 1, "10"),
+    ]
+    users_rows = [
+        (lsn_b, bytes.fromhex("02"), 2, 9, "alice"),
+    ]
+
+    conn = MagicMock()
+    cur = MagicMock()
+    tvf_calls = {"n": 0}
+
+    def _execute(sql, params=None):
+        sql_s = str(sql)
+        if "fn_cdc_get_all_changes_dbo_orders" in sql_s:
+            tvf_calls["n"] = 1
+            cur.description = [
+                ("__$start_lsn",),
+                ("__$seqval",),
+                ("__$operation",),
+                ("id",),
+                ("amount",),
+            ]
+        elif "fn_cdc_get_all_changes_dbo_users" in sql_s:
+            tvf_calls["n"] = 2
+            cur.description = [
+                ("__$start_lsn",),
+                ("__$seqval",),
+                ("__$operation",),
+                ("user_id",),
+                ("name",),
+            ]
+
+    def _fetchall():
+        if tvf_calls["n"] == 1:
+            return orders_rows
+        if tvf_calls["n"] == 2:
+            return users_rows
+        return []
+
+    cur.execute.side_effect = _execute
+    cur.fetchone.side_effect = [
+        ("dbo_orders",),
+        ("dbo_users",),
+        (bytes.fromhex("0a"),),  # min orders
+        (bytes.fromhex("0a"),),  # min users
+        (bytes.fromhex("0b"),),  # max_lsn
+    ]
+    cur.fetchall.side_effect = _fetchall
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        with patch.object(cdc, "_acquire_cdc_lease"):
+            batches = list(cdc.poll())
+
+    assert len(batches) == 2
+    by_table = {b.table: b for b in batches}
+    assert "orders" in by_table and "users" in by_table
+    assert by_table["orders"].ack_barrier is False
+    assert by_table["users"].ack_barrier is True
+    assert by_table["orders"].inserts[0]["id"] == "1"
+    assert by_table["users"].inserts[0]["user_id"] == "9"
+    assert by_table["orders"].resume_token == by_table["users"].resume_token
+
+
+def test_compare_mssql_hex_lsn_orders_binary() -> None:
+    from connectors.sqlserver_cdc_native import compare_mssql_hex_lsn
+
+    assert compare_mssql_hex_lsn("0a", "0b") == -1
+    assert compare_mssql_hex_lsn("0b", "0a") == 1
+    assert compare_mssql_hex_lsn("0a", "0a") == 0
+    # Unequal length: pad high bytes
+    assert compare_mssql_hex_lsn("0a", "000b") == -1
+
+
+def test_assert_resume_lsn_in_retention_raises_on_gap() -> None:
+    from connectors.sqlserver_cdc_native import (
+        CdcLsnGapError,
+        assert_resume_lsn_in_retention,
+    )
+
+    assert_resume_lsn_in_retention("0b", "0a")  # resume ahead of min — ok
+    assert_resume_lsn_in_retention("0a", "0a")  # equal — ok
+    try:
+        assert_resume_lsn_in_retention("0a", "0b")
+        raise AssertionError("expected CdcLsnGapError")
+    except CdcLsnGapError as exc:
+        assert "min_lsn" in str(exc)
+        assert "failover" in str(exc).lower() or "cleanup" in str(exc).lower()
+
+
+def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
+    """AG failover / cleanup: cursor behind retention must not silently skip."""
+    from connectors.sqlserver_cdc_native import CdcLsnGapError, SqlServerNativeCdc
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+        schema="dbo",
+        batch_size=10,
+        capture_instance="dbo_orders",
+    )
+    cdc.phase = "streaming"
+    cdc.start_lsn = "0a"  # older than min
+    cdc._capture_resolved = True
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        (bytes.fromhex("0b"),),  # min_lsn
+    ]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        with patch.object(cdc, "_acquire_cdc_lease"):
+            with patch.object(cdc, "_resolve_capture_instance"):
+                with patch.object(cdc, "_maybe_record_capture_schema"):
+                    try:
+                        list(cdc.poll())
+                        raise AssertionError("expected CdcLsnGapError")
+                    except CdcLsnGapError:
+                        pass

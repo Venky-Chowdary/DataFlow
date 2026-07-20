@@ -74,8 +74,28 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     }
 
 
-def parse_file_content(content: bytes, filename: str) -> tuple[list[dict], list[str], dict[str, str]]:
-    result = FileParser.parse(content, filename)
+def _apply_vector_extra(common: dict[str, Any], endpoint: EndpointConfig) -> None:
+    """Forward Studio Advanced vector fields from endpoint.extra into writer kwargs."""
+    extra = endpoint.extra or {}
+    common["content_column"] = extra.get("content_column")
+    common["embedding_column"] = extra.get("embedding_column")
+    common["metadata_columns"] = extra.get("metadata_columns")
+    common["exclude_pii_columns"] = extra.get("exclude_pii_columns")
+    common["embedding_model"] = extra.get("embedding_model")
+    common["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
+    common["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
+    common["skip_chunking"] = bool(extra.get("skip_chunking"))
+    if "durable_embedding_cache" in extra:
+        common["durable_embedding_cache"] = bool(extra.get("durable_embedding_cache"))
+
+
+def parse_file_content(
+    content: bytes,
+    filename: str,
+    *,
+    enable_ocr: bool = False,
+) -> tuple[list[dict], list[str], dict[str, str]]:
+    result = FileParser.parse(content, filename, enable_ocr=enable_ocr)
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     schema = FileParser.infer_schema(result.data)
@@ -86,6 +106,8 @@ def parse_file_route_sample(
     content: bytes,
     filename: str,
     preview_rows: int = 200,
+    *,
+    enable_ocr: bool = False,
 ) -> tuple[list[str], dict[str, str], int]:
     """Headers + schema for route analysis without loading entire files."""
     ftype = FileParser.detect_file_type(filename, content)
@@ -107,7 +129,7 @@ def parse_file_route_sample(
         schema = FileParser.infer_schema(records) if records else {h: "string" for h in headers}
         return headers, schema, count_csv_rows(content, enc)
 
-    result = FileParser.parse(content, filename)
+    result = FileParser.parse(content, filename, enable_ocr=enable_ocr)
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     sample = result.data[:preview_rows]
@@ -198,7 +220,10 @@ def resolve_connector_config(
         0 if fmt in ("sqlite", "generic_sql", "iceberg") else
         22 if fmt == "sftp" else
         587 if fmt == "email" else
-        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase") else 5432
+        6333 if fmt == "qdrant" else
+        8080 if fmt == "weaviate" else
+        19530 if fmt == "milvus" else
+        443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "pinecone") else 5432
     )
     from services.dialect_profiles import normalize_schema
 
@@ -798,6 +823,9 @@ def write_destination_database(
             1433 if db_type == "sqlserver" else
             1521 if db_type == "oracle" else
             9092 if db_type == "kafka" else
+            6333 if db_type == "qdrant" else
+            8080 if db_type == "weaviate" else
+            19530 if db_type == "milvus" else
             22 if db_type == "sftp" else
             587 if db_type == "email" else
             0 if db_type in ("generic_sql", "iceberg", "sqlite") else 443
@@ -1061,13 +1089,7 @@ def write_destination_database(
 
     if db_type == "pgvector":
         from connectors.pgvector_writer import write_mapped_rows
-        # Pass through vectorization options from the endpoint configuration.
-        common["content_column"] = endpoint.extra.get("content_column")
-        common["embedding_column"] = endpoint.extra.get("embedding_column")
-        common["metadata_columns"] = endpoint.extra.get("metadata_columns")
-        common["embedding_model"] = endpoint.extra.get("embedding_model")
-        common["chunk_size"] = int(endpoint.extra.get("chunk_size", 512)) if endpoint.extra.get("chunk_size") else 512
-        common["chunk_overlap"] = int(endpoint.extra.get("chunk_overlap", 50)) if endpoint.extra.get("chunk_overlap") else 50
+        _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "pgvector write failed")
@@ -1075,17 +1097,13 @@ def write_destination_database(
         return result.rows_written, ddl_log, {
             "type": "pgvector", "schema": result.target_schema, "table": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
+            "load_method": getattr(result, "load_method", None) or "pgvector_upsert",
             **_writer_diagnostics(result),
         }
 
     if db_type == "qdrant":
         from connectors.qdrant_writer import write_mapped_rows
-        common["content_column"] = endpoint.extra.get("content_column")
-        common["embedding_column"] = endpoint.extra.get("embedding_column")
-        common["metadata_columns"] = endpoint.extra.get("metadata_columns")
-        common["embedding_model"] = endpoint.extra.get("embedding_model")
-        common["chunk_size"] = int(endpoint.extra.get("chunk_size", 512)) if endpoint.extra.get("chunk_size") else 512
-        common["chunk_overlap"] = int(endpoint.extra.get("chunk_overlap", 50)) if endpoint.extra.get("chunk_overlap") else 50
+        _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
             raise RuntimeError(result.error or "Qdrant write failed")
@@ -1093,6 +1111,49 @@ def write_destination_database(
         return result.rows_written, ddl_log, {
             "type": "qdrant", "collection": result.table_name,
             "checksum": result.checksum, "driver": result.driver,
+            "load_method": getattr(result, "load_method", None) or "qdrant_upsert",
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "weaviate":
+        from connectors.weaviate_writer import write_mapped_rows
+        _apply_vector_extra(common, endpoint)
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Weaviate write failed")
+        ddl_log.insert(0, f"UPSERT weaviate class {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "weaviate", "collection": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            "load_method": getattr(result, "load_method", None) or "weaviate_upsert",
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "pinecone":
+        from connectors.pinecone_writer import write_mapped_rows
+        _apply_vector_extra(common, endpoint)
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Pinecone write failed")
+        ddl_log.insert(0, f"UPSERT pinecone namespace {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "pinecone", "collection": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            "load_method": getattr(result, "load_method", None) or "pinecone_upsert",
+            **_writer_diagnostics(result),
+        }
+
+    if db_type == "milvus":
+        from connectors.milvus_writer import write_mapped_rows
+        _apply_vector_extra(common, endpoint)
+        result = write_mapped_rows(**common)
+        if not result.ok:
+            raise RuntimeError(result.error or "Milvus write failed")
+        ddl_log.insert(0, f"UPSERT milvus collection {result.table_name}")
+        return result.rows_written, ddl_log, {
+            "type": "milvus", "collection": result.table_name,
+            "checksum": result.checksum, "driver": result.driver,
+            "load_method": getattr(result, "load_method", None) or "milvus_upsert",
             **_writer_diagnostics(result),
         }
 

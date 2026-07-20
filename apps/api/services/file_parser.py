@@ -284,12 +284,17 @@ class ParseResult:
     row_count: int
     error: str = ""
     file_type: str = ""
+    ocr_used: bool = False
+    ocr_page_count: int = 0
 
 
 class FileParser:
     """Universal file parser for DataTransfer platform"""
 
-    SUPPORTED_TYPES = ["json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"]
+    SUPPORTED_TYPES = [
+        "json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+        "pdf", "docx", "html",
+    ]
 
     @staticmethod
     def detect_file_type(filename: str, content: bytes | None = None) -> str:
@@ -320,6 +325,12 @@ class FileParser:
                 return "avro"
             if name.endswith(".orc"):
                 return "orc"
+            if name.endswith(".pdf"):
+                return "pdf"
+            if name.endswith(".docx"):
+                return "docx"
+            if name.endswith((".html", ".htm")):
+                return "html"
             return None
 
         ext_result = _from_extension(filename_lower)
@@ -332,6 +343,18 @@ class FileParser:
             ext_result = _from_extension(inner)
             if ext_result:
                 return ext_result
+
+        # Document sniffing before tabular heuristics.
+        try:
+            from services.document_chunking import detect_document_type
+
+            doc_kind = detect_document_type(filename or "", content)
+            if doc_kind == "html":
+                return "html"
+            if doc_kind:
+                return doc_kind
+        except Exception:
+            pass
 
         # Content sniffing — decompress a gzip prefix if needed.
         sample_bytes: bytes = b""
@@ -762,7 +785,7 @@ class FileParser:
         return out
 
     @classmethod
-    def parse(cls, content: str | bytes, filename: str) -> ParseResult:
+    def parse(cls, content: str | bytes, filename: str, *, enable_ocr: bool = False) -> ParseResult:
         """Parse file based on type detection, transparently handling gzip."""
         raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
 
@@ -802,6 +825,8 @@ class FileParser:
             return cls.parse_orc(raw_bytes)
         elif file_type == "xml":
             return cls.parse_xml(raw_bytes)
+        elif file_type in ("pdf", "docx", "html"):
+            return cls.parse_document(raw_bytes, filename, file_type, enable_ocr=enable_ocr)
         else:
             return ParseResult(
                 success=False,
@@ -810,6 +835,72 @@ class FileParser:
                 row_count=0,
                 error=f"Unsupported file type: {file_type}",
                 file_type=file_type
+            )
+
+    @staticmethod
+    def parse_document(
+        content: bytes,
+        filename: str,
+        file_type: str,
+        *,
+        enable_ocr: bool = False,
+    ) -> ParseResult:
+        """Parse PDF / Word / HTML into provenance-aware chunk rows."""
+        try:
+            from services.document_chunking import document_columns, extract_document_chunks
+
+            rows = extract_document_chunks(
+                content,
+                filename or f"document.{file_type}",
+                doc_type=file_type,
+                enable_ocr=enable_ocr,
+            )
+            if not rows:
+                hint = (
+                    "Enable “OCR scanned PDFs” in Transfer Studio (requires Tesseract), "
+                    "or provide a PDF with an extractable text layer."
+                    if file_type == "pdf"
+                    else "Document has no extractable text."
+                )
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=document_columns(),
+                    row_count=0,
+                    error=f"No extractable text in {file_type.upper()} — {hint}",
+                    file_type=file_type,
+                )
+            ocr_pages = {
+                str(r.get("page") or "")
+                for r in rows
+                if str(r.get("element_type") or "") == "ocr" and r.get("page")
+            }
+            return ParseResult(
+                success=True,
+                data=rows,
+                columns=document_columns(),
+                row_count=len(rows),
+                file_type=file_type,
+                ocr_used=bool(ocr_pages),
+                ocr_page_count=len(ocr_pages),
+            )
+        except RuntimeError as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type=file_type,
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=f"Document parse failed: {exc}",
+                file_type=file_type,
             )
 
     @staticmethod

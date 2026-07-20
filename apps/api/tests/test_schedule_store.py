@@ -28,6 +28,77 @@ def test_create_and_list(temp_store):
     assert len(store.list_schedules()) == 1
 
 
+def test_assert_signed_contract_fail_closed(temp_store, monkeypatch):
+    from services import contract_store as cstore
+    from services.data_contract import ContractStatus, DataContract
+
+    cstore.reset_contract_store()
+    backend = cstore.InMemoryContractStore()
+    monkeypatch.setattr(cstore, "get_contract_store", lambda: backend)
+
+    draft = DataContract(name="draft-orders", status=ContractStatus.DRAFT)
+    backend.save_contract(draft)
+
+    with pytest.raises(ValueError, match="must be SIGNED"):
+        store.assert_signed_contract(draft.id, require_signed=True)
+
+    with pytest.raises(ValueError, match="no contract_id"):
+        store.assert_signed_contract("", require_signed=True)
+
+    store.assert_signed_contract("", require_signed=False)
+
+    draft.status = ContractStatus.SIGNED
+    backend.save_contract(draft)
+    store.assert_signed_contract(draft.id, require_signed=True)
+
+
+def test_create_rejects_unsigned_contract(temp_store, monkeypatch):
+    from services import contract_store as cstore
+    from services.data_contract import ContractStatus, DataContract
+
+    cstore.reset_contract_store()
+    backend = cstore.InMemoryContractStore()
+    monkeypatch.setattr(cstore, "get_contract_store", lambda: backend)
+    draft = DataContract(name="unsigned", status=ContractStatus.DRAFT)
+    backend.save_contract(draft)
+
+    with pytest.raises(ValueError, match="SIGNED"):
+        store.create_schedule({
+            "name": "Bad",
+            "source_connector_id": "a",
+            "source_table": "t",
+            "dest_connector_id": "b",
+            "dest_table": "t2",
+            "interval": "daily",
+            "contract_id": draft.id,
+            "require_signed_contract": True,
+        })
+
+
+def test_create_persists_signed_contract(temp_store, monkeypatch):
+    from services import contract_store as cstore
+    from services.data_contract import ContractStatus, DataContract
+
+    cstore.reset_contract_store()
+    backend = cstore.InMemoryContractStore()
+    monkeypatch.setattr(cstore, "get_contract_store", lambda: backend)
+    signed = DataContract(name="governed", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+
+    sched = store.create_schedule({
+        "name": "Governed nightly",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "t2",
+        "interval": "daily",
+        "contract_id": signed.id,
+        "require_signed_contract": True,
+    })
+    assert sched.contract_id == signed.id
+    assert sched.require_signed_contract is True
+
+
 def test_due_schedules(temp_store):
     sched = store.create_schedule({
         "name": "Hourly",

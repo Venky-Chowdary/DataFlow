@@ -277,6 +277,37 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     _save(data)
 
 
+def clear_watermark(cursor_key: str) -> dict[str, Any]:
+    """Delete a CDC/sync watermark so the next run re-snapshots (when_needed/initial).
+
+    Returns ``{cleared: bool, cursor_key, prior_watermark}``.
+    """
+    key = (cursor_key or "").strip()
+    if not key:
+        return {"cleared": False, "cursor_key": "", "prior_watermark": None, "reason": "missing_cursor_key"}
+
+    prior: str | None = get_watermark(key)
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            coll.delete_one({"key": key})
+        except Exception:
+            _logger.exception("Mongo clear_watermark failed for %s; falling back to file", key)
+
+    data = _load()
+    entries = [e for e in data.get("cursors", []) if e.get("key") != key]
+    if len(entries) != len(data.get("cursors", [])):
+        data["cursors"] = entries
+        _save(data)
+
+    return {
+        "cleared": True,
+        "cursor_key": key,
+        "prior_watermark": prior,
+        "reason": "ok" if prior is not None else "not_found",
+    }
+
+
 def max_cursor_value(rows: list[list[str]], headers: list[str], cursor_column: str) -> str | None:
     """Find maximum cursor value using typed watermark comparator."""
     if not cursor_column or not rows:

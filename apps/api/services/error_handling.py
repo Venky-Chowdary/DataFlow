@@ -131,6 +131,55 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 # `fix` must list *likely checks* — never a single guaranteed remedy.
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
+        ("cdc_lease_conflict", "cdc lease conflict", "refuse concurrent consumer", "cdc resource"),
+        {
+            "code": "cdc_lease_conflict",
+            "category": "cdc_ops",
+            "confidence": "high",
+            "title": "CDC lease conflict",
+            "fix": (
+                "Another worker holds this CDC resource. Stop the holder, wait for TTL expiry, "
+                "or Force-release the lease in Job Theater (fencing generation advances), then "
+                "Resume / re-run. Never run two consumers on the same slot or server_id."
+            ),
+        },
+    ),
+    (
+        (
+            "cdc_lsn_gap",
+            "cdc_scn_gap",
+            "cdc_cursor_gap",
+            "before capture retention",
+            "before available redo",
+            "min_lsn",
+            "oldest_available",
+            "ora-01291",
+            "ora-01292",
+        ),
+        {
+            "code": "cdc_cursor_gap",
+            "category": "cdc_ops",
+            "confidence": "high",
+            "title": "CDC cursor gap (retention / failover)",
+            "fix": (
+                "Reset the CDC watermark, set snapshot to when_needed or initial, then re-run. "
+                "Continuous CDC across the gap is not possible."
+            ),
+        },
+    ),
+    (
+        ("allow_append_only", "append-only (or missing pk", "cdc destination"),
+        {
+            "code": "cdc_append_only_sink",
+            "category": "cdc_ops",
+            "confidence": "high",
+            "title": "Append-only CDC sink blocked",
+            "fix": (
+                "Use a PK upsert destination, or enable Allow append-only CDC in Destination Advanced."
+            ),
+        },
+    ),
+    (
         ("table is full", "er_record_file_full", "(1114,", " 1114,", "error 1114"),
         {
             "code": "destination_table_full",
@@ -298,6 +347,83 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     # Type-aware match when str(exc) is empty (decimal.Overflow).
     if isinstance(error, Exception) and type(error).__name__ == "Overflow":
         text = f"decimal.overflow {text}"
+    try:
+        from services.cdc_lease import CdcLeaseConflict
+
+        if isinstance(error, CdcLeaseConflict):
+            holder = error.holder_id or "another worker"
+            resource = error.resource or "CDC resource"
+            return {
+                "code": "cdc_lease_conflict",
+                "category": "cdc_ops",
+                "title": "CDC lease conflict",
+                "message": (
+                    f"Another worker holds {resource!r} (holder {holder}). "
+                    "DataFlow refuses concurrent consumers — delivery stays at-least-once."
+                ),
+                "fix": (
+                    "Stop or wait for the holder job, or Force-release the lease in Job Theater "
+                    "(fencing generation advances). Then Resume / re-run — do not run two "
+                    "consumers on the same slot or server_id."
+                ),
+                "raw": raw,
+                "retriable": False,
+                "confidence": "high",
+                "holder_id": error.holder_id,
+                "resource": error.resource,
+                "cursor_key": error.cursor_key,
+            }
+    except Exception:
+        pass
+    try:
+        from services.cdc_cursor_gap import CdcCursorGapError
+
+        if isinstance(error, CdcCursorGapError):
+            dialect = error.dialect or "source"
+            return {
+                "code": error.code or "cdc_cursor_gap",
+                "category": "cdc_ops",
+                "title": "CDC cursor gap (retention / failover)",
+                "message": (
+                    f"{dialect} CDC resume is before retained log history "
+                    f"(resume={error.resume or '?'}, retained={error.retained or '?'}). "
+                    "Continuous CDC across the gap is not possible."
+                ),
+                "fix": (
+                    "Reset the CDC watermark in Job Theater, set snapshot mode to "
+                    "when_needed or initial, then re-run. Do not claim continuous CDC "
+                    "across an AG / Data Guard / archive-purge gap."
+                ),
+                "raw": raw,
+                "retriable": False,
+                "confidence": "high",
+                "cursor_key": error.cursor_key,
+                "resume": error.resume,
+                "retained": error.retained,
+                "dialect": error.dialect,
+            }
+    except Exception:
+        pass
+    try:
+        from services.cdc_effectively_once import CdcAppendOnlySinkError
+
+        if isinstance(error, CdcAppendOnlySinkError):
+            return {
+                "code": "cdc_append_only_sink",
+                "category": "cdc_ops",
+                "title": "Append-only CDC sink blocked",
+                "message": str(error),
+                "fix": (
+                    "Choose a destination that supports PK upsert, or enable "
+                    "Allow append-only CDC in Destination Advanced (acknowledges "
+                    "duplicate rows on redelivery). Exactly-once is not claimed."
+                ),
+                "raw": raw,
+                "retriable": False,
+                "confidence": "high",
+            }
+    except Exception:
+        pass
     classification = classify_error(error)
     matched: dict[str, str] | None = None
     for needles, payload in _OPERATOR_FAILURE_RULES:
@@ -312,6 +438,11 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             message = (
                 f"{title}. Driver reported: {raw}. "
                 f"Rows already written remain; fix the overflow column then Resume."
+            )
+        elif matched.get("code") == "cdc_lease_conflict":
+            message = (
+                f"{title}. {raw}. "
+                "Concurrent CDC consumers are blocked — release or wait for the holder, then retry."
             )
         else:
             message = (

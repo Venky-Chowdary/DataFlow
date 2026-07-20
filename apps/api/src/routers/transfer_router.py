@@ -93,6 +93,8 @@ class EndpointDTO(BaseModel):
     auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
+    # Vector / CDC / writer options (content_column, embedding_model, allow_append_only, …).
+    extra: dict = Field(default_factory=dict)
 
 
 class AnalyzeRequest(BaseModel):
@@ -114,6 +116,7 @@ class ExecuteTransferRequest(BaseModel):
     skip_preflight: bool = False
     async_mode: bool = True
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
     source_filter: dict = Field(default_factory=dict)
     priority_column: str = ""
     priority_direction: str = "desc"
@@ -536,6 +539,7 @@ async def execute_transfer_json(
         workspace_id=workspace_id,
         data_region=region,
         backfill_new_fields=bool(body.backfill_new_fields),
+        write_via_staging=bool(body.write_via_staging),
         stream_contracts=list(body.stream_contracts or []),
         contract_id=body.contract_id or "",
         enforce_contract=bool(body.enforce_contract),
@@ -660,6 +664,10 @@ async def run_universal_transfer(
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
+    write_via_staging: str = Form("false"),
+    enable_ocr: str = Form("false"),
+    dest_extra_json: str = Form(""),
+    source_extra_json: str = Form(""),
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     request: Request = None,
@@ -688,6 +696,18 @@ async def run_universal_transfer(
         content = b""
         filename = ""
 
+    use_ocr = enable_ocr.lower() in ("true", "1", "yes")
+    source_extra: dict = {}
+    if use_ocr:
+        source_extra["enable_ocr"] = True
+    if source_extra_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(source_extra_json)
+            if isinstance(parsed, dict):
+                source_extra.update(parsed)
+        except Exception:
+            pass
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -702,7 +722,18 @@ async def run_universal_transfer(
         collection=source_collection,
         connection_string=source_connection_string,
         auth_source=source_auth_source,
+        extra=source_extra,
     )
+    dest_extra: dict = {}
+    if dest_extra_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(dest_extra_json)
+            if isinstance(parsed, dict):
+                dest_extra = parsed
+        except Exception:
+            dest_extra = {}
+
     destination = EndpointConfig(
         kind=dest_kind,
         format=dest_format,
@@ -719,6 +750,7 @@ async def run_universal_transfer(
         output_path=dest_output_path,
         warehouse=dest_warehouse,
         auth_source=dest_auth_source,
+        extra=dest_extra,
     )
 
     source_filter: dict = {}
@@ -752,6 +784,7 @@ async def run_universal_transfer(
         workspace_id=workspace_id,
         data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
+        write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
         triggered_by=_actor_email(request),
     )
     # Explicit form fields win over stored plan policies (plan used to force
@@ -759,6 +792,7 @@ async def run_universal_transfer(
     form_validation_mode = (validation_mode or "").strip()
     form_sync_mode = (sync_mode or "").strip()
     form_schema_policy = (schema_policy or "").strip()
+    form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import build_run_payload
@@ -778,6 +812,8 @@ async def run_universal_transfer(
                 request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
             if policies.get("backfill_new_fields") and not request_obj.backfill_new_fields:
                 request_obj.backfill_new_fields = True
+            if policies.get("write_via_staging") and not form_write_via_staging:
+                request_obj.write_via_staging = True
             if not stream_contracts_json.strip():
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:
@@ -798,6 +834,8 @@ async def run_universal_transfer(
         request_obj.sync_mode = form_sync_mode
     if form_schema_policy:
         request_obj.schema_policy = form_schema_policy
+    if form_write_via_staging:
+        request_obj.write_via_staging = True
     # propagate_* implies additive columns even when the toggle was left off.
     from services.batch_progress import effective_backfill_new_fields
 

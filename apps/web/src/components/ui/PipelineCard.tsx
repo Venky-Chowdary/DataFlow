@@ -2,6 +2,7 @@ import { ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
+import { breakerBadgeClass, breakerWarnLabel } from "../../lib/contractBreakerUi";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import { Button } from "./Button";
 import { CopyIdChip } from "./CopyIdChip";
@@ -16,6 +17,11 @@ interface PipelineCardProps {
   historyOpen?: boolean;
   /** Dense list row — actions live in the detail drawer. */
   compact?: boolean;
+  /** Circuit breaker state for the bound data contract (closed/open/half_open). */
+  breakerState?: string | null;
+  /** Freshness SLO warn — lag seconds when pipeline is stale/critical. */
+  freshnessLagSeconds?: number | null;
+  freshnessSeverity?: string | null;
   onSelect?: () => void;
   onToggle?: () => void;
   onRun?: () => void;
@@ -61,6 +67,9 @@ export function PipelineCard({
   selected,
   historyOpen,
   compact,
+  breakerState,
+  freshnessLagSeconds,
+  freshnessSeverity,
   onSelect,
   onToggle,
   onRun,
@@ -73,6 +82,11 @@ export function PipelineCard({
   const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
   const routeLabel = `${source?.name ?? "Source"} → ${dest?.name ?? "Destination"}`;
   const tableLabel = `${sched.source_table} → ${sched.dest_table}`;
+  const breakerText = breakerWarnLabel(breakerState);
+  const freshnessText =
+    freshnessLagSeconds != null && Number.isFinite(freshnessLagSeconds)
+      ? `Lag ${freshnessLagSeconds.toFixed(0)}s`
+      : "";
 
   if (compact) {
     return (
@@ -119,9 +133,23 @@ export function PipelineCard({
         <span className="df2-pipeline-row-cadence" title="Schedule cadence">
           {cadenceLabel(sched)}
         </span>
-        <span className="df2-pipeline-row-sync" title="Sync mode">{syncLabel}</span>
+        <span className="df2-pipeline-row-sync" title={sched.contract_id ? `Sync mode · contract ${sched.contract_id}` : "Sync mode"}>
+          {syncLabel}
+          {sched.contract_id ? " · contract" : ""}
+        </span>
         <span className="df2-pipeline-row-signal">
-          {isRunning ? (
+          {breakerText ? (
+            <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
+              {breakerText}
+            </span>
+          ) : freshnessText ? (
+            <span
+              className={`df2-badge ${freshnessSeverity === "critical" ? "df2-badge-warn" : "df2-badge-warn"}`}
+              title="CDC freshness SLO"
+            >
+              {freshnessText}
+            </span>
+          ) : isRunning ? (
             <span className="df2-badge df2-badge-run">Running</span>
           ) : sched.last_status ? (
             <span className={jobStatusBadgeClass(sched.last_status)}>
@@ -183,6 +211,11 @@ export function PipelineCard({
           {isRunning && (
             <span className="df2-badge df2-badge-run" title="A run is in progress">
               <DtIcon name="activity" size={11} /> Running
+            </span>
+          )}
+          {breakerText && (
+            <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
+              {breakerText}
             </span>
           )}
           {sched.last_status && (

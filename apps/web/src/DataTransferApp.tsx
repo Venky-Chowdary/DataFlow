@@ -585,6 +585,10 @@ function AppShell({
                     schedules={schedules}
                     onOpenConnectors={() => setScreen("connectors")}
                     onOpenJobs={() => setScreen("jobs")}
+                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
+                    onOpenPipeline={(scheduleId) =>
+                      navigateFromSearch({ screen: "schedules", scheduleId })
+                    }
                   />
                 </PageErrorBoundary>
                 </div>

@@ -11,7 +11,11 @@ import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
-import { inferTransferFailureHint, isDestinationCapacityFailure, classifyJobLogLine } from "../lib/transferFailure";
+import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
+import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
+import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
+import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
+import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 
@@ -33,6 +37,8 @@ interface JobTheaterProps {
   onBackToMap?: () => void;
   /** Resume from last checkpoint without leaving Transfer Studio. */
   onResumed?: (jobId: string) => void;
+  /** Open another job (e.g. CDC lease holder) in Jobs / Theater. */
+  onOpenJob?: (jobId: string) => void;
 }
 
 const PHASES = [
@@ -90,16 +96,18 @@ export function JobTheater({
   onBackToValidate,
   onBackToMap,
   onResumed,
+  onOpenJob,
 }: JobTheaterProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
   const [job, setJob] = useState<JobProgress | null>(null);
   const [throughput, setThroughput] = useState(0);
-  const [log, setLog] = useState<string[]>([]);
+  const [log, setLog] = useState<LiveLogEntry[]>([]);
   const [cancelling, setCancelling] = useState(false);
   const [resuming, setResuming] = useState(false);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
+  const logSeqRef = useRef(0);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
@@ -124,16 +132,23 @@ export function JobTheater({
     startRef.current = Date.now();
     doneRef.current = false;
     prevRef.current = { loggedRows: 0 };
+    logSeqRef.current = 0;
     const append = (line: string) => {
       const stamped = `${new Date().toLocaleTimeString()} — ${line}`;
       setLog((l) => {
-        const next = [...l.slice(-200), stamped];
-        writeJobEventLog(jobId, next);
+        const entry: LiveLogEntry = { id: ++logSeqRef.current, text: stamped };
+        // Trim oldest only — stable ids on remaining lines prevent remount flicker.
+        const next = l.length >= 400 ? [...l.slice(-(399)), entry] : [...l, entry];
+        writeJobEventLog(jobId, next.map((e) => e.text));
         return next;
       });
     };
-    setLog([`${new Date().toLocaleTimeString()} — Connecting to live job stream…`]);
-    writeJobEventLog(jobId, [`${new Date().toLocaleTimeString()} — Connecting to live job stream…`]);
+    const boot: LiveLogEntry = {
+      id: ++logSeqRef.current,
+      text: `${new Date().toLocaleTimeString()} — Connecting to live job stream…`,
+    };
+    setLog([boot]);
+    writeJobEventLog(jobId, [boot.text]);
     const stop = streamJobProgress(
       jobId,
       (update) => {
@@ -258,6 +273,7 @@ export function JobTheater({
       onNewTransfer={onNewTransfer}
       onBackToValidate={onBackToValidate}
       onBackToMap={onBackToMap}
+      onOpenJob={onOpenJob}
     />
   );
 }
@@ -270,7 +286,7 @@ interface JobTheaterViewProps {
   sourceType?: string;
   destType?: string;
   throughput: number;
-  log: string[];
+  log: LiveLogEntry[];
   startedAtFallback?: number;
   preflight?: PreflightResult;
   cancelling?: boolean;
@@ -280,6 +296,7 @@ interface JobTheaterViewProps {
   onNewTransfer?: () => void;
   onBackToValidate?: () => void;
   onBackToMap?: () => void;
+  onOpenJob?: (jobId: string) => void;
 }
 
 /** Presentational live-transfer theater. Pure — driven entirely by props. */
@@ -301,13 +318,8 @@ export function JobTheaterView({
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
+  onOpenJob,
 }: JobTheaterViewProps) {
-  const logRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [log]);
-
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
   const currentPhase = phaseIndex(job.phase, job.status);
@@ -496,17 +508,39 @@ export function JobTheaterView({
       {(isCancelled || isFailed) && (onNewTransfer || onBackToValidate || onBackToMap || onResume) && (
         <div className="df2-theater-v3-next" role="navigation" aria-label="After cancelled or failed transfer">
           <div className="df2-theater-v3-next-copy">
-            <strong>{isCancelled ? "What next?" : "Recover from failure"}</strong>
+            <strong>
+              {isCancelled
+                ? "What next?"
+                : job.cdc_lease_conflict
+                  ? "Recover · lease conflict"
+                  : job.cdc_cursor_gap
+                    || job.error_code === "cdc_cursor_gap"
+                    || job.error_code === "cdc_lsn_gap"
+                    || job.error_code === "cdc_scn_gap"
+                    ? "Recover · CDC cursor gap"
+                    : job.cdc_append_only_sink || job.error_code === "cdc_append_only_sink"
+                      ? "Recover · append-only sink"
+                      : "Recover from failure"}
+            </strong>
             <span>
               {isCancelled
                 ? "Resume from checkpoint, adjust Map / Validate, or start clean."
+                : job.cdc_lease_conflict
+                  ? "Clear the lease or stop the holder first — Resume alone will hit the same conflict while the lease is live."
+                : job.cdc_cursor_gap
+                  || job.error_code === "cdc_cursor_gap"
+                  || job.error_code === "cdc_lsn_gap"
+                  || job.error_code === "cdc_scn_gap"
+                  ? "Reset the watermark, then re-run with snapshot when_needed or initial — Resume with the same cursor will hit the same gap."
+                : job.cdc_append_only_sink || job.error_code === "cdc_append_only_sink"
+                  ? "Switch to a PK upsert destination or enable Allow append-only CDC in Destination Advanced."
                 : capacityFailure
                   ? "Free destination capacity first, then Resume from checkpoint — Resume alone will hit the same error."
                   : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
             </span>
           </div>
           <div className="df2-theater-v3-next-actions">
-            {onResume && (job.chunk_current != null || job.checkpoint) && (
+            {onResume && (job.chunk_current != null || job.checkpoint) && !job.cdc_lease_conflict && !job.cdc_cursor_gap && (
               <button
                 type="button"
                 className="df2-btn df2-btn-sm df2-btn-primary"
@@ -533,6 +567,30 @@ export function JobTheaterView({
             )}
           </div>
         </div>
+      )}
+
+      {isFailed && job.cdc_lease_conflict && (
+        <CdcLeaseConflictPanel
+          job={job}
+          onResume={onResume}
+          resuming={resuming}
+          onOpenJob={onOpenJob}
+        />
+      )}
+      {isFailed && (
+        <CdcCursorGapPanel job={job} onResume={onResume} resuming={resuming} />
+      )}
+
+      {(isComplete || isFailed || isCancelled || isQuarantine) && (
+        <JobTrustScoreCard
+          job={job}
+          onOpenQuarantine={rejectedRows > 0 ? () => {
+            document.getElementById("df2-theater-quarantine")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          } : undefined}
+          onOpenValidate={onBackToValidate}
+          onOpenMap={onBackToMap}
+          onResume={onResume}
+        />
       )}
 
       {slowSnowflakeTip && (
@@ -665,6 +723,22 @@ export function JobTheaterView({
             <span>Elapsed</span>
           </div>
         </article>
+        {typeof destinationSummary.staging_table === "string" && destinationSummary.staging_table && (
+          <article
+            className="df2-theater-v3-metric"
+            title={`Pre-ingestion staging · ${Number(destinationSummary.promoted_rows ?? 0).toLocaleString()} promoted of ${Number(destinationSummary.staged_rows ?? 0).toLocaleString()} staged`}
+          >
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong>{String(destinationSummary.staging_table)}</strong>
+              <span>
+                {destinationSummary.promote_blocked
+                  ? "Staging blocked promote"
+                  : `Staging · ${Number(destinationSummary.promoted_rows ?? 0).toLocaleString()} promoted`}
+              </span>
+            </div>
+          </article>
+        )}
         {job.cdc_lag_seconds != null && Number.isFinite(Number(job.cdc_lag_seconds)) && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="activity" size={16} />
@@ -755,8 +829,30 @@ export function JobTheaterView({
                 {job.cdc_lease_conflict
                   ? `Held by ${job.cdc_lease_holder || "another worker"}`
                   : job.cdc_lease_stale
-                    ? `CDC lease (stale)${job.cdc_lease_backend ? ` · ${job.cdc_lease_backend}` : ""}`
-                    : `CDC lease${job.cdc_lease_backend ? ` · ${job.cdc_lease_backend}` : ""}`}
+                    ? `CDC lease (stale)${job.cdc_lease_backend ? ` · ${job.cdc_lease_backend}` : ""}${
+                        job.cdc_lease_generation != null ? ` · gen ${job.cdc_lease_generation}` : ""
+                      }`
+                    : `CDC lease${job.cdc_lease_backend ? ` · ${job.cdc_lease_backend}` : ""}${
+                        job.cdc_lease_generation != null ? ` · gen ${job.cdc_lease_generation}` : ""
+                      }`}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.source_ha_role && (
+          <article
+            className="df2-theater-v3-metric"
+            title={job.source_ha_message || `Source HA role ${job.source_ha_role}`}
+          >
+            <DtIcon name="activity" size={16} />
+            <div>
+              <strong>{job.source_ha_role}</strong>
+              <span>
+                Source HA
+                {job.source_ha_topology && job.source_ha_topology !== "none"
+                  ? ` · ${job.source_ha_topology}`
+                  : ""}
+                {job.source_ha_group ? ` · ${job.source_ha_group}` : ""}
               </span>
             </div>
           </article>
@@ -880,6 +976,15 @@ export function JobTheaterView({
           report={job.reconciliation}
           explanation={job.explanation}
           className="df2-theater-gate8"
+          onOpenValidate={onBackToValidate}
+          onOpenQuarantine={
+            rejectedRows > 0 || isQuarantine
+              ? () => {
+                  const el = document.querySelector(".df2-theater-v3-quarantine");
+                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+              : undefined
+          }
         />
       )}
 
@@ -921,7 +1026,7 @@ export function JobTheaterView({
       })()}
 
       {(rejectedRows > 0 || isFailed || isQuarantine) && (
-        <section className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
+        <section id="df2-theater-quarantine" className="df2-theater-v3-quarantine" aria-label="Quarantined rows">
           <div className="df2-theater-v3-alert warn">
             <DtIcon name="alert" size={18} />
             <div>
@@ -948,6 +1053,7 @@ export function JobTheaterView({
             initialDetails={job.rejected_details}
             autoLoad
             initiallyOpen
+            onOpenValidate={onBackToValidate}
           />
         </section>
       )}
@@ -955,24 +1061,13 @@ export function JobTheaterView({
       </div>
 
       <div className={`df2-theater-v3-log-section ${isRunning ? "is-live" : ""}`}>
-        <div className="df2-theater-v3-log" ref={logRef} role="log" aria-live="polite">
-          <div className="df2-theater-v3-log-head">
-            <strong><span className="df2-theater-v3-log-dot" aria-hidden /> Live event log</strong>
-            <span>{log.length ? `${log.length} events` : "Waiting…"}</span>
-          </div>
-          {log.length === 0 ? (
-            <div className="df2-theater-v3-log-empty">Waiting for job events…</div>
-          ) : (
-            log.map((line, i) => (
-              <div
-                key={i}
-                className={`df2-theater-v3-log-line is-${classifyJobLogLine(line)}`}
-              >
-                {line}
-              </div>
-            ))
-          )}
-        </div>
+        <LiveEventLog
+          lines={log}
+          live={isRunning}
+          variant="theater"
+          title="Live event log"
+          empty="Waiting for job events…"
+        />
       </div>
     </div>
   );

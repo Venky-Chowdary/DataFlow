@@ -3,13 +3,15 @@ import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { CopyIdChip } from "../ui/CopyIdChip";
 import { readJobEventLog } from "../../lib/jobEventLog";
-import { classifyJobLogLine } from "../../lib/transferFailure";
 import { useActiveData } from "../../lib/DataContext";
 import type { LoadHistoryReport, TransferResult } from "../../lib/types";
+import { LiveEventLog } from "../ui/LiveEventLog";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
 import { Gate8ProofCard } from "./Gate8ProofCard";
+import { JobTrustScoreCard } from "./JobTrustScoreCard";
+import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 
 interface TransferResultDashboardProps {
   result: TransferResult;
@@ -149,6 +151,13 @@ export function TransferResultDashboard({
   if (ds?.load_method) {
     metaChips.push({ label: "Load", value: ds.load_method });
   }
+  if (ds?.type === "pgvector" || ds?.type === "qdrant" || ds?.type === "weaviate" || ds?.type === "pinecone" || ds?.type === "milvus") {
+    metaChips.push({
+      label: "Vector",
+      value: String(ds.table || ds.collection || "collection"),
+      title: "Embedded chunks upserted (at-least-once)",
+    });
+  }
   if (ds?.chunk_size != null && Number(ds.chunk_size) > 0) {
     metaChips.push({ label: "Batch", value: Number(ds.chunk_size).toLocaleString() });
   }
@@ -160,6 +169,24 @@ export function TransferResultDashboard({
   }
   if (ds?.error_policy) {
     metaChips.push({ label: "Policy", value: ds.error_policy });
+  }
+  const stagingTable = typeof ds?.staging_table === "string" ? ds.staging_table : "";
+  const stagedRows = Number(ds?.staged_rows ?? 0);
+  const promotedRows = Number(ds?.promoted_rows ?? 0);
+  if (stagingTable) {
+    metaChips.push({
+      label: "Staging",
+      value: stagingTable,
+      title: `Pre-ingestion: ${stagedRows.toLocaleString()} staged · ${promotedRows.toLocaleString()} promoted to primary`,
+    });
+    if (promotedRows > 0 || stagedRows > 0) {
+      metaChips.push({
+        label: "Promoted",
+        value: `${promotedRows.toLocaleString()} / ${stagedRows.toLocaleString()}`,
+        tone: Number(ds?.rejected_rows ?? 0) > 0 ? "warn" : "ok",
+        title: "Clean rows promoted from staging to primary",
+      });
+    }
   }
   if (checksum) {
     metaChips.push({ label: "Checksum", value: checksum.slice(0, 12), title: checksum });
@@ -275,15 +302,38 @@ export function TransferResultDashboard({
         compact
       />
 
+      <JobTrustScoreCard
+        job={{
+          status: result.success
+            ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
+            : "failed",
+          records_processed: rec,
+          rejected_rows: rejected,
+          coerced_null_rows: coercedNull,
+          reconciliation: result.reconciliation as Record<string, unknown> | undefined,
+          destination_summary: ds as Record<string, unknown> | undefined,
+          cdc_cursor_gap: result.cdc_cursor_gap,
+          error_code: result.error_code,
+          source_ha_role: result.source_ha_role,
+        }}
+        onOpenValidate={onOpenValidate}
+        onOpenQuarantine={
+          showQuarantine
+            ? () => document.getElementById("df2-result-quarantine")?.scrollIntoView({ behavior: "smooth" })
+            : undefined
+        }
+      />
+
       {result.reconciliation && (
         <Gate8ProofCard
           report={result.reconciliation}
           explanation={result.explanation}
           className="df2-result-gate8"
+          onOpenValidate={onOpenValidate}
         />
       )}
 
-      {(result.cdc_plugin || result.cdc_delivery || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder) && (
+      {(result.cdc_plugin || result.cdc_delivery || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder || result.source_ha_role) && (
         <section className="df2-result-cdc-strip" aria-label="CDC run summary">
           <header>
             <DtIcon name="activity" size={14} />
@@ -294,6 +344,18 @@ export function TransferResultDashboard({
             {result.cdc_plugin && <div><dt>Plugin</dt><dd>{result.cdc_plugin}</dd></div>}
             {result.snapshot_mode && <div><dt>Snapshot</dt><dd>{result.snapshot_mode}</dd></div>}
             {result.cdc_shared_reader && <div><dt>Topology</dt><dd>Shared log reader</dd></div>}
+            {result.source_ha_role && (
+              <div>
+                <dt>Source HA</dt>
+                <dd title={result.source_ha_message || ""}>
+                  {result.source_ha_role}
+                  {result.source_ha_topology && result.source_ha_topology !== "none"
+                    ? ` · ${result.source_ha_topology}`
+                    : ""}
+                  {result.source_ha_group ? ` · ${result.source_ha_group}` : ""}
+                </dd>
+              </div>
+            )}
             {result.cdc_lag_seconds != null && Number.isFinite(Number(result.cdc_lag_seconds)) && (
               <div><dt>Lag</dt><dd>{Number(result.cdc_lag_seconds).toFixed(1)}s</dd></div>
             )}
@@ -305,6 +367,24 @@ export function TransferResultDashboard({
             )}
           </dl>
         </section>
+      )}
+
+      {!result.success && (result.cdc_cursor_gap || result.error_code === "cdc_lsn_gap" || result.error_code === "cdc_scn_gap" || result.error_code === "cdc_cursor_gap") && (
+        <CdcCursorGapPanel
+          job={{
+            _id: result.job_id,
+            status: "failed",
+            cdc_cursor_gap: true,
+            cdc_cursor_gap_code: result.cdc_cursor_gap_code,
+            cdc_cursor_gap_dialect: result.cdc_cursor_gap_dialect,
+            cdc_cursor_gap_resume: result.cdc_cursor_gap_resume,
+            cdc_cursor_gap_retained: result.cdc_cursor_gap_retained,
+            cdc_lease_cursor_key: result.cdc_lease_cursor_key,
+            error_code: result.error_code,
+            error: result.error,
+            watermark: result.watermark,
+          } as import("../../lib/types").JobProgress}
+        />
       )}
 
       <div className="df2-result-body">
@@ -475,7 +555,7 @@ export function TransferResultDashboard({
         )}
 
         {(showQuarantine || !result.success) && result.job_id && (
-          <div className="df2-result-section-wrap">
+          <div id="df2-result-quarantine" className="df2-result-section-wrap">
             <QuarantinePanel
               jobId={result.job_id}
               rejectedRows={rejected || issueFindings}
@@ -483,6 +563,7 @@ export function TransferResultDashboard({
               initialDetails={result.destination_summary?.rejected_details}
               autoLoad
               initiallyOpen
+              onOpenValidate={onOpenValidate}
             />
           </div>
         )}
@@ -510,30 +591,12 @@ export function TransferResultDashboard({
       </div>
 
       <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
-        <header className="df2-job-log-panel-head">
-          <div className="df2-job-log-panel-title">
-            <DtIcon name="activity" size={14} />
-            <strong>Job log</strong>
-            <span className="df2-job-log-count">{eventLog.length} events</span>
-            {result.job_id && <CopyIdChip id={result.job_id} label="Job" compact />}
-          </div>
-        </header>
-        <div className="df2-job-log-panel-body" role="log">
-          {eventLog.length === 0 ? (
-            <div className="df2-job-log-empty">
-              No captured events for this job yet. Re-run a transfer to collect a full live event stream.
-            </div>
-          ) : (
-            eventLog.map((line, i) => (
-              <div
-                key={`${i}-${line.slice(0, 32)}`}
-                className={`df2-job-log-line is-${classifyJobLogLine(line)}`}
-              >
-                {line}
-              </div>
-            ))
-          )}
-        </div>
+        <LiveEventLog
+          lines={eventLog}
+          variant="result"
+          title="Job log"
+          empty="No captured events for this job yet. Re-run a transfer to collect a full live event stream."
+        />
       </section>
     </div>
   );

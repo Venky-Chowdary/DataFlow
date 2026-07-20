@@ -22,8 +22,13 @@ def test_normalize_and_digest_stable() -> None:
     assert tables_digest(["b", "a"]) == tables_digest(["a", "b"])
     assert can_share_log_reader("postgresql", 2) is True
     assert can_share_log_reader("mysql", 2) is True
+    assert can_share_log_reader("sqlserver", 2) is True
+    assert can_share_log_reader("mssql", 2) is True
+    assert can_share_log_reader("oracle", 2) is True
     assert can_share_log_reader("mongodb", 2) is False
     assert can_share_log_reader("postgresql", 1) is False
+    assert can_share_log_reader("sqlserver", 1) is False
+    assert can_share_log_reader("oracle", 1) is False
 
 
 def test_multi_table_txn_buffer_demux_and_ack_barrier() -> None:

@@ -148,9 +148,24 @@ def snapshot() -> dict[str, Any]:
         }
 
 
-def freshness_summary(*, max_lag_warn_seconds: float = 60.0) -> dict[str, Any]:
-    """UI-friendly freshness view: worst lag, per-pipeline rows, warn flags."""
+def freshness_summary(
+    *,
+    max_lag_warn_seconds: float = 60.0,
+    max_lag_critical_seconds: float | None = None,
+    heartbeat_stale_seconds: float = 300.0,
+) -> dict[str, Any]:
+    """UI-friendly freshness view: worst lag, per-pipeline rows, SLO alerts.
+
+    ``stale`` = lag above warn threshold.
+    ``critical`` = lag above critical threshold (default 5× warn) or heartbeat aged out.
+    """
     snap = snapshot()
+    critical_floor = float(
+        max_lag_critical_seconds
+        if max_lag_critical_seconds is not None
+        else max(max_lag_warn_seconds * 5.0, max_lag_warn_seconds + 60.0)
+    )
+    now = time.time()
     pipelines: list[dict[str, Any]] = []
     worst: float | None = None
     for key, lag in (snap.get("pipeline_lag_seconds") or {}).items():
@@ -159,6 +174,15 @@ def freshness_summary(*, max_lag_warn_seconds: float = 60.0) -> dict[str, Any]:
         if worst is None or lag_f > worst:
             worst = lag_f
         hb = (snap.get("pipeline_heartbeat_at") or {}).get(key)
+        hb_age = (now - float(hb)) if hb is not None else None
+        heartbeat_stale = hb_age is not None and hb_age > float(heartbeat_stale_seconds)
+        lag_stale = lag_f > max_lag_warn_seconds
+        lag_critical = lag_f > critical_floor
+        severity = "ok"
+        if lag_critical or heartbeat_stale:
+            severity = "critical"
+        elif lag_stale:
+            severity = "warn"
         pipelines.append({
             "schedule_id": parts.get("schedule_id", "_"),
             "stream": parts.get("stream", "_"),
@@ -166,15 +190,65 @@ def freshness_summary(*, max_lag_warn_seconds: float = 60.0) -> dict[str, Any]:
             "lag_seconds": lag_f,
             "polls_total": float((snap.get("pipeline_polls_total") or {}).get(key, 0)),
             "heartbeat_at": hb,
-            "stale": lag_f > max_lag_warn_seconds,
+            "heartbeat_age_seconds": hb_age,
+            "stale": lag_stale or heartbeat_stale,
+            "severity": severity,
         })
-    pipelines.sort(key=lambda p: p["lag_seconds"], reverse=True)
+    pipelines.sort(key=lambda p: (0 if p["severity"] == "critical" else 1 if p["severity"] == "warn" else 2, -p["lag_seconds"]))
     global_lag = float((snap.get("gauges") or {}).get("dataflow_cdc_lag_seconds") or 0)
     if worst is None and global_lag > 0:
         worst = global_lag
+
+    alerts: list[dict[str, Any]] = []
+    for p in pipelines:
+        if p["severity"] == "ok":
+            continue
+        sid = p["schedule_id"]
+        jid = p["job_id"]
+        stream = p["stream"]
+        if p["severity"] == "critical" and p.get("heartbeat_age_seconds") and p["heartbeat_age_seconds"] > heartbeat_stale_seconds:
+            title = "CDC heartbeat stale"
+            detail = (
+                f"No CDC poll heartbeat for {float(p['heartbeat_age_seconds']):.0f}s "
+                f"on {stream} (threshold {heartbeat_stale_seconds:.0f}s)."
+            )
+        elif p["severity"] == "critical":
+            title = "CDC lag critical"
+            detail = f"Lag {p['lag_seconds']:.1f}s exceeds critical SLO ({critical_floor:.0f}s) on {stream}."
+        else:
+            title = "CDC lag above SLO"
+            detail = f"Lag {p['lag_seconds']:.1f}s exceeds warn SLO ({max_lag_warn_seconds:.0f}s) on {stream}."
+        alerts.append({
+            "severity": p["severity"],
+            "code": "cdc_freshness",
+            "title": title,
+            "detail": detail,
+            "schedule_id": None if sid in {"", "_"} else sid,
+            "job_id": None if jid in {"", "_"} else jid,
+            "stream": None if stream in {"", "_"} else stream,
+            "lag_seconds": p["lag_seconds"],
+        })
+
+    stale_count = sum(1 for p in pipelines if p["stale"])
+    critical_count = sum(1 for p in pipelines if p["severity"] == "critical")
+    if critical_count:
+        slo_status = "critical"
+    elif stale_count:
+        slo_status = "warn"
+    elif pipelines:
+        slo_status = "ok"
+    else:
+        slo_status = "unknown"
+
     return {
         "worst_lag_seconds": worst,
         "warn_threshold_seconds": max_lag_warn_seconds,
+        "critical_threshold_seconds": critical_floor,
+        "heartbeat_stale_seconds": heartbeat_stale_seconds,
+        "stale_count": stale_count,
+        "critical_count": critical_count,
+        "slo_status": slo_status,
+        "alerts": alerts[:50],
         "pipelines": pipelines[:100],
         "counters": snap.get("counters") or {},
         "gauges": snap.get("gauges") or {},

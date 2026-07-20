@@ -252,27 +252,47 @@ def test_contract(body: _ContractTestRequest):
 
 @router.get("/{contract_id}/export")
 def export_contract(contract_id: str, format: Literal["yaml", "json"] = "yaml"):
-    """Export a contract as a versionable YAML or JSON artifact for GitOps."""
+    """Export a contract as ``dataflow-contract.yaml`` (kind + metadata + spec)."""
+    from services.gitops_manifest import contract_artifact
+
     store = get_contract_store()
     contract = store.get_contract(contract_id)
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
-    payload = contract.to_dict()
+    artifact = contract_artifact(contract)
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(payload, sort_keys=False, default_flow_style=False),
+            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
             media_type="application/x-yaml",
-            headers={"Content-Disposition": f"attachment; filename=contract-{contract_id}.yaml"},
+            headers={"Content-Disposition": f"attachment; filename=dataflow-contract-{contract_id}.yaml"},
         )
-    return payload
+    return artifact
 
 
 @router.post("/import", response_model=_ContractResponse)
 def import_contract(payload: dict[str, Any]):
-    """Import a contract from a YAML/JSON artifact. Replaces an existing contract with the same id."""
+    """Import a contract from YAML/JSON (raw or DataContract kind wrapper).
+
+    Imported contracts are saved as DRAFT — sign before enforcing on schedules.
+    """
+    from services.gitops_manifest import apply_manifest
+
+    # Accept bare contract dicts and kind-wrapped artifacts.
+    if payload.get("kind") == "DataContract" or payload.get("kind") == "DataFlowManifest":
+        result = apply_manifest(payload, dry_run=False)
+        rows = [r for r in (result.get("results") or []) if r.get("kind") == "DataContract" and r.get("ok")]
+        if not rows:
+            err = next((r.get("error") for r in (result.get("results") or []) if r.get("error")), None)
+            raise HTTPException(status_code=422, detail=err or "Invalid contract payload")
+        store = get_contract_store()
+        contract = store.get_contract(str(rows[0].get("id") or ""))
+        if not contract:
+            raise HTTPException(status_code=500, detail="Contract imported but not readable")
+        return _contract_to_response(contract)
+
     store = get_contract_store()
     try:
-        contract = DataContract.from_dict(payload)
+        contract = DataContract.from_dict(payload.get("spec") if isinstance(payload.get("spec"), dict) else payload)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Invalid contract payload: {exc}") from exc
     contract.status = ContractStatus.DRAFT

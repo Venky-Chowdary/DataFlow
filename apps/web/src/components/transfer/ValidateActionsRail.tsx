@@ -10,6 +10,9 @@ interface ValidateActionsRailProps {
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
   savingContract?: boolean;
+  /** Extra execute block (e.g. non-CDC multi-stream). */
+  executeBlocked?: boolean;
+  executeBlockedReason?: string;
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
@@ -26,6 +29,8 @@ export function ValidateActionsRail({
   rowCount,
   transferLaunch,
   savingContract,
+  executeBlocked = false,
+  executeBlockedReason,
   onBack,
   onRunPreflight,
   onApproveMappings,
@@ -38,6 +43,7 @@ export function ValidateActionsRail({
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
   const proofDecision = preflight?.proof_bundle?.transfer_decision?.decision || "approve";
   const proofReason = preflight?.proof_bundle?.transfer_decision?.reason || "No blocking issues detected";
+  const executeDisabled = transferring || !passed || executeBlocked;
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
   const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
@@ -193,18 +199,27 @@ export function ValidateActionsRail({
             onClick={onExecute}
             loading={transferring}
             loadingLabel="Starting…"
-            disabled={transferring || !passed}
+            disabled={executeDisabled}
             title={
-              !passed
-                ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
-                : undefined
+              executeBlocked
+                ? (executeBlockedReason || "Execution blocked")
+                : !passed
+                  ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
+                  : undefined
             }
             leadingIcon={<DtIcon name="arrow-right" size={16} />}
           >
-            {passed
-              ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
-              : "Execute (blocked)"}
+            {executeBlocked
+              ? "Execute (blocked)"
+              : passed
+                ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
+                : "Execute (blocked)"}
           </Button>
+        )}
+        {executeBlocked && executeBlockedReason && (
+          <p className="df2-validate-rail-explain" role="alert">
+            {executeBlockedReason}
+          </p>
         )}
 
         {preflight && onSaveAsContract && (

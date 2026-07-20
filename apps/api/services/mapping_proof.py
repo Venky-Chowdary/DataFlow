@@ -599,6 +599,33 @@ def build_mapping_proof(
             ),
         })
 
+    if inferred_cdc and destination_db_type:
+        try:
+            from services.cdc_effectively_once import (
+                SINK_APPEND_ONLY,
+                classify_sink_delivery,
+            )
+
+            sink = classify_sink_delivery(
+                dest_type=destination_db_type,
+                has_primary_key=True,
+                write_mode="upsert",
+            )
+            if sink.get("class") == SINK_APPEND_ONLY and not any(
+                r["code"] == "cdc_append_only_sink" for r in global_risks
+            ):
+                global_risks.insert(0, {
+                    "code": "cdc_append_only_sink",
+                    "severity": "error",
+                    "message": (
+                        f"Destination '{destination_db_type}' does not support upsert — "
+                        "CDC redelivery will duplicate rows (not effectively-once). "
+                        "Use a PK upsert sink or set allow_append_only=true."
+                    ),
+                })
+        except Exception:
+            pass
+
     avg_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
     max_conf = round(max(confidences), 3) if confidences else 0.0
     if dest_mode == "create_new":

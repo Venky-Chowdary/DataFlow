@@ -50,6 +50,8 @@ class ReconciliationReport:
     # cast. Data was ALTERED, so this is surfaced even when row counts/checksums
     # match — reconciliation must not claim "100% fidelity" in that case.
     coerced_null_rows: int = 0
+    # Bounded read-back sample (mismatches) for operator drill-down / export.
+    sample_compare: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -330,6 +332,7 @@ def reconcile(
             message=f"Read-back sample verification failed: {detail}",
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
+            sample_compare=sample_compare,
         )
 
     if source_checksum != target_checksum:
@@ -402,6 +405,7 @@ def reconcile(
         message=message,
         rejected_rows=rejected_rows,
         coerced_null_rows=coerced_null_rows,
+        sample_compare=sample_compare,
     )
 
 

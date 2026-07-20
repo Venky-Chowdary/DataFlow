@@ -339,6 +339,77 @@ async def api_detect_pii(request: PIIDetectionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class VectorRoutingRequest(BaseModel):
+    columns: list[str] = Field(..., description="Source column names")
+    samples: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Optional sample values keyed by column name",
+    )
+    schema_types: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional inferred types keyed by column name",
+    )
+    analysis_columns: list[dict] = Field(
+        default_factory=list,
+        description="Optional enhanced analysis rows (column_name, is_pii, semantic_type)",
+    )
+
+
+@router.post("/vector-routing")
+async def api_vector_routing(request: VectorRoutingRequest):
+    """Recommend embed / metadata / exclude_pii / skip for vector destinations.
+
+    Uses semantic roles + PII guards. Studio applies the plan into Advanced
+    vector fields; writers strip ``exclude_pii_columns`` from metadata.
+    """
+    try:
+        from services.semantic_vector_routing import recommend_vector_field_roles
+
+        if not request.columns:
+            raise HTTPException(status_code=400, detail="columns are required")
+        plan = recommend_vector_field_roles(
+            request.columns,
+            samples_by_column=request.samples or {},
+            schema=request.schema_types or {},
+            analysis_columns=request.analysis_columns or [],
+        )
+        return plan.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/embedding-cache")
+async def api_embedding_cache_stats():
+    """Durable SQLite embedding cache status (entries, session hit rate, path)."""
+    try:
+        from services.embedding_cache import cache_stats
+
+        return cache_stats().to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/embedding-cache")
+async def api_embedding_cache_clear(
+    model: Optional[str] = None,
+    clear_memory: bool = True,
+):
+    """Clear durable embedding cache (and optionally process L1 memory)."""
+    try:
+        from services.embedding_cache import clear_cache
+        from services.vectorization import clear_memory_cache
+
+        result = clear_cache(model=model)
+        memory_cleared = 0
+        if clear_memory:
+            memory_cleared = clear_memory_cache()
+        return {**result, "memory_cleared": memory_cleared}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/semantic-types")
 async def list_semantic_types():
     """

@@ -44,6 +44,7 @@ try:
         map_source_to_target,
         requires_upsert,
         resolve_effective_sync_mode,
+        resolve_selected_sync_contracts,
         resolve_sync_contract,
         should_drop_destination_for_sync,
     )
@@ -74,6 +75,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
         map_source_to_target,
         requires_upsert,
         resolve_effective_sync_mode,
+        resolve_selected_sync_contracts,
         resolve_sync_contract,
         should_drop_destination_for_sync,
     )
@@ -101,6 +103,7 @@ from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
 from .stream import (
     peek_stream_source,
+    run_non_cdc_multi_stream_sequential,
     stream_database_transfer,
     stream_scd2_mirror_transfer,
     supports_streaming,
@@ -421,7 +424,11 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
 
 
 def _persist_job_quarantine(job_id: str, dest_summary: dict[str, Any], request: Any = None) -> None:
-    """Best-effort durable DLQ write for rejected rows; never hide transfer success."""
+    """Best-effort durable DLQ write for rejected rows; never hide transfer success.
+
+    Writes control-plane JSONL **and** (when supported) a destination
+    ``{table}_df_quarantine`` table so operators can query/promote with SQL.
+    """
     details = dest_summary.get("rejected_details") or []
     if not details:
         return
@@ -440,6 +447,24 @@ def _persist_job_quarantine(job_id: str, dest_summary: dict[str, Any], request: 
     else:
         dest_summary["quarantine_durable"] = True
 
+    # Destination-side DLQ table (SQL sinks). Failures are surfaced — never silent.
+    if request is not None and getattr(request, "destination", None) is not None:
+        try:
+            from services.dest_quarantine import write_dest_quarantine
+
+            dest_result = write_dest_quarantine(
+                request.destination,
+                details,
+                job_id=job_id,
+            )
+            dest_summary["dest_quarantine"] = dest_result
+            if dest_result.get("ok") and not dest_result.get("skipped"):
+                dest_summary["dest_quarantine_table"] = dest_result.get("table")
+                dest_summary["dest_quarantine_rows"] = dest_result.get("rows_written")
+        except Exception as exc:
+            dest_summary["dest_quarantine_error"] = str(exc)[:300]
+            dest_summary.setdefault("dest_quarantine", {"ok": False, "error": str(exc)[:300]})
+
 
 _CDC_JOB_FIELDS = (
     "cdc_lag_seconds",
@@ -455,6 +480,21 @@ _CDC_JOB_FIELDS = (
     "cdc_lease_heartbeat_age_sec",
     "cdc_lease_backend",
     "cdc_lease_generation",
+    "cdc_lease_cursor_key",
+    "cdc_lease_conflict",
+    "cdc_cursor_gap",
+    "cdc_cursor_gap_code",
+    "cdc_cursor_gap_dialect",
+    "cdc_cursor_gap_resume",
+    "cdc_cursor_gap_retained",
+    "cdc_append_only_sink",
+    "source_ha_role",
+    "source_ha_topology",
+    "source_ha_enabled",
+    "source_ha_group",
+    "source_ha_replica",
+    "source_ha_open_mode",
+    "source_ha_message",
     "watermark",
     "cdc_shared_reader",
     "snapshot_mode",
@@ -518,6 +558,7 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
                 "cdc_lease_conflict": True,
                 "cdc_lease_holder": exc.holder_id or None,
                 "cdc_lease_resource": exc.resource or None,
+                "cdc_lease_cursor_key": exc.cursor_key or None,
             })
         elif isinstance(exc, LeaseStoreError):
             details["code"] = "cdc_lease_store_unavailable"
@@ -538,6 +579,31 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
                 "cdc_toast_incomplete": True,
                 "cdc_toast_table": exc.table or None,
             })
+    except Exception:
+        pass
+    try:
+        from services.cdc_cursor_gap import CdcCursorGapError
+
+        if isinstance(exc, CdcCursorGapError):
+            details.update(exc.to_dict())
+            details["retriable"] = False
+            extras.update({
+                "cdc_cursor_gap": True,
+                "cdc_cursor_gap_code": exc.code,
+                "cdc_cursor_gap_dialect": exc.dialect or None,
+                "cdc_cursor_gap_resume": exc.resume or None,
+                "cdc_cursor_gap_retained": exc.retained or None,
+                "cdc_lease_cursor_key": exc.cursor_key or extras.get("cdc_lease_cursor_key"),
+            })
+    except Exception:
+        pass
+    try:
+        from services.cdc_effectively_once import CdcAppendOnlySinkError
+
+        if isinstance(exc, CdcAppendOnlySinkError):
+            details["code"] = "cdc_append_only_sink"
+            details["retriable"] = False
+            extras["cdc_append_only_sink"] = True
     except Exception:
         pass
     return details, extras
@@ -957,6 +1023,7 @@ class UniversalTransferEngine:
         if (
             supports_streaming(request.source, request.destination)
             and not request.priority_column
+            and not getattr(request, "write_via_staging", False)
         ):
             try:
                 return self._execute_streaming(
@@ -979,6 +1046,7 @@ class UniversalTransferEngine:
             and not non_streaming_mode
             and not request.priority_column
             and request.limit == 0
+            and not getattr(request, "write_via_staging", False)
             and should_stream_file(
                 request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
@@ -1269,6 +1337,27 @@ class UniversalTransferEngine:
                 def _write_destination_with_drop():
                     # Drop inside the retry boundary so a failed full-refresh write
                     # retries from an empty table and cannot duplicate already-loaded rows.
+                    use_staging = bool(getattr(request, "write_via_staging", False))
+                    # Mirror/SCD2 already use their own staging algorithm.
+                    if use_staging and effective_sync_lower not in (
+                        "scd2", "full_refresh_mirror", "mirror",
+                    ):
+                        from services.pre_ingestion_staging import write_via_pre_ingestion_staging
+
+                        return write_via_pre_ingestion_staging(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            validation_mode=request.validation_mode,
+                            backfill_new_fields=backfill_fields,
+                            write_mode=write_mode,
+                            conflict_columns=conflict_columns,
+                            job_id=job_id,
+                            on_checkpoint=throttled_checkpoint,
+                            drop_primary=should_drop_full_refresh,
+                        )
                     if should_drop_full_refresh:
                         _drop_destination_table(request.destination)
                     return write_destination_database(
@@ -1309,6 +1398,33 @@ class UniversalTransferEngine:
                         _write_destination_with_drop,
                         budget=RetryBudget(max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0),
                     )
+                    if dest_summary.get("promote_blocked"):
+                        # Strict/maximum + staging: primary untouched; persist DLQ then fail.
+                        _persist_job_quarantine(job_id, dest_summary, request)
+                        block_msg = (
+                            (dest_summary.get("pre_ingestion_staging") or {}).get("blocked_reason")
+                            or "Pre-ingestion staging blocked promote due to validation failures"
+                        )
+                        mongo.update_job_status(
+                            job_id,
+                            "failed",
+                            phase="failed",
+                            error=block_msg,
+                            message=block_msg,
+                            records_processed=0,
+                            rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                            rejected_details=(dest_summary.get("rejected_details") or [])[:200],
+                            destination_summary=dest_summary,
+                            ddl_log=list(ddl_log or [])[:500],
+                        )
+                        return TransferResult(
+                            success=False,
+                            error=block_msg,
+                            job_id=job_id,
+                            operation=request.operation,
+                            destination_summary=dest_summary,
+                            ddl_executed=list(ddl_log or []),
+                        )
                     if activation_notes:
                         ddl_log = list(ddl_log or []) + [
                             f"reverse-ETL: {n}" for n in activation_notes
@@ -1427,6 +1543,7 @@ class UniversalTransferEngine:
             )
             if load_history_report:
                 dest_summary["load_history_report"] = load_history_report
+            _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
                 job_id, terminal_status,
                 records_processed=rows_written,
@@ -1448,7 +1565,6 @@ class UniversalTransferEngine:
                 schema_policy=request.schema_policy,
                 validation_mode=request.validation_mode,
             )
-            _persist_job_quarantine(job_id, dest_summary, request)
             try:
                 from services.usage_metering import record_transfer_usage
 
@@ -1747,9 +1863,16 @@ class UniversalTransferEngine:
 
             is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
-            if should_drop_destination_for_sync(
-                request_sync_mode=request.sync_mode,
-                contract_sync_mode=stream_contract.sync_mode if stream_contract else None,
+            selected_streams = resolve_selected_sync_contracts(request.stream_contracts)
+            multi_non_cdc = len(selected_streams) > 1
+            # Overwrite DROP once on primary is wrong for multi-stream — sequential
+            # path drops each remapped destination instead.
+            if (
+                not multi_non_cdc
+                and should_drop_destination_for_sync(
+                    request_sync_mode=request.sync_mode,
+                    contract_sync_mode=stream_contract.sync_mode if stream_contract else None,
+                )
             ):
                 if not resume or not is_streaming or not _checkpoint_has_progress(checkpoint):
                     _drop_destination_table(request.destination)
@@ -1759,6 +1882,11 @@ class UniversalTransferEngine:
                 stream_contract.sync_mode if stream_contract else None,
             ).lower()
             if effective_sync in ("full_refresh_mirror", "mirror", "scd2"):
+                if multi_non_cdc:
+                    raise RuntimeError(
+                        "Multi-stream SCD2/mirror is not supported yet — "
+                        "select a single stream or use full/incremental/CDC"
+                    )
                 rows_written, ddl_log, dest_summary, _ = stream_scd2_mirror_transfer(
                     request.source,
                     request.destination,
@@ -1788,6 +1916,24 @@ class UniversalTransferEngine:
                     checkpoint_service=checkpoint_service,
                     backfill_new_fields=backfill_fields,
                     validation_mode=request.validation_mode,
+                    limit=request.limit,
+                )
+            elif multi_non_cdc:
+                rows_written, ddl_log, dest_summary, _ = run_non_cdc_multi_stream_sequential(
+                    request.source,
+                    request.destination,
+                    mappings,
+                    schema,
+                    on_checkpoint=throttled_checkpoint,
+                    sync_mode=request.sync_mode,
+                    stream_contracts=request.stream_contracts,
+                    selected=selected_streams,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    backfill_new_fields=backfill_fields,
+                    validation_mode=request.validation_mode,
+                    source_filter=request.source_filter,
                     limit=request.limit,
                 )
             else:
@@ -1861,6 +2007,7 @@ class UniversalTransferEngine:
                 request, sample_rows or [], schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
             )
+            _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
                 job_id, terminal_status,
                 records_processed=rows_written,
@@ -1883,7 +2030,6 @@ class UniversalTransferEngine:
                 validation_mode=request.validation_mode,
                 **_cdc_fields_from_summary(dest_summary),
             )
-            _persist_job_quarantine(job_id, dest_summary, request)
 
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
@@ -2223,6 +2369,7 @@ class UniversalTransferEngine:
                 request, sample_rows or [], schema,
                 job_id=job_id, dest_summary=dest_summary, row_count=rows_written or total_rows,
             )
+            _persist_job_quarantine(job_id, dest_summary, request)
             mongo.update_job_status(
                 job_id, terminal_status,
                 records_processed=rows_written,
@@ -2244,7 +2391,6 @@ class UniversalTransferEngine:
                 schema_policy=request.schema_policy,
                 validation_mode=request.validation_mode,
             )
-            _persist_job_quarantine(job_id, dest_summary, request)
 
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
@@ -2343,7 +2489,12 @@ class UniversalTransferEngine:
         if request.source.kind == "file":
             if not request.source_content:
                 raise ValueError("File content required for file source")
-            return parse_file_content(request.source_content, request.source_filename or "upload.csv")
+            enable_ocr = bool((request.source.extra or {}).get("enable_ocr"))
+            return parse_file_content(
+                request.source_content,
+                request.source_filename or "upload.csv",
+                enable_ocr=enable_ocr,
+            )
         if request.source.kind == "database":
             return read_source_database(request.source)
         raise ValueError(f"Unsupported source kind: {request.source.kind}")

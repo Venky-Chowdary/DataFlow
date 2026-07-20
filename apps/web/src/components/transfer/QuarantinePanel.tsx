@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, replayJobQuarantine } from "../../lib/api";
@@ -13,6 +13,8 @@ type QuarantineRow = {
   values?: Record<string, string>;
   chars?: string[];
   suggested_transform?: string;
+  /** Destination DLQ row id — required to stamp `_df_promoted_at` after Promote. */
+  _df_qid?: string;
 };
 
 export interface QuarantinePanelProps {
@@ -29,6 +31,10 @@ export interface QuarantinePanelProps {
    * when the API returns empty.
    */
   initialDetails?: QuarantineRow[];
+  /** Closed-loop: preflight findings → Validate (Strip / remapping). */
+  onOpenValidate?: () => void;
+  /** Closed-loop: after successful write-time replay. */
+  onReplayComplete?: (childJobId: string) => void;
 }
 
 function summarizeReasons(rows: QuarantineRow[]) {
@@ -47,6 +53,19 @@ function summarizeColumns(rows: QuarantineRow[]) {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+}
+
+/** Collect suggested transforms into replay overrides (e.g. strip_controls). */
+function buildTransformOverrides(rows: QuarantineRow[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of rows) {
+    const col = (r.column || r.target || "").trim();
+    const xf = (r.suggested_transform || "").trim();
+    if (!col || !xf) continue;
+    // Prefer strip / coerce suggestions; last write wins per column.
+    out[col] = xf;
+  }
+  return out;
 }
 
 /** Make invisible format-control chars visible in the UI / CSV preview. */
@@ -89,6 +108,8 @@ export function QuarantinePanel({
   initiallyOpen = false,
   autoLoad = false,
   initialDetails,
+  onOpenValidate,
+  onReplayComplete,
 }: QuarantinePanelProps) {
   const { toast } = useToast();
   const [open, setOpen] = useState(initiallyOpen || autoLoad || Boolean(initialDetails?.length));
@@ -102,23 +123,30 @@ export function QuarantinePanel({
   const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [applySuggested, setApplySuggested] = useState(true);
   const [replayResult, setReplayResult] = useState<{
     job_id: string;
     rows_written: number;
     rejected: number;
   } | null>(null);
+  const [destDlq, setDestDlq] = useState<import("../../lib/api").QuarantineInfo["dest_dlq"]>(undefined);
+
+  const transformOverrides = useMemo(() => buildTransformOverrides(rows), [rows]);
+  const hasStripSuggestion = Object.values(transformOverrides).some(
+    (v) => v === "strip_controls" || v.includes("strip"),
+  );
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await fetchJobQuarantine(jobId);
       const apiRows = data.quarantine || [];
-      // Prefer API rows when present; keep inline job details as fail-safe.
       const next = apiRows.length ? apiRows : (initialDetails ?? []);
       setRows(next);
       setIssueCount(data.issue_count ?? next.length);
       setRowCount(data.rejected_rows ?? rejectedRows ?? next.length);
       setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
+      setDestDlq(data.dest_dlq);
       setOpen(true);
       setLoaded(true);
     } catch (e) {
@@ -188,17 +216,33 @@ export function QuarantinePanel({
     setReplaying(true);
     setReplayResult(null);
     try {
-      const result = await replayJobQuarantine(jobId, { rows });
+      const overrides = applySuggested && Object.keys(transformOverrides).length
+        ? transformOverrides
+        : undefined;
+      const result = await replayJobQuarantine(jobId, {
+        rows,
+        transform_overrides: overrides,
+      });
       setReplayResult({
         job_id: result.job_id,
         rows_written: result.rows_written,
         rejected: result.rejected,
       });
       toast({
-        title: "Quarantine replay finished",
-        message: `Wrote ${result.rows_written.toLocaleString()} row(s)${result.rejected ? `, ${result.rejected} still rejected` : ""}.`,
+        title: result.rejected ? "Promote finished with rejects" : "Promote / Replay finished",
+        message: [
+          `Wrote ${result.rows_written.toLocaleString()} row(s)`,
+          result.rejected ? `${result.rejected} still rejected` : null,
+          destDlq?.table && !result.rejected
+            ? `DLQ rows stamped on ${destDlq.table}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
         tone: result.rejected ? "warning" : "success",
       });
+      onReplayComplete?.(result.job_id);
+      await load();
     } catch (e) {
       toast({ title: "Replay failed", message: (e as Error).message, tone: "error" });
     } finally {
@@ -210,7 +254,9 @@ export function QuarantinePanel({
   const topColumns = summarizeColumns(rows);
   const displayRowCount = rowCount || (rejectedRows ?? 0) || issueCount;
   const displayFindings = loaded ? issueCount : (rejectedRows ?? 0) || issueCount;
-  const canReplay = source === "write" && rows.length > 0;
+  const isWriteSource = source === "write" || source === "job";
+  const isPreflight = source === "preflight";
+  const canReplay = isWriteSource && rows.length > 0;
 
   return (
     <div className="df2-quarantine-panel">
@@ -236,34 +282,114 @@ export function QuarantinePanel({
             )}
             {source !== "none" && loaded && (
               <span className="df2-quarantine-explainer-count">
-                Source: {source === "preflight" ? "preflight / integrity" : "write-time reject"}
+                Source: {isPreflight ? "preflight / integrity" : "write-time reject"}
+              </span>
+            )}
+            {destDlq?.table && (
+              <span className="df2-quarantine-explainer-count" title="Destination dead-letter table">
+                Dest DLQ: <code>{destDlq.table}</code>
+                {destDlq.rows_written != null ? ` · ${destDlq.rows_written} written` : ""}
+                {destDlq.open_rows != null ? ` · ${destDlq.open_rows} open` : ""}
+              </span>
+            )}
+            {destDlq?.skipped && destDlq.reason && (
+              <span className="df2-quarantine-explainer-count" title={destDlq.reason}>
+                Dest DLQ skipped (control-plane only)
+              </span>
+            )}
+            {destDlq?.error && (
+              <span className="df2-quarantine-explainer-count" title={String(destDlq.error)}>
+                Dest DLQ write error
               </span>
             )}
           </div>
-          {source === "preflight" && (
-            <p className="df2-label-hint" style={{ margin: "6px 0 0" }}>
-              These rows were caught in Validate before write — Replay applies only to write-time
-              rejects. Fix mappings or use Strip controls / Quarantine on the Validate step, then re-run.
-            </p>
-          )}
         </div>
       </div>
 
-      {!open && (
-        <button
-          type="button"
-          className="df2-btn df2-btn-sm df2-btn-primary"
-          onClick={() => void load()}
-          disabled={loading}
-        >
-          <DtIcon name="warning" size={14} />{" "}
-          {loading
-            ? "Loading…"
-            : displayRowCount > 0
-              ? `Inspect ${displayRowCount.toLocaleString()} quarantined row${displayRowCount === 1 ? "" : "s"}`
-              : "Inspect quarantine / findings"}
-        </button>
-      )}
+      {/* Closed-loop next action — one obvious primary path */}
+      <div className="df2-quarantine-next" role="region" aria-label="Next remediation step">
+        <div className="df2-quarantine-next-copy">
+          <strong>Next step</strong>
+          {isPreflight ? (
+            <p>
+              Caught in Validate before write. Open Validate → apply <em>Strip controls</em> or fix
+              mappings, then re-run. Replay is for write-time rejects only.
+            </p>
+          ) : canReplay ? (
+            <p>
+              Write-time rejects
+              {destDlq?.table ? (
+                <>
+                  {" "}are also on destination table <code>{destDlq.table}</code>
+                </>
+              ) : null}
+              . Edit bad cells if needed
+              {hasStripSuggestion ? ", apply suggested strip transforms," : ","} then{" "}
+              <strong>Promote / Replay</strong> — good rows already on the destination stay put.
+              Promoted DLQ rows are stamped <code>_df_promoted_at</code>.
+            </p>
+          ) : (
+            <p>
+              Inspect findings and Export CSV. When write-time rejects are available, Promote/Replay
+              rewrites only the quarantined rows
+              {destDlq?.table ? <> and marks them on <code>{destDlq.table}</code></> : null}.
+            </p>
+          )}
+        </div>
+        <div className="df2-quarantine-next-actions">
+          {isPreflight && onOpenValidate && (
+            <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onOpenValidate}>
+              <DtIcon name="gate" size={14} /> Open Validate (Strip / Fix)
+            </button>
+          )}
+          {canReplay && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-primary"
+              onClick={() => void replay()}
+              disabled={replaying || rows.length === 0}
+            >
+              <DtIcon name="transfer" size={14} />{" "}
+              {replaying
+                ? "Promoting…"
+                : destDlq?.table
+                  ? "Promote / Replay rows"
+                  : "Replay quarantined rows"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="df2-btn df2-btn-sm df2-btn-secondary"
+            onClick={() => void download()}
+            disabled={exporting || (!rows.length && !displayFindings)}
+          >
+            <DtIcon name="download" size={14} /> {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+          {!open && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm df2-btn-ghost"
+              onClick={() => void load()}
+              disabled={loading}
+            >
+              <DtIcon name="warning" size={14} />{" "}
+              {loading ? "Loading…" : "Inspect findings"}
+            </button>
+          )}
+        </div>
+        {canReplay && Object.keys(transformOverrides).length > 0 && (
+          <label className="df2-quarantine-apply-suggested">
+            <input
+              type="checkbox"
+              checked={applySuggested}
+              onChange={(e) => setApplySuggested(e.target.checked)}
+            />
+            Apply suggested transforms on replay
+            {" "}
+            <code>{Object.entries(transformOverrides).map(([c, t]) => `${c}→${t}`).join(", ")}</code>
+          </label>
+        )}
+      </div>
 
       {open && (
         <section className="df2-quarantine-inspect is-open" aria-label="Quarantine findings">
@@ -277,24 +403,6 @@ export function QuarantinePanel({
               </span>
             </div>
             <div className="df2-job-log-actions">
-              {canReplay && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-primary"
-                  onClick={() => void replay()}
-                  disabled={replaying || rows.length === 0}
-                >
-                  <DtIcon name="transfer" size={14} /> {replaying ? "Replaying…" : "Replay"}
-                </button>
-              )}
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-secondary"
-                onClick={() => void download()}
-                disabled={exporting || (!rows.length && !displayFindings)}
-              >
-                <DtIcon name="download" size={14} /> {exporting ? "Exporting…" : "Export CSV"}
-              </button>
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void load()} disabled={loading}>
                 Refresh
               </button>
@@ -341,7 +449,6 @@ export function QuarantinePanel({
                 <p>
                   What to do next: open <strong>Validate</strong> for Strip controls / Quarantine / Fix bad data,
                   confirm the API build includes write-time quarantine persistence, then re-run the transfer.
-                  Export CSV stays available once findings are saved.
                 </p>
               </div>
             ) : (

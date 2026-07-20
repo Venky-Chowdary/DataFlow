@@ -78,9 +78,12 @@ def write_mapped_rows(
     content_column: str | None = None,
     embedding_column: str | None = None,
     metadata_columns: list[str] | None = None,
+    exclude_pii_columns: list[str] | None = None,
     embedding_model: str | None = None,
     chunk_size: int = 512,
     chunk_overlap: int = 50,
+    skip_chunking: bool = False,
+    durable_embedding_cache: bool | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     """Write text rows as embedded chunks into a PostgreSQL pgvector table."""
@@ -103,9 +106,12 @@ def write_mapped_rows(
             content_column=content_column,
             embedding_column=embedding_column,
             metadata_columns=metadata_columns,
+            exclude_pii_columns=exclude_pii_columns,
             model=embedding_model,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            skip_chunking=skip_chunking,
+            durable_embedding_cache=durable_embedding_cache,
         )
     except Exception as exc:
         return WriteResult(

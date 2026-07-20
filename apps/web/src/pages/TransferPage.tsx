@@ -49,7 +49,13 @@ import {
   syncTransferPlanMappings,
   updateTransferPlan,
   uploadFile,
+  fetchVectorRouting,
+  fetchEmbeddingCacheStats,
+  clearEmbeddingCache,
   type CellPreviewResult,
+  type EmbeddingCacheStats,
+  type VectorFieldRouting,
+  type VectorRoutingPlan,
 } from "../lib/api";
 import {
   defaultSchemaForDriver,
@@ -111,6 +117,7 @@ interface TransferPageProps {
 /** File formats are never listed as database sources. */
 const FILE_FORMAT_SOURCE_TYPES = new Set([
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+  "pdf", "docx", "html",
 ]);
 
 const STEP_SOURCE = 1;
@@ -139,9 +146,11 @@ const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_
 const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
 const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl"] as const;
 
-const ACCEPTED_UPLOAD_EXTENSIONS = new Set(["csv", "json", "jsonl", "tsv", "parquet"]);
+const ACCEPTED_UPLOAD_EXTENSIONS = new Set([
+  "csv", "json", "jsonl", "tsv", "parquet", "pdf", "docx", "html", "htm", "xlsx", "xls", "xml",
+]);
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
-const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Parquet"] as const;
+const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Parquet", "PDF", "DOCX", "HTML"] as const;
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -267,6 +276,9 @@ export function TransferPage({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [parsed, setParsed] = useState<ParsedUpload | null>(null);
+  /** Opt-in Tesseract OCR for scanned/image-only PDFs. */
+  const [enableOcr, setEnableOcr] = useState(false);
+  const [ocrStatus, setOcrStatus] = useState<{ available?: boolean; message?: string } | null>(null);
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
@@ -317,18 +329,34 @@ export function TransferPage({
   const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
   const [validationMode, setValidationMode] = useState<ValidationMode>("balanced");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
+  const [writeViaStaging, setWriteViaStaging] = useState(false);
+  const [vectorContentColumn, setVectorContentColumn] = useState("");
+  const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
+  const [vectorMetadataColumns, setVectorMetadataColumns] = useState("");
+  const [vectorEmbeddingModel, setVectorEmbeddingModel] = useState("");
+  const [vectorChunkSize, setVectorChunkSize] = useState(512);
+  const [vectorChunkOverlap, setVectorChunkOverlap] = useState(50);
+  const [vectorExcludePiiColumns, setVectorExcludePiiColumns] = useState("");
+  const [vectorRoutingFields, setVectorRoutingFields] = useState<VectorFieldRouting[]>([]);
+  const [vectorRoutingLoading, setVectorRoutingLoading] = useState(false);
+  const [vectorDurableCache, setVectorDurableCache] = useState(true);
+  const [embeddingCacheStats, setEmbeddingCacheStats] = useState<EmbeddingCacheStats | null>(null);
+  const [embeddingCacheBusy, setEmbeddingCacheBusy] = useState(false);
   const [cursorField, setCursorField] = useState("");
   const [primaryKeyField, setPrimaryKeyField] = useState("");
   const [priorityColumn, setPriorityColumn] = useState("");
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
   const [rowLimit, setRowLimit] = useState(0);
   const [snapshotMode, setSnapshotMode] = useState("initial");
+  const [allowAppendOnly, setAllowAppendOnly] = useState(false);
+  const [multiSubnetFailover, setMultiSubnetFailover] = useState(false);
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
   /** Per-stream column mappings when source lists multiple tables. */
   const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
   const [mapActiveStream, setMapActiveStream] = useState<string | null>(null);
+  const [mapStreamBusy, setMapStreamBusy] = useState<string | null>(null);
   const [destColumns, setDestColumns] = useState<string[]>([]);
   const [destSchemaMap, setDestSchemaMap] = useState<Record<string, string>>({});
   const [destSchemaLoading, setDestSchemaLoading] = useState(false);
@@ -391,6 +419,16 @@ export function TransferPage({
   const buildDestinationEndpoint = () => {
     const isMongo = destDriverType === "mongodb";
     const isDynamo = destDriverType === "dynamodb";
+    const isVector =
+      destDriverType === "pgvector" ||
+      destDriverType === "qdrant" ||
+      destDriverType === "weaviate" ||
+      destDriverType === "pinecone" ||
+      destDriverType === "milvus";
+    const metadataCols = vectorMetadataColumns
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     return {
       kind: "database",
       format: destType,
@@ -410,8 +448,122 @@ export function TransferPage({
       auth_role: selectedDestConnector?.auth_role || undefined,
       api_key: selectedDestConnector?.api_key || undefined,
       service_account: selectedDestConnector?.service_account || undefined,
+      ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
+      ...(isVector
+        ? {
+            ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
+            ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
+            ...(metadataCols.length ? { metadata_columns: metadataCols } : {}),
+            ...(vectorExcludePiiColumns
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean).length
+              ? {
+                  exclude_pii_columns: vectorExcludePiiColumns
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                }
+              : {}),
+            ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
+            chunk_size: vectorChunkSize,
+            chunk_overlap: vectorChunkOverlap,
+            durable_embedding_cache: vectorDurableCache,
+          }
+        : {}),
     };
   };
+
+  const isVectorDest =
+    destDriverType === "pgvector" ||
+    destDriverType === "qdrant" ||
+    destDriverType === "weaviate" ||
+    destDriverType === "pinecone" ||
+    destDriverType === "milvus";
+
+  const applyVectorRoutingPlan = (plan: VectorRoutingPlan) => {
+    if (plan.content_column) setVectorContentColumn(plan.content_column);
+    if (plan.embedding_column) setVectorEmbeddingColumn(plan.embedding_column);
+    if (plan.metadata_columns?.length) {
+      setVectorMetadataColumns(plan.metadata_columns.join(","));
+    }
+    setVectorExcludePiiColumns((plan.exclude_pii_columns || []).join(","));
+    setVectorRoutingFields(plan.fields || []);
+  };
+
+  const runVectorRouting = async (autoApply: boolean) => {
+    const cols =
+      analysis?.columns?.map((c) => c.column_name).filter(Boolean) ||
+      parsed?.columns ||
+      [];
+    if (!cols.length) {
+      toast({ title: "No columns to route", message: "Profile a source first.", tone: "warning" });
+      return;
+    }
+    setVectorRoutingLoading(true);
+    try {
+      const samples: Record<string, string[]> = {};
+      const rows = (parsed?.data ?? parsed?.sample_data ?? []) as Record<string, unknown>[];
+      for (const col of cols) {
+        const fromAnalysis = analysis?.columns?.find((c) => c.column_name === col);
+        // Enhanced analysis may not expose samples; use upload preview rows.
+        const vals = rows
+          .slice(0, 20)
+          .map((r) => String(r?.[col] ?? ""))
+          .filter(Boolean);
+        if (vals.length) samples[col] = vals;
+        void fromAnalysis;
+      }
+      const plan = await fetchVectorRouting({
+        columns: cols,
+        samples,
+        schema_types: parsed?.schema || analysis?.columns?.reduce<Record<string, string>>((acc, c) => {
+          if (c.inferred_type) acc[c.column_name] = c.inferred_type;
+          return acc;
+        }, {}) || {},
+        analysis_columns: (analysis?.columns || []).map((c) => ({
+          column_name: c.column_name,
+          is_pii: c.is_pii,
+          semantic_type: c.semantic_type,
+        })),
+      });
+      setVectorRoutingFields(plan.fields || []);
+      if (autoApply) applyVectorRoutingPlan(plan);
+      else {
+        toast({
+          title: "Routing ready",
+          message: `Embed=${plan.content_column || "—"} · PII excluded=${(plan.exclude_pii_columns || []).length}`,
+          tone: "info",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Vector routing failed",
+        message: e instanceof Error ? e.message : "Try again",
+        tone: "error",
+      });
+    } finally {
+      setVectorRoutingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // Document uploads → default vector embed fields (content + provenance metadata).
+    const ft = (parsed?.file_type || "").toLowerCase();
+    if (!["pdf", "docx", "html", "htm"].includes(ft)) return;
+    if (!vectorContentColumn) setVectorContentColumn("content");
+    if (!vectorMetadataColumns) setVectorMetadataColumns("filename,page,heading,element_type,chunk_index");
+  }, [parsed?.file_type, vectorContentColumn, vectorMetadataColumns]);
+
+  useEffect(() => {
+    // When a vector destination is selected and fields are still empty, auto-route once.
+    if (!isVectorDest) return;
+    if (vectorContentColumn || vectorRoutingFields.length) return;
+    const cols = analysis?.columns?.length ? analysis.columns.map((c) => c.column_name) : parsed?.columns;
+    if (!cols?.length) return;
+    void runVectorRouting(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot when dest/analysis ready
+  }, [isVectorDest, analysis?.columns, parsed?.columns]);
 
   useEffect(() => {
     fetchTransferCapabilities()
@@ -432,9 +584,59 @@ export function TransferPage({
         if (typeof caps.live_route_combinations === "number") {
           setLiveRouteCount(caps.live_route_combinations);
         }
+        const ocr = caps.ocr as { available?: boolean; message?: string } | undefined;
+        if (ocr && typeof ocr === "object") {
+          setOcrStatus(ocr);
+        }
+        const emb = caps.embedding_cache as EmbeddingCacheStats | undefined;
+        if (emb && typeof emb === "object" && typeof emb.entries === "number") {
+          setEmbeddingCacheStats(emb);
+          if (typeof emb.durable_default === "boolean") {
+            setVectorDurableCache(emb.durable_default);
+          }
+        }
       })
       .catch(() => {});
   }, []);
+
+  const refreshEmbeddingCacheStats = useCallback(async () => {
+    setEmbeddingCacheBusy(true);
+    try {
+      const stats = await fetchEmbeddingCacheStats();
+      setEmbeddingCacheStats(stats);
+    } catch (err) {
+      toast({
+        title: "Embedding cache",
+        message: err instanceof Error ? err.message : "Could not load cache stats",
+        tone: "warning",
+      });
+    } finally {
+      setEmbeddingCacheBusy(false);
+    }
+  }, [toast]);
+
+  const handleClearEmbeddingCache = useCallback(async () => {
+    setEmbeddingCacheBusy(true);
+    try {
+      const result = await clearEmbeddingCache();
+      toast({
+        title: "Embedding cache cleared",
+        message: `Deleted ${result.deleted} durable entries` +
+          (result.memory_cleared ? ` and ${result.memory_cleared} in-memory` : ""),
+        tone: "success",
+      });
+      const stats = await fetchEmbeddingCacheStats();
+      setEmbeddingCacheStats(stats);
+    } catch (err) {
+      toast({
+        title: "Clear failed",
+        message: err instanceof Error ? err.message : "Could not clear cache",
+        tone: "error",
+      });
+    } finally {
+      setEmbeddingCacheBusy(false);
+    }
+  }, [toast]);
 
   useEffect(() => {
     // Never invent a destination type. Only coerce when an already-chosen type
@@ -562,6 +764,9 @@ export function TransferPage({
   /** First named stream — API table/collection field (never the raw CSV string). */
   const primarySourceStream = primaryStreamName(sourceStreamInputRaw);
   const isMultiStreamSource = multiStreamNames.length > 1;
+  /** SCD2/mirror multi-stream not supported yet — full/incremental/CDC are. */
+  const multiStreamUnsupportedMode =
+    isMultiStreamSource && (syncMode === "scd2" || syncMode === "mirror");
   const advancedStreamNames = isMultiStreamSource ? multiStreamNames : [sourceStreamName];
   const mapStreamsDiverge = useMemo(() => {
     const ok = streamPreviews.filter((s) => s.status === "ok" && (s.columns?.length ?? 0) > 0);
@@ -630,6 +835,9 @@ export function TransferPage({
       auth_role: sourceConnector.auth_role || undefined,
       api_key: sourceConnector.api_key || undefined,
       service_account: sourceConnector.service_account || undefined,
+      ...(syncMode === "cdc" && multiSubnetFailover
+        ? { multi_subnet_failover: true }
+        : {}),
     };
   };
 
@@ -651,6 +859,7 @@ export function TransferPage({
       schema_policy: schemaPolicy,
       validation_mode: validationMode,
       backfill_new_fields: backfillNewFields,
+      write_via_staging: writeViaStaging,
       stream_contracts: streamContracts,
     },
   }), [
@@ -676,6 +885,7 @@ export function TransferPage({
     schemaPolicy,
     validationMode,
     backfillNewFields,
+    writeViaStaging,
     streamContracts,
     connectorId,
     destType,
@@ -805,6 +1015,67 @@ export function TransferPage({
       }
     },
     [parsed, analysis, transferPlan, validationMode, file, sourceKind, sourceConnector, buildSourceSamples, ensurePersistedPlan, buildMappingsFromSource, toast],
+  );
+
+  /** Semantic map for one multi-stream source table (uses that stream's columns). */
+  const mapColumnsForStream = useCallback(
+    async (streamName: string): Promise<EditableMapping[]> => {
+      const preview = streamPreviews.find((s) => s.name === streamName && s.status === "ok");
+      const sourceCols = preview?.columns?.length
+        ? preview.columns
+        : (analysis?.columns.map((c) => c.column_name) ?? []);
+      if (!sourceCols.length) return [];
+      const sourceSchema = preview?.schema ?? {};
+      const rows = preview?.rows?.length ? preview.rows : undefined;
+      const threshold = confidenceThresholdForMode(validationMode);
+      const targetCols = destColumns.length ? destColumns : undefined;
+      const targetSchema = destSchemaMap;
+      try {
+        const result = await mapTransferColumns({
+          source_columns: sourceCols,
+          source_schema: sourceSchema,
+          target_columns: targetCols,
+          target_schema: targetSchema,
+          validation_mode: validationMode,
+          file_format: sourceConnector?.type,
+          use_llm: true,
+          source_samples: buildColumnSamples(sourceCols, rows ?? []),
+          destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
+          sync_mode: syncMode,
+        });
+        return editableFromPipelineMappings(
+          result.mappings,
+          rows,
+          targetCols,
+          threshold,
+          targetSchema,
+        );
+      } catch (e) {
+        console.error(`Stream mapping failed for ${streamName}:`, e);
+        return sourceCols.map((col) => ({
+          source: col,
+          target: col,
+          confidence: 0.5,
+          approved: false,
+          requiresReview: true,
+          existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
+          reason: "Fallback identity mapping (stream rematch unavailable)",
+          transform: "none" as const,
+        }));
+      }
+    },
+    [
+      streamPreviews,
+      analysis,
+      validationMode,
+      destColumns,
+      destSchemaMap,
+      sourceConnector,
+      destKindMode,
+      exportFormat,
+      destType,
+      syncMode,
+    ],
   );
 
   const remapWithDestination = async (targetCols: string[], targetSchema: Record<string, string>) => {
@@ -1184,7 +1455,7 @@ export function TransferPage({
     try {
       let data: ParsedUpload;
       try {
-        data = await uploadFile(selected);
+        data = await uploadFile(selected, { enableOcr });
       } catch (uploadErr) {
         const ext = fileExtension(selected.name);
         if (ext === "csv" || ext === "tsv") {
@@ -1205,6 +1476,9 @@ export function TransferPage({
         );
       }
       setParsed(data);
+      if (data.ocr_status) {
+        setOcrStatus(data.ocr_status);
+      }
       const rows = data.data ?? data.sample_data;
       const samples = buildColumnSamples(data.columns, rows);
       setActiveData({
@@ -1221,6 +1495,10 @@ export function TransferPage({
       toast({
         title: "Source profiled",
         message: `${data.row_count.toLocaleString()} rows and ${data.columns.length} columns detected.${
+          data.ocr_used
+            ? ` OCR extracted text from ${data.ocr_page_count ?? 0} page(s).`
+            : ""
+        }${
           data.validation && !data.validation.ok
             ? ` ${data.validation.issue_count} type issue(s) found — review before transfer.`
             : ""
@@ -1756,6 +2034,40 @@ export function TransferPage({
         setStep(STEP_SOURCE);
         return;
       }
+
+      // Multi-stream: seed per-stream mappings (copy when schemas match; rematch when they diverge).
+      if (isMultiStreamSource && multiStreamNames.length > 1) {
+        bump(85, "Mapping each source stream…");
+        const primary = primarySourceStream;
+        setMapActiveStream(primary);
+        // Read latest primary mappings from a dedicated rematch of primary stream columns.
+        const primaryMaps = await mapColumnsForStream(primary);
+        if (primaryMaps.length) {
+          setColumnMappings(primaryMaps);
+        }
+        const seeded: Record<string, EditableMapping[]> = {
+          [primary]: primaryMaps.length ? primaryMaps : columnMappings,
+        };
+        const colSig = (cols: string[]) =>
+          [...cols].map((c) => c.toLowerCase()).sort().join("|");
+        const primaryPreview = streamPreviews.find((s) => s.name === primary);
+        const primarySig = colSig(primaryPreview?.columns || currentSourceColumns);
+        for (const name of multiStreamNames) {
+          if (name === primary) continue;
+          const preview = streamPreviews.find((s) => s.name === name && s.status === "ok");
+          const sig = colSig(preview?.columns || []);
+          if (sig && sig === primarySig && seeded[primary]?.length) {
+            seeded[name] = seeded[primary];
+          } else {
+            seeded[name] = await mapColumnsForStream(name);
+          }
+        }
+        setStreamMappings(seeded);
+        if (seeded[primary]?.length) {
+          setColumnMappings(seeded[primary]);
+        }
+      }
+
       bump(100, "Mapping ready");
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
@@ -1782,6 +2094,23 @@ export function TransferPage({
       });
       setStep(STEP_MAP);
       return;
+    }
+    if (isMultiStreamSource && mapStreamsDiverge) {
+      const active = mapActiveStream || primarySourceStream;
+      const merged: Record<string, EditableMapping[]> = {
+        ...streamMappings,
+        [active]: columnMappings,
+      };
+      const missing = multiStreamNames.filter((n) => !(merged[n]?.length));
+      if (missing.length) {
+        toast({
+          title: "Map every stream",
+          message: `Schemas differ — open and map: ${missing.join(", ")}.`,
+          tone: "warning",
+        });
+        setStep(STEP_MAP);
+        return;
+      }
     }
     setStep(STEP_VALIDATE);
     void executePreflight();
@@ -2296,6 +2625,15 @@ export function TransferPage({
   };
 
   const executeTransfer = async () => {
+    if (multiStreamUnsupportedMode) {
+      toast({
+        title: "Multi-stream not supported for this mode",
+        message: "SCD2/mirror require a single stream. Use full/incremental/CDC for multi-table, or select one table.",
+        tone: "error",
+      });
+      setStep(STEP_DESTINATION);
+      return;
+    }
     const needsDbTarget = destKindMode === "database";
     if (sourceKind === "file" && !file) {
       toast({ title: "Source file required", message: "Upload a file before executing.", tone: "warning" });
@@ -2383,6 +2721,52 @@ export function TransferPage({
         schemaPolicy,
         validationMode,
         backfillNewFields,
+        writeViaStaging,
+        enableOcr,
+        sourceExtra:
+          syncMode === "cdc" && multiSubnetFailover
+            ? { multi_subnet_failover: true }
+            : undefined,
+        destExtra:
+          destDriverType === "pgvector" ||
+          destDriverType === "qdrant" ||
+          destDriverType === "weaviate" ||
+          destDriverType === "pinecone" ||
+          destDriverType === "milvus"
+            ? {
+                ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
+                ...(vectorEmbeddingColumn ? { embedding_column: vectorEmbeddingColumn } : {}),
+                ...(vectorMetadataColumns
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean).length
+                  ? {
+                      metadata_columns: vectorMetadataColumns
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    }
+                  : {}),
+                ...(vectorExcludePiiColumns
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean).length
+                  ? {
+                      exclude_pii_columns: vectorExcludePiiColumns
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    }
+                  : {}),
+                ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
+                chunk_size: vectorChunkSize,
+                chunk_overlap: vectorChunkOverlap,
+                durable_embedding_cache: vectorDurableCache,
+                ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
+              }
+            : syncMode === "cdc" && allowAppendOnly
+              ? { allow_append_only: true }
+              : undefined,
         streamContracts,
         planId: persistedPlanId ?? undefined,
         priorityColumn: priorityColumn || undefined,
@@ -2482,6 +2866,17 @@ export function TransferPage({
       watermark: job.watermark,
       cdc_lease_holder: job.cdc_lease_holder,
       cdc_lease_backend: job.cdc_lease_backend,
+      source_ha_role: job.source_ha_role,
+      source_ha_topology: job.source_ha_topology,
+      source_ha_group: job.source_ha_group,
+      source_ha_message: job.source_ha_message,
+      cdc_cursor_gap: job.cdc_cursor_gap,
+      cdc_cursor_gap_code: job.cdc_cursor_gap_code,
+      cdc_cursor_gap_dialect: job.cdc_cursor_gap_dialect,
+      cdc_cursor_gap_resume: job.cdc_cursor_gap_resume,
+      cdc_cursor_gap_retained: job.cdc_cursor_gap_retained,
+      cdc_lease_cursor_key: job.cdc_lease_cursor_key,
+      error_code: job.error_code,
       notifications: job.notifications,
       error_details: job.load_history_report
         ? { load_history_report: job.load_history_report }
@@ -2506,6 +2901,14 @@ export function TransferPage({
   }, []);
 
   const handleScheduleRoute = async () => {
+    if (multiStreamUnsupportedMode) {
+      toast({
+        title: "Multi-stream not supported for this mode",
+        message: "SCD2/mirror cannot be scheduled for multiple streams — use full/incremental/CDC or a single stream.",
+        tone: "error",
+      });
+      return;
+    }
     if (destKindMode !== "database" || !connectorId) {
       toast({
         title: "Saved destination required",
@@ -2954,15 +3357,54 @@ export function TransferPage({
           streamNames={isMultiStreamSource ? multiStreamNames : []}
           activeStream={mapActiveStream || primarySourceStream}
           streamsDiverge={mapStreamsDiverge}
+          streamBusy={mapStreamBusy}
+          onRematchAllStreams={
+            isMultiStreamSource
+              ? async () => {
+                  setMapStreamBusy("all");
+                  try {
+                    const active = mapActiveStream || primarySourceStream;
+                    const seeded: Record<string, EditableMapping[]> = {
+                      ...streamMappings,
+                      [active]: columnMappings,
+                    };
+                    for (const name of multiStreamNames) {
+                      seeded[name] = await mapColumnsForStream(name);
+                    }
+                    setStreamMappings(seeded);
+                    setColumnMappings(seeded[active] || []);
+                    toast({
+                      title: "Streams rematched",
+                      message: `Mapped ${multiStreamNames.length} source streams to the destination.`,
+                      tone: "success",
+                    });
+                  } finally {
+                    setMapStreamBusy(null);
+                  }
+                }
+              : undefined
+          }
           onActiveStreamChange={(name) => {
-            // Persist current tab mappings, then swap to the selected stream.
-            const current = mapActiveStream || primarySourceStream;
-            setStreamMappings((prev) => ({ ...prev, [current]: columnMappings }));
-            const next = streamMappings[name];
-            if (next && next.length) {
-              setColumnMappings(next);
-            }
-            setMapActiveStream(name);
+            void (async () => {
+              const current = mapActiveStream || primarySourceStream;
+              let cached = streamMappings[name];
+              setStreamMappings((prev) => ({ ...prev, [current]: columnMappings }));
+              if (!cached?.length) {
+                setMapStreamBusy(name);
+                try {
+                  cached = await mapColumnsForStream(name);
+                  setStreamMappings((prev) => ({
+                    ...prev,
+                    [current]: columnMappings,
+                    [name]: cached || [],
+                  }));
+                } finally {
+                  setMapStreamBusy(null);
+                }
+              }
+              setColumnMappings(cached?.length ? cached : []);
+              setMapActiveStream(name);
+            })();
           }}
           onChangeMappings={(next) => {
             setColumnMappings(next);
@@ -3044,7 +3486,13 @@ export function TransferPage({
 
           {sourceKind === "file" ? (
             <>
-              <input ref={fileInputRef} type="file" accept=".json,.csv,.jsonl,.tsv,.parquet" onChange={handleFileSelect} hidden />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json,.csv,.jsonl,.tsv,.parquet,.pdf,.docx,.html,.htm,.xlsx,.xls,.xml"
+                onChange={handleFileSelect}
+                hidden
+              />
               {uploadError && (
                 <div className="df2-alert df2-alert-error" role="alert">
                   <DtIcon name="x" size={16} />
@@ -3054,6 +3502,24 @@ export function TransferPage({
                   </div>
                 </div>
               )}
+              <label className="df2-policy-toggle" style={{ marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  checked={enableOcr}
+                  onChange={(e) => setEnableOcr(e.target.checked)}
+                />
+                <span>
+                  <strong>OCR scanned PDFs</strong>
+                  <small>
+                    When a PDF has no text layer, render pages and run Tesseract before chunking.
+                    {ocrStatus?.available === false
+                      ? ` Not ready on this host: ${ocrStatus.message || "install tesseract + pypdfium2/Pillow/pytesseract"}.`
+                      : ocrStatus?.available
+                        ? " Tesseract is available on this API host."
+                        : " Requires system Tesseract on the API host."}
+                  </small>
+                </span>
+              </label>
               <div
                 className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""} ${parsed ? "has-file" : ""}`}
                 onClick={() => !uploading && fileInputRef.current?.click()}
@@ -3097,6 +3563,17 @@ export function TransferPage({
                       </span>
                     </div>
                   </div>
+                  {["pdf", "docx", "html", "htm"].includes((parsed.file_type || "").toLowerCase()) && (
+                    <p className="df2-label-hint" role="status">
+                      Document source: {parsed.row_count.toLocaleString()} text chunk(s) with page/heading
+                      provenance
+                      {parsed.ocr_used
+                        ? ` (OCR on ${parsed.ocr_page_count ?? 0} page(s))`
+                        : ""}
+                      . Pair with a vector destination (pgvector, Qdrant, Weaviate, Pinecone, or Milvus)
+                      in Destination → Advanced for RAG embed.
+                    </p>
+                  )}
                   {parsed.validation && !parsed.validation.ok && (
                     <div className="df2-csv-validation-alert" role="alert">
                       <DtIcon name="alert" size={16} />
@@ -3227,8 +3704,8 @@ export function TransferPage({
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each comma-separated name is a real table/collection. Preview opens one tab per stream. Mapping currently applies the primary stream schema to the shared map — open each stream tab to confirm columns match, or run one stream at a time for distinct schemas. Configure cursor / primary key per stream in Destination → Advanced for CDC."
-                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark. Distinct schemas across streams require separate transfers until per-stream mapping ships."}
+                    ? "Each comma-separated name is a real table/collection. Preview opens one tab per stream. Full/incremental runs streams sequentially (own watermark each); CDC prefers a shared log reader when available. Divergent schemas get a Map tab per stream. Configure cursor / primary key per stream in Destination → Advanced."
+                    : "For CDC or incremental across multiple tables, enter comma-separated names (example: sessions, users). Preview shows a tab for each; each stream keeps its own watermark. Map step rematches when stream schemas differ."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -3426,22 +3903,43 @@ export function TransferPage({
                 </div>
               ) : null}
               <div className="df2-field df2-field-md">
-                <label className="df2-label">Host</label>
-                <input className="df2-input" value={destHost} onChange={(e) => setDestHost(e.target.value)} />
+                <label className="df2-label">
+                  {destDriverType === "pinecone" ? "Index host" : "Host"}
+                </label>
+                <input
+                  className="df2-input"
+                  value={destHost}
+                  onChange={(e) => setDestHost(e.target.value)}
+                  placeholder={
+                    destDriverType === "pinecone"
+                      ? "my-index-xxxx.svc.pinecone.io"
+                      : destDriverType === "weaviate"
+                        ? "localhost"
+                        : destDriverType === "milvus"
+                          ? "localhost"
+                          : undefined
+                  }
+                />
               </div>
+              {destDriverType !== "pinecone" && (
               <div className="df2-field df2-field-sm">
                 <label className="df2-label">Port</label>
                 <input type="number" className="df2-input" value={destPort} onChange={(e) => setDestPort(Number(e.target.value))} />
               </div>
+              )}
               {destType !== "mongodb" && (
                 <>
+                  {destDriverType !== "pinecone" && destDriverType !== "qdrant" && destDriverType !== "weaviate" && (
                   <div className="df2-field df2-field-140">
                     <label className="df2-label">Username</label>
-                    <input className="df2-input" value={destUsername} onChange={(e) => setDestUsername(e.target.value)} />
+                    <input className="df2-input" value={destUsername} onChange={(e) => setDestUsername(e.target.value)} placeholder={destDriverType === "milvus" ? "root" : undefined} />
                   </div>
+                  )}
                   <div className="df2-field df2-field-140">
-                    <label className="df2-label">Password</label>
-                    <input type="password" className="df2-input" value={destPassword} onChange={(e) => setDestPassword(e.target.value)} />
+                    <label className="df2-label">
+                      {["pinecone", "qdrant", "weaviate"].includes(destDriverType) ? "API key" : "Password"}
+                    </label>
+                    <input type="password" className="df2-input" value={destPassword} onChange={(e) => setDestPassword(e.target.value)} placeholder={destDriverType === "milvus" ? "Milvus" : undefined} />
                   </div>
                 </>
               )}
@@ -3478,9 +3976,11 @@ export function TransferPage({
                   ? "GCP Project ID"
                   : destDriverType === "dynamodb"
                     ? "AWS region or local endpoint"
-                    : "Database"}
+                    : destDriverType === "pinecone" || destDriverType === "qdrant" || destDriverType === "weaviate" || destDriverType === "milvus"
+                      ? "Unused (optional)"
+                      : "Database"}
               </label>
-              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destDriverType === "bigquery" ? "my-gcp-project" : destDriverType === "dynamodb" ? "us-east-1" : "test_db"} />
+              <input id="dest-db" className="df2-input" value={targetDb} onChange={(e) => setTargetDb(e.target.value)} placeholder={destDriverType === "bigquery" ? "my-gcp-project" : destDriverType === "dynamodb" ? "us-east-1" : destDriverType === "milvus" ? "default" : "test_db"} />
             </div>
             {destDriverType === "bigquery" && (
               <div className="df2-field df2-field-flex">
@@ -3490,9 +3990,37 @@ export function TransferPage({
             )}
             <div className="df2-field df2-field-flex">
               <label className="df2-label" htmlFor="dest-col">
-                {destDriverType === "mongodb" ? "Collection" : destDriverType === "dynamodb" ? "DynamoDB table" : "Table"}
+                {destDriverType === "mongodb"
+                  ? "Collection"
+                  : destDriverType === "dynamodb"
+                    ? "DynamoDB table"
+                    : destDriverType === "pinecone"
+                      ? "Namespace"
+                      : destDriverType === "weaviate"
+                        ? "Class name"
+                        : destDriverType === "qdrant" || destDriverType === "milvus"
+                          ? "Collection"
+                          : "Table"}
               </label>
-              <input id="dest-col" className="df2-input" value={targetCollection} onChange={(e) => setTargetCollection(e.target.value)} placeholder={destDriverType === "mongodb" ? "my_collection" : destDriverType === "dynamodb" ? "orders" : "my_table"} />
+              <input
+                id="dest-col"
+                className="df2-input"
+                value={targetCollection}
+                onChange={(e) => setTargetCollection(e.target.value)}
+                placeholder={
+                  destDriverType === "mongodb"
+                    ? "my_collection"
+                    : destDriverType === "dynamodb"
+                      ? "orders"
+                      : destDriverType === "pinecone"
+                        ? "default"
+                        : destDriverType === "weaviate"
+                          ? "DataflowChunk"
+                          : destDriverType === "qdrant" || destDriverType === "milvus"
+                            ? "chunks"
+                            : "my_table"
+                }
+              />
             </div>
             {getGenericSqlGroup(destType) === "postgresql+psycopg2" && (
               <div className="df2-field df2-field-120">
@@ -3582,10 +4110,22 @@ export function TransferPage({
                 {syncMode === "scd2" ? "SCD Type 2" : "Mirror"} requires a primary key — open Advanced settings to set it.
               </p>
             )}
-            {isMultiStreamSource && syncMode !== "cdc" && (
-              <p className="df2-label-hint df2-dest-sync-warning" role="status">
-                Multi-stream full/incremental modes currently run the <strong>primary stream</strong> only
-                ({advancedStreamNames[0] || "first selected"}). Switch to <strong>CDC</strong> for shared-reader multi-table sync, or run streams one at a time.
+            {isMultiStreamSource && syncMode === "cdc" && (
+              <p className="df2-label-hint" role="status">
+                Multi-stream CDC uses a shared log reader when the source supports it
+                (Postgres / MySQL / SQL Server / Oracle); otherwise streams run sequentially.
+              </p>
+            )}
+            {isMultiStreamSource && syncMode !== "cdc" && !multiStreamUnsupportedMode && (
+              <p className="df2-label-hint" role="status">
+                Multi-stream full/incremental runs each table/collection{" "}
+                <strong>sequentially</strong> with its own watermark and mappings
+                ({multiStreamNames.length} streams). Prefer CDC when you need one shared log consumer.
+              </p>
+            )}
+            {multiStreamUnsupportedMode && (
+              <p className="df2-label-hint df2-dest-sync-warning" role="alert">
+                Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or enter a single table.
               </p>
             )}
           </div>
@@ -3615,6 +4155,47 @@ export function TransferPage({
             suggestedPrimaryKey={primaryKeyCandidate}
             snapshotMode={snapshotMode}
             onSnapshotModeChange={setSnapshotMode}
+            allowAppendOnly={allowAppendOnly}
+            onAllowAppendOnlyChange={setAllowAppendOnly}
+            multiSubnetFailover={multiSubnetFailover}
+            onMultiSubnetFailoverChange={setMultiSubnetFailover}
+            showMultiSubnetFailover={
+              syncMode === "cdc"
+              && ["sqlserver", "mssql", "azure_sql_database", "microsoft_sql_server", "amazon_rds_sql_server"].includes(
+                resolveDriverType(sourceConnector?.type || ""),
+              )
+            }
+            writeViaStaging={writeViaStaging}
+            onWriteViaStagingChange={setWriteViaStaging}
+            showVectorOptions={
+              destDriverType === "pgvector" ||
+              destDriverType === "qdrant" ||
+              destDriverType === "weaviate" ||
+              destDriverType === "pinecone" ||
+              destDriverType === "milvus"
+            }
+            vectorContentColumn={vectorContentColumn}
+            vectorEmbeddingColumn={vectorEmbeddingColumn}
+            vectorMetadataColumns={vectorMetadataColumns}
+            vectorEmbeddingModel={vectorEmbeddingModel}
+            vectorChunkSize={vectorChunkSize}
+            vectorChunkOverlap={vectorChunkOverlap}
+            onVectorContentColumnChange={setVectorContentColumn}
+            onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
+            onVectorMetadataColumnsChange={setVectorMetadataColumns}
+            onVectorEmbeddingModelChange={setVectorEmbeddingModel}
+            onVectorChunkSizeChange={setVectorChunkSize}
+            onVectorChunkOverlapChange={setVectorChunkOverlap}
+            vectorRoutingFields={vectorRoutingFields}
+            vectorRoutingLoading={vectorRoutingLoading}
+            vectorExcludePiiColumns={vectorExcludePiiColumns}
+            onApplyVectorRouting={() => void runVectorRouting(true)}
+            vectorDurableCache={vectorDurableCache}
+            onVectorDurableCacheChange={setVectorDurableCache}
+            embeddingCacheStats={embeddingCacheStats}
+            embeddingCacheBusy={embeddingCacheBusy}
+            onRefreshEmbeddingCache={() => void refreshEmbeddingCacheStats()}
+            onClearEmbeddingCache={() => void handleClearEmbeddingCache()}
             priorityColumn={priorityColumn}
             priorityDirection={priorityDirection}
             rowLimit={rowLimit}
@@ -3782,7 +4363,17 @@ export function TransferPage({
               title="Ready to transfer"
               description="Preflight passed — execute the transfer to move your data."
               action={
-                <button type="button" className="df2-btn df2-btn-primary df2-btn-lg" onClick={() => void executeTransfer()}>
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-primary df2-btn-lg"
+                  onClick={() => void executeTransfer()}
+                  disabled={multiStreamUnsupportedMode}
+                  title={
+                    multiStreamUnsupportedMode
+                      ? "Multi-stream SCD2/mirror is not supported — switch mode or select a single stream"
+                      : undefined
+                  }
+                >
                   <DtIcon name="transfer" size={18} /> Execute Transfer
                 </button>
               }
@@ -3881,6 +4472,12 @@ export function TransferPage({
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           transferLaunch={transferLaunch}
           savingContract={savingContract}
+          executeBlocked={multiStreamUnsupportedMode}
+          executeBlockedReason={
+            multiStreamUnsupportedMode
+              ? "Multi-stream SCD2/mirror is not supported — switch to full/incremental/CDC or a single stream."
+              : undefined
+          }
           onBack={() => setStep(STEP_MAP)}
           onRunPreflight={() => void executePreflight()}
           onApproveMappings={() => void approveAllAndPreflight()}

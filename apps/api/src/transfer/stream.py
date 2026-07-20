@@ -672,7 +672,7 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "pgvector", "qdrant"):
+    if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
         writers = {
             "s3": "connectors.s3_writer",
             "gcs": "connectors.gcs_writer",
@@ -682,6 +682,9 @@ def _write_batch(
             "redis": "connectors.redis_writer",
             "pgvector": "connectors.pgvector_writer",
             "qdrant": "connectors.qdrant_writer",
+            "weaviate": "connectors.weaviate_writer",
+            "pinecone": "connectors.pinecone_writer",
+            "milvus": "connectors.milvus_writer",
         }
         import importlib
         mod = importlib.import_module(writers[dest_type])
@@ -713,14 +716,16 @@ def _write_batch(
             "error_policy": error_policy,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         }
-        if dest_type in ("pgvector", "qdrant"):
+        if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
             kwargs["embedding_column"] = extra.get("embedding_column")
             kwargs["metadata_columns"] = extra.get("metadata_columns")
+            kwargs["exclude_pii_columns"] = extra.get("exclude_pii_columns")
             kwargs["embedding_model"] = extra.get("embedding_model")
             kwargs["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
             kwargs["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
+            kwargs["skip_chunking"] = bool(extra.get("skip_chunking"))
         result = mod.write_mapped_rows(**kwargs)
         if not result.ok:
             raise RuntimeError(result.error or f"{dest_type} batch write failed")
@@ -1549,6 +1554,203 @@ def stream_database_transfer(
             dest_summary["load_method"] = load_methods_seen[-1]
     ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")
     return written, ddl_log, dest_summary, columns
+
+
+def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
+    """Drop the remapped destination object (overwrite sync, multi-stream)."""
+    if destination.kind != "database":
+        return False
+    try:
+        from connectors.table_manager import drop_table
+
+        db_type = resolve_driver_type(destination.format)
+        cfg = resolve_connector_config(destination)
+        table_name = resolve_dest_table(db_type, destination)
+        schema = cfg.get("schema")
+        return drop_table(db_type, cfg, table_name, schema)
+    except Exception:
+        return False
+
+
+def run_non_cdc_multi_stream_sequential(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Callable[..., None] | None = None,
+    *,
+    sync_mode: str = "full_refresh_append",
+    stream_contracts: list[dict] | None = None,
+    selected: list[Any] | None = None,
+    job_id: str | None = None,
+    checkpoint: Checkpoint | None = None,
+    checkpoint_service: CheckpointService | None = None,
+    retry_budget: RetryBudget | None = None,
+    backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+    source_filter: dict[str, Any] | None = None,
+    limit: int = 0,
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """Run full/incremental for N streams sequentially (one object at a time).
+
+    Mirrors CDC ``_run_cdc_multi_stream_sequential``: remap source/dest per stream,
+    prefer per-stream mappings, aggregate ``streams[]`` health. Overwrite DROP is
+    per remapped destination (not once on the primary). Delivery remains
+    **at-least-once** on resume (shared job checkpoint).
+    """
+    from services.sync_cursor import (
+        resolve_effective_sync_mode,
+        resolve_selected_sync_contracts,
+        should_drop_destination_for_sync,
+    )
+
+    selected_list = list(selected or resolve_selected_sync_contracts(stream_contracts))
+    if len(selected_list) < 2:
+        return stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            schema,
+            on_checkpoint,
+            sync_mode=sync_mode,
+            stream_contracts=stream_contracts,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service,
+            retry_budget=retry_budget,
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            source_filter=source_filter,
+            limit=limit,
+        )
+
+    total_rows = 0
+    ddl_log: list[str] = [
+        f"MULTI-STREAM sequential ({len(selected_list)} streams, sync={sync_mode}; "
+        "each stream has its own watermark; at-least-once)"
+    ]
+    headers: list[str] = list(schema.keys()) if schema else []
+    stream_health: list[dict[str, Any]] = []
+    last_summary: dict[str, Any] = {}
+    remaining_limit = int(limit or 0)
+
+    original_table = getattr(source, "table", None)
+    original_collection = getattr(source, "collection", None)
+    original_dest_table = getattr(destination, "table", None)
+    original_dest_collection = getattr(destination, "collection", None)
+
+    try:
+        for contract in selected_list:
+            if remaining_limit == 0 and limit > 0:
+                break
+            stream_name = (contract.name or "").strip() or "stream"
+            if getattr(source, "format", "") == "mongodb" or original_collection:
+                source.collection = stream_name
+            else:
+                source.table = stream_name
+            if original_dest_table is not None or original_dest_collection is not None:
+                if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
+                    destination.collection = stream_name
+                else:
+                    destination.table = stream_name
+
+            raw = next(
+                (c for c in (stream_contracts or []) if c.get("name") == stream_name),
+                {},
+            ) or {}
+            single_contracts = [
+                {
+                    **raw,
+                    "name": stream_name,
+                    "selected": True,
+                    "sync_mode": contract.sync_mode or sync_mode,
+                    "cursor_field": contract.cursor_field or raw.get("cursor_field") or "",
+                    "primary_key": contract.primary_key or raw.get("primary_key") or "",
+                    "schema_policy": contract.schema_policy or raw.get("schema_policy"),
+                    "validation_mode": contract.validation_mode or validation_mode,
+                }
+            ]
+            stream_maps = single_contracts[0].get("mappings")
+            use_mappings = (
+                stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
+            )
+
+            # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
+            if should_drop_destination_for_sync(
+                request_sync_mode=sync_mode,
+                contract_sync_mode=single_contracts[0].get("sync_mode"),
+            ):
+                _drop_destination_endpoint(destination)
+
+            status = "completed"
+            error: str | None = None
+            rows = 0
+            summary: dict[str, Any] = {}
+            stream_limit = remaining_limit if limit > 0 else 0
+            try:
+                # Empty schema → re-introspect each remapped source table.
+                rows, stream_ddl, summary, headers = stream_database_transfer(
+                    source,
+                    destination,
+                    use_mappings,
+                    {},
+                    on_checkpoint,
+                    sync_mode=sync_mode,
+                    stream_contracts=single_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    retry_budget=retry_budget,
+                    backfill_new_fields=backfill_new_fields,
+                    validation_mode=validation_mode,
+                    source_filter=source_filter,
+                    limit=stream_limit,
+                )
+                ddl_log.extend(stream_ddl)
+                total_rows += rows
+                last_summary = summary
+                if limit > 0:
+                    remaining_limit = max(0, remaining_limit - rows)
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+                stream_health.append(
+                    {
+                        "name": stream_name,
+                        "status": status,
+                        "records_processed": rows,
+                        "error": error,
+                    }
+                )
+                raise
+            stream_health.append(
+                {
+                    "name": stream_name,
+                    "status": status,
+                    "records_processed": rows,
+                    "watermark": summary.get("watermark"),
+                    "sync_mode": summary.get("sync_mode")
+                    or resolve_effective_sync_mode(
+                        sync_mode, single_contracts[0].get("sync_mode")
+                    ),
+                    "error": error,
+                }
+            )
+    finally:
+        if original_table is not None:
+            source.table = original_table
+        if original_collection is not None:
+            source.collection = original_collection
+        if original_dest_table is not None:
+            destination.table = original_dest_table
+        if original_dest_collection is not None:
+            destination.collection = original_dest_collection
+
+    last_summary = dict(last_summary or {})
+    last_summary["streams"] = stream_health
+    last_summary["multi_stream"] = True
+    last_summary["multi_stream_mode"] = "sequential"
+    return total_rows, ddl_log, last_summary, headers
 
 
 class _NoOpCheckpointService:

@@ -31,6 +31,54 @@ export function inferTransferFailureHint(
   const text = String(error || "").toLowerCase();
   if (!text) return null;
 
+  if (
+    text.includes("cdc_lease_conflict")
+    || text.includes("cdc lease conflict")
+    || text.includes("refuse concurrent consumer")
+  ) {
+    return {
+      code: errorCode || "cdc_lease_conflict",
+      title: errorTitle || "CDC lease conflict",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Another worker holds this CDC resource. Stop the holder, wait for TTL, or Force-release the lease in Job Theater (fencing generation advances), then Resume. Do not run two consumers on the same slot or server_id.",
+    };
+  }
+  if (
+    text.includes("cdc_lsn_gap")
+    || text.includes("cdc_scn_gap")
+    || text.includes("cdc_cursor_gap")
+    || text.includes("before capture retention")
+    || text.includes("before available redo")
+    || text.includes("min_lsn")
+    || text.includes("oldest_available")
+    || text.includes("ora-01291")
+    || text.includes("ora-01292")
+  ) {
+    return {
+      code: errorCode || "cdc_cursor_gap",
+      title: errorTitle || "CDC cursor gap (retention / failover)",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Reset the CDC watermark in Job Theater, set snapshot mode to when_needed or initial, then re-run. Continuous CDC across an AG / Data Guard / archive-purge gap is not possible.",
+    };
+  }
+  if (
+    text.includes("allow_append_only")
+    || text.includes("append-only")
+    || text.includes("cdc_append_only_sink")
+  ) {
+    return {
+      code: errorCode || "cdc_append_only_sink",
+      title: errorTitle || "Append-only CDC sink blocked",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Use a PK upsert destination, or enable Allow append-only CDC in Destination Advanced (acknowledges duplicates on redelivery).",
+    };
+  }
   if (text.includes("table is full") || text.includes("(1114") || text.includes("er_record_file_full")) {
     return {
       code: errorCode || "destination_table_full",

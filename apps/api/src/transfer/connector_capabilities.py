@@ -22,6 +22,9 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "redshift": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "pgvector": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "qdrant": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "weaviate": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -54,6 +57,9 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "avro": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "orc": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "xml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "pdf": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
+    "docx": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
+    "html": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
 }
 
 # Catalog marketplace id → driver / format type
@@ -139,6 +145,7 @@ TRANSFER_READY_CATALOG_IDS = frozenset({
     "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     "sftp", "email",
+    "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 })
 
 SUGGESTED_DESTINATIONS = [
@@ -147,6 +154,7 @@ SUGGESTED_DESTINATIONS = [
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "iceberg", "kafka", "salesforce", "hubspot",
     "sftp", "email",
+    "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 ]
 
 
@@ -166,6 +174,9 @@ def default_port(driver_type: str) -> int:
         "redshift": 5439,
         "pgvector": 5432,
         "qdrant": 6333,
+        "weaviate": 8080,
+        "pinecone": 443,
+        "milvus": 19530,
         "sqlite": 0,
         "sqlserver": 1433,
         "oracle": 1521,
@@ -364,6 +375,9 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "kafka": None,  # kafka-python checked at produce time with clear error
     "pgvector": "psycopg2",
     "qdrant": "requests",
+    "weaviate": "requests",
+    "pinecone": "requests",
+    "milvus": "requests",
     "salesforce": "requests",
     "hubspot": "requests",
     "stripe": "requests",

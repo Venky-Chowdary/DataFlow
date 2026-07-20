@@ -196,7 +196,7 @@ async def schedule_intervals():
 
 @router.get("/export/dataflow")
 def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
-    """Export all schedules as a single ``dataflow.yaml`` GitOps manifest."""
+    """Export all schedules (+ contracts) as a single ``dataflow.yaml`` GitOps manifest."""
     import yaml
 
     from services.gitops_manifest import build_dataflow_manifest
@@ -209,6 +209,41 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
             headers={"Content-Disposition": "attachment; filename=dataflow.yaml"},
         )
     return artifact
+
+
+@router.post("/gitops/plan")
+async def gitops_plan_manifest(payload: dict[str, Any]):
+    """Dry-run a DataFlowManifest / PipelineSchedule / DataContract YAML body."""
+    from services.gitops_manifest import plan_manifest
+
+    try:
+        return plan_manifest(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/gitops/apply")
+async def gitops_apply_manifest(
+    payload: dict[str, Any],
+    dry_run: bool = False,
+    require_signed_contracts: bool = False,
+):
+    """Apply a GitOps manifest (create/update schedules + draft contracts).
+
+    Contracts land as DRAFT — sign explicitly before ``require_signed_contract`` runs.
+    Pass ``require_signed_contracts=true`` for CD/staging: every schedule must
+    reference a SIGNED contract.
+    """
+    from services.gitops_manifest import apply_manifest
+
+    try:
+        return apply_manifest(
+            payload,
+            dry_run=dry_run,
+            require_signed_contracts=require_signed_contracts,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/", response_model=list[ScheduleSummaryResponse])
@@ -261,16 +296,12 @@ def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] =
     """Export a schedule as a versionable YAML/JSON artifact for GitOps."""
     import yaml
 
-    from services.gitops_manifest import schedule_spec
+    from services.gitops_manifest import schedule_artifact
 
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    artifact = {
-        "apiVersion": "dataflow.space/v1",
-        "kind": "PipelineSchedule",
-        "spec": schedule_spec(sched),
-    }
+    artifact = schedule_artifact(sched)
     if format == "yaml":
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
@@ -283,21 +314,19 @@ def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] =
 @router.post("/import", response_model=ScheduleResponse, status_code=201)
 async def import_pipeline_schedule(payload: dict[str, Any]):
     """Import a PipelineSchedule GitOps artifact (create or replace by id)."""
-    spec = payload.get("spec") if payload.get("kind") == "PipelineSchedule" else payload
-    if not isinstance(spec, dict):
-        raise HTTPException(status_code=422, detail="Expected PipelineSchedule spec object")
-    schedule_id = (spec.get("id") or "").strip()
-    try:
-        if schedule_id and get_schedule(schedule_id):
-            updated = update_schedule(schedule_id, spec)
-            if not updated:
-                raise HTTPException(status_code=404, detail="Schedule not found")
-            return ScheduleResponse.from_schedule(updated)
-        created = create_schedule(spec)
-        return ScheduleResponse.from_schedule(created)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from services.gitops_manifest import apply_manifest
 
+    # Prefer single-resource apply so kind wrappers and bare specs both work.
+    result = apply_manifest(payload, dry_run=False)
+    rows = result.get("results") or []
+    sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
+    if not sched_row:
+        err = next((r.get("error") for r in rows if r.get("error")), None)
+        raise HTTPException(status_code=400, detail=err or "Could not import PipelineSchedule")
+    sched = get_schedule(str(sched_row.get("id") or ""))
+    if not sched:
+        raise HTTPException(status_code=500, detail="Schedule imported but not readable")
+    return ScheduleResponse.from_schedule(sched)
 
 @router.delete("/{schedule_id}")
 async def remove_pipeline_schedule(schedule_id: str):

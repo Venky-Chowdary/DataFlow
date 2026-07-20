@@ -43,6 +43,10 @@ interface TransferMapStepProps {
   onActiveStreamChange?: (name: string) => void;
   /** True when stream schemas differ — operator must review each tab. */
   streamsDiverge?: boolean;
+  /** Stream name currently being rematched (or "all"). */
+  streamBusy?: string | null;
+  /** Rematch every stream against the destination schema. */
+  onRematchAllStreams?: () => void | Promise<void>;
   onChangeMappings: (mappings: EditableMapping[]) => void;
   onBack: () => void;
   onContinue: () => void;
@@ -78,6 +82,8 @@ export function TransferMapStep({
   activeStream = null,
   onActiveStreamChange,
   streamsDiverge = false,
+  streamBusy = null,
+  onRematchAllStreams,
   onChangeMappings,
   onBack,
   onContinue,
@@ -207,10 +213,12 @@ export function TransferMapStep({
               type="button"
               role="tab"
               aria-selected={activeStream === name}
-              className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}`}
+              className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
               onClick={() => onActiveStreamChange?.(name)}
+              disabled={Boolean(streamBusy)}
             >
               {name}
+              {streamBusy === name ? "…" : ""}
             </button>
           ))}
         </div>
@@ -222,9 +230,20 @@ export function TransferMapStep({
           <div>
             <strong>Stream schemas differ</strong>
             <p>
-              Review the mapping tab for each stream before Validate. Shared destinations with
-              incompatible columns should use separate transfers until per-stream write contracts ship.
+              Each tab has its own column mapping (sent as per-stream write contracts).
+              Review every stream before Validate — incompatible shared destinations still
+              need separate routes.
             </p>
+            {onRematchAllStreams && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                disabled={Boolean(streamBusy)}
+                onClick={() => void onRematchAllStreams()}
+              >
+                {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
+              </button>
+            )}
           </div>
         </div>
       )}

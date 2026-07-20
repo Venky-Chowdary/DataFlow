@@ -202,6 +202,24 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         reader_fn="",
         writer="connectors.qdrant_writer",
     ),
+    "weaviate": ConnectorModules(
+        probe=("connectors.weaviate_writer", "test_weaviate"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.weaviate_writer",
+    ),
+    "pinecone": ConnectorModules(
+        probe=("connectors.pinecone_writer", "test_pinecone"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.pinecone_writer",
+    ),
+    "milvus": ConnectorModules(
+        probe=("connectors.milvus_writer", "test_milvus"),
+        reader=None,
+        reader_fn="",
+        writer="connectors.milvus_writer",
+    ),
     # Singer tap bridge (Connector SDK) — source-only extract over the Singer
     # protocol. Reader is the SDK matrix helper; writes are not supported.
     "singer_tap": ConnectorModules(

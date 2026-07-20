@@ -22,6 +22,7 @@ import { PageShell } from "../components/ui/PageShell";
 import { PageContextBar } from "../components/ui/PageContextBar";
 import { ProgressCell } from "../components/ui/ProgressCell";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
+import { FreshnessSloPanel } from "../components/overview/FreshnessSloPanel";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
 interface DashboardPageProps {
@@ -30,6 +31,8 @@ interface DashboardPageProps {
   schedules?: PipelineSchedule[];
   onOpenConnectors?: () => void;
   onOpenJobs?: () => void;
+  onOpenJob?: (jobId: string) => void;
+  onOpenPipeline?: (scheduleId: string) => void;
 }
 
 const JOB_LIMIT = 10;
@@ -65,6 +68,8 @@ export function DashboardPage({
   schedules = [],
   onOpenConnectors,
   onOpenJobs,
+  onOpenJob,
+  onOpenPipeline,
 }: DashboardPageProps) {
   const [catalogStats, setCatalogStats] = useState<{
     live: number;
@@ -76,6 +81,24 @@ export function DashboardPage({
   const [usageRows, setUsageRows] = useState<number | null>(null);
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
+  const [freshness, setFreshness] = useState<{
+    slo_status?: string;
+    warn_threshold_seconds?: number;
+    critical_threshold_seconds?: number;
+    stale_count?: number;
+    critical_count?: number;
+    worst_lag_seconds?: number | null;
+    alerts?: Array<{
+      severity: string;
+      code: string;
+      title: string;
+      detail: string;
+      schedule_id?: string | null;
+      job_id?: string | null;
+      stream?: string | null;
+      lag_seconds?: number;
+    }>;
+  } | null>(null);
 
   useEffect(() => {
     fetchCatalogStats()
@@ -91,8 +114,22 @@ export function DashboardPage({
       .then((u) => setUsageRows(u.totals?.rows_written ?? u.rows_written ?? 0))
       .catch(() => setUsageRows(null));
     fetchOpsFreshness(60)
-      .then((f) => setOpsLagSeconds(f.worst_lag_seconds))
-      .catch(() => setOpsLagSeconds(null));
+      .then((f) => {
+        setOpsLagSeconds(f.worst_lag_seconds);
+        setFreshness({
+          slo_status: f.slo_status,
+          warn_threshold_seconds: f.warn_threshold_seconds,
+          critical_threshold_seconds: f.critical_threshold_seconds,
+          stale_count: f.stale_count,
+          critical_count: f.critical_count,
+          worst_lag_seconds: f.worst_lag_seconds,
+          alerts: f.alerts,
+        });
+      })
+      .catch(() => {
+        setOpsLagSeconds(null);
+        setFreshness(null);
+      });
     fetchOpsDlq(50)
       .then((d) => setDlqCount(d.count))
       .catch(() => setDlqCount(null));
@@ -148,10 +185,24 @@ export function DashboardPage({
   const hasThroughput = throughputSeries.some((d) => d.rows > 0);
   const hasJobs = jobs.length > 0;
   const pausedPipelines = schedules.filter((s) => !s.enabled).length;
+  const scheduleNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const s of schedules) map[s.id] = s.name;
+    return map;
+  }, [schedules]);
+  const freshnessStale = (freshness?.stale_count ?? 0) > 0
+    || freshness?.slo_status === "warn"
+    || freshness?.slo_status === "critical";
   const attentionItems = [
     failed.length > 0 ? `${failed.length} failed job${failed.length === 1 ? "" : "s"}` : null,
     dlqCount != null && dlqCount > 0 ? `${dlqCount} DLQ event${dlqCount === 1 ? "" : "s"}` : null,
-    cdcLagSeconds != null && cdcLagSeconds > 60 ? `CDC lag ${cdcLagSeconds.toFixed(0)}s` : null,
+    freshnessStale
+      ? `Freshness SLO ${freshness?.slo_status || "warn"}${
+          freshness?.stale_count ? ` · ${freshness.stale_count} pipeline${freshness.stale_count === 1 ? "" : "s"}` : ""
+        }`
+      : cdcLagSeconds != null && cdcLagSeconds > 60
+        ? `CDC lag ${cdcLagSeconds.toFixed(0)}s`
+        : null,
     pausedPipelines > 0 ? `${pausedPipelines} paused pipeline${pausedPipelines === 1 ? "" : "s"}` : null,
   ].filter(Boolean) as string[];
 
@@ -176,8 +227,29 @@ export function DashboardPage({
                 Open jobs
               </button>
             )}
+            {freshnessStale && !failed.length && onOpenPipeline && freshness?.alerts?.[0]?.schedule_id && (
+              <button
+                type="button"
+                className="df2-overview-attention-action"
+                onClick={() => onOpenPipeline(freshness.alerts![0].schedule_id!)}
+              >
+                Open pipeline
+              </button>
+            )}
           </div>
         )}
+        <FreshnessSloPanel
+          sloStatus={freshness?.slo_status}
+          warnSeconds={freshness?.warn_threshold_seconds}
+          criticalSeconds={freshness?.critical_threshold_seconds}
+          worstLagSeconds={freshness?.worst_lag_seconds ?? opsLagSeconds}
+          staleCount={freshness?.stale_count}
+          criticalCount={freshness?.critical_count}
+          alerts={freshness?.alerts}
+          scheduleNames={scheduleNames}
+          onOpenPipeline={onOpenPipeline}
+          onOpenJob={onOpenJob}
+        />
         <PageContextBar
           ariaLabel="Live workspace status"
           stats={[

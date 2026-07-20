@@ -202,6 +202,26 @@ def test_cdc_metadata_and_delivery_posture():
     assert any(r["code"] == "cdc_tombstone" for r in tomb["risks"])
 
 
+def test_cdc_append_only_sink_surfaces_in_mapping_proof():
+    proof = build_mapping_proof(
+        [{
+            "source": "id",
+            "target": "id",
+            "confidence": 0.95,
+            "source_type": "INTEGER",
+            "target_type": "integer",
+            "transform": "none",
+            "create_new": True,
+            "assignment_strategy": "identity_passthrough",
+        }],
+        target_columns=[],
+        destination_db_type="csv",
+        sync_mode="cdc",
+    )
+    assert any(r["code"] == "cdc_append_only_sink" for r in proof["global_risks"])
+    assert any(r["severity"] == "error" for r in proof["global_risks"] if r["code"] == "cdc_append_only_sink")
+
+
 def test_semi_structured_and_sample_preview():
     proof = build_mapping_proof(
         [{

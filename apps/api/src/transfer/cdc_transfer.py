@@ -28,6 +28,7 @@ from bson import json_util
 from connectors.mongodb_change_stream import MongodbChangeStreamCdc
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from connectors.oracle_change_stream import OracleFlashbackCdc
+from services.cdc_effectively_once import gate_cdc_destination
 from connectors.oracle_logminer import OracleLogMinerCdc
 from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 from connectors.sqlserver_cdc_native import SqlServerNativeCdc
@@ -145,7 +146,18 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         "cdc_slot_name": slot_name,
         "cdc_delivery": "at-least-once",
         **lease_fields,
+        **_source_ha_lag_fields(cdc),
     }
+
+
+def _source_ha_lag_fields(cdc: Any) -> dict[str, Any]:
+    probe = getattr(cdc, "_source_ha", None)
+    if probe is None:
+        return {}
+    try:
+        return dict(probe.job_fields())
+    except Exception:
+        return {}
 
 
 @dataclass
@@ -325,6 +337,37 @@ def _stamp_cdc_lsn(
         )
     out_types.setdefault(DF_LSN_COL, "string")
     return out_headers, out_mappings, out_types
+
+
+def _truthy_cfg(cfg: dict[str, Any] | None, *keys: str) -> bool:
+    raw = cfg or {}
+    for key in keys:
+        val = raw.get(key)
+        if val is True:
+            return True
+        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _gate_cdc_sink(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any] | None,
+    has_primary_key: bool,
+) -> dict[str, Any]:
+    """Fail-fast append-only CDC sinks unless operator opts in."""
+    return gate_cdc_destination(
+        dest_type=dest_type,
+        has_primary_key=has_primary_key,
+        write_mode="upsert",
+        allow_append_only=_truthy_cfg(
+            dest_cfg, "allow_append_only", "cdc_allow_append_only"
+        ),
+        require_effectively_once=_truthy_cfg(
+            dest_cfg, "require_effectively_once", "cdc_require_effectively_once"
+        ),
+    )
 
 
 def _apply_change_batch(
@@ -609,6 +652,11 @@ def _run_cdc_shared_multi_table(
         for c in selected
         if (c.name or "").strip()
     }
+    _gate_cdc_sink(
+        dest_type=dest_type,
+        dest_cfg=dest_cfg,
+        has_primary_key=all(bool(pk) for pk in primary_keys.values()),
+    )
     stream_cfg: dict[str, dict[str, Any]] = {}
     for contract in selected:
         name = (contract.name or "").strip()
@@ -674,8 +722,63 @@ def _run_cdc_shared_multi_table(
         )
         if not cdc.is_available():
             raise RuntimeError("MySQL shared binlog reader not available")
+    elif src_type in {"sqlserver", "mssql"}:
+        from services.dialect_profiles import default_schema_for
+
+        cdc = SqlServerNativeCdc(
+            {**src_cfg, "job_id": job_id},
+            table=tables,
+            primary_key=primary_keys.get(tables[0], "id"),
+            primary_keys=primary_keys,
+            schema=str(src_cfg.get("schema") or default_schema_for("sqlserver") or "dbo"),
+            resume_token=shared_wm if isinstance(shared_wm, str) else (
+                json.dumps(shared_wm) if shared_wm else None
+            ),
+            batch_size=CHUNK_SIZE,
+            cursor_key=shared_key,
+            row_filter=str(src_cfg.get("cdc_row_filter") or src_cfg.get("row_filter") or ""),
+        )
+        if not cdc.is_available():
+            raise RuntimeError(
+                "SQL Server shared native CDC not available "
+                "(enable CDC on the database and each selected table)"
+            )
+    elif src_type == "oracle":
+        from services.dialect_profiles import default_schema_for
+
+        cdc = OracleLogMinerCdc(
+            {**src_cfg, "job_id": job_id},
+            table=tables,
+            primary_key=primary_keys.get(tables[0], "id"),
+            primary_keys=primary_keys,
+            schema=str(
+                src_cfg.get("schema")
+                or src_cfg.get("username")
+                or default_schema_for("oracle")
+                or ""
+            ),
+            resume_token=shared_wm if isinstance(shared_wm, str) else (
+                json.dumps(shared_wm) if shared_wm else None
+            ),
+            batch_size=CHUNK_SIZE,
+            cursor_key=shared_key,
+        )
+        if not cdc.is_available():
+            raise RuntimeError(
+                "Oracle shared LogMiner CDC not available "
+                "(need LogMiner privileges + supplemental logging)"
+            )
     else:
         raise RuntimeError(f"shared multi-table CDC unsupported for {src_type}")
+
+    try:
+        from services.source_ha_probe import attach_source_ha
+
+        ha = attach_source_ha(cdc, src_cfg)
+        if ha is not None:
+            ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
+    except Exception:
+        pass
 
     snapshot_mode = resolve_snapshot_mode(
         stream_contracts,
@@ -1029,6 +1132,11 @@ def _run_cdc_single_stream(
     cursor_field = contract.cursor_field if contract else ""
     if not primary_key:
         raise ValueError("CDC sync requires primary_key in the stream contract")
+    _gate_cdc_sink(
+        dest_type=dest_type,
+        dest_cfg=dest_cfg,
+        has_primary_key=True,
+    )
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:
         cursor_field = cursor_field or primary_key or ("_id" if src_type == "mongodb" else "id")
     elif not cursor_field:
@@ -1317,6 +1425,15 @@ def _run_cdc_single_stream(
             f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
         ]
 
+    try:
+        from services.source_ha_probe import attach_source_ha
+
+        ha = attach_source_ha(cdc, src_cfg)
+        if ha is not None:
+            ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
+    except Exception:
+        pass
+
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
     # Resume from durable job checkpoint watermark when present.
     cp_dict: dict[str, Any] = {}
@@ -1472,6 +1589,12 @@ def _run_cdc_single_stream(
                     "cdc_lease_stale": lag_fields.get("cdc_lease_stale"),
                     "cdc_lease_backend": lag_fields.get("cdc_lease_backend"),
                     "cdc_lease_generation": lag_fields.get("cdc_lease_generation"),
+                    "source_ha_role": lag_fields.get("source_ha_role"),
+                    "source_ha_topology": lag_fields.get("source_ha_topology"),
+                    "source_ha_enabled": lag_fields.get("source_ha_enabled"),
+                    "source_ha_group": lag_fields.get("source_ha_group"),
+                    "source_ha_replica": lag_fields.get("source_ha_replica"),
+                    "source_ha_message": lag_fields.get("source_ha_message"),
                     "watermark": state.running_cursor,
                     "cdc": {
                         "inserts": state.inserts,
@@ -1546,6 +1669,17 @@ def _run_cdc_single_stream(
     summary["cdc_lease_stale"] = lag_fields.get("cdc_lease_stale")
     summary["cdc_lease_backend"] = lag_fields.get("cdc_lease_backend")
     summary["cdc_lease_generation"] = lag_fields.get("cdc_lease_generation")
+    for ha_key in (
+        "source_ha_role",
+        "source_ha_topology",
+        "source_ha_enabled",
+        "source_ha_group",
+        "source_ha_replica",
+        "source_ha_open_mode",
+        "source_ha_message",
+    ):
+        if lag_fields.get(ha_key) is not None:
+            summary[ha_key] = lag_fields.get(ha_key)
     summary["snapshot_mode"] = snapshot_mode.value
     summary["watermark"] = final_watermark
     summary["checksum"] = state.last_checksum

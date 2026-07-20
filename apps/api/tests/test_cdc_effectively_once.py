@@ -32,6 +32,42 @@ def test_honesty_dict_refuses_exactly_once_claim() -> None:
     assert h["exactly_once_claimed"] is False
     assert h["delivery_default"] == "at-least-once"
     assert h["effectively_once_pk_sinks"] is True
+    assert h["append_only_sinks_effectively_once"] is False
+
+
+def test_classify_and_gate_append_only_sink() -> None:
+    from services.cdc_effectively_once import (
+        CdcAppendOnlySinkError,
+        SINK_APPEND_ONLY,
+        SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+        classify_sink_delivery,
+        gate_cdc_destination,
+    )
+
+    pg = classify_sink_delivery(
+        dest_type="postgresql", has_primary_key=True, write_mode="upsert"
+    )
+    assert pg["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
+    assert pg["exactly_once"] is False
+
+    csv = classify_sink_delivery(
+        dest_type="csv", has_primary_key=True, write_mode="upsert"
+    )
+    assert csv["class"] == SINK_APPEND_ONLY
+    assert csv["duplicates_on_redelivery"] is True
+
+    try:
+        gate_cdc_destination(dest_type="csv", has_primary_key=True)
+        raise AssertionError("expected CdcAppendOnlySinkError")
+    except CdcAppendOnlySinkError as exc:
+        assert "allow_append_only" in str(exc)
+
+    allowed = gate_cdc_destination(
+        dest_type="csv", has_primary_key=True, allow_append_only=True
+    )
+    assert allowed["class"] == SINK_APPEND_ONLY
+
+    gate_cdc_destination(dest_type="postgresql", has_primary_key=True)
 
 
 def test_should_apply_rejects_stale_lsn() -> None:

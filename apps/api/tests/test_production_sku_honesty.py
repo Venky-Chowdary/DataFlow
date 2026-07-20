@@ -25,6 +25,9 @@ _OPTIONAL_DRIVERS = {
     "hubspot",
     "pgvector",
     "qdrant",
+    "weaviate",
+    "pinecone",
+    "milvus",
     "kafka",
 }
 

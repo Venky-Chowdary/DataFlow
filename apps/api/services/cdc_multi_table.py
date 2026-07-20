@@ -59,7 +59,14 @@ def can_share_log_reader(src_type: str, table_count: int) -> bool:
     """True when Debezium-style single-reader multi-table is supported."""
     if table_count < 2:
         return False
-    return (src_type or "").lower() in {"postgresql", "postgres", "mysql"}
+    return (src_type or "").lower() in {
+        "postgresql",
+        "postgres",
+        "mysql",
+        "sqlserver",
+        "mssql",
+        "oracle",
+    }
 
 
 @dataclass

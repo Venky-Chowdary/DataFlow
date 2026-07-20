@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -20,13 +20,21 @@ import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
+  applyGitopsManifest,
   createSchedule,
   deleteSchedule,
+  exportDataflowManifest,
+  exportScheduleYaml,
+  fetchContractBreaker,
+  fetchOpsFreshness,
   fetchScheduleIntervals,
   fetchSchedules,
+  planGitopsManifest,
+  resetContractBreaker,
   runScheduleNow,
   updateSchedule,
 } from "../lib/api";
+import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { Connector, PipelineSchedule, ScheduleInput, ScheduleIntervals } from "../lib/types";
 
 interface SchedulesPageProps {
@@ -55,16 +63,61 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [pipelineTab, setPipelineTab] = useState<PipelineTab>(PIPELINE_TABS[0]);
   const [filter, setFilter] = useState<ScheduleFilter>("all");
   const [pipelineSearch, setPipelineSearch] = useState("");
+  const [breakers, setBreakers] = useState<Record<string, string>>({});
+  /** schedule_id -> worst lag seconds when stale/critical */
+  const [freshnessLag, setFreshnessLag] = useState<Record<string, { lag: number; severity: string }>>({});
+
+  const loadBreakers = useCallback(async (rows: PipelineSchedule[]) => {
+    const ids = [...new Set(rows.map((s) => s.contract_id).filter(Boolean))] as string[];
+    if (ids.length === 0) {
+      setBreakers({});
+      return;
+    }
+    const map: Record<string, string> = {};
+    await Promise.all(
+      ids.slice(0, 40).map(async (id) => {
+        try {
+          const b = await fetchContractBreaker(id);
+          map[id] = b.state;
+        } catch {
+          /* breaker optional */
+        }
+      }),
+    );
+    setBreakers(map);
+  }, []);
+
+  const loadFreshness = useCallback(async () => {
+    try {
+      const f = await fetchOpsFreshness(60);
+      const map: Record<string, { lag: number; severity: string }> = {};
+      for (const p of f.pipelines || []) {
+        if (!p.schedule_id || p.schedule_id === "_") continue;
+        if (!(p.stale || p.severity === "warn" || p.severity === "critical")) continue;
+        const prev = map[p.schedule_id];
+        const sev = p.severity || (p.stale ? "warn" : "ok");
+        if (!prev || p.lag_seconds > prev.lag) {
+          map[p.schedule_id] = { lag: p.lag_seconds, severity: sev };
+        }
+      }
+      setFreshnessLag(map);
+    } catch {
+      setFreshnessLag({});
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setSchedules(await fetchSchedules());
+      const rows = await fetchSchedules();
+      setSchedules(rows);
+      void loadBreakers(rows);
+      void loadFreshness();
     } catch (e) {
       console.error(e);
     }
     setLoading(false);
-  }, []);
+  }, [loadBreakers, loadFreshness]);
 
   useEffect(() => {
     load();
@@ -216,6 +269,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleRunNow = async (id: string) => {
+    const sched = schedules.find((s) => s.id === id);
+    const contractId = sched?.contract_id;
+    if (contractId && breakerBlocksRuns(breakers[contractId])) {
+      toast({
+        title: "Contract breaker is open",
+        message: "Reset the breaker on this pipeline (or Contracts) before running.",
+        tone: "error",
+      });
+      return;
+    }
     setRunningId(id);
     try {
       await runScheduleNow(id);
@@ -231,6 +294,113 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       console.error(e);
     }
     setRunningId(null);
+  };
+
+  const handleResetBreaker = async (contractId: string) => {
+    try {
+      const b = await resetContractBreaker(contractId);
+      setBreakers((prev) => ({ ...prev, [contractId]: b.state }));
+      toast({ title: "Breaker reset", message: `Contract breaker is now ${b.state}.`, tone: "success" });
+    } catch (e) {
+      toast({
+        title: "Could not reset breaker",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    }
+  };
+
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [gitopsBusy, setGitopsBusy] = useState(false);
+  const [gitopsRequireSigned, setGitopsRequireSigned] = useState(false);
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  };
+
+  const handleExportFleet = async () => {
+    setGitopsBusy(true);
+    try {
+      const blob = await exportDataflowManifest();
+      downloadBlob(blob, "dataflow.yaml");
+      toast({
+        title: "Exported dataflow.yaml",
+        message: "Schedules + contracts — review in git before apply.",
+        tone: "success",
+      });
+    } catch (e) {
+      toast({
+        title: "Export failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setGitopsBusy(false);
+    }
+  };
+
+  const handleExportOne = async (id: string) => {
+    setGitopsBusy(true);
+    try {
+      const blob = await exportScheduleYaml(id);
+      downloadBlob(blob, `schedule-${id}.yaml`);
+      toast({ title: "Pipeline YAML exported", tone: "success" });
+    } catch (e) {
+      toast({
+        title: "Export failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setGitopsBusy(false);
+    }
+  };
+
+  const handleImportFile = async (file: File) => {
+    setGitopsBusy(true);
+    try {
+      const text = await file.text();
+      const payload = { yaml: text };
+      const plan = await planGitopsManifest(payload);
+      const ok = await confirm({
+        title: "Apply GitOps manifest?",
+        message: gitopsRequireSigned
+          ? `Plan: ${plan.creates} create · ${plan.updates} update · ${plan.skips} skip (${plan.resource_count} resources).\n\nSigned-contract gate ON: every schedule must reference a SIGNED contract. Contracts in this file still import as DRAFT.`
+          : `Plan: ${plan.creates} create · ${plan.updates} update · ${plan.skips} skip (${plan.resource_count} resources). Contracts import as DRAFT — sign before require-signed schedules run.`,
+        confirmLabel: gitopsRequireSigned ? "Apply (signed gate)" : "Apply",
+        cancelLabel: "Cancel",
+        tone: "danger",
+      });
+      if (!ok) return;
+      const applied = await applyGitopsManifest(payload, false, {
+        requireSignedContracts: gitopsRequireSigned,
+      });
+      await load();
+      void onSchedulesChange?.();
+      toast({
+        title: "GitOps apply complete",
+        message: `${applied.applied ?? 0} applied · ${applied.failed ?? 0} failed${
+          gitopsRequireSigned ? " · signed-contract gate" : ""
+        }`,
+        tone: (applied.failed ?? 0) > 0 ? "error" : "success",
+      });
+    } catch (e) {
+      toast({
+        title: "Import failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setGitopsBusy(false);
+    }
   };
 
   return (
@@ -293,9 +463,56 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           }
           actions={
             !showForm ? (
-              <Button size="sm" variant="primary" onClick={openCreate}>
-                New pipeline
-              </Button>
+              <>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".yaml,.yml,.json,application/x-yaml,text/yaml,application/json"
+                  hidden
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f) void handleImportFile(f);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={gitopsBusy}
+                  onClick={() => void handleExportFleet()}
+                  title="Export schedules + contracts as dataflow.yaml"
+                >
+                  Export YAML
+                </Button>
+                <label
+                  className="df2-policy-toggle"
+                  title="CD/staging: refuse schedules unless contract_id is SIGNED"
+                  style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", margin: 0 }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={gitopsRequireSigned}
+                    onChange={(e) => setGitopsRequireSigned(e.target.checked)}
+                  />
+                  <span style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>Require signed</span>
+                </label>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={gitopsBusy}
+                  onClick={() => importInputRef.current?.click()}
+                  title={
+                    gitopsRequireSigned
+                      ? "Plan then apply with signed-contract gate"
+                      : "Plan then apply a dataflow.yaml manifest"
+                  }
+                >
+                  Import YAML
+                </Button>
+                <Button size="sm" variant="primary" onClick={openCreate}>
+                  New pipeline
+                </Button>
+              </>
             ) : undefined
           }
         />
@@ -372,6 +589,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                 running={runningId === sched.id}
                 highlighted={highlightScheduleId === sched.id}
                 selected={drawerOpen && selectedId === sched.id}
+                breakerState={sched.contract_id ? breakers[sched.contract_id] : null}
+                freshnessLagSeconds={freshnessLag[sched.id]?.lag ?? null}
+                freshnessSeverity={freshnessLag[sched.id]?.severity ?? null}
                 onSelect={() => openDrawer(sched.id)}
               />
             ))}
@@ -397,6 +617,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         tab={pipelineTab}
         setTab={setPipelineTab}
         running={selectedSchedule ? runningId === selectedSchedule.id : false}
+        breakerHint={
+          selectedSchedule?.contract_id
+            ? breakers[selectedSchedule.contract_id] ?? null
+            : null
+        }
         onClose={closeDrawer}
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
         onEdit={() => {
@@ -407,6 +632,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }}
         onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
         onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+        onResetBreaker={handleResetBreaker}
+        onExportYaml={
+          selectedSchedule
+            ? () => void handleExportOne(selectedSchedule.id)
+            : undefined
+        }
         onOpenJob={(jobId) => {
           setResumeDrawerAfterEdit(false);
           closeDrawer();

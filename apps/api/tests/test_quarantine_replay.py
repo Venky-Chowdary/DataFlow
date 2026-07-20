@@ -54,8 +54,22 @@ def test_quarantine_replay_sqlite_edits_and_rewrites(tmp_path: Path):
     client = _client()
     q = client.get(f"/api/v1/connectors/jobs/{job_id}/quarantine")
     assert q.status_code == 200
-    quarantine = q.json()["quarantine"]
+    qbody = q.json()
+    quarantine = qbody["quarantine"]
     assert quarantine
+    dest_dlq = qbody.get("dest_dlq") or {}
+    assert dest_dlq.get("table") == "users_df_quarantine"
+    assert int(dest_dlq.get("rows_written") or 0) >= 1
+    assert int(dest_dlq.get("open_rows") or 0) >= 1
+
+    import sqlite3
+
+    with sqlite3.connect(dest_path) as db:
+        open_n = db.execute(
+            "SELECT COUNT(*) FROM users_df_quarantine "
+            "WHERE _df_promoted_at IS NULL OR _df_promoted_at = ''"
+        ).fetchone()[0]
+        assert open_n >= 1
 
     # Fix the bad age value and replay.
     edited = []
@@ -79,10 +93,23 @@ def test_quarantine_replay_sqlite_edits_and_rewrites(tmp_path: Path):
     assert body["parent_job_id"] == job_id
     assert body["rows_written"] >= 1
     assert body["rejected"] == 0
+    promote = body.get("dest_dlq_promoted") or {}
+    assert int(promote.get("updated") or 0) >= 1
+
+    with sqlite3.connect(dest_path) as db:
+        open_after = db.execute(
+            "SELECT COUNT(*) FROM users_df_quarantine "
+            "WHERE _df_promoted_at IS NULL OR _df_promoted_at = ''"
+        ).fetchone()[0]
+        assert open_after == 0
 
     child = client.get(f"/api/v1/connectors/jobs/{body['job_id']}")
     assert child.status_code == 200
     assert child.json()["status"] in ("completed", "completed_with_quarantine")
+
+    q2 = client.get(f"/api/v1/connectors/jobs/{job_id}/quarantine")
+    assert q2.status_code == 200
+    assert int((q2.json().get("dest_dlq") or {}).get("open_rows") or 0) == 0
 
 
 def test_quarantine_replay_empty_uses_stored_details(tmp_path: Path):
