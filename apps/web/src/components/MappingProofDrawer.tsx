@@ -617,7 +617,7 @@ export function MappingProofDrawer({
           setExpanded(false);
           onClose();
         }}
-        size="xl"
+        size="full"
         title="Mapping proof — full detail"
         subtitle="Source → destination overlaps, schema decisions, transforms, and quarantine posture"
         ariaLabel="Full mapping proof"

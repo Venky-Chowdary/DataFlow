@@ -50,6 +50,23 @@ describe("buildStreamContracts", () => {
     assert.equal(contracts[0].cursor_field, "ts");
     assert.equal(contracts[0].primary_key, "pk");
   });
+
+  it("stamps snapshot_mode on CDC contracts", () => {
+    const contracts = buildStreamContracts({
+      streamNames: ["orders"],
+      syncMode: "cdc",
+      schemaPolicy: "manual_review",
+      validationMode: "strict",
+      fieldCount: 3,
+      requiresCursor: true,
+      requiresPrimaryKey: true,
+      defaultCursor: "updated_at",
+      defaultPrimaryKey: "id",
+      streamFields: {},
+      snapshotMode: "never",
+    });
+    assert.equal(contracts[0].snapshot_mode, "never");
+  });
 });
 
 describe("streamContractsNeedReview", () => {

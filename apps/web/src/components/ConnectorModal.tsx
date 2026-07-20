@@ -508,7 +508,7 @@ export function ConnectorModal({
   return (
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
-        className={`df2-modal ${step === "pick" ? "df2-modal-xl" : "df2-modal-lg"}`}
+        className="df2-modal df2-modal-full"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

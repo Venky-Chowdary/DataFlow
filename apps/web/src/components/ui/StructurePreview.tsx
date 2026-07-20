@@ -197,6 +197,12 @@ function PreviewBody({
             {sampleWarning
               || "Columns detected, but no sample rows were loaded. Preview data and Validate dry-run need a row sample — re-read the source table."}
           </p>
+          {sampleWarning && /002003|"public"|schema/i.test(sampleWarning) && (
+            <p className="df2-label-hint">
+              On Snowflake, schema <code>public</code> (Postgres default) is not the same as <code>PUBLIC</code>.
+              Set the connector schema to PUBLIC, then reload.
+            </p>
+          )}
           {onRetrySample && (
             <button type="button" className="df2-btn df2-btn-sm" onClick={onRetrySample}>
               <DtIcon name="scan" size={14} /> Reload sample preview
@@ -248,7 +254,7 @@ export function StructurePreview(props: StructurePreviewProps) {
       <Dialog
         open={expanded}
         onClose={() => setExpanded(false)}
-        size="xl"
+        size="full"
         title={props.title || "Structure preview"}
         subtitle={
           props.subtitle

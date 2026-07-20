@@ -200,11 +200,8 @@ def resolve_connector_config(
         587 if fmt == "email" else
         443 if fmt in ("snowflake", "bigquery", "dynamodb", "s3", "gcs", "adls", "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase") else 5432
     )
-    default_schema = (
-        "PUBLIC" if fmt == "snowflake" else
-        None if fmt == "generic_sql" else
-        "public"
-    )
+    from services.dialect_profiles import normalize_schema
+
     # Start with inline endpoint values only; driver defaults are applied after the
     # saved connector is merged so saved credentials can fill missing fields.
     cfg: dict[str, Any] = {
@@ -286,7 +283,13 @@ def resolve_connector_config(
     # Apply driver defaults for fields that are still missing.
     cfg["host"] = cfg["host"] or "localhost"
     cfg["port"] = cfg["port"] or default_port
-    cfg["schema"] = cfg["schema"] or default_schema
+    driver_type = (cfg.get("type") or fmt or "").lower()
+    # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
+    cfg["schema"] = normalize_schema(
+        driver_type,
+        cfg.get("schema"),
+        username=str(cfg.get("username") or "") or None,
+    )
     if fmt == "mongodb" and not cfg.get("database"):
         from connectors.mongodb_common import mongodb_database_from_uri
 
@@ -371,6 +374,7 @@ def _introspect_table_schema(
         except Exception:
             pass
 
+    from services.dialect_profiles import schema_from_cfg
     from services.schema_introspect import introspect_schema
 
     info = introspect_schema(
@@ -380,7 +384,7 @@ def _introspect_table_schema(
         database=cfg.get("database", ""),
         username=cfg.get("username", ""),
         password=cfg.get("password", ""),
-        schema=cfg.get("schema", "public"),
+        schema=schema_from_cfg(db_type, cfg),
         connection_string=cfg.get("connection_string", ""),
         ssl=cfg.get("ssl", False),
         warehouse=cfg.get("warehouse", ""),
@@ -783,6 +787,8 @@ def write_destination_database(
 
     table_name = resolve_dest_table(db_type, endpoint, "dt_import")
 
+    from services.dialect_profiles import schema_from_cfg
+
     common = {
         "host": cfg["host"],
         "port": cfg["port"] or (
@@ -799,7 +805,7 @@ def write_destination_database(
         "database": cfg["database"],
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
-        "schema": cfg.get("schema", "public"),
+        "schema": schema_from_cfg(db_type, cfg),
         "connection_string": cfg.get("connection_string", ""),
         "ssl": cfg.get("ssl", False),
         "auth_source": cfg.get("auth_source", ""),
@@ -823,7 +829,7 @@ def write_destination_database(
 
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
-        common["schema"] = cfg.get("schema", "PUBLIC")
+        common["schema"] = schema_from_cfg("snowflake", cfg)
         common["warehouse"] = cfg.get("warehouse", "")
         for col in columns:
             ddl_log.append(f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}")
@@ -839,7 +845,7 @@ def write_destination_database(
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
-        common["schema"] = cfg.get("schema", "public")
+        common["schema"] = schema_from_cfg(db_type, cfg)
         if db_type == "redshift":
             common["port"] = cfg["port"] or 5439
         for col in columns:

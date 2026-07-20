@@ -55,7 +55,7 @@ The product is **beta / early production** for batch transfers on supported driv
 - **Multi-table shared reader** for PG + MySQL when ≥2 stream contracts are selected (one publication/slot or one binlog `server_id`; demux + `ack_barrier`). Falls back to sequential N readers if the shared path cannot start.
 - Shared-reader **ack-barrier chaos** (`tests/test_cdc_shared_ack_chaos.py`) + **live concurrent-write IT** (`tests/test_cdc_shared_reader_integration.py`).
 - **Effectively once for PK sinks** when destinations stamp/guard `_df_lsn` (`services/cdc_effectively_once.py`, `tests/test_cdc_effectively_once.py` incl. live PG upsert). Still **not** platform exactly-once.
-- **TOAST / large txn**: pgoutput merges unchanged TOAST from old tuple; incomplete sparse updates **fail closed**. Open-txn overflow raises ``CdcTxnBufferOverflow`` (no silent drop); ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS``.
+- **TOAST / large txn**: pgoutput merges unchanged TOAST from old tuple; incomplete sparse updates **fail closed**. Open txns **spill to disk** after ``DATAFLOW_CDC_TXN_SPILL_AFTER``; hard overflow still raises ``CdcTxnBufferOverflow`` (no silent drop).
 - Job Theater surfaces lease holder + backend + conflict (`cdc_lease_*` job fields).
 - CI: Postgres logical CDC in main job; Redis lease backend on CDC matrix; **SQL Server CT + native CDC** in `cdc-sqlserver`; **Oracle** optional `cdc-oracle` when `ENABLE_ORACLE_CDC` + secrets are set.
 - **Do not claim** “100% CDC”, “Debezium parity”, or “better than Airbyte CDC platform-wide” without a named live matrix.
@@ -65,7 +65,14 @@ The product is **beta / early production** for batch transfers on supported driv
 - **Exactly-once pipeline delivery** — only PK-sink effectively-once via `_df_lsn`; append-only / no-guard sinks remain at-least-once.
 - **Oracle always-on CI** (image/license); optional gated job exists, default forks skip.
 - **SQL Server** multi-table shared reader; AG/failover LSN quirks.
-- Disk-spill for extremely large open txns (today: fail-closed overflow; raise ``DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS``).
+- Non-CDC multi-stream still runs the **primary stream only** (UI warns; CDC multi-table shared/sequential is the multi-object path).
+
+### July 20 operator + CDC streamline pass
+
+- Durable job `event_log` + Jobs Log / Gate-8 / actor / duration / DDL persistence.
+- CDC UI parity: lease + shared reader + snapshot mode + per-stream watermark on Jobs/Theater/Results.
+- Advanced: Debezium `snapshot_mode` → `stream_contracts`; priority column + row limit.
+- Open-txn **disk spill** (`DATAFLOW_CDC_TXN_SPILL_AFTER`) — still fail-closed past `DATAFLOW_CDC_TXN_BUFFER_MAX_EVENTS`.
 
 ### Why it matters
 
@@ -73,9 +80,9 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 ### Recommended next step
 
-1. Lease metrics / Redis HA runbook.
-2. Prefer ``pgoutput`` as default in CI live matrix (TOAST path is binary-native).
-3. SQL Server multi-table shared reader / AG failover proofs.
+1. SQL Server multi-table shared reader / AG failover proofs.
+2. Sequential non-CDC multi-stream execute loop (or hard-gate Studio to CDC-only for N streams).
+3. Lease metrics / Redis HA runbook.
 
 ---
 
@@ -90,9 +97,10 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 | Effectively once (PK + `_df_lsn`) | **Proven** for guarded upserts — not EO delivery |
 | Multi-node CDC leases | **Shipped** — Redis Lua + fencing; file single-host |
 | SQL Server native CDC | **Shipped** — capture discovery, LSN IT, net/before-image filters |
-| PG TOAST / large open txn | **Shipped** — merge + fail-closed overflow (no silent drop) |
+| PG TOAST / large open txn | **Shipped** — merge + disk spill + fail-closed hard cap (no silent drop) |
 | SQL Server / Oracle fleet depth | **Behind** Debezium on multi-table/AG; Oracle CI optional |
 | Connect-scale ops / years of edge cases | **Behind** |
+| Operator CDC signals (lease / shared reader / snapshot) | **Shipped** — Jobs + Theater + Results |
 
 **Verdict:** DataFlow can win evaluations that prioritize *provable trust*. It cannot yet win evaluations that prioritize *CDC platform coverage*. Say so in sales decks.
 
@@ -284,7 +292,7 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 |-----------|----------------|------------------|-----|
 | Batch reliability | 8/10 | 9/10 | small |
 | Connector depth | 4/10 | 9/10 | large |
-| CDC / real-time | **5.5/10** | 8/10 | large (shared multi-table reader landed; EO/fleet/SQL Server CI still open) |
+| CDC / real-time | **5.7/10** | 8/10 | large (shared reader + spill + UI signals; EO/SQL Server multi-table still open) |
 | Vector / AI-ready | 2/10 | 6/10 | large |
 | Data contracts / governance | 6/10 | 5/10 | small lead |
 | GitOps / as-code | 1/10 | 5/10 | large |

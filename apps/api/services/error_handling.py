@@ -110,7 +110,181 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "refuse concurrent consumer",
     "cdc lease",
     "cdc_lease_conflict",
+    # Destination capacity — OperationalError-class but will not self-heal on retry.
+    "table is full",
+    "er_record_file_full",
+    "1114",
+    "disk full",
+    "no space left",
+    "enospc",
+    "tablespace is full",
+    # Source format — will not self-heal on retry without a new file.
+    "json file must be an array",
+    "json must be an array of objects",
+    "json array must contain objects",
+    "json file has no object rows",
+    "invalid json",
 }
+
+
+# Operator-facing failure catalog. Only patterns we can map accurately.
+# `fix` must list *likely checks* — never a single guaranteed remedy.
+_OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
+    (
+        ("table is full", "er_record_file_full", "(1114,", " 1114,", "error 1114"),
+        {
+            "code": "destination_table_full",
+            "category": "destination_capacity",
+            "confidence": "high",
+            "title": "Destination table is full (MySQL 1114)",
+            "fix": (
+                "MySQL ER_RECORD_FILE_FULL (1114) means the engine could not allocate more space "
+                "for this table. Common verified causes: host disk full, InnoDB tablespace / "
+                "innodb_data_file_path limit, MEMORY/HEAP max size, or MyISAM max_rows. Check "
+                "which applies on your host (SHOW TABLE STATUS / disk / tablespace), free or "
+                "expand capacity, then Resume from checkpoint. Resume alone will fail again "
+                "until capacity is available."
+            ),
+        },
+    ),
+    (
+        ("disk full", "no space left", "enospc"),
+        {
+            "code": "destination_disk_full",
+            "category": "destination_capacity",
+            "confidence": "high",
+            "title": "Destination reported no free disk space",
+            "fix": (
+                "The driver reported ENOSPC / disk full. Free space on the destination host "
+                "(or expand the volume), confirm the write path is not a full mount, then Resume. "
+                "If the message was wrapped by a proxy, confirm on the DB host before assuming disk."
+            ),
+        },
+    ),
+    (
+        ("tablespace is full", "innodb: error: tablespace"),
+        {
+            "code": "destination_tablespace_full",
+            "category": "destination_capacity",
+            "confidence": "high",
+            "title": "Destination tablespace is full",
+            "fix": (
+                "InnoDB tablespace is exhausted. Expand the tablespace / data file, free space "
+                "inside it, or move the table — then Resume. Do not treat this as a mapping issue."
+            ),
+        },
+    ),
+    (
+        ("too many connections", "max_connections"),
+        {
+            "code": "destination_connection_limit",
+            "category": "destination_capacity",
+            "confidence": "medium",
+            "title": "Destination connection limit reached",
+            "fix": (
+                "Likely max_connections (or pool) saturation. Reduce concurrent DataFlow jobs "
+                "or raise the destination limit, then retry. Confirm with the DB admin if shared."
+            ),
+        },
+    ),
+    (
+        (
+            "json file must be an array of objects",
+            "json must be an array of objects",
+            "json array must contain objects",
+            "json file has no object rows",
+            "json must be an array of objects — each record",
+        ),
+        {
+            "code": "json_shape_unsupported",
+            "category": "source_format",
+            "confidence": "high",
+            "title": "JSON source shape is not tabular",
+            "fix": (
+                "DataFlow needs object rows. Accepted shapes: [{...}, ...], a wrapper like "
+                '{"data":[{...}]} / {"countries":[{...}]} / GeoJSON {"features":[...]}, or one '
+                "object as a single row. Arrays of strings/numbers, empty files, and invalid JSON "
+                "are rejected. Re-export the file in one of those shapes, re-upload, then re-run "
+                "from Source (Resume will not help if extract never started)."
+            ),
+        },
+    ),
+    (
+        (
+            'dataflow."public"',
+            '."public"',
+            'schema "public"',
+            "schema 'public'",
+        ),
+        {
+            "code": "snowflake_schema_not_found",
+            "category": "source_schema",
+            "confidence": "high",
+            "title": "Snowflake schema not found (check PUBLIC vs public)",
+            "fix": (
+                "Snowflake folds unquoted names to UPPERCASE. A quoted lowercase schema "
+                '"public" is not the same as PUBLIC. Set the connector schema to PUBLIC '
+                "(or the real schema name in uppercase), confirm the role can USE that "
+                "schema, then reload sample preview. If the schema truly is missing, create "
+                "it or pick an existing schema your role can access."
+            ),
+        },
+    ),
+)
+
+
+def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
+    """Turn a raw driver exception into an operator-facing failure summary.
+
+    Honesty rules
+    -------------
+    - Only attach a concrete ``fix`` when the pattern is a known driver signal.
+    - Phrase fixes as *likely checks*, never as a guaranteed one-click remedy.
+    - Unknown errors keep the raw message and a neutral next-step — no invented root cause.
+
+    Returns keys: code, category, title, message, fix, raw, retriable, confidence.
+    """
+    raw = str(error)
+    text = raw.lower()
+    classification = classify_error(error)
+    matched: dict[str, str] | None = None
+    for needles, payload in _OPERATOR_FAILURE_RULES:
+        if any(n in text for n in needles):
+            matched = dict(payload)
+            break
+    if matched:
+        title = matched["title"]
+        fix = matched["fix"]
+        confidence = matched.get("confidence", "medium")
+        message = (
+            f"{title}. Driver reported: {raw}. "
+            f"Rows already written stay on the destination until you address capacity."
+        )
+        return {
+            "code": matched["code"],
+            "category": matched["category"],
+            "title": title,
+            "message": message,
+            "fix": fix,
+            "raw": raw,
+            "retriable": False,
+            "confidence": confidence,
+        }
+    # Unknown — never invent a specific root cause or fake remediation path.
+    return {
+        "code": "transfer_failed",
+        "category": "runtime",
+        "title": "Transfer failed",
+        "message": raw,
+        "fix": (
+            "No mapped remediation for this driver message. Use the raw error, event log, and "
+            "Quarantine tab to identify the cause. Fix that cause before Resume — do not assume "
+            "a mapping or capacity issue without evidence."
+        ),
+        "raw": raw,
+        "retriable": bool(classification.get("retriable")),
+        "confidence": "low",
+    }
 
 
 @dataclass

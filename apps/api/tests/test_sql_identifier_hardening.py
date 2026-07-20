@@ -50,6 +50,21 @@ def test_quote_table_ref_snowflake() -> None:
     assert ref == '"PUBLIC"."ORDERS"'
 
 
+def test_quote_table_ref_snowflake_folds_postgres_public_default() -> None:
+    """UI often stores schema=public (Postgres default). Snowflake needs PUBLIC."""
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    assert snowflake_fold_identifier("public") == "PUBLIC"
+    ref = quote_table_ref("jobs", "public", dialect="snowflake")
+    assert ref == '"PUBLIC"."JOBS"'
+    assert '"public"' not in ref
+
+
+def test_quote_table_ref_snowflake_preserves_mixed_case() -> None:
+    ref = quote_table_ref("MyTable", "MySchema", dialect="snowflake")
+    assert ref == '"MySchema"."MyTable"'
+
+
 def test_quote_table_ref_bigquery() -> None:
     ref = quote_table_ref(
         "events",

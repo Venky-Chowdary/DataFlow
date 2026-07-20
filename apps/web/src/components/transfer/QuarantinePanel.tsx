@@ -49,6 +49,27 @@ function summarizeColumns(rows: QuarantineRow[]) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
 }
 
+/** Make invisible format-control chars visible in the UI / CSV preview. */
+function formatQuarantineSample(value: unknown, chars?: string[]): string {
+  let text = String(value ?? "");
+  const replacements: Array<[RegExp, string]> = [
+    [/\u200B/g, "⟦U+200B⟧"],
+    [/\u200C/g, "⟦U+200C⟧"],
+    [/\u200D/g, "⟦U+200D⟧"],
+    [/\uFEFF/g, "⟦U+FEFF⟧"],
+    [/\u0000/g, "⟦U+0000⟧"],
+    [/\uFFFD/g, "⟦U+FFFD⟧"],
+  ];
+  for (const [re, label] of replacements) {
+    text = text.replace(re, label);
+  }
+  const alreadyMarked = /⟦U\+[0-9A-F]+⟧/i.test(text);
+  if (!alreadyMarked && chars?.length) {
+    text = `${text} (${chars.join(", ")})`;
+  }
+  return text || "—";
+}
+
 function triggerBlobDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -343,9 +364,11 @@ export function QuarantinePanel({
                       <td>{r.row ?? "—"}</td>
                       <td>{r.column || "—"}</td>
                       <td>{r.target || "—"}</td>
-                      <td className="df2-quarantine-value" title={String(r.value ?? "")}>
-                        {String(r.value ?? "")}
-                        {r.chars?.length ? ` (${r.chars.join(", ")})` : ""}
+                      <td
+                        className="df2-quarantine-value"
+                        title={String(r.value ?? "")}
+                      >
+                        {formatQuarantineSample(r.value, r.chars)}
                       </td>
                       <td>{r.reason || "—"}</td>
                       <td className="df2-quarantine-fix" title={r.suggested_transform || ""}>

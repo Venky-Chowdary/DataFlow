@@ -322,7 +322,9 @@ def cleanup_write_ledger(
                 ssl=bool(cfg.get("ssl", False)),
             )
             try:
-                schema = cfg.get("schema") or "public"
+                from services.dialect_profiles import default_schema_for
+
+                schema = cfg.get("schema") or default_schema_for(dest) or "public"
                 with conn.cursor() as cur:
                     cur.execute(
                         sql.SQL("DELETE FROM {}.{} WHERE job_id = %s").format(

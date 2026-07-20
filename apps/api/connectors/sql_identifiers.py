@@ -20,6 +20,25 @@ def sanitize_identifier(name: str, preserve_case: bool = False, *, max_len: int 
     return s[:max_len]
 
 
+def snowflake_fold_identifier(name: str) -> str:
+    """Fold Snowflake identifiers the way unquoted SQL does (UPPER).
+
+    Prefer ``services.dialect_profiles.fold_identifier("snowflake", name)`` for
+    new code — this wrapper remains for existing Snowflake call sites.
+    """
+    try:
+        from services.dialect_profiles import fold_identifier
+
+        return fold_identifier("snowflake", name)
+    except Exception:
+        raw = (name or "").strip()
+        if not raw:
+            return raw
+        if raw != raw.upper() and raw != raw.lower():
+            return raw
+        return raw.upper()
+
+
 def require_safe_identifier(
     name: str,
     *,
@@ -87,6 +106,18 @@ def quote_table_ref(
             return f"{quote_sql_identifier(sch, q)}.{quote_sql_identifier(tbl, q)}"
         return quote_sql_identifier(tbl, q)
 
+    if dialect in ("sqlserver", "mssql"):
+        # SQL Server: [schema].[table]
+        def _bracket(ident: str) -> str:
+            safe = require_safe_identifier(ident, preserve_case=True) if sanitize else require_safe_identifier(
+                ident, allow_raw=True, max_len=128
+            )
+            return f"[{safe.replace(']', ']]')}]"
+
+        if schema:
+            return f"{_bracket(schema)}.{_bracket(table)}"
+        return _bracket(table)
+
     if dialect in ("bigquery", "bq"):
         # BigQuery: `project.dataset.table` — sanitize each segment.
         parts: list[str] = []
@@ -102,16 +133,28 @@ def quote_table_ref(
         joined = ".".join(parts)
         return f"`{joined}`"
 
-    # ANSI / Postgres / Snowflake / SQLite / DuckDB
+    # ANSI / Postgres / Snowflake / SQLite / DuckDB / Oracle
     q = '"'
-    # Preserve case for Snowflake/PG quoted identifiers when sanitize strips case.
-    preserve = preserve_case or dialect in ("snowflake", "postgresql", "postgres", "redshift")
+    preserve = preserve_case or dialect in ("snowflake", "postgresql", "postgres", "redshift", "oracle")
     if sanitize:
         tbl = require_safe_identifier(table, preserve_case=preserve)
         sch = require_safe_identifier(schema, preserve_case=preserve) if schema else None
     else:
         tbl = require_safe_identifier(table, allow_raw=True)
         sch = require_safe_identifier(schema, allow_raw=True) if schema else None
+    # Dialect fold (Snowflake UPPER, etc.) — never leak Postgres lowercase into warehouses.
+    if dialect in ("snowflake", "oracle", "postgresql", "postgres", "redshift"):
+        try:
+            from services.dialect_profiles import fold_identifier
+
+            tbl = fold_identifier(dialect, tbl)
+            if sch:
+                sch = fold_identifier(dialect, sch)
+        except Exception:
+            if dialect == "snowflake":
+                tbl = snowflake_fold_identifier(tbl)
+                if sch:
+                    sch = snowflake_fold_identifier(sch)
     if sch:
         return f"{quote_sql_identifier(sch, q)}.{quote_sql_identifier(tbl, q)}"
     return quote_sql_identifier(tbl, q)

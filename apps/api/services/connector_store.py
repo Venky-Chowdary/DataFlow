@@ -24,6 +24,19 @@ STORE_PATH = data_dir() / "connectors.json"
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_connector_schema(
+    conn_type: str,
+    schema: str | None,
+    username: str | None = None,
+) -> str:
+    """Dialect-aware schema default — never force Postgres ``public`` onto other engines."""
+    from services.dialect_profiles import normalize_schema
+
+    resolved = normalize_schema(conn_type, schema, username=username)
+    return resolved or ""
+
+
 # Databases / warehouses / object stores that are valid as source *and* destination.
 # Catalog UI may pass role=source|destination from the filter tab — that must not
 # lock the saved profile into a one-sided capability.
@@ -78,7 +91,7 @@ class SavedConnector:
     database: str = ""
     username: str = ""
     password: str = ""
-    schema: str = "public"
+    schema: str = ""  # filled via dialect_profiles — never assume Postgres public
     connection_string: str = ""
     ssl: bool = True
     warehouse: str = ""
@@ -115,7 +128,7 @@ class SavedConnector:
             database=data.get("database", ""),
             username=data.get("username", ""),
             password=password,
-            schema=data.get("schema", "public"),
+            schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
             connection_string=conn_str,
             ssl=bool(data.get("ssl", True)),
             warehouse=data.get("warehouse", ""),
@@ -386,7 +399,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         database=data.get("database", ""),
         username=data.get("username", ""),
         password=data.get("password", ""),
-        schema=data.get("schema", "public"),
+        schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
         connection_string=data.get("connection_string", ""),
         ssl=bool(data.get("ssl", True)),
         warehouse=data.get("warehouse", ""),

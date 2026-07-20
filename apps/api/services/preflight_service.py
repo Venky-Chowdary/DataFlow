@@ -801,6 +801,8 @@ def inspect_destination_for_preflight(
         # fields the user may have overridden in the current step.
         db_type = (conn.get("type") or dest_type or "mongodb").lower()
         out["db_type"] = db_type
+        from services.dialect_profiles import normalize_schema
+
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
@@ -808,7 +810,7 @@ def inspect_destination_for_preflight(
             host=dest_host or "",
             port=int(dest_port or 0),
             database=dest_database or "",
-            schema=dest_schema or "",
+            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
             username=dest_username or "",
@@ -825,13 +827,15 @@ def inspect_destination_for_preflight(
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
         out["db_type"] = db_type
+        from services.dialect_profiles import normalize_schema
+
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
             host=dest_host or "localhost",
             port=int(dest_port or 0),
             database=dest_database or "",
-            schema=dest_schema or "public",
+            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
             username=dest_username or "",

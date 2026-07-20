@@ -101,13 +101,19 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
 
 
 def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
-    data = json.loads(content.decode("utf-8", errors="replace"))
-    if isinstance(data, list) and data:
-        if isinstance(data[0], dict):
-            headers = list(data[0].keys())
-            rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in data]
-            return headers, rows[:100], len(data)
-    raise ValueError("JSON must be an array of objects")
+    from services.json_tabular import load_json_records
+
+    objects = load_json_records(content)
+    if not objects:
+        return [], [], 0
+    headers = list(objects[0].keys())
+    # Union keys across sample so wrapped/geojson rows do not drop fields.
+    for item in objects[:50]:
+        for k in item.keys():
+            if k not in headers:
+                headers.append(k)
+    rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in objects]
+    return headers, rows[:100], len(objects)
 
 
 def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
@@ -226,17 +232,22 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 yield headers, chunk
     elif fmt == "json":
         import json
+        from services.json_tabular import extract_json_records
+
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-            if not isinstance(data, list):
-                raise ValueError("JSON must be an array of objects")
-            if not data:
-                return
-            headers = list(data[0].keys())
-            for i in range(0, len(data), chunk_size):
-                batch = data[i:i+chunk_size]
-                rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
-                yield headers, rows
+        records = extract_json_records(data)
+        if not records:
+            return
+        headers = list(records[0].keys())
+        for item in records[:50]:
+            for k in item.keys():
+                if k not in headers:
+                    headers.append(k)
+        for i in range(0, len(records), chunk_size):
+            batch = records[i : i + chunk_size]
+            rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
+            yield headers, rows
     elif fmt == "jsonl":
         import json
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -348,30 +359,21 @@ class FileParser:
 
     @staticmethod
     def parse_json(content: str) -> ParseResult:
-        """Parse JSON file content"""
+        """Parse JSON file content (array, wrapper object, or single record)."""
         try:
-            data = json.loads(content)
+            from services.json_tabular import extract_json_records
 
-            if isinstance(data, list):
-                records = data
-            elif isinstance(data, dict):
-                if any(isinstance(v, list) for v in data.values()):
-                    for key, value in data.items():
-                        if isinstance(value, list) and value and isinstance(value[0], dict):
-                            records = value
-                            break
-                    else:
-                        records = [data]
-                else:
-                    records = [data]
-            else:
+            data = json.loads(content)
+            try:
+                records = extract_json_records(data)
+            except ValueError as exc:
                 return ParseResult(
                     success=False,
                     data=[],
                     columns=[],
                     row_count=0,
-                    error="JSON must be an array or object",
-                    file_type="json"
+                    error=str(exc),
+                    file_type="json",
                 )
 
             if not records:
@@ -380,10 +382,10 @@ class FileParser:
                     data=[],
                     columns=[],
                     row_count=0,
-                    file_type="json"
+                    file_type="json",
                 )
 
-            columns = set()
+            columns: set[str] = set()
             object_rows = 0
             for record in records:
                 if isinstance(record, dict):
@@ -415,7 +417,7 @@ class FileParser:
                 data=records,
                 columns=sorted(list(columns)),
                 row_count=len(records),
-                file_type="json"
+                file_type="json",
             )
 
         except json.JSONDecodeError as e:
@@ -425,7 +427,7 @@ class FileParser:
                 columns=[],
                 row_count=0,
                 error=f"Invalid JSON: {str(e)}",
-                file_type="json"
+                file_type="json",
             )
 
     @staticmethod

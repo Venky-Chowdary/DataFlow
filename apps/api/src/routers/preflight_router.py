@@ -68,7 +68,9 @@ class PreflightRequest(BaseModel):
 
 
 def _schema_default(db_type: str) -> str:
-    return "PUBLIC" if db_type == "snowflake" else "public"
+    from services.dialect_profiles import default_schema_for
+
+    return default_schema_for(db_type) or ""
 
 
 def _default_port(db_type: str) -> int:

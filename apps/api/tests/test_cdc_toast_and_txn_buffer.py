@@ -75,6 +75,25 @@ def test_txn_buffer_overflow_typed_no_silent_drop() -> None:
     assert buf.open_xid == "42"
 
 
+def test_txn_buffer_spills_to_disk_then_commits(tmp_path: Path) -> None:
+    """Large open txns spill to disk so RAM stays bounded; COMMIT reconstitutes all events."""
+    buf = TransactionBuffer(max_events=100, spill_after=3, spill_dir=tmp_path)
+    buf.begin("spill-1")
+    for i in range(10):
+        buf.insert({"id": str(i), "v": f"row-{i}"})
+    assert buf.open_event_count == 10
+    # Memory should have spilled at least once.
+    assert buf._open is not None
+    assert buf._open.spill_path is not None
+    assert Path(buf._open.spill_path).exists()
+    batch = buf.commit(resume_token={"lsn": "0/1"})
+    assert batch is not None
+    assert len(batch.inserts) == 10
+    assert [r["id"] for r in batch.inserts] == [str(i) for i in range(10)]
+    # Spill file cleaned after commit.
+    assert list(tmp_path.glob("df_cdc_txn_*.jsonl")) == []
+
+
 def test_multi_table_buffer_overflow() -> None:
     buf = MultiTableTransactionBuffer(max_events=2)
     buf.begin("9")

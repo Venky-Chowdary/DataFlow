@@ -465,31 +465,57 @@ def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:
-    schema = cfg.get("schema") or ""
+    from services.dialect_profiles import normalize_schema
+
     db_type = (cfg.get("type") or "").lower()
     connection_string = (cfg.get("connection_string") or "").lower()
-    # MySQL, MariaDB, SQLite and DuckDB do not use schemas; database is in the URL.
-    if (
-        db_type == "mysql"
-        or db_type == "mariadb"
-        or connection_string.startswith("mysql")
-        or db_type == "sqlite"
-        or connection_string.startswith("sqlite://")
-        or db_type == "duckdb"
-        or connection_string.startswith("duckdb:")
-    ):
-        return None
-    if not schema:
-        if db_type == "presto":
-            return "public"
-        if db_type == "trino":
-            return "default"
-    return schema or None
+    # Infer dialect from URL when type is generic_sql / blank.
+    if not db_type or db_type == "generic_sql":
+        if connection_string.startswith("mysql") or "mariadb" in connection_string:
+            db_type = "mysql"
+        elif connection_string.startswith("postgresql") or connection_string.startswith("postgres"):
+            db_type = "postgresql"
+        elif "sqlserver" in connection_string or "mssql" in connection_string:
+            db_type = "sqlserver"
+        elif connection_string.startswith("oracle"):
+            db_type = "oracle"
+        elif connection_string.startswith("sqlite"):
+            db_type = "sqlite"
+        elif connection_string.startswith("duckdb"):
+            db_type = "duckdb"
+    return normalize_schema(db_type, cfg.get("schema"), username=cfg.get("username"))
 
 
 def get_sql_schema(cfg: dict[str, Any]) -> str | None:
     """Public accessor for the SQL schema name implied by a connector config."""
     return _schema_name(cfg)
+
+
+def _dialect_key(cfg: dict[str, Any]) -> str:
+    db_type = (cfg.get("type") or "").lower()
+    if db_type and db_type != "generic_sql":
+        return db_type
+    connection_string = (cfg.get("connection_string") or "").lower()
+    if connection_string.startswith("mysql") or "mariadb" in connection_string:
+        return "mysql"
+    if connection_string.startswith("postgresql") or connection_string.startswith("postgres"):
+        return "postgresql"
+    if "sqlserver" in connection_string or "mssql" in connection_string:
+        return "sqlserver"
+    if connection_string.startswith("oracle"):
+        return "oracle"
+    if connection_string.startswith("sqlite"):
+        return "sqlite"
+    if connection_string.startswith("duckdb"):
+        return "duckdb"
+    return db_type or "ansi"
+
+
+def _qualified_table_ref(cfg: dict[str, Any], table: str, schema: str | None) -> str:
+    """Dialect-aware schema.table quoting (brackets, backticks, fold)."""
+    from connectors.sql_identifiers import quote_table_ref
+
+    return quote_table_ref(table, schema, dialect=_dialect_key(cfg))
 
 
 def _type_repr(type_obj: Any) -> str:
@@ -949,10 +975,16 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
         return None
 
 
-def _sample_raw_table(conn: Any, table: str, schema: str | None) -> tuple[list[str], list[Any]]:
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
-    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+def _sample_raw_table(
+    conn: Any,
+    table: str,
+    schema: str | None,
+    *,
+    dialect: str = "ansi",
+) -> tuple[list[str], list[Any]]:
+    from connectors.sql_identifiers import quote_table_ref
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
     result = conn.execute(sa.text(f"SELECT * FROM {qualified} LIMIT 200"))
     headers = list(result.keys())
     rows = result.fetchall()
@@ -999,7 +1031,9 @@ def introspect_table_schema(
                             for name, data_type, nullable in rows
                         ]
                         # Refine text columns from a sample to recover JSON, UUID, BINARY, etc.
-                        headers, sample_rows = _sample_raw_table(conn, table, schema)
+                        headers, sample_rows = _sample_raw_table(
+                            conn, table, schema, dialect=_dialect_key(cfg)
+                        )
                         if sample_rows and headers:
                             name_to_idx = {n: i for i, n in enumerate(headers)}
                             for col in result:
@@ -1019,7 +1053,9 @@ def introspect_table_schema(
                 )
 
             with engine.connect() as conn:
-                headers, sample_rows = _sample_raw_table(conn, table, schema)
+                headers, sample_rows = _sample_raw_table(
+                    conn, table, schema, dialect=_dialect_key(cfg)
+                )
                 result = [
                     {
                         "name": name,
@@ -1049,7 +1085,9 @@ def introspect_table_schema(
         # Sample the table to narrow generic String columns to JSON, UUID, BINARY, etc.
         try:
             with engine.connect() as conn:
-                headers, sample_rows = _sample_raw_table(conn, table, schema)
+                headers, sample_rows = _sample_raw_table(
+                    conn, table, schema, dialect=_dialect_key(cfg)
+                )
                 if sample_rows:
                     for idx, col in enumerate(result):
                         if col["inferred_type"] == "string":
@@ -1082,9 +1120,7 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
-        table_quoted = quote_sql_identifier(table)
-        schema_quoted = quote_sql_identifier(schema) if schema else None
-        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+        qualified = _qualified_table_ref(cfg, table, schema)
         with engine.connect() as conn:
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
             conn.commit()
@@ -1113,10 +1149,14 @@ def delete_by_primary_keys(
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
-        table_quoted = quote_sql_identifier(table)
-        schema_quoted = quote_sql_identifier(schema) if schema else None
-        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
-        pk_quoted = quote_sql_identifier(primary_key_column)
+        qualified = _qualified_table_ref(cfg, table, schema)
+        from services.dialect_profiles import quote_char_for
+
+        q = quote_char_for(_dialect_key(cfg)) or '"'
+        if q == "[":
+            pk_quoted = f"[{str(primary_key_column).replace(']', ']]')}]"
+        else:
+            pk_quoted = quote_sql_identifier(primary_key_column, q)
         placeholders = ",".join([":k{}".format(i) for i in range(len(keys))])
         params = {"k{}".format(i): k for i, k in enumerate(keys)}
         stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"
@@ -1136,11 +1176,13 @@ def _read_table_raw(
     schema: str | None,
     offset: int,
     limit: int,
+    *,
+    dialect: str = "ansi",
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
-    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+    from connectors.sql_identifiers import quote_table_ref
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
     sql = f"SELECT * FROM {qualified}"
     if offset > 0:
         sql += f" LIMIT {limit} OFFSET {offset}"
@@ -1156,10 +1198,12 @@ def _count_table_raw(
     conn: Any,
     table: str,
     schema: str | None,
+    *,
+    dialect: str = "ansi",
 ) -> int:
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
-    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+    from connectors.sql_identifiers import quote_table_ref
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
     try:
         return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar() or 0
     except Exception:
@@ -1230,11 +1274,13 @@ def read_table_batch(
                         total = len(rows)
             except Exception:
                 # Engines like RisingWave/QuestDB have incomplete pg_catalog reflection.
-                headers, rows = _read_table_raw(conn, table, schema_name, offset, limit)
+                headers, rows = _read_table_raw(
+                    conn, table, schema_name, offset, limit, dialect=_dialect_key(cfg)
+                )
                 if known_total_rows is not None:
                     total = known_total_rows
                 else:
-                    total = _count_table_raw(conn, table, schema_name)
+                    total = _count_table_raw(conn, table, schema_name, dialect=_dialect_key(cfg))
                     if not total:
                         total = len(rows)
 

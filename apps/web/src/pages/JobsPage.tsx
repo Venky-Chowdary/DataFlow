@@ -20,6 +20,7 @@ import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtil
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
+import { inferTransferFailureHint, classifyJobLogLine } from "../lib/transferFailure";
 import { buildJobTimeline, JobTimeline } from "../components/ui/JobTimeline";
 import { readJobEventLog } from "../lib/jobEventLog";
 
@@ -428,6 +429,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
       || rejectedCount > 0
     ),
   );
+  const failureHint = liveJob?.error
+    ? inferTransferFailureHint(
+      liveJob.error,
+      liveJob.error_code,
+      liveJob.error_title,
+      liveJob.error_fix,
+      liveJob.error_confidence,
+    )
+    : null;
 
   // Reset tabs only when the operator picks a different job.
   useEffect(() => {
@@ -864,6 +874,25 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                               {liveJob.cdc_delivery && (
                                 <div><dt>CDC delivery</dt><dd>{liveJob.cdc_delivery}</dd></div>
                               )}
+                              {liveJob.cdc_shared_reader && (
+                                <div><dt>CDC topology</dt><dd>Shared log reader (one slot / server_id)</dd></div>
+                              )}
+                              {liveJob.snapshot_mode && (
+                                <div><dt>Snapshot mode</dt><dd>{liveJob.snapshot_mode}</dd></div>
+                              )}
+                              {(liveJob.cdc_lease_holder || liveJob.cdc_lease_conflict) && (
+                                <div>
+                                  <dt>CDC lease</dt>
+                                  <dd>
+                                    {liveJob.cdc_lease_conflict
+                                      ? `Conflict — held by ${liveJob.cdc_lease_holder || "another worker"}`
+                                      : `${liveJob.cdc_lease_holder || "—"}${liveJob.cdc_lease_backend ? ` · ${liveJob.cdc_lease_backend}` : ""}${liveJob.cdc_lease_stale ? " (stale)" : ""}`}
+                                  </dd>
+                                </div>
+                              )}
+                              {liveJob.cdc_lease_resource && (
+                                <div><dt>Lease resource</dt><dd className="df2-mono">{liveJob.cdc_lease_resource}</dd></div>
+                              )}
                             </dl>
 
                             <div className="df2-jobs-v3-timeline-block">
@@ -882,22 +911,49 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                                 <header className="df2-jobs-v3-failure-head">
                                   <DtIcon name="alert" size={18} />
                                   <div>
-                                    <strong>What went wrong</strong>
-                                    <span>Job stopped before completion — review the failure below and quarantined rows if any.</span>
+                                    <strong>{failureHint?.title || liveJob.error_title || "What went wrong"}</strong>
+                                    <span>
+                                      {failureHint?.code === "destination_table_full" || failureHint?.code === "destination_disk_full"
+                                        ? "Destination capacity blocked the load — quarantined cells below are separate data-quality findings, not the cause of this stop."
+                                        : "Job stopped before completion — review the failure below and quarantined rows if any."}
+                                    </span>
                                   </div>
                                 </header>
                                 <p className="df2-jobs-v3-failure-message">{liveJob.error}</p>
+                                {(failureHint?.fix || liveJob.error_fix) && (
+                                  <p className="df2-jobs-v3-failure-fix">
+                                    <strong>
+                                      {(failureHint?.confidence || "low") === "high"
+                                        ? "Likely checks: "
+                                        : (failureHint?.confidence || "low") === "medium"
+                                          ? "Suggested checks: "
+                                          : "Next step: "}
+                                    </strong>
+                                    {failureHint?.fix || liveJob.error_fix}
+                                  </p>
+                                )}
                                 <dl className="df2-jobs-v3-failure-meta">
-                                  {liveJob.phase && (
+                                  {(liveJob.failed_at_phase || liveJob.phase) && (
                                     <div>
-                                      <dt>Failed phase</dt>
-                                      <dd>{liveJob.phase}</dd>
+                                      <dt>Failed during</dt>
+                                      <dd>
+                                        {liveJob.failed_at_phase
+                                          && !["failed", "cancelled"].includes(String(liveJob.failed_at_phase).toLowerCase())
+                                          ? liveJob.failed_at_phase
+                                          : (liveJob.phase === "failed" ? "load" : liveJob.phase)}
+                                      </dd>
+                                    </div>
+                                  )}
+                                  {(failureHint?.code || liveJob.error_code) && (
+                                    <div>
+                                      <dt>Error code</dt>
+                                      <dd className="df2-mono">{failureHint?.code || liveJob.error_code}</dd>
                                     </div>
                                   )}
                                   {rejectedCount > 0 && (
                                     <div>
                                       <dt>Quarantined rows</dt>
-                                      <dd>{rejectedCount.toLocaleString()} — validation failures isolated, not silently dropped</dd>
+                                      <dd>{rejectedCount.toLocaleString()} — validation findings isolated, not the load-stop cause unless noted above</dd>
                                     </div>
                                   )}
                                   {liveJob.records_processed != null && liveJob.records_processed > 0 && (
@@ -1067,21 +1123,45 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                         {detailTab === "log" && (
                           <div className="df2-jobs-detail-pane">
                             {eventLog.length > 0 ? (
-                              <div className="df2-jobs-v3-log is-tab">
-                                <h3>Event log</h3>
+                              <div className="df2-jobs-v3-log is-tab is-terminal">
+                                <header className="df2-jobs-terminal-head">
+                                  <strong>Event log</strong>
+                                  <span>{eventLog.length} events</span>
+                                </header>
                                 <p className="df2-jobs-log-hint">
                                   Phase changes, progress messages, and row milestones recorded for this job.
                                 </p>
-                                <pre>{eventLog.join("\n")}</pre>
+                                <div className="df2-jobs-terminal" role="log">
+                                  {eventLog.map((line, i) => (
+                                    <div
+                                      key={`ev-${i}`}
+                                      className={`df2-jobs-terminal-line is-${classifyJobLogLine(line)}`}
+                                    >
+                                      {line}
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
                             ) : null}
                             {ddlLog.length > 0 ? (
-                              <div className="df2-jobs-v3-log is-tab">
-                                <h3>DDL & stream log</h3>
+                              <div className="df2-jobs-v3-log is-tab is-terminal">
+                                <header className="df2-jobs-terminal-head">
+                                  <strong>DDL & stream log</strong>
+                                  <span>{ddlLog.length} lines</span>
+                                </header>
                                 <p className="df2-jobs-log-hint">
                                   Statements and stream steps the engine recorded while creating or altering destination objects.
                                 </p>
-                                <pre>{ddlLog.join("\n")}</pre>
+                                <div className="df2-jobs-terminal" role="log">
+                                  {ddlLog.map((line, i) => (
+                                    <div
+                                      key={`ddl-${i}`}
+                                      className={`df2-jobs-terminal-line is-${classifyJobLogLine(line)}`}
+                                    >
+                                      {line}
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
                             ) : null}
                             {eventLog.length === 0 && ddlLog.length === 0 && (
@@ -1093,9 +1173,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId }: Job
                               />
                             )}
                             {liveJob.explanation && (
-                              <div className="df2-jobs-v3-log is-tab">
-                                <h3>Pipeline explanation</h3>
-                                <pre>{liveJob.explanation}</pre>
+                              <div className="df2-jobs-v3-log is-tab is-terminal">
+                                <header className="df2-jobs-terminal-head">
+                                  <strong>Pipeline explanation</strong>
+                                </header>
+                                <div className="df2-jobs-terminal" role="log">
+                                  <div className="df2-jobs-terminal-line is-meta">{liveJob.explanation}</div>
+                                </div>
                               </div>
                             )}
                             {Array.isArray(liveJob.streams) && liveJob.streams.length > 0 && (

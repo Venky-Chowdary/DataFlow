@@ -102,7 +102,9 @@ def run_reconciliation(
 
     db_type = endpoint.format.lower()
     cfg = resolve_connector_config(endpoint)
-    schema = dest_summary.get("schema") or cfg.get("schema", "public")
+    from services.dialect_profiles import schema_from_cfg
+
+    schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]

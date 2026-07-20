@@ -283,6 +283,8 @@ def introspect_connector_schema(
         endpoint = _endpoint_from_connector(conn, table=table)
         cfg = resolve_connector_config(endpoint)
         db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+        from services.dialect_profiles import normalize_schema
+
         info = introspect_schema(
             db_type,
             host=str(cfg.get("host") or ""),
@@ -290,7 +292,7 @@ def introspect_connector_schema(
             database=str(cfg.get("database") or ""),
             username=str(cfg.get("username") or ""),
             password=str(cfg.get("password") or ""),
-            schema=str(cfg.get("schema") or "public"),
+            schema=normalize_schema(db_type, cfg.get("schema"), username=cfg.get("username")) or "",
             connection_string=str(cfg.get("connection_string") or ""),
             ssl=bool(cfg.get("ssl")),
             warehouse=str(cfg.get("warehouse") or ""),

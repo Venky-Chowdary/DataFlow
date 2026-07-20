@@ -432,18 +432,20 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
             return True, raw
         return False, humanize_connection_error(db_type, raw)
 
-    schema_default = (
-        "PUBLIC" if db_type == "snowflake"
-        else "dataflow" if db_type == "bigquery"
-        else "public"
-    )
+    from services.dialect_profiles import default_schema_for, normalize_schema
+
+    schema_default = default_schema_for(db_type)
     probe_kwargs = {
         "host": cfg.get("host", ""),
         "port": int(cfg.get("port") or default_port(db_type or catalog_id)),
         "database": cfg.get("database", ""),
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
-        "schema": cfg.get("schema", schema_default),
+        "schema": normalize_schema(
+            db_type,
+            cfg.get("schema") or schema_default,
+            username=str(cfg.get("username") or "") or None,
+        ),
         "connection_string": cfg.get("connection_string", ""),
         "ssl": cfg.get("ssl", False),
         "warehouse": cfg.get("warehouse", ""),

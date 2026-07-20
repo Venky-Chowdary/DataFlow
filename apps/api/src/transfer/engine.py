@@ -456,6 +456,8 @@ _CDC_JOB_FIELDS = (
     "cdc_lease_backend",
     "cdc_lease_generation",
     "watermark",
+    "cdc_shared_reader",
+    "snapshot_mode",
 )
 
 
@@ -481,12 +483,29 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
 
 def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build error_details + top-level job fields for a failed transfer."""
+    from services.error_handling import humanize_transfer_failure
+
     classification = classify_error(exc)
+    human = humanize_transfer_failure(exc)
     details: dict[str, Any] = {
         "retriable": classification.get("retriable"),
         "evidence": classification.get("evidence"),
+        "raw": human.get("raw") or str(exc),
+        "code": human.get("code"),
+        "title": human.get("title"),
+        "fix": human.get("fix"),
+        "category": human.get("category"),
+        "message": human.get("message"),
+        "confidence": human.get("confidence"),
     }
-    extras: dict[str, Any] = {}
+    # Prefer operator-facing message for job.error / SSE while keeping raw in details.
+    extras: dict[str, Any] = {
+        "error_code": human.get("code"),
+        "error_title": human.get("title"),
+        "error_fix": human.get("fix"),
+        "error_confidence": human.get("confidence"),
+        "operator_error": human.get("message"),
+    }
     try:
         from services.cdc_lease import CdcLeaseConflict, LeaseStoreError
         from services.cdc_toast import CdcToastIncompleteError
@@ -495,33 +514,81 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         if isinstance(exc, CdcLeaseConflict):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras = {
+            extras.update({
                 "cdc_lease_conflict": True,
                 "cdc_lease_holder": exc.holder_id or None,
                 "cdc_lease_resource": exc.resource or None,
-            }
+            })
         elif isinstance(exc, LeaseStoreError):
             details["code"] = "cdc_lease_store_unavailable"
             details["retriable"] = True  # Redis blip — safe to retry once store is back
-            extras = {"cdc_lease_backend": "unavailable"}
+            extras["cdc_lease_backend"] = "unavailable"
         elif isinstance(exc, CdcTxnBufferOverflow):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras = {
+            extras.update({
                 "cdc_txn_buffer_overflow": True,
                 "cdc_txn_xid": exc.xid or None,
                 "cdc_txn_max_events": exc.max_events or None,
-            }
+            })
         elif isinstance(exc, CdcToastIncompleteError):
             details.update(exc.to_dict())
             details["retriable"] = False
-            extras = {
+            extras.update({
                 "cdc_toast_incomplete": True,
                 "cdc_toast_table": exc.table or None,
-            }
+            })
     except Exception:
         pass
     return details, extras
+
+
+def _fail_runtime_job(
+    mongo: Any,
+    job_id: str,
+    exc: Exception,
+    *,
+    lineage: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """Persist a runtime failure with operator-facing message + failed_at_phase."""
+    cancelled = isinstance(exc, TransferCancelled)
+    status = "cancelled" if cancelled else "failed"
+    error_details, lease_extras = _job_failure_fields(exc)
+    prev = {}
+    try:
+        prev = mongo.get_job(job_id) or {}
+    except Exception:
+        prev = {}
+    prev_phase = str(prev.get("phase") or "").strip().lower()
+    failed_at_phase = (
+        prev_phase if prev_phase and prev_phase not in {"failed", "cancelled", "queued", ""} else "load"
+    )
+    operator_msg = str(
+        lease_extras.pop("operator_error", None)
+        or error_details.get("message")
+        or exc
+    )
+    display = str(exc) if cancelled else operator_msg
+    mongo.update_job_status(
+        job_id,
+        status,
+        error=display,
+        phase=status,
+        failed_at_phase=failed_at_phase,
+        progress_pct=0,
+        message=display,
+        error_details=error_details,
+        **lease_extras,
+    )
+    if lineage is not None and not cancelled:
+        lineage.emit_run_failed(
+            run_id=job_id,
+            job_id=job_id,
+            error=display,
+            error_details=error_details,
+            retriable=bool(error_details.get("retriable", False)),
+        )
+    return display, error_details
 
 
 def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -1451,24 +1518,11 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            cancelled = isinstance(e, TransferCancelled)
-            status = "cancelled" if cancelled else "failed"
-            error_details, lease_extras = _job_failure_fields(e)
-            mongo.update_job_status(
-                job_id, status,
-                error=str(e), phase=status, progress_pct=0, message=str(e),
-                error_details=error_details,
-                **lease_extras,
-            )
-            lineage.emit_run_failed(
-                run_id=job_id, job_id=job_id, error=str(e),
-                error_details=error_details,
-                retriable=bool(error_details.get("retriable", False)),
-            )
+            display, error_details = _fail_runtime_job(mongo, job_id, e, lineage=lineage)
             return TransferResult(
                 success=False,
                 job_id=job_id,
-                error=str(e),
+                error=display,
                 error_details=error_details,
                 operation=request.operation,
                 contract_id=contract_id,
@@ -1872,24 +1926,11 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            cancelled = isinstance(e, TransferCancelled)
-            status = "cancelled" if cancelled else "failed"
-            error_details, lease_extras = _job_failure_fields(e)
-            mongo.update_job_status(
-                job_id, status,
-                error=str(e), phase=status, progress_pct=0, message=str(e),
-                error_details=error_details,
-                **lease_extras,
-            )
-            lineage.emit_run_failed(
-                run_id=job_id, job_id=job_id, error=str(e),
-                error_details=error_details,
-                retriable=bool(error_details.get("retriable", False)),
-            )
+            display, error_details = _fail_runtime_job(mongo, job_id, e, lineage=lineage)
             return TransferResult(
                 success=False,
                 job_id=job_id,
-                error=str(e),
+                error=display,
                 error_details=error_details,
                 operation=request.operation,
                 contract_id=contract_id,
@@ -2246,24 +2287,11 @@ class UniversalTransferEngine:
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)
-            cancelled = isinstance(e, TransferCancelled)
-            status = "cancelled" if cancelled else "failed"
-            error_details, lease_extras = _job_failure_fields(e)
-            mongo.update_job_status(
-                job_id, status,
-                error=str(e), phase=status, progress_pct=0, message=str(e),
-                error_details=error_details,
-                **lease_extras,
-            )
-            lineage.emit_run_failed(
-                run_id=job_id, job_id=job_id, error=str(e),
-                error_details=error_details,
-                retriable=bool(error_details.get("retriable", False)),
-            )
+            display, error_details = _fail_runtime_job(mongo, job_id, e, lineage=lineage)
             return TransferResult(
                 success=False,
                 job_id=job_id,
-                error=str(e),
+                error=display,
                 error_details=error_details,
                 operation=request.operation,
                 contract_id=contract_id,

@@ -11,6 +11,7 @@ import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
+import { inferTransferFailureHint, isDestinationCapacityFailure, classifyJobLogLine } from "../lib/transferFailure";
 import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 
@@ -315,6 +316,16 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const failureHint = isFailed
+    ? inferTransferFailureHint(
+      job.error || job.message,
+      job.error_code,
+      job.error_title,
+      job.error_fix,
+      job.error_confidence,
+    )
+    : null;
+  const capacityFailure = isDestinationCapacityFailure(failureHint, job.error || job.message);
 
   // Prefer row-derived progress when we have a denominator — never let phase
   // theater (old 90% caps) outrun actual rows written.
@@ -456,13 +467,26 @@ export function JobTheaterView({
         <div className="df2-theater-v3-alert error">
           <DtIcon name="alert" size={18} />
           <div>
-            <strong>Transfer failed{job.phase ? ` during ${job.phase}` : ""}</strong>
+            <strong>
+              {failureHint?.title
+                || (job.failed_at_phase && !["failed", "cancelled"].includes(String(job.failed_at_phase).toLowerCase())
+                  ? `Transfer failed during ${job.failed_at_phase}`
+                  : "Transfer failed")}
+            </strong>
             <p>{job.error || job.message || "The job stopped before completing. Review the event log below and re-run."}</p>
+            {failureHint?.fix && (
+              <p className="df2-theater-v3-fail-fix">
+                <strong>
+                  {failureHint.confidence === "high" ? "Likely checks: " : failureHint.confidence === "medium" ? "Suggested checks: " : "Next step: "}
+                </strong>
+                {failureHint.fix}
+              </p>
+            )}
             <p className="df2-theater-v3-fail-meta">
               {processed > 0 ? `${processed.toLocaleString()} rows written before failure. ` : "No rows committed. "}
-              {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined. ` : ""}
+              {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined (data-quality findings — separate from this load failure). ` : ""}
               {job.chunk_current != null
-                ? `Resume from batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""} here or on Jobs.`
+                ? `Checkpoint at batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""}.`
                 : "Use Resume below if a checkpoint was saved."}
             </p>
           </div>
@@ -476,7 +500,9 @@ export function JobTheaterView({
             <span>
               {isCancelled
                 ? "Resume from checkpoint, adjust Map / Validate, or start clean."
-                : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
+                : capacityFailure
+                  ? "Free destination capacity first, then Resume from checkpoint — Resume alone will hit the same error."
+                  : "Resume from the last checkpoint, or fix mappings and re-run from Validate."}
             </span>
           </div>
           <div className="df2-theater-v3-next-actions">
@@ -747,9 +773,28 @@ export function JobTheaterView({
               {stream.cdc_lag_seconds != null && (
                 <span>{Number(stream.cdc_lag_seconds).toFixed(1)}s lag</span>
               )}
+              {stream.watermark && (
+                <span className="df2-mono" title={String(stream.watermark)}>
+                  {`${String(stream.watermark).slice(0, 20)}${String(stream.watermark).length > 20 ? "…" : ""}`}
+                </span>
+              )}
               {stream.error && <span className="df2-muted">{stream.error}</span>}
             </div>
           ))}
+        </div>
+      )}
+
+      {(job.cdc_shared_reader || job.snapshot_mode) && (
+        <div className="df2-theater-v3-cdc-meta" aria-label="CDC topology">
+          {job.cdc_shared_reader && (
+            <span className="df2-theater-cdc-chip is-ok">Shared log reader · one slot / server_id</span>
+          )}
+          {job.snapshot_mode && (
+            <span className="df2-theater-cdc-chip">Snapshot · {job.snapshot_mode}</span>
+          )}
+          {job.cdc_delivery && (
+            <span className="df2-theater-cdc-chip">{job.cdc_delivery} delivery</span>
+          )}
         </div>
       )}
 
@@ -909,8 +954,8 @@ export function JobTheaterView({
 
       </div>
 
-      <div className="df2-theater-v3-log-section">
-        <div className="df2-theater-v3-log" ref={logRef}>
+      <div className={`df2-theater-v3-log-section ${isRunning ? "is-live" : ""}`}>
+        <div className="df2-theater-v3-log" ref={logRef} role="log" aria-live="polite">
           <div className="df2-theater-v3-log-head">
             <strong><span className="df2-theater-v3-log-dot" aria-hidden /> Live event log</strong>
             <span>{log.length ? `${log.length} events` : "Waiting…"}</span>
@@ -918,7 +963,14 @@ export function JobTheaterView({
           {log.length === 0 ? (
             <div className="df2-theater-v3-log-empty">Waiting for job events…</div>
           ) : (
-            log.map((line, i) => <div key={i} className="df2-theater-v3-log-line">{line}</div>)
+            log.map((line, i) => (
+              <div
+                key={i}
+                className={`df2-theater-v3-log-line is-${classifyJobLogLine(line)}`}
+              >
+                {line}
+              </div>
+            ))
           )}
         </div>
       </div>

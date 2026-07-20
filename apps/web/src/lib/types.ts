@@ -143,6 +143,14 @@ export interface TransferJob {
   message?: string;
   operation?: string;
   error?: string;
+  /** Structured failure details (code, title, fix, raw driver message). */
+  error_details?: Record<string, unknown>;
+  error_code?: string;
+  error_title?: string;
+  error_fix?: string;
+  error_confidence?: string;
+  /** Phase active when the job failed (e.g. load) — distinct from status phase=failed. */
+  failed_at_phase?: string;
   rejected_rows?: number;
   coerced_null_rows?: number;
   chunk_current?: number;
@@ -163,6 +171,10 @@ export interface TransferJob {
   cdc_last_ddl_at?: string | null;
   /** Durable CDC resume cursor (slot/LSN, GTID, change-stream token). */
   watermark?: string | null;
+  /** True when multi-table shared log reader is active (one slot / server_id). */
+  cdc_shared_reader?: boolean | null;
+  /** Debezium-compatible snapshot mode used for this run. */
+  snapshot_mode?: string | null;
   /** Active CDC lease holder (multi-worker fail-fast). */
   cdc_lease_holder?: string | null;
   cdc_lease_resource?: string | null;
@@ -531,6 +543,15 @@ export interface TransferResult {
   };
   explanation?: string;
   job_id?: string;
+  /** CDC operator signals copied from the completed job. */
+  cdc_lag_seconds?: number | null;
+  cdc_plugin?: string | null;
+  cdc_delivery?: string | null;
+  cdc_shared_reader?: boolean | null;
+  snapshot_mode?: string | null;
+  watermark?: string | null;
+  cdc_lease_holder?: string | null;
+  cdc_lease_backend?: string | null;
   /** Workspace notification dispatch results copied from the completed job. */
   notifications?: JobNotificationResult[];
   /** Full client-captured event log from live theater (persisted for result dashboard) */

@@ -18,6 +18,8 @@ export interface BuildStreamContractsInput {
   defaultPrimaryKey: string;
   /** Per-stream overrides; missing keys fall back to defaults. */
   streamFields: Record<string, StreamFieldContract>;
+  /** Debezium-compatible snapshot mode (CDC only). */
+  snapshotMode?: string;
 }
 
 export function resolveStreamFields(
@@ -54,6 +56,9 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       schema_policy: input.schemaPolicy,
       field_count: input.fieldCount,
       validation_mode: input.validationMode,
+      ...(input.syncMode === "cdc" && input.snapshotMode
+        ? { snapshot_mode: input.snapshotMode }
+        : {}),
       ...(maps && maps.length
         ? {
             mappings: maps.map((m) => ({

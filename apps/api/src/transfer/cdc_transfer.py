@@ -646,13 +646,15 @@ def _run_cdc_shared_multi_table(
         f"(one slot/server_id; at-least-once upsert)"
     ]
     if src_type in {"postgresql", "postgres"}:
+        from services.dialect_profiles import default_schema_for
+
         cdc = PostgreSqlChangeStreamCdc(
             {**src_cfg, "job_id": job_id},
             table=tables,
             primary_key=primary_keys.get(tables[0], "id"),
             primary_keys=primary_keys,
             cursor_key=shared_key,
-            schema=src_cfg.get("schema") or "public",
+            schema=src_cfg.get("schema") or default_schema_for("postgresql") or "public",
             columns=list(schema.keys()) or None,
             resume_token=shared_wm,
             batch_size=CHUNK_SIZE,
@@ -846,6 +848,7 @@ def _run_cdc_shared_multi_table(
     }
     last_summary["cdc_delivery"] = "at-least-once"
     last_summary["cdc_shared_reader"] = True
+    last_summary["snapshot_mode"] = snapshot_mode.value
     for k, v in lag_fields.items():
         last_summary[k] = v
     return total_rows, ddl_log, last_summary, headers
@@ -1115,12 +1118,14 @@ def _run_cdc_single_stream(
             ]
     elif src_type == "postgresql":
         try:
+            from services.dialect_profiles import default_schema_for
+
             cdc = PostgreSqlChangeStreamCdc(
                 {**src_cfg, "job_id": job_id},
                 table=table_name,
                 primary_key=primary_key,
                 cursor_key=cursor_key,
-                schema=src_cfg.get("schema") or "public",
+                schema=src_cfg.get("schema") or default_schema_for("postgresql") or "public",
                 columns=headers,
                 resume_token=watermark,
                 batch_size=CHUNK_SIZE,
@@ -1157,13 +1162,16 @@ def _run_cdc_single_stream(
             except Exception:
                 pass
     elif src_type in {"sqlserver", "mssql"}:
+        from services.dialect_profiles import default_schema_for
+
+        ss_schema = src_cfg.get("schema") or default_schema_for("sqlserver") or "dbo"
         cdc = None
         try:
             native = SqlServerNativeCdc(
                 {**src_cfg, "job_id": job_id},
                 table=table_name,
                 primary_key=primary_key,
-                schema=src_cfg.get("schema") or "dbo",
+                schema=ss_schema,
                 resume_token=watermark,
                 batch_size=CHUNK_SIZE,
                 cursor_key=cursor_key,
@@ -1186,7 +1194,7 @@ def _run_cdc_single_stream(
                     {**src_cfg, "job_id": job_id},
                     table=table_name,
                     primary_key=primary_key,
-                    schema=src_cfg.get("schema") or "dbo",
+                    schema=ss_schema,
                     resume_token=watermark,
                     batch_size=CHUNK_SIZE,
                     cursor_key=cursor_key,
@@ -1223,13 +1231,18 @@ def _run_cdc_single_stream(
                 except Exception:
                     pass
     elif src_type == "oracle":
+        from services.dialect_profiles import normalize_schema as _norm_schema
+
+        ora_schema = _norm_schema(
+            "oracle", src_cfg.get("schema"), username=src_cfg.get("username")
+        ) or ""
         cdc = None
         try:
             logminer = OracleLogMinerCdc(
                 {**src_cfg, "job_id": job_id},
                 table=table_name,
                 primary_key=primary_key,
-                schema=src_cfg.get("schema") or src_cfg.get("username") or "",
+                schema=ora_schema,
                 resume_token=watermark,
                 batch_size=CHUNK_SIZE,
                 cursor_key=cursor_key,
@@ -1252,7 +1265,7 @@ def _run_cdc_single_stream(
                     {**src_cfg, "job_id": job_id},
                     table=table_name,
                     primary_key=primary_key,
-                    schema=src_cfg.get("schema") or src_cfg.get("username") or "",
+                    schema=ora_schema,
                     resume_token=watermark,
                     batch_size=CHUNK_SIZE,
                     cursor_key=cursor_key,
@@ -1533,6 +1546,7 @@ def _run_cdc_single_stream(
     summary["cdc_lease_stale"] = lag_fields.get("cdc_lease_stale")
     summary["cdc_lease_backend"] = lag_fields.get("cdc_lease_backend")
     summary["cdc_lease_generation"] = lag_fields.get("cdc_lease_generation")
+    summary["snapshot_mode"] = snapshot_mode.value
     summary["watermark"] = final_watermark
     summary["checksum"] = state.last_checksum
     if hasattr(cdc, "close"):

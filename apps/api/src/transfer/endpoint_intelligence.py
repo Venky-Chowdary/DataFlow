@@ -662,10 +662,9 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
         if db == "mongodb":
             plan["auto_create"].append(f"MongoDB collection `{destination.database or 'test_db'}.{target}`")
         else:
-            sch = destination.schema or (
-                "PUBLIC" if db == "snowflake" else
-                "dataflow" if db == "bigquery" else "public"
-            )
+            from services.dialect_profiles import default_schema_for
+
+            sch = destination.schema or default_schema_for(db) or ""
             plan["auto_create"].append(f"{db} table `{sch}.{target}` with typed columns (CREATE IF NOT EXISTS)")
         for col in columns:
             plan["type_mappings"].append({

@@ -8,7 +8,7 @@ interface DialogProps {
   title?: ReactNode;
   subtitle?: ReactNode;
   footer?: ReactNode;
-  /** Visual size: default ~480, lg 640, xl ~960, full ~ nearly viewport */
+  /** Visual size for workspace dialogs. Prefer `full` for Map / proof / expanders so panels match. Confirm stays `md`. */
   size?: "md" | "lg" | "xl" | "full";
   ariaLabel?: string;
   className?: string;
@@ -17,7 +17,7 @@ interface DialogProps {
 
 /**
  * Centered dialog using shared df2-modal tokens (Escape, overlay click, scroll lock).
- * Prefer this over ad-hoc modals when Transfer Studio panels need room.
+ * Studio expanders (mapping table, structure preview, proof) should use size="full".
  */
 export function Dialog({
   open,
@@ -25,7 +25,7 @@ export function Dialog({
   title,
   subtitle,
   footer,
-  size = "lg",
+  size = "full",
   ariaLabel,
   className = "",
   children,

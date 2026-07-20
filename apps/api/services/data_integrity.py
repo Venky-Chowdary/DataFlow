@@ -443,7 +443,7 @@ def _check_encoding_anomalies(
                     "row": row_idx,
                     "message": "replacement character (U+FFFD) detected — encoding mismatch",
                     "chars": ["U+FFFD"],
-                    "sample": text[:80],
+                    "sample": text[:500],
                     "suggested_fix": "Re-encode the source as UTF-8, or apply strip_controls and quarantine remaining bad cells.",
                     "suggested_transform": "strip_controls",
                 })
@@ -455,7 +455,7 @@ def _check_encoding_anomalies(
                     "row": row_idx,
                     "message": f"format-control character detected ({', '.join(bad)}) — normalize before transfer",
                     "chars": bad,
-                    "sample": text[:80],
+                    "sample": text[:500],
                     "suggested_fix": (
                         f"Column '{col}' contains invisible format/control characters "
                         f"({', '.join(bad)}). Apply strip_controls to sanitize (warehouse-safe) "

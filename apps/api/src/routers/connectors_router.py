@@ -699,14 +699,16 @@ async def export_job_quarantine(job_id: str, request: Request):
 
     from services.format_converter import convert_rows
 
-    headers = ["row", "column", "value", "reason", "policy"]
+    headers = ["row", "column", "target", "value", "reason", "policy", "suggested_transform"]
     rows = [
         [
             str(d.get("row", "")),
             str(d.get("column", "")),
+            str(d.get("target", "")),
             str(d.get("value", "")),
             str(d.get("reason", "")),
             str(d.get("policy", "")),
+            str(d.get("suggested_transform", "")),
         ]
         for d in details
     ]

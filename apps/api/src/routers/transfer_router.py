@@ -80,7 +80,7 @@ class EndpointDTO(BaseModel):
     host: str = ""
     port: int = 0
     database: str = ""
-    db_schema: str = Field("public", alias="schema")
+    db_schema: str = Field("", alias="schema")
     table: str = ""
     collection: str = ""
     username: str = ""

@@ -791,6 +791,14 @@ export function streamJobProgress(
       message: raw.message ? String(raw.message) : undefined,
       operation: raw.operation ? String(raw.operation) : undefined,
       error: raw.error ? String(raw.error) : undefined,
+      error_details: raw.error_details && typeof raw.error_details === "object"
+        ? raw.error_details as JobProgress["error_details"]
+        : undefined,
+      error_code: raw.error_code ? String(raw.error_code) : undefined,
+      error_title: raw.error_title ? String(raw.error_title) : undefined,
+      error_fix: raw.error_fix ? String(raw.error_fix) : undefined,
+      error_confidence: raw.error_confidence ? String(raw.error_confidence) : undefined,
+      failed_at_phase: raw.failed_at_phase ? String(raw.failed_at_phase) : undefined,
       chunk_current: raw.chunk_current != null ? Number(raw.chunk_current) : undefined,
       chunk_total: raw.chunk_total != null ? Number(raw.chunk_total) : undefined,
       chunk_size: raw.chunk_size != null
@@ -849,6 +857,8 @@ export function streamJobProgress(
       cdc_slot_name: raw.cdc_slot_name ? String(raw.cdc_slot_name) : null,
       cdc_delivery: raw.cdc_delivery ? String(raw.cdc_delivery) : null,
       watermark: raw.watermark != null ? String(raw.watermark) : null,
+      cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
+      snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
       cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
       cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
       cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),
@@ -1468,7 +1478,8 @@ export async function runUniversalTransfer(options: {
   formData.append("dest_kind", options.destKind || "database");
   formData.append("dest_format", options.destFormat || "mongodb");
   formData.append("dest_database", options.destDatabase || "test_db");
-  formData.append("dest_schema", options.destSchema || "public");
+  // Empty schema is OK — API normalize_schema fills dialect default (never force Postgres public).
+  formData.append("dest_schema", options.destSchema || "");
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
@@ -1987,10 +1998,23 @@ export async function downloadJobQuarantineCsv(
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
-    const lines = ["row,column,target,value,reason,policy"];
+    const lines = ["row,column,target,value,reason,policy,suggested_transform"];
+    const mark = (v: unknown) => {
+      let text = String(v ?? "");
+      text = text
+        .replace(/\u200B/g, "[U+200B]")
+        .replace(/\u200C/g, "[U+200C]")
+        .replace(/\u200D/g, "[U+200D]")
+        .replace(/\uFEFF/g, "[U+FEFF]")
+        .replace(/\u0000/g, "[U+0000]")
+        .replace(/\uFFFD/g, "[U+FFFD]");
+      return text;
+    };
     for (const r of rows) {
       lines.push(
-        [r.row, r.column, r.target, r.value, r.reason, r.policy].map(escape).join(","),
+        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform]
+          .map(escape)
+          .join(","),
       );
     }
     return `${lines.join("\n")}\n`;

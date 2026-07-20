@@ -74,6 +74,9 @@ interface DestinationAdvancedDrawerProps {
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
   suggestedPrimaryKey?: string;
+  /** Debezium-compatible snapshot mode (CDC). */
+  snapshotMode?: string;
+  onSnapshotModeChange?: (mode: string) => void;
   /** Priority-first sync: sort source by this column before write. */
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
@@ -117,6 +120,8 @@ export function DestinationAdvancedDrawer({
   onStreamPrimaryKeyChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
+  snapshotMode = "initial",
+  onSnapshotModeChange,
   priorityColumn = "",
   priorityDirection = "desc",
   rowLimit = 0,
@@ -226,6 +231,28 @@ export function DestinationAdvancedDrawer({
                 Use suggested primary key · <strong>{suggestedPrimaryKey}</strong>
               </button>
             )}
+          </div>
+        )}
+
+        {syncMode === "cdc" && (
+          <div className="df2-field df2-adv-snapshot-field">
+            <label className="df2-label" htmlFor="df2-adv-snapshot-mode">CDC snapshot mode</label>
+            <select
+              id="df2-adv-snapshot-mode"
+              className="df2-input df2-select"
+              value={snapshotMode}
+              onChange={(e) => onSnapshotModeChange?.(e.target.value)}
+              disabled={!onSnapshotModeChange}
+            >
+              <option value="initial">initial — snapshot if no watermark (Debezium default)</option>
+              <option value="always">always — snapshot every run, then stream</option>
+              <option value="never">never — stream only (requires existing watermark)</option>
+              <option value="initial_only">initial_only — snapshot then stop</option>
+              <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
+            </select>
+            <small className="df2-label-hint">
+              Delivery remains <strong>at-least-once upsert</strong> unless the destination stamps ``_df_lsn`` for PK effectively-once.
+            </small>
           </div>
         )}
 

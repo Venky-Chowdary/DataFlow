@@ -51,6 +51,10 @@ import {
   uploadFile,
   type CellPreviewResult,
 } from "../lib/api";
+import {
+  defaultSchemaForDriver,
+  foldSchemaForDriver,
+} from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType } from "../lib/connectorTypes";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
@@ -300,7 +304,7 @@ export function TransferPage({
   const [targetCollection, setTargetCollection] = useState("");
   const [destHost, setDestHost] = useState("");
   const [destPort, setDestPort] = useState(0);
-  const [destSchema, setDestSchema] = useState("public");
+  const [destSchema, setDestSchema] = useState("");
   const [destUsername, setDestUsername] = useState("");
   const [destPassword, setDestPassword] = useState("");
   const [destConnectionString, setDestConnectionString] = useState("");
@@ -318,6 +322,7 @@ export function TransferPage({
   const [priorityColumn, setPriorityColumn] = useState("");
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
   const [rowLimit, setRowLimit] = useState(0);
+  const [snapshotMode, setSnapshotMode] = useState("initial");
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
@@ -576,6 +581,7 @@ export function TransferPage({
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
     streamFields,
+    snapshotMode: syncMode === "cdc" ? snapshotMode : undefined,
     streamMappings: isMultiStreamSource
       ? {
           ...streamMappings,
@@ -917,9 +923,7 @@ export function TransferPage({
     if (connectorId || !destType) return;
     setDestHost(getConnectorDefaults(destType).host);
     setDestPort(defaultPortForType(destType));
-    const group = getGenericSqlGroup(destType);
-    if (group === "postgresql+psycopg2") setDestSchema("public");
-    if (group === "mssql+pyodbc") setDestSchema("dbo");
+    setDestSchema(defaultSchemaForDriver(destType));
     autoSelectedConnector.current = false;
   }, [connectorId, destType]);
 
@@ -1196,7 +1200,9 @@ export function TransferPage({
         }
       }
       if (!data.columns?.length) {
-        throw new Error("No columns detected — ensure JSON is an array of objects with field names.");
+        throw new Error(
+          "No columns detected — JSON needs object rows: [{...}], a wrapper like {\"data\":[{...}]} / {\"countries\":[{...}]}, or a single object.",
+        );
       }
       setParsed(data);
       const rows = data.data ?? data.sample_data;
@@ -2196,7 +2202,9 @@ export function TransferPage({
           dest_username: destKindMode === "database" && !connectorId ? destUsername || undefined : undefined,
           dest_password: destKindMode === "database" && !connectorId ? destPassword || undefined : undefined,
           dest_connection_string: destKindMode === "database" && !connectorId ? destConnectionString || undefined : undefined,
-          dest_schema: destKindMode === "database" && !connectorId && (destDriverType === "snowflake" || getGenericSqlGroup(destType) === "postgresql+psycopg2" || getGenericSqlGroup(destType) === "mssql+pyodbc") ? destSchema || (getGenericSqlGroup(destType) === "postgresql+psycopg2" ? "public" : "dbo") : undefined,
+          dest_schema: destKindMode === "database" && !connectorId
+            ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
+            : undefined,
           dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
           // Live dest schema — required so existing BOOLEAN columns are not invisible to DDL gates.
           dest_table: destKindMode === "database" && destDriverType !== "mongodb" && destDriverType !== "dynamodb"
@@ -2466,6 +2474,14 @@ export function TransferPage({
       explanation: job.explanation,
       ddl_executed: job.ddl_executed ?? job.ddl_log,
       event_log: job.event_log?.length ? job.event_log : (job._id ? readJobEventLog(job._id) : undefined),
+      cdc_lag_seconds: job.cdc_lag_seconds,
+      cdc_plugin: job.cdc_plugin,
+      cdc_delivery: job.cdc_delivery,
+      cdc_shared_reader: job.cdc_shared_reader,
+      snapshot_mode: job.snapshot_mode,
+      watermark: job.watermark,
+      cdc_lease_holder: job.cdc_lease_holder,
+      cdc_lease_backend: job.cdc_lease_backend,
       notifications: job.notifications,
       error_details: job.load_history_report
         ? { load_history_report: job.load_history_report }
@@ -2838,7 +2854,7 @@ export function TransferPage({
     setDestHost("");
     setDestPort(0);
     routeAnalyzedKeyRef.current = "";
-    setDestSchema("public");
+    setDestSchema("");
     setDestUsername("");
     setDestPassword("");
     setDestConnectionString("");
@@ -3597,6 +3613,8 @@ export function TransferPage({
             streamNeedsReview={streamNeedsReview}
             suggestedCursor={cursorCandidate}
             suggestedPrimaryKey={primaryKeyCandidate}
+            snapshotMode={snapshotMode}
+            onSnapshotModeChange={setSnapshotMode}
             priorityColumn={priorityColumn}
             priorityDirection={priorityDirection}
             rowLimit={rowLimit}

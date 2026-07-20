@@ -257,6 +257,8 @@ def _export_to_connector(
     from src.transfer.adapters import write_destination_database
     from src.transfer.models import EndpointConfig
 
+    from services.dialect_profiles import normalize_schema
+
     dest = EndpointConfig(
         kind="database",
         format=dest_connector.type,
@@ -264,7 +266,12 @@ def _export_to_connector(
         host=dest_connector.host,
         port=dest_connector.port,
         database=dest_connector.database,
-        schema=dest_connector.schema or "public",
+        schema=normalize_schema(
+            dest_connector.type,
+            dest_connector.schema,
+            username=dest_connector.username,
+        )
+        or "",
         table=body.destination or "query_export",
         collection=body.destination or "query_export",
         username=dest_connector.username,

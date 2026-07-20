@@ -139,6 +139,8 @@ def _endpoint_from_connector(conn: dict, table: str):
 
     is_mongo = conn.get("type") == "mongodb"
     connector_id = str(conn.get("_id") or conn.get("id") or "")
+    from services.dialect_profiles import schema_from_cfg
+
     return EndpointConfig(
         kind="database",
         format=conn.get("type", ""),
@@ -146,7 +148,7 @@ def _endpoint_from_connector(conn: dict, table: str):
         host=conn.get("host", ""),
         port=int(conn.get("port", 0) or 0),
         database=conn.get("database", ""),
-        schema=conn.get("schema", "public"),
+        schema=schema_from_cfg(conn.get("type"), conn),
         table=table if not is_mongo else "",
         collection=table if is_mongo else "",
         username=conn.get("username", ""),

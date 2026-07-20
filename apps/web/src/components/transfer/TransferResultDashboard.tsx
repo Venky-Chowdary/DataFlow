@@ -3,6 +3,7 @@ import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { CopyIdChip } from "../ui/CopyIdChip";
 import { readJobEventLog } from "../../lib/jobEventLog";
+import { classifyJobLogLine } from "../../lib/transferFailure";
 import { useActiveData } from "../../lib/DataContext";
 import type { LoadHistoryReport, TransferResult } from "../../lib/types";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -282,6 +283,30 @@ export function TransferResultDashboard({
         />
       )}
 
+      {(result.cdc_plugin || result.cdc_delivery || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder) && (
+        <section className="df2-result-cdc-strip" aria-label="CDC run summary">
+          <header>
+            <DtIcon name="activity" size={14} />
+            <strong>CDC</strong>
+            <span>{result.cdc_delivery || "at-least-once"} · not platform exactly-once</span>
+          </header>
+          <dl>
+            {result.cdc_plugin && <div><dt>Plugin</dt><dd>{result.cdc_plugin}</dd></div>}
+            {result.snapshot_mode && <div><dt>Snapshot</dt><dd>{result.snapshot_mode}</dd></div>}
+            {result.cdc_shared_reader && <div><dt>Topology</dt><dd>Shared log reader</dd></div>}
+            {result.cdc_lag_seconds != null && Number.isFinite(Number(result.cdc_lag_seconds)) && (
+              <div><dt>Lag</dt><dd>{Number(result.cdc_lag_seconds).toFixed(1)}s</dd></div>
+            )}
+            {result.cdc_lease_holder && (
+              <div><dt>Lease</dt><dd>{result.cdc_lease_holder}{result.cdc_lease_backend ? ` · ${result.cdc_lease_backend}` : ""}</dd></div>
+            )}
+            {result.watermark && (
+              <div className="is-wide"><dt>Watermark</dt><dd className="df2-mono" title={result.watermark}>{result.watermark.slice(0, 64)}{result.watermark.length > 64 ? "…" : ""}</dd></div>
+            )}
+          </dl>
+        </section>
+      )}
+
       <div className="df2-result-body">
         {!result.success && (
           <section className="df2-result-alert is-error" aria-label="What went wrong">
@@ -500,7 +525,10 @@ export function TransferResultDashboard({
             </div>
           ) : (
             eventLog.map((line, i) => (
-              <div key={`${i}-${line.slice(0, 32)}`} className="df2-job-log-line">
+              <div
+                key={`${i}-${line.slice(0, 32)}`}
+                className={`df2-job-log-line is-${classifyJobLogLine(line)}`}
+              >
                 {line}
               </div>
             ))

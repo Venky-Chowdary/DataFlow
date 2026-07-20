@@ -384,21 +384,42 @@ def peek_file_source(
         return headers, schema, total, sample
 
     if file_type == "json":
-        import ijson
+        from services.json_tabular import detect_ijson_records_prefix, load_json_records
 
         sample_objs: list[dict] = []
         columns: set[str] = set()
         total = 0
-        with _open_binary(content) as bio:
-            for obj in ijson.items(bio, "item"):
-                if not isinstance(obj, dict):
-                    continue
-                total += 1
-                if len(sample_objs) < 100:
-                    sample_objs.append(obj)
-                    columns.update(obj.keys())
+        head = _first_bytes(content, 65536)
+        prefix = detect_ijson_records_prefix(head)
+        if prefix:
+            try:
+                import ijson
+            except ImportError:
+                prefix = None
+        if prefix:
+            with _open_binary(content) as bio:
+                for obj in ijson.items(bio, prefix):
+                    if not isinstance(obj, dict):
+                        continue
+                    total += 1
+                    if len(sample_objs) < 100:
+                        sample_objs.append(obj)
+                        columns.update(obj.keys())
+        else:
+            raw = content if isinstance(content, (bytes, bytearray)) else None
+            if raw is None:
+                with _open_binary(content) as bio:
+                    raw = bio.read()
+            records = load_json_records(bytes(raw))
+            total = len(records)
+            sample_objs = records[:100]
+            for obj in sample_objs:
+                columns.update(obj.keys())
         if total == 0:
-            raise ValueError("JSON file must be an array of objects")
+            raise ValueError(
+                "JSON file has no object rows. Use an array of objects "
+                '[{...}], a wrapper like {"data":[{...}]}, or a single object record.'
+            )
         headers = sorted(columns)
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, total, sample_objs[:100]
@@ -451,19 +472,9 @@ def _iter_json_array_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
 ):
-    import ijson
+    from services.json_tabular import iter_json_record_dicts
 
-    batch: list[dict] = []
-    with _open_binary(content) as bio:
-        for obj in ijson.items(bio, "item"):
-            if not isinstance(obj, dict):
-                continue
-            batch.append(obj)
-            if len(batch) >= chunk_size:
-                yield batch
-                batch = []
-    if batch:
-        yield batch
+    yield from iter_json_record_dicts(_open_binary, content, chunk_size=chunk_size)
 
 
 def _batch_iterator_for_type(
