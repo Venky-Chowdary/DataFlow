@@ -20,6 +20,14 @@ def known_target(name: str, target_columns: list[str]) -> bool:
     return any(_norm(col) == needle for col in target_columns)
 
 
+def _is_create_new_mapping(m: dict) -> bool:
+    """True when the mapper intentionally proposes ADD COLUMN / create-new DDL."""
+    if m.get("create_new"):
+        return True
+    strategy = str(m.get("assignment_strategy") or "")
+    return strategy in {"create_compatible_new", "identity_passthrough"}
+
+
 def enforce_destination_constraints(
     mappings: list[dict],
     target_columns: list[str],
@@ -27,7 +35,11 @@ def enforce_destination_constraints(
     confidence_floor: float = 0.55,
 ) -> tuple[list[dict], list[str], list[str]]:
     """
-    Keep only mappings whose target exists in the destination schema.
+    Keep mappings whose target exists in the destination schema.
+
+    Create-new / ADD COLUMN proposals (ObjectId→new VARCHAR, etc.) are kept
+    even when the target is not yet on the destination — blocking them emptied
+    Transfer Studio Map after type-safe remaps.
 
     Returns (kept_mappings, dropped_sources, invented_targets).
     """
@@ -41,6 +53,11 @@ def enforce_destination_constraints(
     for m in mappings:
         src = m["source"]
         tgt = m["target"]
+        if _is_create_new_mapping(m):
+            out = dict(m)
+            out["create_new"] = True
+            kept.append(out)
+            continue
         if not known_target(tgt, target_columns):
             invented.append(src)
             dropped.append(src)

@@ -184,18 +184,48 @@ ABBREVIATIONS: dict[str, str] = {
     "description": "description",
     "addr": "address",
     "address": "address",
-    "email": "email_address",
-    "e_mail": "email_address",
+    "email": "email",
+    "e_mail": "email",
+    "email_addr": "email_address",
     "email_address": "email_address",
+    "usr_email": "user_email",
+    "user_email": "user_email",
     "usr": "user",
     "user": "user",
+    "ship": "shipping",
+    "ship_addr": "shipping_address",
+    "ship_address": "shipping_address",
+    "shipping_addr": "shipping_address",
+    "shipping_address": "shipping_address",
+    "bill_addr": "billing_address",
+    "billing_addr": "billing_address",
+    "billing_address": "billing_address",
+    "mail_addr": "mailing_address",
+    "dob": "date_of_birth",
+    "date_of_birth": "date_of_birth",
+    "birth_date": "date_of_birth",
+    "birthdate": "date_of_birth",
+    "d_o_b": "date_of_birth",
     "phone": "phone",
     "tel": "phone",
+    "ph": "phone",
+    "ph_num": "phone",
+    "ph_no": "phone",
+    "ph_nbr": "phone",
+    "tel_num": "phone_number",
+    "tel_no": "phone_number",
     "phone_number": "phone_number",
+    "phone_num": "phone_number",
     "mobile": "mobile",
     "mob": "mobile",
     "cell": "mobile",
+    "mobile_phone": "mobile_phone",
     "mobile_number": "mobile_number",
+    "mobile_num": "mobile_number",
+    "mob_num": "mobile_number",
+    "mob_phone": "mobile_phone",
+    "cell_phone": "mobile_phone",
+    "cell_num": "mobile_number",
     # Status and location
     "sts": "status",
     "stat": "status",
@@ -239,7 +269,7 @@ def _expand_abbrev(token: str) -> str:
 
 def _semantic_tokens(name: str) -> list[str]:
     norm = _normalize(name)
-    parts = norm.split("_")
+    parts = [p for p in norm.split("_") if p]
     tokens: list[str] = []
     i = 0
     # Match longest abbreviation phrase first so multi-token abbreviations like
@@ -249,14 +279,33 @@ def _semantic_tokens(name: str) -> list[str]:
         for j in range(len(parts), i, -1):
             phrase = "_".join(parts[i:j])
             if phrase in ABBREVIATIONS:
-                tokens.append(ABBREVIATIONS[phrase])
+                expansion = ABBREVIATIONS[phrase]
+                exp_parts = [p for p in expansion.split("_") if p]
+                tokens.extend(exp_parts)
                 i = j
+                # Skip trailing parts already covered by the expansion
+                # (email → email_address then addr → address must not double).
+                already = set(tokens)
+                while i < len(parts):
+                    nxt = _expand_abbrev(parts[i])
+                    nxt_parts = [p for p in nxt.split("_") if p]
+                    if nxt_parts and all(p in already for p in nxt_parts):
+                        i += 1
+                        already.update(nxt_parts)
+                        continue
+                    break
                 matched = True
                 break
         if not matched:
-            tokens.append(_expand_abbrev(parts[i]))
+            expansion = _expand_abbrev(parts[i])
+            tokens.extend([p for p in expansion.split("_") if p])
             i += 1
-    return tokens
+    # Collapse adjacent duplicates from flattened multi-token expansions.
+    deduped: list[str] = []
+    for t in tokens:
+        if not deduped or deduped[-1] != t:
+            deduped.append(t)
+    return deduped
 
 
 def _semantic_form(name: str) -> str:
@@ -277,7 +326,8 @@ def _canonical_form(name: str) -> str:
 
 
 def _tokenize(name: str) -> list[str]:
-    return _canonical_form(name).split("_")
+    """Abbreviation-expanded tokens for BM25 / IDF — not schematic-collapsed."""
+    return [t for t in _semantic_form(name).split("_") if t]
 
 
 def _build_idf(corpus: list[str]) -> dict[str, float]:
@@ -308,6 +358,93 @@ def _bm25_score(query_tokens: list[str], doc_tokens: list[str], idf: dict[str, f
 
 def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
+
+
+# Leaf tokens too generic to prove columns are the same when qualifiers conflict.
+_ENTITY_STOPWORDS = frozenset({
+    "at", "of", "the", "a", "an", "to", "for", "by", "and", "or", "on", "in",
+})
+_DOMAIN_LEAVES = frozenset({
+    "amount", "id", "name", "date", "code", "status", "type", "number",
+    "value", "count", "flag", "key", "timestamp", "balance", "price",
+    "quantity", "total", "rate", "pct", "percent", "description", "text",
+    "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
+})
+_GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
+
+
+def _qualifier_tokens(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} - _DOMAIN_LEAVES - _ENTITY_STOPWORDS
+
+
+def _qualifier_stems_overlap(a: set[str], b: set[str]) -> bool:
+    """True when qualifiers share a stem (ship ≈ shipping, cust ≈ customer)."""
+    for x in a:
+        for y in b:
+            if x == y:
+                return True
+            if len(x) >= 3 and len(y) >= 3 and (x.startswith(y) or y.startswith(x)):
+                return True
+    return False
+
+
+def _qualifiers_compatible(source: str, target: str) -> bool:
+    """False when both sides carry conflicting entity prefixes."""
+    src_q = _qualifier_tokens(source)
+    tgt_q = _qualifier_tokens(target)
+    if not src_q or not tgt_q:
+        return True
+    if not src_q.isdisjoint(tgt_q):
+        return True
+    return _qualifier_stems_overlap(src_q, tgt_q)
+
+
+def _entity_agreement(source: str, target: str) -> float:
+    """1.0 shared entity, 0.5 asymmetric/generic, 0.0 hard conflict."""
+    src_q = _qualifier_tokens(source)
+    tgt_q = _qualifier_tokens(target)
+    if src_q and tgt_q:
+        if not src_q.isdisjoint(tgt_q):
+            return len(src_q & tgt_q) / len(src_q | tgt_q)
+        if _qualifier_stems_overlap(src_q, tgt_q):
+            return 0.75
+        return 0.0
+    if not src_q and not tgt_q:
+        return 0.55
+    return 0.35
+
+
+def _is_bare_domain_leaf(name: str) -> bool:
+    toks = {t for t in _semantic_form(name).split("_") if t} - _ENTITY_STOPWORDS
+    return len(toks) == 1 and toks <= _DOMAIN_LEAVES
+
+
+def _near_target_by_form(
+    source: str,
+    target_columns: list[str],
+    *,
+    used_targets: set[str] | None = None,
+) -> tuple[str, float]:
+    """Best unused destination by abbreviation-expanded form similarity."""
+    used = {t.lower() for t in (used_targets or set())}
+    src_form = _semantic_form(source)
+    best_tgt = ""
+    best = 0.0
+    for tgt in target_columns:
+        if tgt.lower() in used:
+            continue
+        if not _qualifiers_compatible(source, tgt):
+            continue
+        ratio = _similarity(src_form, _semantic_form(tgt))
+        agreement = _entity_agreement(source, tgt)
+        ratio = ratio * (0.55 + 0.45 * max(agreement, 0.15))
+        # Containment bonus: phone ⊂ phone_number when entities agree
+        tgt_form = _semantic_form(tgt)
+        if agreement > 0 and src_form and tgt_form and (src_form in tgt_form or tgt_form in src_form):
+            ratio = max(ratio, 0.72 * (0.6 + 0.4 * agreement))
+        if ratio > best:
+            best, best_tgt = ratio, tgt
+    return best_tgt, best
 
 
 def _type_compat_penalty(src_type: str, tgt_type: str) -> float:
@@ -423,20 +560,48 @@ def _score_pair(
     except ImportError:
         pass
     if schematic is not None:
-        return _finish(schematic, "Schematic index match (1M+ variants)")
+        # Blend a touch of form similarity so equal schematic hits
+        # (mobile_phone → phone vs phone_number) still differentiate.
+        form_ratio = _similarity(src_sem, tgt_sem_raw)
+        blended = min(0.995, schematic * 0.92 + form_ratio * 0.08)
+        return _finish(blended, "Schematic index match (1M+ variants)")
+
+    # Hard entity conflict (created vs updated, order vs transaction): demote early.
+    agreement = _entity_agreement(source, target)
+    if agreement == 0.0:
+        form_ratio = _similarity(src_sem, tgt_sem_raw)
+        return _finish(min(0.42, form_ratio * 0.55), "Conflicting entity qualifiers")
 
     src_canon = _canonical_form(source)
     tgt_canon = _canonical_form(target)
     expanded = _semantic_form(source)
-    if src_canon and tgt_canon and src_canon == tgt_canon:
-        if _normalize(target) == src_canon:
-            return _finish(0.99, "Canonical schematic resolution (exact target)")
-        if _normalize(target) == _normalize(expanded):
+    if src_canon and _normalize(target) == src_canon:
+        if _qualifier_tokens(source):
+            return _finish(0.76, "Canonical schematic resolution (specific→bare leaf)")
+        return _finish(0.99, "Canonical schematic resolution (exact target)")
+    if src_canon and tgt_canon and src_canon == tgt_canon and _qualifiers_compatible(source, target):
+        src_q = _qualifier_tokens(source)
+        tgt_q = _qualifier_tokens(target)
+        if not src_q and tgt_q:
+            pass  # generic → specific: fall through
+        elif src_q and _is_bare_domain_leaf(target):
+            return _finish(0.76, "Canonical schematic resolution (specific→generic)")
+        elif src_q and not tgt_q:
+            pass  # compound domain target — fall through
+        elif _normalize(target) == _normalize(expanded):
             return _finish(0.985, "Canonical schematic resolution (expanded form)")
-        return _finish(0.93, "Canonical schematic resolution")
+        else:
+            return _finish(0.93, "Canonical schematic resolution")
 
     if _normalize(target) == _normalize(expanded):
         return _finish(0.94, "Abbreviation expansion match")
+
+    # Domain expansions: mobile_phone → phone_number, etc.
+    src_parts = set(src_sem.split("_")) - {""}
+    if "mobile" in src_parts and "phone" in src_parts and tgt_sem_raw == "phone_number":
+        return _finish(0.965, "Mobile phone → phone_number expansion")
+    if "mobile" in src_parts and "phone" in src_parts and tgt_sem_raw == "phone":
+        return _finish(0.86, "Mobile phone → short phone form")
 
     if source_role and target_role:
         boost = role_match_boost(source_role, target_role)
@@ -454,13 +619,21 @@ def _score_pair(
     if boosted is not None:
         return _finish(boosted, "Training lexicon match (synthetic_v1)")
 
-    src_sem = _canonical_form(source)
-    tgt_sem = _canonical_form(target)
+    # Lexical stage uses abbreviation-expanded forms — not schematic canonical
+    # collapse — so order_amount vs total_amount can outrank transaction_amount.
+    src_form = _semantic_form(source)
+    tgt_form = _semantic_form(target)
+    form_ratio = _similarity(src_form, tgt_form)
 
-    if src_sem == tgt_sem:
+    if src_form == tgt_form:
         return _finish(0.96, "Semantic token match")
 
-    bm25 = _bm25_score(_tokenize(source), _tokenize(target), idf, avgdl)
+    bm25 = _bm25_score(
+        src_form.split("_"),
+        tgt_form.split("_"),
+        idf,
+        avgdl,
+    )
     bm25_norm = min(bm25 / 8.0, 1.0)
 
     # Advanced heuristic: ML Baseline prediction
@@ -473,30 +646,58 @@ def _score_pair(
             if pred_score > 0.8:
                 return _finish(0.95, "ML Baseline highly confident match")
 
-    if src_sem in tgt_sem or tgt_sem in src_sem:
-        if min(len(src_sem), len(tgt_sem)) >= 4:
-            return _finish(max(0.92, 0.85 + bm25_norm * 0.1), "Partial semantic overlap + BM25")
+    src_toks = set(src_form.split("_")) - {""}
+    tgt_toks = set(tgt_form.split("_")) - {""}
+    overlap = len(src_toks & tgt_toks)
+    shared = src_toks & tgt_toks
+    only_generic_overlap = overlap > 0 and shared <= _DOMAIN_LEAVES
 
-    overlap = len(set(src_sem.split("_")) & set(tgt_sem.split("_")))
+    # Prefer specific amount targets when source has an entity prefix
+    # (order_amount → total_amount over bare amount).
+    src_q = _qualifier_tokens(source)
+    if src_q and _is_bare_domain_leaf(target) and only_generic_overlap:
+        return _finish(
+            min(0.80, 0.62 + form_ratio * 0.20 + bm25_norm * 0.05),
+            "Specific source → bare domain leaf",
+        )
+
+    # Compound domain targets (total_amount) with a matching leaf + form similarity.
+    if src_q and only_generic_overlap and not _is_bare_domain_leaf(target):
+        return _finish(
+            min(0.94, 0.72 + form_ratio * 0.22 + bm25_norm * 0.04),
+            "Specific source → compound domain target",
+        )
+
+    if src_form in tgt_form or tgt_form in src_form:
+        if min(len(src_form), len(tgt_form)) >= 4:
+            base = 0.80 + form_ratio * 0.14 + bm25_norm * 0.04 + agreement * 0.04
+            return _finish(min(0.97, max(0.86, base)), "Partial semantic overlap + form similarity")
+
     if overlap >= 2:
-        return _finish(0.82 + overlap * 0.03 + bm25_norm * 0.05 + ml_boost, f"Shared tokens ({overlap}) + BM25")
+        return _finish(
+            0.82 + overlap * 0.03 + bm25_norm * 0.05 + form_ratio * 0.04 + agreement * 0.03 + ml_boost,
+            f"Shared tokens ({overlap}) + BM25",
+        )
 
-    fuzzy = _similarity(src_sem, tgt_sem)
+    fuzzy = form_ratio
 
-    # Advanced heuristic: Character n-gram Jaccard (n=3)
     def ngrams(s, n):
         return set(s[i:i+n] for i in range(max(1, len(s)-n+1)))
     jaccard = 0.0
-    s_ngrams, t_ngrams = ngrams(src_sem, 3), ngrams(tgt_sem, 3)
+    s_ngrams, t_ngrams = ngrams(src_form, 3), ngrams(tgt_form, 3)
     if s_ngrams or t_ngrams:
         jaccard = len(s_ngrams & t_ngrams) / len(s_ngrams | t_ngrams)
 
-    combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) + ml_boost
+    if only_generic_overlap:
+        combined = 0.55 + fuzzy * 0.35 + jaccard * 0.08 + agreement * 0.05 + ml_boost
+        return _finish(min(combined, 0.92), "Generic leaf + form similarity")
+
+    combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) + ml_boost + agreement * 0.05
 
     if combined >= 0.78:
         return _finish(min(combined, 0.99), "BM25 / Jaccard lexical retrieval")
-    if overlap == 1 and len(src_sem.split("_")) > 1:
-        return _finish(min(0.78 + ml_boost, 0.99), "Single token overlap")
+    if overlap == 1 and len(src_form.split("_")) > 1:
+        return _finish(min(0.70 + fuzzy * 0.22 + agreement * 0.05 + ml_boost, 0.95), "Single token overlap + form similarity")
     return _finish(min(combined, 0.99), "Character similarity")
 
 def _hungarian_minimize(cost: list[list[float]]) -> list[int]:
@@ -765,8 +966,66 @@ def map_columns(
                 best_score, best_target, best_reason = score, target, reason
         alternatives = _alternatives(source, target_columns, pair_scores)
         src_type = src_types.get(source, "VARCHAR")
+        # Prefer a near-matching existing destination over inventing a column
+        # when abbreviation/form similarity is strong enough (ph_num → phone).
+        # Never override a hard type/sample demotion (ObjectId → DECIMAL id).
+        near_tgt, near_ratio = _near_target_by_form(source, target_columns, used_targets=used_targets)
+        if near_tgt:
+            near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+            near_penalty = _type_compat_penalty(src_type, near_tgt_type)
+            near_sample = _sample_consistency_boost(
+                src_samples.get(source), src_type, near_tgt_type,
+            )
+            if near_penalty >= 0.20 or near_sample <= -0.50:
+                near_tgt, near_ratio = "", 0.0
+        if near_tgt and near_ratio >= 0.62 and (not best_target or best_score < floor or near_ratio > best_score):
+            # Promote near form match into the assignment set.
+            near_score = max(best_score, 0.55 + near_ratio * 0.40)
+            if near_score >= floor or near_ratio >= 0.70:
+                used_targets.add(near_tgt)
+                assigned_sources.add(source)
+                winner = alternatives[0]["confidence"] if alternatives else near_score
+                runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+                mappings.append(
+                    {
+                        "source": source,
+                        "target": near_tgt,
+                        "confidence": round(min(near_score, 0.97), 3),
+                        "reasoning": (
+                            f"Near-form match to existing destination "
+                            f"(similarity={near_ratio:.2f}); prefer over inventing a column"
+                        ),
+                        "user_override": False,
+                        "assignment_strategy": "near_form_existing",
+                        "alternatives": alternatives,
+                        "score_gap": round(max(winner - runner_up, 0.0), 3),
+                        "requires_review": near_ratio < 0.85,
+                    }
+                )
+                continue
         # Prefer create-new text column over a lossy existing target (e.g. ObjectId → DECIMAL).
         if (not best_target or best_score < floor) and target_columns:
+            # Final gate: if any unused dest is a reasonable form match, map there
+            # with review instead of inventing (avoids ph_number when phone exists).
+            if near_tgt and near_ratio >= 0.50:
+                used_targets.add(near_tgt)
+                mappings.append(
+                    {
+                        "source": source,
+                        "target": near_tgt,
+                        "confidence": round(min(0.55 + near_ratio * 0.35, 0.88), 3),
+                        "reasoning": (
+                            f"Sub-threshold score but near existing column "
+                            f"(similarity={near_ratio:.2f}) — review before create-new"
+                        ),
+                        "user_override": False,
+                        "assignment_strategy": "near_form_review",
+                        "alternatives": alternatives,
+                        "score_gap": 0.0,
+                        "requires_review": True,
+                    }
+                )
+                continue
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
             candidate = _semantic_form(source)
             taken = {t.lower() for t in used_targets} | {t.lower() for t in target_columns}

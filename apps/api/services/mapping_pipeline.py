@@ -122,13 +122,27 @@ def _column_entailed(candidate: str, target: str) -> bool:
     return set(c_parts) == set(t_parts)
 
 
+def _is_create_new_mapping(m: dict) -> bool:
+    if m.get("create_new"):
+        return True
+    strategy = str(m.get("assignment_strategy") or "")
+    return strategy in {"create_compatible_new", "identity_passthrough"}
+
+
 def entailment_prune(mappings: list[dict], target_columns: list[str]) -> tuple[list[dict], list[str]]:
-    """Drop mappings whose target is not entailed by any known target column."""
+    """Drop mappings whose target is not entailed by any known target column.
+
+    Create-new / ADD COLUMN proposals are kept — they intentionally name a
+    column that does not exist yet (e.g. ObjectId → `_id_text` beside DECIMAL `id`).
+    """
     if not target_columns:
         return mappings, []
     kept: list[dict] = []
     pruned: list[str] = []
     for m in mappings:
+        if _is_create_new_mapping(m):
+            kept.append(m)
+            continue
         tgt = m["target"]
         if any(_column_entailed(tgt, known) for known in target_columns):
             kept.append(m)

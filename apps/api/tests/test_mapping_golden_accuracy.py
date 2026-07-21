@@ -14,7 +14,7 @@ import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden.json"
 PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
-ACCURACY_FLOOR = 0.95  # Raise only when golden expands; current fixture proves ≥ this.
+ACCURACY_FLOOR = 1.0  # Current 20-case fixture must be perfect; expand fixture before lowering.
 
 
 def _load_cases() -> list[dict]:

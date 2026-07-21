@@ -134,14 +134,102 @@ def schematic_count() -> int:
     return len(_build_index())
 
 
+# Tokens ignored for entity-qualifier conflict checks.
+_ENTITY_STOPWORDS = frozenset({
+    "at", "of", "the", "a", "an", "to", "for", "by", "and", "or", "on", "in",
+})
+# Domain leaves — shared leaf alone does not prove columns are the same field
+# when entity prefixes conflict (order vs transaction, created vs updated).
+_DOMAIN_LEAVES = frozenset({
+    "amount", "id", "name", "date", "code", "status", "type", "number",
+    "value", "count", "flag", "key", "timestamp", "balance", "price",
+    "quantity", "total", "rate", "pct", "percent", "description", "text",
+    "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
+    "amt", "num", "nbr", "no", "cd", "dt", "ts",
+})
+# Back-compat alias used by older call sites.
+_GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
+
+
+def _token_set(name: str) -> set[str]:
+    return {t for t in _normalize(name).split("_") if t}
+
+
+def _entity_qualifiers(tokens: set[str]) -> set[str]:
+    toks = set(tokens)
+    if "amt" in toks:
+        toks = (toks - {"amt"}) | {"amount"}
+    return toks - _DOMAIN_LEAVES - _ENTITY_STOPWORDS
+
+
+def _qualifier_stems_overlap(a: set[str], b: set[str]) -> bool:
+    for x in a:
+        for y in b:
+            if x == y:
+                return True
+            if len(x) >= 3 and len(y) >= 3 and (x.startswith(y) or y.startswith(x)):
+                return True
+    return False
+
+
+def qualifiers_compatible(source: str, target: str) -> bool:
+    """False when both sides have non-overlapping entity prefixes.
+
+    ``order_amt`` vs ``transaction_amount`` and ``created_at`` vs ``updated_at``
+    must not look like near-certain matches just because both collapse to a
+    domain leaf (amount / timestamp). Stem overlap (ship≈shipping) is allowed.
+    """
+    src_q = _entity_qualifiers(_token_set(source))
+    tgt_q = _entity_qualifiers(_token_set(target))
+    if not src_q or not tgt_q:
+        return True
+    if not src_q.isdisjoint(tgt_q):
+        return True
+    return _qualifier_stems_overlap(src_q, tgt_q)
+
+
 def schematic_match_boost(source: str, target: str) -> float | None:
-    """High-confidence score when both columns resolve to same canonical via index."""
+    """High-confidence score when columns resolve to the same canonical form.
+
+    Asymmetric rules:
+    - Conflicting entity prefixes → no boost
+    - Generic source → specific target (AMT → transaction_amount) → no boost
+    - Specific source → bare leaf (order_amt → amount, mobile_phone → phone) → weak
+    - Exact bare source → bare leaf (AMT → amount) → strong
+    """
+    src_tokens = _token_set(source)
+    tgt_tokens = _token_set(target)
+    if "amt" in src_tokens:
+        src_tokens = (src_tokens - {"amt"}) | {"amount"}
+    if "amt" in tgt_tokens:
+        tgt_tokens = (tgt_tokens - {"amt"}) | {"amount"}
+    src_q = _entity_qualifiers(src_tokens)
+    tgt_q = _entity_qualifiers(tgt_tokens)
+
+    if src_q and tgt_q and src_q.isdisjoint(tgt_q):
+        return None
+
     src_canon = lookup_schematic(source)
     tgt_canon = lookup_schematic(target)
-    if src_canon and tgt_canon and src_canon == tgt_canon:
-        return 0.97
+    tgt_is_bare_leaf = len(tgt_tokens - _ENTITY_STOPWORDS) == 1
+
+    # Exact: bare source resolves to bare target (AMT → amount).
     if src_canon and _normalize(target) == src_canon:
-        return 0.95
+        if src_q:
+            # order_amt / mobile_phone resolving to bare amount/phone — weak.
+            return 0.76
+        return 0.99
+
+    if src_canon and tgt_canon and src_canon == tgt_canon:
+        if not src_q and tgt_q:
+            return None
+        if src_q and tgt_is_bare_leaf:
+            return 0.76
+        if src_q and not tgt_q:
+            # Compound domain target (phone_number, total_amount) — lexical ranks.
+            return None
+        return 0.97
+
     if tgt_canon and _normalize(source) == tgt_canon:
         return 0.95
     return None

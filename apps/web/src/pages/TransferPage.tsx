@@ -722,12 +722,28 @@ export function TransferPage({
       : dbSourceConnectors.find((c) => c.id === sourceConnectorId)
         ?? connectors.find((c) => c.id === sourceConnectorId && !CLOUD_SOURCE_TYPES.has(c.type));
   const isConnectorSource = sourceKind === "database" || sourceKind === "cloud";
-  const currentSourceColumns = sourceKind === "file"
-    ? parsed?.columns ?? []
-    : (transferPlan?.source_columns ?? parsed?.columns ?? []);
-  const currentSourceSchema = sourceKind === "file"
-    ? parsed?.schema ?? {}
-    : (transferPlan?.source_schema ?? parsed?.schema ?? {});
+  // Prefer non-empty lists — `??` does not skip `[]`, and route analyze can
+  // overwrite transferPlan with an empty source_columns array.
+  const currentSourceColumns = (() => {
+    if (sourceKind === "file") return parsed?.columns?.length ? parsed.columns : [];
+    if (transferPlan?.source_columns?.length) return transferPlan.source_columns;
+    if (parsed?.columns?.length) return parsed.columns;
+    if (analysis?.columns?.length) return analysis.columns.map((c) => c.column_name);
+    return [];
+  })();
+  const currentSourceSchema = (() => {
+    if (sourceKind === "file") return parsed?.schema ?? {};
+    if (transferPlan?.source_schema && Object.keys(transferPlan.source_schema).length) {
+      return transferPlan.source_schema;
+    }
+    if (parsed?.schema && Object.keys(parsed.schema).length) return parsed.schema;
+    if (analysis?.columns?.length) {
+      return Object.fromEntries(
+        analysis.columns.map((c) => [c.column_name, c.inferred_type || "VARCHAR"]),
+      );
+    }
+    return {};
+  })();
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
 
@@ -938,9 +954,29 @@ export function TransferPage({
 
   const ensurePersistedPlan = useCallback(async (
     validationOverride?: ValidationMode,
+    columnOverrides?: {
+      source_columns?: string[];
+      source_schema?: Record<string, string>;
+      target_columns?: string[];
+      target_schema?: Record<string, string>;
+    },
   ): Promise<string | null> => {
-    if (!currentSourceColumns.length) return null;
-    const payload = buildPlanPayload();
+    const sourceCols = columnOverrides?.source_columns?.length
+      ? columnOverrides.source_columns
+      : currentSourceColumns;
+    if (!sourceCols.length) return null;
+    const base = buildPlanPayload();
+    const payload = {
+      ...base,
+      source_columns: sourceCols,
+      source_schema: columnOverrides?.source_schema ?? base.source_schema,
+      ...(columnOverrides?.target_columns
+        ? {
+            target_columns: columnOverrides.target_columns,
+            target_schema: columnOverrides.target_schema ?? {},
+          }
+        : {}),
+    };
     // setState for validationMode is async — honor explicit override so plan
     // preflight never runs as stale "strict" after Quarantine → balanced.
     if (validationOverride) {
@@ -956,9 +992,10 @@ export function TransferPage({
       return plan.id;
     } catch (e) {
       console.error("Transfer plan persistence failed:", e);
-      return persistedPlanId;
+      // Do not map against a stale plan — fall through to direct /transfer/map.
+      return null;
     }
-  }, [buildPlanPayload, currentSourceColumns.length, persistedPlanId]);
+  }, [buildPlanPayload, currentSourceColumns, persistedPlanId]);
 
   const buildMappingsFromSource = useCallback((
     columns: import("../lib/types").ColumnAnalysis[] | undefined,
@@ -990,29 +1027,64 @@ export function TransferPage({
     }));
   }, [parsed, transferPlan, destColumns]);
 
+  const mappingGenRef = useRef(0);
+
   const applyPipelineMappings = useCallback(
     async (targetCols?: string[], targetSchema?: Record<string, string>, analysisOverride?: import("../lib/types").EnhancedAnalysis | null) => {
       const sourceCols =
-        parsed?.columns ??
-        analysisOverride?.columns.map((c) => c.column_name) ??
-        analysis?.columns.map((c) => c.column_name) ??
-        transferPlan?.source_columns ??
-        [];
-      if (!sourceCols.length) return;
+        (parsed?.columns?.length ? parsed.columns : null)
+        ?? analysisOverride?.columns.map((c) => c.column_name)
+        ?? analysis?.columns.map((c) => c.column_name)
+        ?? (transferPlan?.source_columns?.length ? transferPlan.source_columns : null)
+        ?? [];
+      if (!sourceCols.length) return [];
       const threshold = confidenceThresholdForMode(validationMode);
-      const planId = await ensurePersistedPlan();
+      const sourceSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      const gen = ++mappingGenRef.current;
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
+      const commitMappings = (
+        next: EditableMapping[],
+        llmUsed: boolean,
+        proof: import("../components/MappingProofDrawer").MappingProof | null,
+      ) => {
+        if (gen !== mappingGenRef.current) return next;
+        if (!next.length && sourceCols.length) {
+          const identity = buildMappingsFromSource(analysisCols, targetCols);
+          if (identity.length) {
+            setColumnMappings(identity);
+            setLlmMappingUsed(false);
+            setMappingProof(null);
+            return identity;
+          }
+        }
+        setColumnMappings(next);
+        setLlmMappingUsed(llmUsed);
+        setMappingProof(proof);
+        return next;
+      };
       try {
-        const result = planId
-          ? await mapTransferPlan(planId, {
+        // Prefer direct map when fresh dest schema is in-hand — plan persistence
+        // can lag React state and previously wiped create-new proposals.
+        const useDirect = Boolean(targetCols?.length) || !persistedPlanId;
+        let result: Awaited<ReturnType<typeof mapTransferColumns>>;
+        if (!useDirect) {
+          const planId = await ensurePersistedPlan(undefined, {
+            source_columns: sourceCols,
+            source_schema: sourceSchema,
+            target_columns: targetCols,
+            target_schema: targetSchema,
+          });
+          if (planId) {
+            result = await mapTransferPlan(planId, {
               validation_mode: validationMode,
               use_llm: true,
               source_samples: buildSourceSamples(),
-            })
-          : await mapTransferColumns({
+            });
+          } else {
+            result = await mapTransferColumns({
               source_columns: sourceCols,
-              source_schema: parsed?.schema ?? transferPlan?.source_schema ?? {},
+              source_schema: sourceSchema,
               target_columns: targetCols?.length ? targetCols : undefined,
               target_schema: targetSchema,
               validation_mode: validationMode,
@@ -1024,33 +1096,72 @@ export function TransferPage({
               destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
               sync_mode: syncMode,
             });
-        setColumnMappings(
-          editableFromPipelineMappings(
-            result.mappings,
-            rows,
-            targetCols,
-            threshold,
-            targetSchema,
-          ),
+          }
+        } else {
+          result = await mapTransferColumns({
+            source_columns: sourceCols,
+            source_schema: sourceSchema,
+            target_columns: targetCols?.length ? targetCols : undefined,
+            target_schema: targetSchema,
+            validation_mode: validationMode,
+            file_format: parsed?.file_type
+              ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
+              ?? file?.name.split(".").pop(),
+            use_llm: true,
+            source_samples: buildSourceSamples(),
+            destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
+            sync_mode: syncMode,
+          });
+          void ensurePersistedPlan(undefined, {
+            source_columns: sourceCols,
+            source_schema: sourceSchema,
+            target_columns: targetCols,
+            target_schema: targetSchema,
+          });
+        }
+        const mapped = editableFromPipelineMappings(
+          result.mappings ?? [],
+          rows,
+          targetCols,
+          threshold,
+          targetSchema,
         );
-        setLlmMappingUsed(Boolean(result.llm?.llm_used));
-        setMappingProof((result as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null);
+        return commitMappings(
+          mapped,
+          Boolean(result.llm?.llm_used),
+          (result as { mapping_proof?: import("../components/MappingProofDrawer").MappingProof }).mapping_proof ?? null,
+        );
       } catch (e) {
         console.error("Mapping pipeline failed:", e);
         const fallback = buildMappingsFromSource(analysisCols, targetCols);
         if (fallback.length) {
-          setColumnMappings(fallback);
           toast({
             title: "Using fallback mappings",
             message: "Semantic pipeline unavailable — showing AI-classified column pairs. Review before transfer.",
             tone: "warning",
           });
         }
-        setLlmMappingUsed(false);
-        setMappingProof(null);
+        return commitMappings(fallback, false, null);
       }
     },
-    [parsed, analysis, transferPlan, validationMode, file, sourceKind, sourceConnector, buildSourceSamples, ensurePersistedPlan, buildMappingsFromSource, toast],
+    [
+      parsed,
+      analysis,
+      transferPlan,
+      validationMode,
+      file,
+      sourceKind,
+      sourceConnector,
+      buildSourceSamples,
+      ensurePersistedPlan,
+      buildMappingsFromSource,
+      toast,
+      persistedPlanId,
+      destKindMode,
+      exportFormat,
+      destType,
+      syncMode,
+    ],
   );
 
   /** Semantic map for one multi-stream source table (uses that stream's columns). */
@@ -1172,9 +1283,9 @@ export function TransferPage({
   };
 
   useEffect(() => {
-    if (!analysis?.columns.length || step !== STEP_MAP) return;
+    if (!analysis?.columns.length || step !== STEP_MAP || analyzing) return;
     void applyPipelineMappings(destColumns.length ? destColumns : undefined, destSchemaMap);
-  }, [validationMode, step, destColumns, destSchemaMap]);
+  }, [validationMode, step, destColumns, destSchemaMap, analyzing]);
 
   useEffect(() => {
     if (destKindMode !== "database" || !targetCollection.trim()) return;
@@ -1458,7 +1569,18 @@ export function TransferPage({
       } else {
         return;
       }
-      setTransferPlan(plan);
+      setTransferPlan((prev) => ({
+        ...plan,
+        // Route analyze sometimes omits columns — keep introspected schema.
+        source_columns: plan.source_columns?.length
+          ? plan.source_columns
+          : (prev?.source_columns?.length ? prev.source_columns : parsed?.columns ?? []),
+        source_schema: plan.source_schema && Object.keys(plan.source_schema).length
+          ? plan.source_schema
+          : (prev?.source_schema && Object.keys(prev.source_schema).length
+            ? prev.source_schema
+            : parsed?.schema ?? {}),
+      }));
       toast({
         title: plan.supported ? "Route ready" : "Route needs attention",
         message: plan.message || `${plan.auto_create?.length ?? 0} auto-create steps planned`,
@@ -1504,8 +1626,9 @@ export function TransferPage({
     exportFormat,
   ]);
 
-  const runSourceColumnAnalysis = async (data: ParsedUpload) => {
-    setAnalyzing(true);
+  const runSourceColumnAnalysis = async (data: ParsedUpload, opts?: { manageAnalyzing?: boolean }) => {
+    const manageAnalyzing = opts?.manageAnalyzing !== false;
+    if (manageAnalyzing) setAnalyzing(true);
     try {
       const rows = data.data ?? data.sample_data;
       const columnSamples = buildColumnSamples(data.columns, rows);
@@ -1577,7 +1700,7 @@ export function TransferPage({
         }
       }
     } finally {
-      setAnalyzing(false);
+      if (manageAnalyzing) setAnalyzing(false);
     }
   };
 
@@ -2169,22 +2292,23 @@ export function TransferPage({
       }
       bump(42, "Building transfer plan…");
       await loadTransferPlan();
+      let mapped: EditableMapping[] = [];
       if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
           bump(58, "Profiling source columns…");
-          await runSourceColumnAnalysis(parsed);
+          await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
         }
         bump(72, "Matching source to destination fields…");
-        await applyPipelineMappings(
+        mapped = await applyPipelineMappings(
           freshDestCols.length ? freshDestCols : undefined,
           freshDestSchema,
-        );
+        ) ?? [];
       } else if (analysis?.columns.length || currentSourceColumns.length) {
         bump(65, "Matching source to destination fields…");
-        await applyPipelineMappings(
+        mapped = await applyPipelineMappings(
           freshDestCols.length ? freshDestCols : undefined,
           freshDestSchema,
-        );
+        ) ?? [];
       } else {
         toast({
           title: "Source schema required",
@@ -2202,11 +2326,12 @@ export function TransferPage({
         setMapActiveStream(primary);
         // Read latest primary mappings from a dedicated rematch of primary stream columns.
         const primaryMaps = await mapColumnsForStream(primary);
-        if (primaryMaps.length) {
-          setColumnMappings(primaryMaps);
+        const primaryResolved = primaryMaps.length ? primaryMaps : mapped;
+        if (primaryResolved.length) {
+          setColumnMappings(primaryResolved);
         }
         const seeded: Record<string, EditableMapping[]> = {
-          [primary]: primaryMaps.length ? primaryMaps : columnMappings,
+          [primary]: primaryResolved,
         };
         const colSig = (cols: string[]) =>
           [...cols].map((c) => c.toLowerCase()).sort().join("|");
@@ -2229,6 +2354,13 @@ export function TransferPage({
       }
 
       bump(100, "Mapping ready");
+      if (!mapped.length) {
+        toast({
+          title: "Mappings did not load",
+          message: "Retry mapping, or go back and confirm the destination table schema is reachable.",
+          tone: "warning",
+        });
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
       toast({ title: "Mapping setup failed", message, tone: "error" });
