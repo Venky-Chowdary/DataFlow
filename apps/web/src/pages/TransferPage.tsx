@@ -2881,6 +2881,15 @@ export function TransferPage({
             ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
             : undefined,
           dest_warehouse: destKindMode === "database" && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          dest_auth_source: destKindMode === "database"
+            ? (selectedDestConnector?.auth_source || undefined)
+            : undefined,
+          dest_auth_mode: destKindMode === "database"
+            ? (selectedDestConnector?.auth_mode || undefined)
+            : undefined,
+          dest_auth_role: destKindMode === "database"
+            ? (selectedDestConnector?.auth_role || undefined)
+            : undefined,
           // Live dest schema — required so existing BOOLEAN columns are not invisible to DDL gates.
           dest_table: destKindMode === "database" && destDriverType !== "mongodb" && destDriverType !== "dynamodb"
             ? (targetCollection || undefined)

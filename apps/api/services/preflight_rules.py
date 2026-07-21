@@ -456,11 +456,18 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "examples": ["PostgreSQL connection refused."],
     },
     {
-        "keywords": ["destination not reachable", "destination error"],
+        "keywords": ["destination not reachable", "destination error", "authentication failed"],
         "gate": "g2_destination",
-        "why": "DataFlow cannot reach the destination.",
-        "fix": "Check the destination connection, credentials, and write permissions.",
-        "examples": ["MongoDB auth failed."],
+        "why": "DataFlow cannot authenticate to or reach the destination — Validate blocks before any write.",
+        "fix": (
+            "Open Connectors → edit the destination → set Auth source (often `admin` for Railway/Atlas MongoDB) "
+            "and re-enter username/password if needed → click Test until it passes → return to Transfer and Re-validate. "
+            "Strip controls / Quarantine cannot fix credentials."
+        ),
+        "examples": [
+            "MongoDB Authentication failed — user lives in admin, Auth source was blank or set to the app database.",
+            "Host-only connection string without form username/password — credentials were not injected.",
+        ],
     },
 ]
 

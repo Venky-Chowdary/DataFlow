@@ -518,6 +518,16 @@ export function ValidateDashboard({
         /invalid (decimal|integer|boolean)|cannot be cast|does not safely become|lossy type/i.test(b.message),
       ),
     );
+  const isConnectionBlock = Boolean(
+    preflight?.blockers.some((b) =>
+      /g2_destination|g1_source/i.test(b.id || "")
+      || /authentication failed|destination error|source error|not reachable|connection refused|credential/i.test(b.message || ""),
+    )
+    || preflight?.gates.some((g) =>
+      (g.id === "g2_destination" || g.id === "g1_source")
+      && g.status === "block",
+    ),
+  );
 
   const pushRemediation = (action: string, detail: string, outcome: string) => {
     setRemediationLog((prev) => [
@@ -534,7 +544,7 @@ export function ValidateDashboard({
     preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
     || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
   );
-  const showEncodingRemediation = !isTypeMismatchBlock && (hasEncodingIssue || encodingBlocks);
+  const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && (hasEncodingIssue || encodingBlocks);
 
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
@@ -985,6 +995,30 @@ export function ValidateDashboard({
         <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
           <div className="df2-vd-chip-row">
+            {isConnectionBlock && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-check_connection"
+                disabled={remediating}
+                onClick={() => {
+                  window.location.hash = "#/connectors";
+                }}
+              >
+                <DtIcon name="server" size={13} />
+                Fix connector credentials
+              </button>
+            )}
+            {isConnectionBlock && onRunPreflight && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-rerun"
+                disabled={remediating || running}
+                onClick={() => void onRunPreflight()}
+              >
+                <DtIcon name="activity" size={13} />
+                Re-test &amp; re-validate
+              </button>
+            )}
             {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
               <button
                 key={`${col.source}-${col.target}`}
@@ -1073,7 +1107,9 @@ export function ValidateDashboard({
             )}
           </div>
           <p className="df2-vd-cell-preview-hint">
-            {isTypeMismatchBlock
+            {isConnectionBlock
+              ? "Destination (or source) authentication failed. Open Connectors, set Auth source (often admin for Railway/Atlas Mongo), click Test until it passes, then Re-validate here. Strip/Quarantine cannot fix credentials."
+              : isTypeMismatchBlock
               ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
               : showEncodingRemediation
                 ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination after Validate passes (never silent drop)."

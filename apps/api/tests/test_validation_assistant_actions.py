@@ -21,18 +21,19 @@ def test_type_mismatch_suggests_remap_not_strip():
     assert widen["to_type"] == "VARCHAR"
 
 
-def test_encoding_blocker_still_suggests_strip_quarantine():
+def test_destination_auth_suggests_check_connection_not_strip():
     actions = _suggested_actions(
         [{
-            "id": "g5_dry_run",
-            "message": "Dry-run / integrity failed: format-control character detected (U+200B)",
-            "details": {"errors": ["description: format-control character"]},
+            "id": "g2_destination",
+            "message": "Destination error: Authentication failed. Check the username/password and the Auth source field.",
+            "details": {},
         }],
         [],
     )
     kinds = [a["kind"] for a in actions]
-    assert "normalize_control_chars" in kinds
-    assert "quarantine_and_rerun" in kinds
+    assert "check_connection" in kinds
+    assert "normalize_control_chars" not in kinds
+    assert "quarantine_and_rerun" not in kinds
 
 
 def test_explain_type_mismatch_narrative_mentions_remap():

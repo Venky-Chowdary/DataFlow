@@ -209,7 +209,10 @@ def _suggested_actions(
     if "schema_drift" in gate_ids:
         actions.append({"kind": "rerun_mapping", "label": "Re-run mapping to accept the new schema"})
     if {"g1_source", "g2_destination"} & gate_ids:
-        actions.append({"kind": "check_connection", "label": "Check the source/destination connection settings"})
+        actions.append({
+            "kind": "check_connection",
+            "label": "Open Connectors — fix credentials / Auth source, then Test",
+        })
     return actions
 
 
