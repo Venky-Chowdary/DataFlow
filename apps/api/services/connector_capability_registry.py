@@ -88,7 +88,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": True,
         "supports_streaming": False,
-        "supports_upsert": False,
+        "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,

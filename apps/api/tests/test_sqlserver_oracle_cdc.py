@@ -174,10 +174,18 @@ def test_cdc_transfer_sqlserver_branch_end_to_end() -> None:
     mock_write = MagicMock(return_value=(1, "chk", {}))
     mock_delete = MagicMock(return_value=1)
 
+    def _resolve_driver(fmt: str) -> str:
+        key = (fmt or "").strip().lower().replace("-", "_")
+        if key in {"mssql", "sql_server", "ms_sql", "sqlserver"}:
+            return "sqlserver"
+        if key in {"sqlite", "generic_sql", "postgresql", "mysql"}:
+            return key
+        return key or "generic_sql"
+
     with (
         patch("src.transfer.cdc_transfer.SqlServerChangeTrackingCdc", FakeCt),
         patch("connectors.sqlserver_change_stream.SqlServerChangeTrackingCdc", FakeCt),
-        patch("src.transfer.cdc_transfer.resolve_driver_type", return_value="sqlserver"),
+        patch("src.transfer.cdc_transfer.resolve_driver_type", side_effect=_resolve_driver),
         patch("src.transfer.cdc_transfer._write_batch", mock_write),
         patch("src.transfer.cdc_transfer.delete_by_primary_keys", mock_delete),
         patch("src.transfer.cdc_transfer.get_watermark", return_value=None),
