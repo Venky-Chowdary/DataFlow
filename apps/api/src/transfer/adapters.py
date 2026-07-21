@@ -184,12 +184,24 @@ def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
         candidates.append(str(cfg.get("auth_source")).strip())
     if url_auth_source:
         candidates.append(url_auth_source)
-    if database:
-        candidates.append(database)
+    # Prefer admin before the app database — managed Mongo (Railway/Atlas)
+    # almost always defines the user in admin, while the app DB is the path.
     candidates.append("admin")
+    if database and database != "admin":
+        candidates.append(database)
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for auth_source in candidates:
+        key = (auth_source or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
 
     last_error = ""
-    for auth_source in candidates:
+    for auth_source in ordered:
         try:
             conn_str = mongodb_connection_string({**cfg, "auth_source": auth_source})
             client = _mongo_client(conn_str)

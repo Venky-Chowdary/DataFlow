@@ -321,15 +321,50 @@ def safe_ddl_logical_type(
     field_name: str | None = None,
     source_type: str | None = None,
 ) -> str:
-    """For new-table DDL: never emit a tight type samples cannot all coerce to."""
+    """For new-table DDL: never emit a tight type samples cannot all coerce to.
+
+    Destination-native DDL (e.g. Postgres ``TIMESTAMPTZ``, Snowflake ``TIMESTAMP_TZ``)
+    is canonicalized to a logical type first. Without that, identity mappings that
+    already projected ``ddl_type(dest, TIMESTAMP)`` were treated as unknown and
+    wrongly widened to VARCHAR — CREATE TABLE then stored ISO strings as TEXT.
+    """
+    from services.type_system import normalize_logical_type
+
     proposed_u = (proposed or source_type or "VARCHAR").upper()
     if proposed_u in {"STRING", "CHAR", "CHARACTER", "CHARACTER VARYING"}:
         proposed_u = "VARCHAR"
+    # Map dest-native / alias DDL → canonical logical vocabulary used by writers.
+    _NORM_TO_LOGICAL = {
+        "integer": "INTEGER",
+        "decimal": "DECIMAL",
+        "boolean": "BOOLEAN",
+        "date": "DATE",
+        "datetime": "TIMESTAMP",
+        "time": "TIME",
+        "string": "VARCHAR",
+        "text": "TEXT",
+        "uuid": "UUID",
+        "json": "JSON",
+        "array": "JSON",
+        "binary": "BINARY",
+    }
+    canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
+    if canonical:
+        proposed_u = canonical
     if not samples:
         # Prefer source type when no samples; still avoid BOOLEAN without evidence.
         if proposed_u == "BOOLEAN" and source_type and str(source_type).upper() in {"VARCHAR", "TEXT", "STRING"}:
             return "VARCHAR"
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
+    # Loose text proposals: upgrade when every sample coerces to a tighter type.
+    # Without this, CREATE TABLE stays VARCHAR and writers skip type transforms
+    # (e.g. "true"/"false"/"1" never become BOOLEAN).
+    if proposed_u in {"VARCHAR", "TEXT", "STRING", "CHAR"}:
+        inferred = infer_type(samples, field_name=field_name)
+        if inferred not in {"VARCHAR", "TEXT"} and samples_fit_logical_type(
+            samples, inferred, field_name=field_name
+        ):
+            return inferred if inferred in LOGICAL_TYPES else "VARCHAR"
     if samples_fit_logical_type(samples, proposed_u, field_name=field_name):
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
     # Widen using fresh inference (string enums → VARCHAR, etc.)
@@ -366,6 +401,21 @@ def infer_column(
             "notes": notes,
             "samples": non_empty[:8],
         }
+
+    # true/false/yes/no mixed with 0/1 must stay BOOLEAN — classifying "1" as
+    # INTEGER alone would widen the column to VARCHAR and skip bool coercion.
+    if all(v.lower() in _BOOLEAN_STRINGS for v in non_empty):
+        only_01 = all(v.strip() in {"0", "1"} for v in non_empty)
+        if (not only_01) or _is_boolean_field_name(field_name or ""):
+            notes.append("boolean token family (true/false/0/1) → BOOLEAN")
+            return {
+                "name": field_name or "",
+                "logical_type": "BOOLEAN",
+                "semantic_role": "boolean_flag",
+                "confidence": 0.98,
+                "notes": notes,
+                "samples": non_empty[:8],
+            }
 
     counts: Counter[str] = Counter(_classify_value(s, field_name=field_name) for s in non_empty)
     types = set(counts.keys())

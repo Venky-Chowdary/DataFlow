@@ -2580,6 +2580,12 @@ export function TransferPage({
             target: candidate,
             destType: action.to_type,
             existsInDestination: false,
+            createNew: true,
+            assignmentStrategy: "create_compatible_new",
+            transform:
+              m.transform === "cast_number" || m.transform === "cast_boolean"
+                ? "none"
+                : m.transform,
             approved: true,
             requiresReview: false,
             reason: [
@@ -2875,6 +2881,15 @@ export function TransferPage({
             ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
             : undefined,
           dest_warehouse: destKindMode === "database" && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          dest_auth_source: destKindMode === "database"
+            ? (selectedDestConnector?.auth_source || undefined)
+            : undefined,
+          dest_auth_mode: destKindMode === "database"
+            ? (selectedDestConnector?.auth_mode || undefined)
+            : undefined,
+          dest_auth_role: destKindMode === "database"
+            ? (selectedDestConnector?.auth_role || undefined)
+            : undefined,
           // Live dest schema — required so existing BOOLEAN columns are not invisible to DDL gates.
           dest_table: destKindMode === "database" && destDriverType !== "mongodb" && destDriverType !== "dynamodb"
             ? (targetCollection || undefined)
@@ -4753,6 +4768,9 @@ export function TransferPage({
             validationMode={validationMode}
             onApplyAction={applySuggestedAction}
             onStripControlChars={stripControlCharsAndRerun}
+            stripControlsApplied={columnMappings.some(
+              (m) => m.transform === "strip_controls",
+            )}
             onQuarantineAndRerun={quarantineAndRerun}
             cellPreview={cellPreview}
             onReviewMappings={() => setStep(STEP_MAP)}

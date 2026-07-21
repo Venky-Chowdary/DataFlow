@@ -6,7 +6,6 @@ auto-mapper when a target schema already exists.
 """
 from __future__ import annotations
 
-import contextlib
 import sys
 import uuid
 from pathlib import Path
@@ -96,12 +95,11 @@ def test_manual_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> None:
         mappings=MANUAL_MAPPINGS,
     )
 
-    snowflake = pytest.importorskip("fakesnow") if destination.format == "snowflake" else None
-    ctx = snowflake.patch() if snowflake else contextlib.nullcontext()
+    if destination.format == "snowflake":
+        pytest.importorskip("fakesnow")
 
     engine = UniversalTransferEngine()
-    with ctx:
-        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
     assert result.success, f"{dest_driver}: {result.error}"
     assert result.records_transferred == 2, f"{dest_driver}: {result.records_transferred}"
@@ -159,12 +157,11 @@ def test_intelligent_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> N
         }],
     )
 
-    snowflake = pytest.importorskip("fakesnow") if destination.format == "snowflake" else None
-    ctx = snowflake.patch() if snowflake else contextlib.nullcontext()
+    if destination.format == "snowflake":
+        pytest.importorskip("fakesnow")
 
     engine = UniversalTransferEngine()
-    with ctx:
-        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
     assert result.success, f"{dest_driver}: {result.error}"
     assert result.records_transferred == 2, f"{dest_driver}: {result.records_transferred}"

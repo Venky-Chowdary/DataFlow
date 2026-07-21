@@ -58,7 +58,9 @@ def _check_coercion_safety(
     dest_kind: str = "",
     schema_policy: str = "manual_review",
     validation_mode: str = "strict",
+    rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from services.coercion_probe import samples_coerce_mapping
     from services.type_coercion_validator import (
         coerce_blocks_transfer,
         validate_mapping_coercions,
@@ -84,13 +86,44 @@ def _check_coercion_safety(
             "warnings": [i["message"] for i in issues if i.get("severity") in {"warn", "block"}][:10],
         }
 
-    blocks = [i for i in issues if i.get("severity") == "block"]
+    # Declared VARCHAR→NUMBER is "lossy" on paper, but JSON/CSV files often store
+    # numeric columns as strings. When samples coerce via the write transform
+    # (same path as G3 / dry-run), do not hard-block — otherwise Validate
+    # contradicts itself (G3 pass + G5/G6 block) and operators click Strip wrongly.
+    sample_rows = rows or []
+    type_locked = (schema_policy or "").lower() == "type_locked"
+    hardened: list[dict[str, Any]] = []
+    sample_cleared: list[str] = []
+    for issue in issues:
+        if issue.get("severity") != "block":
+            hardened.append(issue)
+            continue
+        if type_locked or not sample_rows:
+            hardened.append(issue)
+            continue
+        src = str(issue.get("source") or "")
+        mapping = next((m for m in mappings if str(m.get("source") or "") == src), None)
+        if mapping and samples_coerce_mapping(
+            mapping,
+            source_types=source_types,
+            target_types=target_types,
+            rows=sample_rows,
+        ):
+            sample_cleared.append(issue.get("message") or src)
+            hardened.append({**issue, "severity": "warn", "sample_cleared": True})
+            continue
+        hardened.append(issue)
+
+    blocks = [i for i in hardened if i.get("severity") == "block"]
+    warnings = [i["message"] for i in hardened if i.get("severity") == "warn"][:10]
+    for msg in sample_cleared[:5]:
+        warnings.append(f"Sample-cleared declared coercion: {msg}")
     return {
         "check": "coercion_safety",
         "passed": len(blocks) == 0,
-        "blocks_transfer": coerce_blocks_transfer(issues),
+        "blocks_transfer": coerce_blocks_transfer(hardened),
         "issues": [i["message"] for i in blocks[:15]],
-        "warnings": [i["message"] for i in issues if i.get("severity") == "warn"][:10],
+        "warnings": warnings,
     }
 
 
@@ -551,6 +584,7 @@ def run_integrity_audit(
                 dest_kind=dest_kind,
                 schema_policy=schema_policy,
                 validation_mode=validation_mode,
+                rows=rows,
             )
         )
         checks.append(

@@ -44,6 +44,53 @@ def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _parse_type_mismatch_columns(text: str) -> list[tuple[str, str]]:
+    """Extract (source, target) from messages like ``population (VARCHAR) → population (NUMBER)``."""
+    import re
+
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(
+        r"([A-Za-z_][\w]*)\s*\([^)]+\)\s*→\s*([A-Za-z_][\w]*)\s*\([^)]+\)",
+        text or "",
+    ):
+        out.append((m.group(1), m.group(2)))
+    return out
+
+
+def _is_encoding_blocker(text: str) -> bool:
+    t = (text or "").lower()
+    return any(
+        k in t
+        for k in (
+            "format-control",
+            "replacement character",
+            "encoding",
+            "zero-width",
+            "null byte",
+            "u+200b",
+            "u+0000",
+        )
+    )
+
+
+def _is_type_mismatch_blocker(text: str) -> bool:
+    t = (text or "").lower()
+    if _parse_type_mismatch_columns(text):
+        return True
+    return any(
+        k in t
+        for k in (
+            "invalid decimal",
+            "invalid integer",
+            "invalid boolean",
+            "cannot be cast",
+            "does not safely become",
+            "lossy type",
+            "unparseable",
+        )
+    )
+
+
 def _suggested_actions(
     blockers: list[dict[str, Any]],
     column_fixes: list[dict[str, Any]],
@@ -89,27 +136,38 @@ def _suggested_actions(
     blocker_text = " ".join(
         str(b.get("message") or "") + " " + str(b.get("details") or "")
         for b in blockers
-    ).lower()
-    if "format-control" in blocker_text or "replacement character" in blocker_text or "encoding" in blocker_text:
-        actions.append({
-            "kind": "normalize_control_chars",
-            "transform": "strip_controls",
-            "label": "Strip control characters & re-run",
-        })
-        actions.append({
-            "kind": "quarantine_and_rerun",
-            "label": "Quarantine bad cells & re-run",
-        })
-        actions.append({
-            "kind": "open_bad_data_fix",
-            "label": "Open Fix bad data dialog",
-        })
-    # Dry-run / integrity failures also get the strip + quarantine one-clicks so
-    # operators never have to dig through a collapsed AI panel to remediate.
-    if any(
-        gid in gate_ids or (gid or "").startswith("g5")
-        for gid in ("g5_dry_run", "g5_transform", "g9_data_integrity", "dry_run")
-    ) or "dry-run" in blocker_text or "integrity" in blocker_text:
+    )
+    blocker_lower = blocker_text.lower()
+
+    # Declared-type / dry-run type mismatches → Widen/remap, never Strip-first.
+    if _is_type_mismatch_blocker(blocker_text):
+        for src, tgt in _parse_type_mismatch_columns(blocker_text):
+            key = ("change_target_type", src, "VARCHAR")
+            if key not in seen:
+                seen.add(key)
+                actions.append({
+                    "kind": "change_target_type",
+                    "column": src,
+                    "target": tgt,
+                    "to_type": "VARCHAR",
+                    "label": (
+                        f"Remap '{src}' off typed {tgt} → VARCHAR "
+                        "(Strip/Quarantine cannot fix type mismatches)"
+                    ),
+                    "requires_ddl": True,
+                })
+        if not any(a.get("kind") == "change_target_type" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": "Open Map — widen or remap the incompatible typed column",
+            })
+        elif not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": "Review mappings (type mismatch — not an encoding issue)",
+            })
+
+    if _is_encoding_blocker(blocker_lower):
         if not any(a.get("kind") == "normalize_control_chars" for a in actions):
             actions.append({
                 "kind": "normalize_control_chars",
@@ -121,12 +179,40 @@ def _suggested_actions(
                 "kind": "quarantine_and_rerun",
                 "label": "Quarantine bad cells & re-run",
             })
+        if not any(a.get("kind") == "open_bad_data_fix" for a in actions):
+            actions.append({
+                "kind": "open_bad_data_fix",
+                "label": "Open Fix bad data dialog",
+            })
+    elif any(
+        gid in gate_ids or (gid or "").startswith("g5")
+        for gid in ("g5_dry_run", "g5_transform", "g9_data_integrity", "dry_run")
+    ) or "dry-run" in blocker_lower or "integrity" in blocker_lower:
+        # Generic G5 without type/encoding signal — still offer Map review,
+        # but do NOT advertise Strip as the primary fix (operators click it
+        # and see the same type block again).
+        if not _is_type_mismatch_blocker(blocker_text):
+            if not any(a.get("kind") == "open_bad_data_fix" for a in actions):
+                actions.append({
+                    "kind": "open_bad_data_fix",
+                    "label": "Open Fix bad data dialog",
+                })
+            if not any(a.get("kind") == "review_mappings" for a in actions):
+                actions.append({
+                    "kind": "review_mappings",
+                    "label": "Review mappings",
+                })
+
     if "g4_mapping_confidence" in gate_ids:
-        actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
+        if not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
     if "schema_drift" in gate_ids:
         actions.append({"kind": "rerun_mapping", "label": "Re-run mapping to accept the new schema"})
     if {"g1_source", "g2_destination"} & gate_ids:
-        actions.append({"kind": "check_connection", "label": "Check the source/destination connection settings"})
+        actions.append({
+            "kind": "check_connection",
+            "label": "Open Connectors — fix credentials / Auth source, then Test",
+        })
     return actions
 
 
@@ -257,11 +343,24 @@ def explain_validation(
     # Surface warn-only columns as advisory issues even when nothing blocks.
     for c in column_fixes:
         if c["severity"] == "warn":
+            sentinel = int(c.get("sentinel_nulls") or 0)
+            # Coercion report also warns on ISO→warehouse temporal normalize
+            # (wire_normalize) with zero sentinel nulls — do not mislabel those
+            # as "placeholder → NULL" (that scared operators on healthy routes).
+            if sentinel > 0:
+                title = "Placeholder values become NULL"
+                what = f"{sentinel} placeholder value(s) in '{c['column']}'"
+            else:
+                title = "Type normalize at write"
+                what = (
+                    c.get("suggested_fix")
+                    or f"Column '{c['column']}' will be normalized for the destination type"
+                )
             issues.append({
                 "gate": "g3_schema_contract",
-                "title": "Placeholder values become NULL",
+                "title": title,
                 "severity": "warning",
-                "what": f"{c['sentinel_nulls']} placeholder value(s) in '{c['column']}'",
+                "what": what,
                 "why": explain_issue("lossy type coercion", dest_kind=dest_kind).get("why", ""),
                 "fix": c["suggested_fix"],
                 "examples": [],

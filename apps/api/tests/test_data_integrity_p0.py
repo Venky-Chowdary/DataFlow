@@ -213,8 +213,8 @@ def test_engine_file_to_sqlite_sets_completed_with_quarantine():
     from src.transfer.models import EndpointConfig, TransferRequest
 
     csv = b"id,age\n1,30\n2,not-a-number\n3,42\n"
-    dest_path = _API_ROOT / "exports" / f"p0_{uuid.uuid4().hex[:8]}.db"
-    try:
+    with tempfile.TemporaryDirectory() as tmp:
+        dest_path = Path(tmp) / f"p0_{uuid.uuid4().hex[:8]}.db"
         request = TransferRequest(
             source=EndpointConfig(kind="file", format="csv"),
             destination=EndpointConfig(
@@ -244,9 +244,6 @@ def test_engine_file_to_sqlite_sets_completed_with_quarantine():
         job = get_mongodb_service().get_job(result.job_id)
         assert job is not None
         assert job.get("status") == "completed_with_quarantine"
-    finally:
-        if dest_path.exists():
-            dest_path.unlink()
 
 
 # --- Task 2: structured detail shape shared by all writers ------------------

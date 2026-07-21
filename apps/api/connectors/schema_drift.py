@@ -44,7 +44,8 @@ def add_missing_columns(
     dialect = engine.dialect
     dialect_name = getattr(dialect, "name", "")
     keyword = "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
-    supports_if_not_exists = dialect_name in {"postgresql", "sqlite", "duckdb"}
+    supports_if_not_exists = dialect_name in {"postgresql", "duckdb"}
+    # SQLite rejects "ADD COLUMN IF NOT EXISTS" (syntax error near EXISTS).
     if_not_exists = " IF NOT EXISTS" if supports_if_not_exists else ""
     log: list[str] = []
     quoted_schema = f'"{schema}"' if schema else None

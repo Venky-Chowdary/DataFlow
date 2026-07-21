@@ -16,13 +16,21 @@ if str(_SRC) not in sys.path:
 
 from src.services.catalog_service import search_catalog  # noqa: E402
 from src.transfer.connector_capabilities import (  # noqa: E402
+    _DRIVER_CAPS,
+    _FILE_CAPS,
     default_port,
     dest_ready,
     get_capabilities,
     resolve_driver_type,
     source_ready,
 )
+from src.transfer.connector_registry import CONNECTOR_MODULES  # noqa: E402
 from src.transfer.registry import validate_transfer  # noqa: E402
+
+# Every resolve_driver_type result must land in the registry or file caps.
+_KNOWN_DRIVERS = frozenset(CONNECTOR_MODULES) | frozenset(_DRIVER_CAPS) | frozenset(_FILE_CAPS) | {
+    "generic_sql",
+}
 
 
 def _all_live_catalog_ids() -> list[str]:
@@ -39,15 +47,7 @@ def test_all_live_catalog_ids_resolve_to_driver(live_catalog_ids: list[str]):
     for cid in live_catalog_ids:
         driver = resolve_driver_type(cid)
         assert driver, f"{cid} resolved to an empty driver"
-        # Generic SQL engines resolve to generic_sql; aliases resolve to first-class drivers.
-        assert driver in (
-            "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
-            "dynamodb", "s3", "gcs", "adls", "redis", "elasticsearch", "sqlite",
-            "sftp", "email",
-            "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
-            "generic_sql", "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet",
-            "avro", "orc", "xml",
-        ), f"{cid} -> {driver} is not a known driver"
+        assert driver in _KNOWN_DRIVERS, f"{cid} -> {driver} is not a known driver"
 
 
 def test_all_live_catalog_ids_have_default_port(live_catalog_ids: list[str]):

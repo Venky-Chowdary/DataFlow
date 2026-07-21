@@ -32,6 +32,7 @@ from transfer.connector_capabilities import (  # noqa: E402
     get_capabilities,
     transfer_ready,
 )
+from transfer.connector_registry import CONNECTOR_MODULES  # noqa: E402
 from transfer.registry import (  # noqa: E402
     LIVE_DEST_DATABASES,
     LIVE_SOURCE_DATABASES,
@@ -53,98 +54,23 @@ def test_every_db_driver_has_probe_read_write(driver: str):
     else:
         assert transfer_ready(caps), driver
 
-    probes = {
-        "postgresql": ("connectors.postgresql", "test_postgresql"),
-        "mysql": ("connectors.mysql", "test_mysql"),
-        "snowflake": ("connectors.snowflake", "test_snowflake"),
-        "bigquery": ("connectors.bigquery", "test_bigquery"),
-        "redshift": ("connectors.redshift", "test_redshift"),
-        "pgvector": ("connectors.postgresql", "test_postgresql"),
-        "qdrant": ("connectors.qdrant_writer", "test_qdrant"),
-        "dynamodb": ("connectors.dynamodb", "test_dynamodb"),
-        "s3": ("connectors.s3", "test_s3"),
-        "gcs": ("connectors.gcs", "test_gcs"),
-        "adls": ("connectors.adls", "test_adls"),
-        "redis": ("connectors.redis_kv", "test_redis"),
-        "elasticsearch": ("connectors.elasticsearch", "test_elasticsearch"),
-        "sqlite": ("connectors.sqlite", "test_sqlite"),
-        "sftp": ("connectors.sftp", "test_sftp"),
-        "email": ("connectors.email", "test_email"),
-        "salesforce": ("connectors.salesforce", "test_salesforce"),
-        "hubspot": ("connectors.hubspot", "test_hubspot"),
-        "stripe": ("connectors.stripe", "test_stripe"),
-        "rest_api": ("connectors.rest_api", "test_connection"),
-        "influxdb": ("connectors.influxdb", "test_connection"),
-        "neo4j": ("connectors.neo4j", "test_connection"),
-        "couchbase": ("connectors.couchbase", "test_connection"),
-        "singer_tap": ("connectors.sdk.singer_bridge", "test_singer_tap"),
-    }
+    # Canonical probe/reader/writer map — never maintain a stale parallel dict.
+    spec = CONNECTOR_MODULES.get(driver)
+    assert spec is not None, f"{driver} missing from CONNECTOR_MODULES"
+
     if driver == "mongodb":
         import pymongo  # noqa: F401
-    else:
-        mod_name, fn_name = probes[driver]
+    elif spec.probe is not None:
+        mod_name, fn_name = spec.probe
         assert callable(getattr(importlib.import_module(mod_name), fn_name))
 
-    readers = {
-        "postgresql": "connectors.postgresql_reader",
-        "mysql": "connectors.mysql_reader",
-        "mongodb": "connectors.mongodb_reader",
-        "snowflake": "connectors.snowflake_reader",
-        "bigquery": "connectors.bigquery_reader",
-        "redshift": "connectors.postgresql_reader",
-        "dynamodb": "connectors.dynamodb_reader",
-        "s3": "connectors.s3_reader",
-        "gcs": "connectors.gcs_reader",
-        "adls": "connectors.adls_reader",
-        "redis": "connectors.redis_reader",
-        "elasticsearch": "connectors.elasticsearch_reader",
-        "sqlite": "connectors.sqlite_reader",
-        "pgvector": None,
-        "qdrant": None,
-        "sftp": "connectors.sftp_reader",
-        "salesforce": "connectors.salesforce",
-        "hubspot": "connectors.hubspot",
-        "stripe": "connectors.stripe",
-        "rest_api": "connectors.rest_api",
-        "influxdb": "connectors.influxdb",
-        "neo4j": "connectors.neo4j",
-        "couchbase": "connectors.couchbase",
-        "singer_tap": "connectors.sdk",
-    }
-    writers = {
-        "postgresql": "connectors.postgresql_writer",
-        "mysql": "connectors.mysql_writer",
-        "mongodb": "connectors.mongodb_writer",
-        "snowflake": "connectors.snowflake_writer",
-        "bigquery": "connectors.bigquery_writer",
-        "redshift": "connectors.postgresql_writer",
-        "dynamodb": "connectors.dynamodb_writer",
-        "s3": "connectors.s3_writer",
-        "gcs": "connectors.gcs_writer",
-        "adls": "connectors.adls_writer",
-        "redis": "connectors.redis_writer",
-        "elasticsearch": "connectors.elasticsearch_writer",
-        "sqlite": "connectors.sqlite_writer",
-        "pgvector": "connectors.pgvector_writer",
-        "qdrant": "connectors.qdrant_writer",
-        "sftp": "connectors.sftp_writer",
-        "email": "connectors.email",
-        "salesforce": "connectors.salesforce_writer",
-        "hubspot": "connectors.hubspot_writer",
-        "stripe": "connectors.saas_common",
-        "rest_api": "connectors.saas_common",
-        "influxdb": "connectors.saas_common",
-        "neo4j": "connectors.saas_common",
-        "couchbase": "connectors.saas_common",
-        "singer_tap": "connectors.saas_common",
-    }
-    if readers.get(driver):
-        assert importlib.import_module(readers[driver])
-    writer_mod = importlib.import_module(writers[driver])
+    if spec.reader:
+        assert importlib.import_module(spec.reader)
+    writer_mod = importlib.import_module(spec.writer)
     if caps.get("source_only"):
         assert callable(getattr(writer_mod, "write_not_supported"))
     else:
-        assert callable(writer_mod.write_mapped_rows)
+        assert callable(getattr(writer_mod, spec.writer_fn))
 
 
 @pytest.mark.parametrize("src_fmt", ALL_FILE_FORMATS)

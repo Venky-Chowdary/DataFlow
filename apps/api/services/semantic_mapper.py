@@ -764,7 +764,9 @@ def _sample_consistency_boost(samples: list[str] | None, source_type: str, targe
         return 0.0
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
-    transform = infer_transform_for_mapping("col", "col", source_type, target_type)
+    transform = infer_transform_for_mapping(
+        "col", "col", source_type, target_type, source_samples=samples,
+    )
     ok = 0
     checked = 0
     for raw in samples[:8]:

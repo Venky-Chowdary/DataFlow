@@ -141,19 +141,21 @@ def test_prechunked_vectorize_does_not_resplit():
     rows = vectorize_records(
         records,
         content_column="content",
-        embedding_column="embedding",  # missing → embed path
-        # Force precomputed empty path: use skip via flag + inject fake embedding column absent
+        embedding_column="embedding",
+        model="hash/32",
     )
-    # Without embedding_column values, it embeds — may need ST model.
-    # Instead pass precomputed embeddings to stay CI-stable:
-    for r in records:
-        r["embedding"] = "[0.1,0.2,0.3]"
-    rows = vectorize_records(records, content_column="content", embedding_column="embedding")
     assert len(rows) == 2
     assert rows[0]["chunk_index"] == 0
     assert rows[1]["chunk_index"] == 1
     assert rows[0]["metadata"].get("page") == "1"
     assert PRECHUNKED_FLAG not in rows[0]["metadata"]
+
+    # Precomputed embeddings stay 1:1 as well (skip re-embed).
+    for r in records:
+        r["embedding"] = "[0.1,0.2,0.3]"
+    rows2 = vectorize_records(records, content_column="content", embedding_column="embedding")
+    assert len(rows2) == 2
+    assert rows2[0]["chunk_index"] == 0
 
 
 def test_pdf_chunks_when_synthesizer_available():

@@ -129,6 +129,77 @@ def _is_create_new_mapping(m: dict) -> bool:
     return strategy in {"create_compatible_new", "identity_passthrough"}
 
 
+def _repair_unparseable_numeric_targets(
+    mappings: list[dict],
+    *,
+    source_schemas: list[dict] | None,
+    target_schemas: list[dict] | None,
+    destination_db_type: str = "",
+) -> list[dict]:
+    """Rewrite hex/ObjectId → NUMBER/INTEGER mappings to create-new VARCHAR.
+
+    Studio was proposing ``_id`` → ``id`` NUMBER(38,0) when Mongo introspect
+    lacked samples; Validate then correctly blocked. Even with a typed dest
+    ``id``, non-numeric samples must never stay on that column.
+    """
+    from services.schema_inference import samples_fit_logical_type
+    from services.type_system import ddl_type, normalize_logical_type
+
+    src_by = {s["name"]: s for s in (source_schemas or [])}
+    tgt_by = {s["name"]: s for s in (target_schemas or [])}
+    taken = {str(m.get("target") or "").lower() for m in mappings}
+    for t in tgt_by:
+        taken.add(t.lower())
+    out: list[dict] = []
+    for m in mappings:
+        src = str(m.get("source") or "")
+        tgt = str(m.get("target") or "")
+        samples = [str(x) for x in (src_by.get(src, {}).get("samples") or [])[:8] if str(x).strip()]
+        tgt_type = str(
+            m.get("target_type")
+            or tgt_by.get(tgt, {}).get("inferred_type")
+            or ""
+        )
+        logical = normalize_logical_type(tgt_type)
+        if (
+            samples
+            and len(samples) >= 2
+            and logical in {"integer", "decimal"}
+            and not samples_fit_logical_type(samples, tgt_type or "INTEGER", field_name=src)
+        ):
+            dest_db = (destination_db_type or "").strip().lower()
+            dest_native = ddl_type(dest_db, "VARCHAR") if dest_db else "VARCHAR"
+            candidate = src.strip() or tgt
+            if candidate.lower() in taken and candidate.lower() == tgt.lower():
+                # Keep source name when inventing beside an incompatible dest.
+                base = candidate
+                candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
+            elif candidate.lower() in taken:
+                base = candidate
+                candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
+            taken.add(candidate.lower())
+            repaired = {
+                **m,
+                "target": candidate,
+                "target_type": dest_native,
+                "source_type": src_by.get(src, {}).get("inferred_type") or m.get("source_type") or "VARCHAR",
+                "create_new": True,
+                "assignment_strategy": "create_compatible_new",
+                "transform": "none",
+                "requires_review": True,
+                "confidence": min(float(m.get("confidence") or 0.92), 0.92),
+                "reasoning": (
+                    f"{m.get('reasoning', '')} · samples are not numeric — "
+                    f"CREATE/ADD '{candidate}' as {dest_native} instead of "
+                    f"lossy {tgt} ({tgt_type or logical})"
+                ).strip(" ·"),
+            }
+            out.append(repaired)
+            continue
+        out.append(m)
+    return out
+
+
 def entailment_prune(mappings: list[dict], target_columns: list[str]) -> tuple[list[dict], list[str]]:
     """Drop mappings whose target is not entailed by any known target column.
 
@@ -304,7 +375,15 @@ def run_mapping_pipeline(
         enriched_mappings.append(
             {
                 **m,
-                "transform": infer_transform_for_mapping(m["source"], m["target"], src_type, tgt_type),
+                "transform": infer_transform_for_mapping(
+                    m["source"],
+                    m["target"],
+                    src_type,
+                    tgt_type,
+                    source_samples=[
+                        str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
+                    ] or None,
+                ),
                 "source_type": src_type,
                 "target_type": tgt_type,
                 "reasoning": reasoning,
@@ -319,6 +398,12 @@ def run_mapping_pipeline(
         enriched_mappings,
         source_schemas=source_schemas,
         target_schemas=target_schemas,
+    )
+    enriched_mappings = _repair_unparseable_numeric_targets(
+        enriched_mappings,
+        source_schemas=source_schemas,
+        target_schemas=target_schemas,
+        destination_db_type=destination_db_type,
     )
 
     from services.mapping_quality import (

@@ -553,11 +553,17 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:
+                from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+
+                try:
+                    target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
+                except Exception:
+                    pass
                 cur.execute(
                     """
                     SELECT column_name, data_type, is_nullable
                     FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s
+                    WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
                     ORDER BY ordinal_position
                     """,
                     (schema, target_table),
@@ -892,18 +898,47 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     doc["_id"] = str(doc["_id"])
                 for key, val in doc.items():
                     inferred = _sample_logical_type(val, key)
+                    sample_text = "" if val is None else str(val)
                     if key not in columns:
-                        columns[key] = {"name": key, "inferred_type": inferred, "nullable": True}
+                        columns[key] = {
+                            "name": key,
+                            "inferred_type": inferred,
+                            "nullable": val is None,
+                            "samples": [sample_text] if sample_text else [],
+                        }
                     else:
                         columns[key]["inferred_type"] = _widen_mongodb_type(
                             columns[key]["inferred_type"], inferred
                         )
+                        if val is None:
+                            columns[key]["nullable"] = True
+                        # Samples feed the mapper so hex/ObjectId _id cannot score
+                        # onto an existing Snowflake NUMBER(38,0) `id` column.
+                        samples = columns[key].setdefault("samples", [])
+                        if sample_text and len(samples) < 8 and sample_text not in samples:
+                            samples.append(sample_text)
         client.close()
         # A field that was null in every sampled document has no observed type;
         # fall back to TEXT so the column is still created.
         for col in columns.values():
             if not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
+            # Re-infer from the collected sample set so mixed docs stay honest
+            # (e.g. sha256 hex stays VARCHAR, not INTEGER-by-name).
+            samples = [s for s in (col.get("samples") or []) if str(s).strip()]
+            if len(samples) >= 2:
+                try:
+                    from services.schema_inference import infer_column
+
+                    intel = infer_column(samples, field_name=col["name"])
+                    logical = str(intel.get("logical_type") or col["inferred_type"])
+                    if logical == "VARCHAR":
+                        logical = "TEXT"
+                    # Never narrow a sticky OBJECT/ARRAY with scalar-only re-infer.
+                    if col["inferred_type"] not in _STRUCTURAL_TYPES:
+                        col["inferred_type"] = logical
+                except Exception:
+                    logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -1130,6 +1165,7 @@ def _introspect_sqlite(
             columns: list[dict[str, Any]] = []
             for name in col_names:
                 declared = declared_types.get(name, "")
+                declared_base = declared.split("(", 1)[0].strip().upper()
                 values = samples.get(name, [])
                 semantic_role = None
                 if declared == "BLOB" or any(isinstance(v, bytes) for v in values):
@@ -1141,9 +1177,19 @@ def _introspect_sqlite(
                     intel = infer_column(str_values, field_name=name)
                     inferred = str(intel["logical_type"])
                     semantic_role = intel.get("semantic_role")
-                    if inferred in ("VARCHAR", "TEXT") and declared in ("INTEGER", "INT"):
+                    # Prefer declared affinity over sample narrowing. SQLite stores
+                    # NUMERIC(38,15) values as ints when they have no fraction, and
+                    # sample inference alone would report INTEGER — then SCD2/upsert
+                    # re-runs falsely block DECIMAL → INTEGER as lossy.
+                    if declared_base in {"NUMERIC", "DECIMAL", "NUMBER"} or declared.startswith(
+                        ("NUMERIC", "DECIMAL", "NUMBER")
+                    ):
+                        inferred = "DECIMAL"
+                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {"INTEGER", "INT", "BIGINT"}:
                         inferred = "INTEGER"
-                    elif inferred in ("VARCHAR", "TEXT") and declared in ("REAL", "FLOAT", "NUMERIC", "DOUBLE"):
+                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {
+                        "REAL", "FLOAT", "DOUBLE"
+                    }:
                         inferred = "DECIMAL"
 
                 col_out: dict[str, Any] = {

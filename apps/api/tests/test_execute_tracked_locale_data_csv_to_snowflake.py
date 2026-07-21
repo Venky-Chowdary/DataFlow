@@ -80,8 +80,7 @@ def test_locale_data_csv_to_snowflake():
     )
 
     engine = UniversalTransferEngine()
-    with fakesnow.patch():
-        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
     assert result.success is True, result.error
     assert result.records_transferred == 3
     assert result.reconciliation.get("passed") is True

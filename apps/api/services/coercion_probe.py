@@ -46,6 +46,38 @@ SAMPLE_FAILURE_LIMIT = 5
 DEFAULT_SAMPLE_LIMIT = 200
 
 
+def samples_coerce_mapping(
+    mapping: dict,
+    *,
+    source_types: dict[str, str],
+    target_types: dict[str, str],
+    rows: list[dict[str, Any]],
+) -> bool:
+    """True when every non-empty sample coerces via the write-path transform.
+
+    Used by G5 integrity, G6 DDL, and schema-drift so declared VARCHAR→NUMBER
+    (JSON/CSV numeric strings) does not false-block when values cast cleanly.
+    """
+    src = str(mapping.get("source") or "")
+    if not src or not rows:
+        return False
+    item = dict(mapping)
+    tgt = item.get("target")
+    if not item.get("target_type") and tgt and target_types:
+        item["target_type"] = target_types.get(str(tgt))
+    transform = resolve_transform(item, column_types=source_types, dest_types=target_types)
+    checked = 0
+    for row in rows[:200]:
+        raw = cell_to_string(row.get(src, ""))
+        if not str(raw).strip():
+            continue
+        checked += 1
+        _val, err = apply_transform(raw, transform)
+        if err:
+            return False
+    return checked > 0
+
+
 def _target_type_for(mapping: dict, dest_types: dict[str, str], source_types: dict[str, str]) -> str:
     tgt = mapping.get("target", "")
     return (

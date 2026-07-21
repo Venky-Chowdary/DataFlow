@@ -290,6 +290,9 @@ export async function runPreflight(payload: {
   dest_connection_string?: string;
   dest_schema?: string;
   dest_warehouse?: string;
+  dest_auth_source?: string;
+  dest_auth_mode?: string;
+  dest_auth_role?: string;
   dest_kind?: string;
   dest_table?: string;
   dest_collection?: string;

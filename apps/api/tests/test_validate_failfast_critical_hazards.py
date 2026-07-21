@@ -13,12 +13,13 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 _PROOF = _API_ROOT / "data" / "proofs" / "validate_failfast_critical_hazards.json"
 
 
-def test_unknown_dest_schema_blocks_non_overwrite():
+def test_unknown_dest_schema_blocks_when_table_exists():
+    """Existing table + empty introspection must fail-closed (cannot prove columns)."""
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "_id", "target": "_id", "confidence": 0.95}],
         source_schema={"_id": "VARCHAR"},
         target_schema={},
-        table_exists=False,
+        table_exists=True,
         dest_connected=True,
         dest_db_type="snowflake",
         allow_create=True,
@@ -27,6 +28,26 @@ def test_unknown_dest_schema_blocks_non_overwrite():
     )
     assert not ok
     assert any("Could not load destination schema" in i for i in issues)
+
+
+def test_create_new_allows_empty_schema_for_non_overwrite():
+    """First-run create (SCD2/upsert/append) must not require a live dest schema."""
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.95},
+            {"source": "name", "target": "name", "confidence": 0.95},
+        ],
+        source_schema={"id": "INTEGER", "name": "VARCHAR"},
+        target_schema={},
+        table_exists=False,
+        dest_connected=True,
+        dest_db_type="sqlite",
+        allow_create=True,
+        sync_mode="scd2",
+        destination_table="products",
+    )
+    assert ok, issues
+    assert not any("Could not load destination schema" in i for i in issues)
 
 
 def test_overwrite_allows_empty_schema_for_recreate():

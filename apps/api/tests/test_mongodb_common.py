@@ -62,3 +62,19 @@ def test_builds_uri_from_host_port_user_pass():
     )
     assert uri.startswith("mongodb://user:pass@localhost:27017")
     assert "authSource=dataflow" in uri
+
+
+def test_injects_form_credentials_into_host_only_uri():
+    """Railway-style paste: host URI without userinfo + form username/password."""
+    uri = normalize_mongodb_connection_string(
+        "mongodb://mongodb.railway.internal:27017/trueresume",
+        database="trueresume",
+        username="mongo",
+        password="s#cret!",
+        auth_source="admin",
+    )
+    assert "mongo:" in uri
+    assert "@mongodb.railway.internal:27017" in uri
+    assert "authSource=admin" in uri
+    # Special characters in password must be percent-encoded.
+    assert "s%23cret" in uri or "s%23cret%21" in uri

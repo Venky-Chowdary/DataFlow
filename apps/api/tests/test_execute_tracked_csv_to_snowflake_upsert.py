@@ -64,37 +64,36 @@ def test_csv_to_snowflake_upsert_updates_and_appends():
     )
 
     engine = UniversalTransferEngine()
-    with fakesnow.patch():
-        result1 = engine.execute_tracked(request, _new_job_id())
-        assert result1.success, result1.error
-        assert result1.records_transferred == 2
-        assert result1.reconciliation.get("passed") is True
-        assert result1.reconciliation.get("target_rows") == 2
+    result1 = engine.execute_tracked(request, _new_job_id())
+    assert result1.success, result1.error
+    assert result1.records_transferred == 2
+    assert result1.reconciliation.get("passed") is True
+    assert result1.reconciliation.get("target_rows") == 2
 
-        request.source_content = _csv_bytes([
-            {"id": "1", "amount": "1111.00"},
-            {"id": "3", "amount": "3000.00"},
-        ])
-        result2 = engine.execute_tracked(request, _new_job_id())
-        assert result2.success, result2.error
-        assert result2.records_transferred == 2
-        assert result2.reconciliation.get("passed") is True
-        assert result2.reconciliation.get("target_rows") == 3
+    request.source_content = _csv_bytes([
+        {"id": "1", "amount": "1111.00"},
+        {"id": "3", "amount": "3000.00"},
+    ])
+    result2 = engine.execute_tracked(request, _new_job_id())
+    assert result2.success, result2.error
+    assert result2.records_transferred == 2
+    assert result2.reconciliation.get("passed") is True
+    assert result2.reconciliation.get("target_rows") == 3
 
-        import snowflake.connector
+    import snowflake.connector
 
-        conn = snowflake.connector.connect(
-            account="test",
-            user="test",
-            password="test",
-            database="dataflow",
-            schema="public",
-            warehouse="",
-        )
-        with conn.cursor() as cur:
-            cur.execute(f'SELECT id, amount FROM "{table_name.upper()}" ORDER BY id')
-            rows = cur.fetchall()
-        conn.close()
+    conn = snowflake.connector.connect(
+        account="test",
+        user="test",
+        password="test",
+        database="dataflow",
+        schema="public",
+        warehouse="",
+    )
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT id, amount FROM "{table_name.upper()}" ORDER BY id')
+        rows = cur.fetchall()
+    conn.close()
     assert len(rows) == 3
     by_id = {r[0]: r[1] for r in rows}
     assert by_id[1] == pytest.approx(1111.00)

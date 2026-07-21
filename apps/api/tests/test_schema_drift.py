@@ -91,6 +91,20 @@ def test_mongodb_does_not_raise_type_mismatch_drift_for_document_fields():
     assert report["drift_detected"] is False
 
 
+def test_varchar_to_number_not_breaking_drift_when_samples_coerce():
+    report = detect_schema_drift(
+        source_columns=["population"],
+        source_schema={"population": "VARCHAR"},
+        target_columns=["population"],
+        target_schema={"population": "NUMBER(38,0)"},
+        mappings=[{"source": "population", "target": "population", "confidence": 0.93}],
+        destination_db_type="snowflake",
+        sample_rows=[{"population": "331002651"}, {"population": "42"}],
+    )
+    assert report["type_mismatches"] == []
+    assert report["severity"] == "none"
+
+
 def test_mongo_aliases_treated_as_schemaless_in_drift_engine():
     report = detect_schema_drift(
         source_columns=["amount"],

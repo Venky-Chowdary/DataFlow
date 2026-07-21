@@ -551,6 +551,7 @@ def run_file_preflight(
         target_schema=destination_column_types or {},
         mappings=mappings,
         destination_db_type=destination_db_type,
+        sample_rows=sample_rows,
     )
     if drift.get("drift_detected"):
         for issue in drift.get("issues", []):
@@ -874,4 +875,18 @@ def inspect_destination_for_preflight(
         names = {o.get("name") for o in info.get("objects", []) if isinstance(o, dict)}
         out["table_exists"] = stream in names
     out["can_create_table"] = out["connected"]
+
+    # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
+    resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()
+    if out["connected"] and resolved_auth and (out.get("db_type") or "").lower() == "mongodb":
+        out["auth_source"] = resolved_auth
+        if connector_id:
+            try:
+                from services.connector_store import get_connector, update_connector
+
+                conn = get_connector(connector_id)
+                if conn and (conn.auth_source or "") != resolved_auth:
+                    update_connector(connector_id, {"auth_source": resolved_auth})
+            except Exception:
+                pass
     return out

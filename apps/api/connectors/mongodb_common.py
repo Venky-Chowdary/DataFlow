@@ -68,11 +68,22 @@ def normalize_mongodb_connection_string(
     present in the URL; otherwise it defaults to the database name (or the
     explicit `auth_source` argument).  This lets a user connect to `trueresume`
     while the user lives in the `admin` database by adding `?authSource=admin`.
+
+    When the pasted URI has no userinfo but form username/password are set,
+    credentials are injected into the netloc (common for Railway/Atlas pastes
+    that separate host URI from login fields).
     """
+    from urllib.parse import quote_plus
+
     uri = connection_string.strip()
     host = host or "localhost"
     if not uri:
-        netloc = f"{username}:{password}@{host}:{port or 27017}" if username and password else f"{host}:{port or 27017}"
+        if username and password:
+            netloc = f"{quote_plus(username)}:{quote_plus(password)}@{host}:{port or 27017}"
+        elif username:
+            netloc = f"{quote_plus(username)}@{host}:{port or 27017}"
+        else:
+            netloc = f"{host}:{port or 27017}"
         uri = f"mongodb://{netloc}/"
 
     if not uri.startswith(("mongodb://", "mongodb+srv://")):
@@ -86,8 +97,14 @@ def normalize_mongodb_connection_string(
     if connection_string.strip() and _is_localhost(uri) and host and (username or password):
         return normalize_mongodb_connection_string(
             "", database=database, host=host, port=port, username=username, password=password,
-            auth_source=auth_source,
+            ssl=ssl, auth_source=auth_source,
         )
+
+    # Inject form credentials when the URI has no userinfo (host-only paste).
+    netloc = parsed.netloc or ""
+    if username and "@" not in netloc:
+        auth = f"{quote_plus(username)}:{quote_plus(password)}" if password else quote_plus(username)
+        netloc = f"{auth}@{netloc}"
 
     path = parsed.path
     if database:
@@ -110,4 +127,4 @@ def normalize_mongodb_connection_string(
         qs["ssl"] = ["true"]
 
     query = urlencode({k: v[0] if v else "" for k, v in qs.items()}, doseq=False)
-    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, query, parsed.fragment))
+    return urlunparse((parsed.scheme, netloc, path, parsed.params, query, parsed.fragment))

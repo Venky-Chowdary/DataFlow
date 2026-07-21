@@ -475,7 +475,12 @@ def verify_snowflake_table(
     limit: int = 0,
 ) -> tuple[int, str]:
     try:
-        from connectors.snowflake_conn import get_connection, normalize_account
+        from connectors.snowflake_conn import (
+            get_connection,
+            normalize_account,
+            resolve_or_fold_snowflake_table,
+            snowflake_qualified_table,
+        )
 
         conn = get_connection(
             account=normalize_account(host),
@@ -486,7 +491,7 @@ def verify_snowflake_table(
             warehouse=warehouse,
             connection_string=connection_string,
         )
-        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref, require_safe_identifier
+        from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 
         with conn.cursor() as cur:
             if warehouse:
@@ -495,7 +500,8 @@ def verify_snowflake_table(
                     cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
                 except Exception:
                     pass
-            qualified_name = quote_table_ref(table_name, schema or "PUBLIC", dialect="snowflake")
+            resolved = resolve_or_fold_snowflake_table(cur, schema or "PUBLIC", table_name)
+            qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")
             count = int(cur.fetchone()[0])
             cur.execute(f"SELECT * FROM {qualified_name}")

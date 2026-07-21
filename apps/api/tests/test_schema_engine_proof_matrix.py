@@ -131,6 +131,20 @@ def test_safe_ddl_widens_enum_boolean_for_new_table():
     )
 
 
+def test_safe_ddl_keeps_timestamptz_as_timestamp_logical():
+    """Identity mappings project ddl_type(pg, TIMESTAMP)=TIMESTAMPTZ — must not widen to TEXT."""
+    samples = ["2024-12-31T23:59:59+00:00", "1735689600"]
+    assert (
+        safe_ddl_logical_type(
+            "TIMESTAMPTZ",
+            samples,
+            field_name="measured_at",
+            source_type="TIMESTAMP",
+        )
+        == "TIMESTAMP"
+    )
+
+
 def test_resolve_target_columns_new_table_widens_status_boolean():
     headers = ["status", "id"]
     rows = [["active"], ["invalidated"], ["pending"]]

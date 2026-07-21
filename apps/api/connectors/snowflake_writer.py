@@ -16,7 +16,7 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 from connectors.driver_guard import stub_writes_allowed
-from connectors.snowflake_conn import get_connection, normalize_account
+from connectors.snowflake_conn import _is_local_account, get_connection, normalize_account
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -564,6 +564,9 @@ def write_mapped_rows(
         )
 
     schema = (schema or "PUBLIC").upper()
+    # Sanitize only here; after USE SCHEMA we resolve against information_schema
+    # so legacy quoted-lowercase tables (e.g. "csvtestfile") are reused instead of
+    # creating a parallel "CSVTESTFILE".
     table_name = sanitize_identifier(table_name)
     target_types = [sf_type(t) for t in logical_types]
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
@@ -624,7 +627,9 @@ def write_mapped_rows(
             rejected_details=rejected_details,
         )
 
-    if stub_writes_allowed():
+    # Never stub local/fakesnow accounts when snowflake.connector is installed —
+    # stub writes skip real load and break strict reconciliation (no read-back).
+    if stub_writes_allowed() and not _is_local_account(str(account or "")):
         rows, checksum, chunks = simulate_stub_write(
             data_rows=mapped_rows,
             table_name=table_name,
@@ -689,6 +694,13 @@ def write_mapped_rows(
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
                 cur.execute(f"USE SCHEMA {sch_q}")
 
+            # Bind to the real stored table name (case) before DDL/DML.
+            from connectors.snowflake_conn import resolve_snowflake_table_name
+            from connectors.sql_identifiers import snowflake_fold_identifier
+
+            found = resolve_snowflake_table_name(cur, schema, table_name)
+            table_name = found if found is not None else snowflake_fold_identifier(table_name)
+
             if create_table:
                 col_defs = ", ".join(
                     f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)
@@ -703,8 +715,8 @@ def write_mapped_rows(
             if backfill_new_fields:
                 cur.execute(
                     """SELECT COLUMN_NAME FROM information_schema.columns
-                       WHERE table_schema = %s AND table_name = %s""",
-                    (schema.upper(), table_name.upper()),
+                       WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s""",
+                    (schema, table_name),
                 )
                 existing = {row[0].upper() for row in cur.fetchall()}
                 tbl_q = quote_sql_identifier(table_name)

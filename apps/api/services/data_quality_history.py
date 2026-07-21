@@ -192,16 +192,33 @@ def quarantine_histogram(rejected_details: list[dict[str, Any]] | None) -> dict[
     return dict(hist.most_common(50))
 
 
+def _endpoint_identity(endpoint: dict[str, Any]) -> str:
+    """Stable identity for a route endpoint — must distinguish local file DBs.
+
+    Using only kind/format/table collapses every ``sqlite → orders_out`` transfer
+    onto one history file, so a 6-row cursor test falsely fails against a prior
+    500-row load from another tempfile path in the same pytest/CI process.
+    """
+    conn = str(endpoint.get("connection_string") or "")
+    conn_fp = hashlib.sha256(conn.encode("utf-8")).hexdigest()[:16] if conn else ""
+    return "|".join(
+        [
+            str(endpoint.get("kind") or ""),
+            str(endpoint.get("format") or ""),
+            str(endpoint.get("host") or ""),
+            str(endpoint.get("port") or ""),
+            str(endpoint.get("database") or ""),
+            str(endpoint.get("schema") or ""),
+            str(endpoint.get("table") or endpoint.get("collection") or ""),
+            conn_fp,
+        ]
+    )
+
+
 def _profile_key(source: dict[str, Any], destination: dict[str, Any]) -> str:
-    parts = [
-        source.get("kind", ""),
-        source.get("format", ""),
-        source.get("table") or source.get("collection") or source.get("schema", ""),
-        destination.get("kind", ""),
-        destination.get("format", ""),
-        destination.get("table") or destination.get("collection") or destination.get("schema", ""),
-    ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+    return hashlib.sha256(
+        f"{_endpoint_identity(source)}→{_endpoint_identity(destination)}".encode("utf-8")
+    ).hexdigest()
 
 
 def _profile_collection():

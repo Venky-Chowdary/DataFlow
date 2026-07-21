@@ -87,8 +87,13 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Transform dry-run / integrity",
         "category": "hard",
         "why": "A sample row could not be transformed or violates a data-integrity rule. This means the real transfer would fail or produce bad data.",
-        "fix": "Fix the source values, choose a less strict transform, or adjust the validation mode. For schemaless destinations the transform is stored as-is and may not block.",
+        "fix": (
+            "Read the failing column message. Type mismatches (e.g. VARCHAR → NUMBER) need "
+            "Remap/Widen on Map — not Strip controls. Encoding issues need Strip/Quarantine. "
+            "Validation mode only softens confidence thresholds; it does not invent a type cast."
+        ),
         "examples": [
+            "population (VARCHAR) → population (NUMBER(38,0)) — remap off the typed column or keep cast when samples are clean numbers.",
             "'2024-13-01' cannot be parsed as a date → correct the date or use a string target.",
             "A required identifier is null → remove the row or relax the source constraint.",
         ],
@@ -168,8 +173,15 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "keywords": ["dry-run / integrity failed"],
         "gate": "g5_dry_run",
         "why": "The sample rows could not be transformed or failed an integrity check.",
-        "fix": "Open the issue list and fix the source values or the target types. For schemaless destinations (MongoDB, DynamoDB, Redis) DataFlow can store values as-is, but if a typed target is used the transform must succeed.",
-        "examples": ["'abc' could not be parsed as integer."],
+        "fix": (
+            "If the message shows a type pair like VARCHAR → NUMBER, use Remap/Widen to VARCHAR "
+            "(or fix the source values) — Strip controls and Quarantine do not change column types. "
+            "Use Strip/Quarantine only for format-control or encoding characters."
+        ),
+        "examples": [
+            "population (VARCHAR) → population (NUMBER(38,0)) — remap off the typed column or cast clean numbers.",
+            "'abc' could not be parsed as integer.",
+        ],
     },
     {
         "keywords": ["target ddl incompatible"],
@@ -444,11 +456,18 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "examples": ["PostgreSQL connection refused."],
     },
     {
-        "keywords": ["destination not reachable", "destination error"],
+        "keywords": ["destination not reachable", "destination error", "authentication failed"],
         "gate": "g2_destination",
-        "why": "DataFlow cannot reach the destination.",
-        "fix": "Check the destination connection, credentials, and write permissions.",
-        "examples": ["MongoDB auth failed."],
+        "why": "DataFlow cannot authenticate to or reach the destination — Validate blocks before any write.",
+        "fix": (
+            "Open Connectors → edit the destination → set Auth source (often `admin` for Railway/Atlas MongoDB) "
+            "and re-enter username/password if needed → click Test until it passes → return to Transfer and Re-validate. "
+            "Strip controls / Quarantine cannot fix credentials."
+        ),
+        "examples": [
+            "MongoDB Authentication failed — user lives in admin, Auth source was blank or set to the app database.",
+            "Host-only connection string without form username/password — credentials were not injected.",
+        ],
     },
 ]
 

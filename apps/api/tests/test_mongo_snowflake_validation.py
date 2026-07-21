@@ -319,38 +319,81 @@ def test_real_mongo_messy_docs_roundtrip_variant_queryable():
         {"id": 3, "tags": [], "profile": None},                  # empty / null
     ])
     try:
-        with fakesnow.patch():
-            import snowflake.connector as sc
+        from connectors.snowflake_conn import get_connection
 
-            engine = UniversalTransferEngine()
-            req = TransferRequest(
-                source=EndpointConfig(kind="database", format="mongodb", host="localhost",
-                                      port=27017, database="dataflow", table=coll),
-                destination=EndpointConfig(kind="database", format="snowflake", host="localhost",
-                                           port=443, database="dataflow", username="t", password="t",
-                                           schema="public", table=dst),
-                sync_mode="full_refresh_overwrite",
-                stream_contracts=[{"name": coll, "primary_key": "id", "selected": True,
-                                   "sync_mode": "full_refresh_overwrite"}],
-                skip_preflight=True,
-            )
-            res = engine.execute_tracked(req, uuid.uuid4().hex[:24])
-            assert res.success is True, res.error
-            assert res.records_transferred == 3
-            assert res.reconciliation.get("rejected_rows", 0) == 0  # no data dropped
+        engine = UniversalTransferEngine()
+        req = TransferRequest(
+            source=EndpointConfig(kind="database", format="mongodb", host="localhost",
+                                  port=27017, database="dataflow", table=coll),
+            destination=EndpointConfig(kind="database", format="snowflake", host="localhost",
+                                       port=443, database="dataflow", username="t", password="t",
+                                       schema="public", table=dst),
+            sync_mode="full_refresh_overwrite",
+            stream_contracts=[{"name": coll, "primary_key": "id", "selected": True,
+                               "sync_mode": "full_refresh_overwrite"}],
+            skip_preflight=True,
+        )
+        res = engine.execute_tracked(req, uuid.uuid4().hex[:24])
+        assert res.success is True, res.error
+        assert res.records_transferred == 3
+        assert res.reconciliation.get("rejected_rows", 0) == 0  # no data dropped
 
-            conn = sc.connect(account="localhost", user="t", password="t",
-                              database="dataflow", schema="public")
-            cur = conn.cursor()
-            # Nested array element is queryable as real VARIANT, not flat text.
-            cur.execute(f'SELECT "tags"[0] FROM "{dst}" WHERE "id" = 1')
-            assert cur.fetchall()[0][0].strip('"') == "vip"
-            # Bare scalar loaded as a VARIANT string (not dropped).
-            cur.execute(f'SELECT "tags" FROM "{dst}" WHERE "id" = 2')
-            assert cur.fetchall()[0][0].strip('"') == "single"
-            # Nested object field is queryable.
-            cur.execute(f'SELECT "profile":age FROM "{dst}" WHERE "id" = 1')
-            assert str(cur.fetchall()[0][0]).strip('"') == "30"
+        conn = get_connection(
+            account="localhost", username="t", password="t",
+            database="dataflow", schema="public", warehouse="", connection_string="",
+        )
+        cur = conn.cursor()
+        # Nested array element is queryable as real VARIANT, not flat text.
+        cur.execute(f'SELECT "tags"[0] FROM "{dst}" WHERE "id" = 1')
+        assert cur.fetchall()[0][0].strip('"') == "vip"
+        # Bare scalar loaded as a VARIANT string (not dropped).
+        cur.execute(f'SELECT "tags" FROM "{dst}" WHERE "id" = 2')
+        assert cur.fetchall()[0][0].strip('"') == "single"
+        # Nested object field is queryable.
+        cur.execute(f'SELECT "profile":age FROM "{dst}" WHERE "id" = 1')
+        assert str(cur.fetchall()[0][0]).strip('"') == "30"
+        conn.close()
     finally:
         client["dataflow"][coll].drop()
         client.close()
+
+
+def test_hex_mongo_id_does_not_map_onto_snowflake_number_id_when_samples_present():
+    """Hex/ObjectId-like ``_id`` must not bind to existing Snowflake NUMBER ``id``.
+
+    Without samples the semantic form ``_id`` → ``id`` scores ~0.73 and lands on
+    NUMBER(38,0), which Validate correctly blocks. Introspect must attach samples
+    so the mapper invents a VARCHAR create-new column instead.
+    """
+    from services.semantic_mapper import map_columns
+
+    samples = [
+        "e3befcc4bfe68c256fadde759f81221eb54b42fb36105c0884c545487c642e5b",
+        "c97abd998d4bfb7d033b363648f9a9b16f77606784c37b21d9864706b103754e",
+        "d2909789b4ace07d724901b5ecfe1efeb3777638c9bb1c38a3e2eb1e7cb8e018",
+        "72a198e224365b20ab46575aab687271181e1f7f844671de8c6de40b147e7356",
+    ]
+    # Without samples: regression marker — semantic name match onto NUMBER wins.
+    bare = map_columns(
+        ["_id"],
+        ["id"],
+        source_schemas=[{"name": "_id", "inferred_type": "TEXT", "samples": []}],
+        target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
+        destination_db_type="snowflake",
+    )
+    assert bare[0]["target"] == "id"
+    assert not bare[0].get("create_new")
+
+    mapped = map_columns(
+        ["_id"],
+        ["id"],
+        source_schemas=[{"name": "_id", "inferred_type": "TEXT", "samples": samples}],
+        target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
+        destination_db_type="snowflake",
+    )
+    assert len(mapped) == 1
+    m = mapped[0]
+    assert m.get("create_new") is True
+    assert str(m.get("target_type", "")).upper() in {"VARCHAR", "TEXT", "STRING"}
+    # Prefer a new text field over overwriting the incompatible NUMBER id.
+    assert m["target"].lower() != "id"

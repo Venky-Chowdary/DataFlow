@@ -193,6 +193,7 @@ def detect_schema_drift(
     stored_target_fp: str = "",
     mappings: list[dict[str, Any]] | None = None,
     destination_db_type: str = "",
+    sample_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Compare current schemas to stored fingerprints and mapping coverage.
@@ -214,10 +215,24 @@ def detect_schema_drift(
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
     mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
     unmapped_sources = [c for c in source_columns if c not in mapped_sources]
-    orphan_targets = [c for c in target_columns if c.lower() not in mapped_targets]
+    # Engine-managed SCD2 / CDC bookkeeping columns are not mapping orphans.
+    try:
+        from services.scd2_engine import SCD2_COLUMNS
+
+        system_targets = {c.lower() for c in SCD2_COLUMNS}
+    except Exception:
+        system_targets = {"valid_from", "valid_to", "is_current", "row_hash"}
+    system_targets |= {"_df_lsn", "df_lsn"}
+    orphan_targets = [
+        c
+        for c in target_columns
+        if c.lower() not in mapped_targets and c.lower() not in system_targets
+    ]
 
     type_mismatches: list[dict[str, str]] = []
     if not schemaless:
+        from services.coercion_probe import samples_coerce_mapping
+
         for m in mappings:
             src = str(m.get("source") or "")
             tgt = str(m.get("target") or "")
@@ -225,8 +240,22 @@ def detect_schema_drift(
                 continue
             src_type = source_schema.get(src) or "VARCHAR"
             tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
-            if target_schema and is_lossy_coercion(src_type, tgt_type):
-                type_mismatches.append({"source": src, "target": tgt, "source_type": src_type.upper(), "target_type": tgt_type.upper()})
+            if not (target_schema and is_lossy_coercion(src_type, tgt_type)):
+                continue
+            # Declared VARCHAR→NUMBER with clean numeric samples is not breaking drift.
+            if sample_rows and samples_coerce_mapping(
+                m,
+                source_types=source_schema,
+                target_types=target_schema,
+                rows=sample_rows,
+            ):
+                continue
+            type_mismatches.append({
+                "source": src,
+                "target": tgt,
+                "source_type": src_type.upper(),
+                "target_type": tgt_type.upper(),
+            })
 
     issues: list[str] = []
     if source_changed:

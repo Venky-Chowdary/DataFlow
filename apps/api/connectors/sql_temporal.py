@@ -19,22 +19,39 @@ def sql_base_type(source_type: str) -> str:
     return upper
 
 
-def parse_sql_datetime(value: Any) -> datetime | None:
-    """Parse ISO-8601 / common CSV timestamps into naive UTC for DATETIME/TIMESTAMP."""
+def parse_sql_datetime(value: Any, *, aware_utc: bool = False) -> datetime | None:
+    """Parse ISO-8601 / common CSV timestamps.
+
+    Default returns **naive UTC** (MySQL DATETIME / TIMESTAMP without TZ).
+    When ``aware_utc=True`` (Postgres TIMESTAMPTZ), keep ``tzinfo=UTC`` so the
+    driver does not reinterpret naive values in the session time zone.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         dt = value
         if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
+            dt = dt.astimezone(timezone.utc)
+            return dt if aware_utc else dt.replace(tzinfo=None)
+        return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
     if isinstance(value, date) and not isinstance(value, datetime):
-        return datetime.combine(value, time.min)
+        dt = datetime.combine(value, time.min)
+        return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
     if not isinstance(value, str):
         return None
     text = value.strip()
     if not text:
         return None
+    # Unix epoch seconds / millis (common in CSV edge fixtures).
+    if text.isdigit() or (text[0] in "+-" and text[1:].isdigit()):
+        try:
+            raw = int(text)
+            if abs(raw) >= 10**12:
+                raw = raw // 1000
+            dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+            return dt if aware_utc else dt.replace(tzinfo=None)
+        except (OverflowError, OSError, ValueError):
+            pass
     if text.endswith(("Z", "z")):
         text = text[:-1] + "+00:00"
     if text.upper().endswith(" UTC"):
@@ -57,8 +74,9 @@ def parse_sql_datetime(value: Any) -> datetime | None:
         else:
             return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+        dt = dt.astimezone(timezone.utc)
+        return dt if aware_utc else dt.replace(tzinfo=None)
+    return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
 
 
 def parse_sql_date(value: Any) -> date | None:
@@ -81,7 +99,10 @@ def parse_sql_date(value: Any) -> date | None:
 def coerce_sql_temporal(value: Any, source_type: str) -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value."""
     base = sql_base_type(source_type)
-    if base in {"DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ"}:
+    if base in {"TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP WITH TIME ZONE"}:
+        parsed = parse_sql_datetime(value, aware_utc=True)
+        return parsed if parsed is not None else value
+    if base in {"DATETIME", "TIMESTAMP", "TIMESTAMP_LTZ"}:
         parsed = parse_sql_datetime(value)
         return parsed if parsed is not None else value
     if base == "DATE":

@@ -582,6 +582,36 @@ def infer_transform(source_col: str, target_col: str, inferred_type: str) -> str
     return infer_transform_for_mapping(source_col, target_col, inferred_type, None)
 
 
+def _samples_prefer_boolean_over_integer(samples: list[str] | None) -> bool:
+    """True when samples parse as booleans but not as plain integers (true/false).
+
+    Used when the destination DDL is INTEGER (SQLite bool affinity) so we coerce
+    with the boolean transform instead of inventing a create-new text column.
+    """
+    if not samples:
+        return False
+    checked = 0
+    bool_ok = 0
+    int_ok = 0
+    for raw in samples[:8]:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        checked += 1
+        if _parse_boolean(text) is not None:
+            bool_ok += 1
+        try:
+            int(text, 10)
+            int_ok += 1
+        except ValueError:
+            pass
+    if checked < 2:
+        return False
+    return (bool_ok / checked) >= 0.9 and (int_ok / checked) < 0.5
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -602,6 +632,11 @@ def infer_transform_for_mapping(
     # use a direct numeric transform, otherwise apply semantic transforms.
     if tgt and tgt not in {"string", "text"}:
         if tgt == "integer":
+            # SQLite/MySQL/etc. store BOOLEAN as INTEGER. Coerce boolean sources
+            # (and true/false text samples) with the boolean transform so remaps
+            # do not invent active_text / null out the existing flag column.
+            if src == "boolean" or _samples_prefer_boolean_over_integer(source_samples):
+                return "boolean"
             return "integer"
         if tgt == "decimal":
             if src in {"string", "text", "unknown"} and semantic == "currency":

@@ -32,13 +32,8 @@ def _parse_decimal_capacity(ddl: str) -> tuple[int, int] | None:
         precision = int(m.group(1))
         scale = int(m.group(2) or 0)
         return precision, scale
-    # Bare NUMBER / DECIMAL (Snowflake NUMBER defaults to 38,0)
-    if _NUMBERISH.match(text) and "(" not in text:
-        logical = normalize_logical_type(text)
-        if logical in {"decimal", "float"}:
-            return 38, 0
-        if logical == "integer":
-            return 38, 0
+    # Bare NUMBER / DECIMAL without precision: capacity is unknown — do not
+    # invent scale=0 (that falsely blocks "10.00" → DECIMAL on SQLite re-runs).
     return None
 
 
@@ -210,15 +205,17 @@ def evaluate_ddl_compatibility(
     overwrite = sync in _OVERWRITE_SYNC
     named_target = bool((destination_table or "").strip())
 
-    # Honest schema gate: empty live schema on a named non-overwrite target means
-    # Validate cannot prove columns exist — do not pretend the table is new.
+    # Honest schema gate: empty live schema on an *existing* non-overwrite target
+    # means Validate cannot prove columns exist — do not pretend the table is new.
+    # When table_exists is False (create-new), empty target_schema is expected —
+    # SCD2 / upsert / incremental first runs must not be blocked here.
     if (
         dest_connected
         and not schemaless
         and named_target
         and not overwrite
         and not target_schema
-        and (table_exists or named_target)
+        and table_exists
     ):
         issues.append(
             "Could not load destination schema for existing target — "
@@ -253,9 +250,23 @@ def evaluate_ddl_compatibility(
             continue
 
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
-            issues.append(
-                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
-            )
+            # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are
+            # declared-lossy but write-safe when values coerce. Only hard-block
+            # when samples are missing or fail the write-path transform.
+            sample_ok = False
+            if sample_rows:
+                from services.coercion_probe import samples_coerce_mapping
+
+                sample_ok = samples_coerce_mapping(
+                    m,
+                    source_types=source_schema or {},
+                    target_types=target_schema or {},
+                    rows=sample_rows,
+                )
+            if not sample_ok:
+                issues.append(
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
+                )
 
         if not schemaless and sample_rows and tgt_type:
             samples = _sample_values(sample_rows, src)

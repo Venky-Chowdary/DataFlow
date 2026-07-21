@@ -113,8 +113,7 @@ def test_edge_types_csv_to_snowflake():
     )
 
     engine = UniversalTransferEngine()
-    with fakesnow.patch():
-        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
     assert result.success is True, result.error
     assert result.records_transferred == 2
     assert result.reconciliation.get("passed") is True
