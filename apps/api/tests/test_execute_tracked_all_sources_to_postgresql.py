@@ -7,7 +7,6 @@ class can both be written to and read from, not just the write path tested by
 
 from __future__ import annotations
 
-import contextlib
 import sys
 import uuid
 from dataclasses import replace
@@ -48,7 +47,7 @@ def test_all_source_to_postgresql(source: EndpointConfig):
         pytest.skip("destination-only vector store cannot act as a transfer source")
 
     if source.format == "snowflake":
-        fakesnow = pytest.importorskip("fakesnow")
+        pytest.importorskip("fakesnow")
     elif not _is_reachable(source.host, source.port):
         pytest.skip(f"{source.format} emulator not reachable on {source.host}:{source.port}")
 
@@ -62,13 +61,6 @@ def test_all_source_to_postgresql(source: EndpointConfig):
     columns = ["id", "amount"]
     schema = {"id": "INTEGER", "amount": "DECIMAL"}
     mappings = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]
-
-    # Seed the source connector. Snowflake uses fakesnow, so wrap the whole test
-    # in its patch context.
-    if source.format == "snowflake":
-        ctx = fakesnow.patch()
-    else:
-        ctx = contextlib.nullcontext()
 
     destination = EndpointConfig(
         kind="database",
@@ -90,14 +82,16 @@ def test_all_source_to_postgresql(source: EndpointConfig):
     )
 
     engine = UniversalTransferEngine()
-    with ctx:
-        rows, _, summary = write_destination_database(
-            source, records, columns, schema, mappings
-        )
-        assert rows == 2, f"{source.format}: expected 2 rows seeded, got {rows} (summary={summary})"
-        assert summary.get("error") is None, f"{source.format}: {summary.get('error')}"
+    # snowflake_conn auto-patches local accounts — do not nest fakesnow.patch().
+    rows, _, summary = write_destination_database(
+        source, records, columns, schema, mappings
+    )
+    assert rows == 2, f"{source.format}: expected 2 rows seeded, got {rows} (summary={summary})"
+    assert summary.get("error") is None, f"{source.format}: {summary.get('error')}"
 
-        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
     assert result.success is True, f"{source.format}: {result.error}"
-    assert result.records_transferred == 2, f"{source.format}: expected 2 transferred, got {result.records_transferred}"
+    assert result.records_transferred == 2, (
+        f"{source.format}: expected 2 transferred, got {result.records_transferred}"
+    )
     assert result.reconciliation.get("passed") is True, f"{source.format}: {result.reconciliation}"

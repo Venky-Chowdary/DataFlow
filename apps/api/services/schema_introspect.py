@@ -553,11 +553,17 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:
+                from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+
+                try:
+                    target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
+                except Exception:
+                    pass
                 cur.execute(
                     """
                     SELECT column_name, data_type, is_nullable
                     FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s
+                    WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
                     ORDER BY ordinal_position
                     """,
                     (schema, target_table),

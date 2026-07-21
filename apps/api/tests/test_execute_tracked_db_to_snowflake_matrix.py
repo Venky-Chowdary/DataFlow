@@ -193,28 +193,27 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
         assert schema.get("tags") in {"ARRAY", "JSON"}, schema
 
         mappings = [{"source": h, "target": h, "confidence": 0.99} for h in headers]
-        with fakesnow.patch():
-            pf = apply_policy_gates(
-                run_file_preflight(
-                    columns=headers, column_types=schema, row_count=len(records),
-                    mappings=mappings, destination_connected=True, source_connected=True,
-                    source_kind="database", source_format="mongodb",
-                    sync_mode="full_refresh_overwrite", sample_rows=records,
-                    confidence_threshold=confidence_threshold_for_mode("strict"),
-                    destination_column_types={}, destination_table_exists=False,
-                    destination_can_create=True, destination_db_type="snowflake",
-                ),
-                run_transfer_policy_gates(
-                    sync_mode="full_refresh_overwrite", schema_policy="manual_review",
-                    validation_mode="strict",
-                    stream_contracts=[{"name": src_collection, "primary_key": "id",
-                                       "selected": True, "sync_mode": "full_refresh_overwrite"}],
-                    backfill_new_fields=False,
-                ),
+        pf = apply_policy_gates(
+            run_file_preflight(
+                columns=headers, column_types=schema, row_count=len(records),
+                mappings=mappings, destination_connected=True, source_connected=True,
+                source_kind="database", source_format="mongodb",
+                sync_mode="full_refresh_overwrite", sample_rows=records,
+                confidence_threshold=confidence_threshold_for_mode("strict"),
+                destination_column_types={}, destination_table_exists=False,
+                destination_can_create=True, destination_db_type="snowflake",
+            ),
+            run_transfer_policy_gates(
+                sync_mode="full_refresh_overwrite", schema_policy="manual_review",
                 validation_mode="strict",
-            )
-            assert pf["passed"] is True, pf.get("blockers")
-            assert pf["coercion_report"]["has_blocking_failures"] is False
+                stream_contracts=[{"name": src_collection, "primary_key": "id",
+                                   "selected": True, "sync_mode": "full_refresh_overwrite"}],
+                backfill_new_fields=False,
+            ),
+            validation_mode="strict",
+        )
+        assert pf["passed"] is True, pf.get("blockers")
+        assert pf["coercion_report"]["has_blocking_failures"] is False
 
         # 2) Real transfer + round-trip: every row lands, VARIANT is queryable.
         request = TransferRequest(
@@ -225,22 +224,24 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
                                "primary_key": "id", "selected": True}],
             skip_preflight=True,
         )
-        with fakesnow.patch():
-            import snowflake.connector as sc
+        from connectors.snowflake_conn import get_connection
 
-            engine = UniversalTransferEngine()
-            result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
-            assert result.success is True, result.error
-            assert result.records_transferred == 3
-            assert result.reconciliation.get("rejected_rows", 0) == 0
+        engine = UniversalTransferEngine()
+        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+        assert result.success is True, result.error
+        assert result.records_transferred == 3
+        assert result.reconciliation.get("rejected_rows", 0) == 0
 
-            conn = sc.connect(account="localhost", user="t", password="t",
-                              database="dataflow", schema="public")
-            cur = conn.cursor()
-            cur.execute(f'SELECT "tags"[0] FROM "{dst_table}" WHERE "id" = 1')
-            assert cur.fetchall()[0][0].strip('"') == "vip"
-            cur.execute(f'SELECT "tags" FROM "{dst_table}" WHERE "id" = 2')
-            assert cur.fetchall()[0][0].strip('"') == "single"
+        conn = get_connection(
+            account="localhost", username="t", password="t",
+            database="dataflow", schema="public", warehouse="", connection_string="",
+        )
+        cur = conn.cursor()
+        cur.execute(f'SELECT "tags"[0] FROM "{dst_table}" WHERE "id" = 1')
+        assert cur.fetchall()[0][0].strip('"') == "vip"
+        cur.execute(f'SELECT "tags" FROM "{dst_table}" WHERE "id" = 2')
+        assert cur.fetchall()[0][0].strip('"') == "single"
+        conn.close()
     finally:
         c = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
         c["dataflow"][src_collection].drop()

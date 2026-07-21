@@ -134,9 +134,23 @@ def _get_embedder(name: str | None = None) -> Embedder:
             dim = int(suffix)
         return _HashEmbedder(dimension=dim)
     if model_name.startswith("sentence-transformers/"):
+        try:
+            import sentence_transformers  # noqa: F401
+        except ImportError as exc:
+            raise ModuleNotFoundError(
+                f"sentence_transformers is required for embedding model {model_name!r}; "
+                "install sentence-transformers or set DATAFLOW_EMBEDDING_MODEL=hash/32"
+            ) from exc
         return _SentenceTransformerEmbedder(model_name=model_name.split("/", 1)[1])
     if model_name in {"text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"}:
         return _OpenAIEmbedder(model_name=model_name)
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError as exc:
+        raise ModuleNotFoundError(
+            f"sentence_transformers is required for embedding model {model_name!r}; "
+            "install sentence-transformers or set DATAFLOW_EMBEDDING_MODEL=hash/32"
+        ) from exc
     return _SentenceTransformerEmbedder(model_name=model_name)
 
 

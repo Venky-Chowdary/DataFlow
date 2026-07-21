@@ -41,6 +41,87 @@ def _is_local_account(account: str) -> bool:
     return account.lower() in ("local", "localhost", "fakesnow")
 
 
+def resolve_snowflake_table_name(cur: Any, schema: str, table: str) -> str | None:
+    """Return the exact ``TABLE_NAME`` as stored, or ``None`` if not visible.
+
+    DataFlow historically created quoted lowercase tables via
+    ``sanitize_identifier`` + ``"name"`` quoting (e.g. ``"csvtestfile"``), while
+    readers fold unquoted-style names to ``CSVTESTFILE``. Preview then fails with
+    ``002003 Object 'DATAFLOW.PUBLIC.CSVTESTFILE' does not exist`` even though the
+    lowercase table exists and information_schema can see it.
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    schema_f = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+    raw = (table or "").strip()
+    if not raw:
+        raise ValueError("Snowflake table name is empty")
+
+    candidates: list[str] = []
+    for c in (snowflake_fold_identifier(raw), raw, raw.upper(), raw.lower()):
+        if c and c not in candidates:
+            candidates.append(c)
+
+    for cand in candidates:
+        try:
+            cur.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE UPPER(table_schema) = UPPER(%s)
+                  AND table_name = %s
+                  AND table_type = 'BASE TABLE'
+                LIMIT 1
+                """,
+                (schema_f, cand),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:
+            continue
+
+    try:
+        cur.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE UPPER(table_schema) = UPPER(%s)
+              AND UPPER(table_name) = UPPER(%s)
+              AND table_type = 'BASE TABLE'
+            LIMIT 1
+            """,
+            (schema_f, raw),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        pass
+
+    return None
+
+
+def resolve_or_fold_snowflake_table(cur: Any, schema: str, table: str) -> str:
+    """Resolve stored table name, or Snowflake-fold for a not-yet-created table."""
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    found = resolve_snowflake_table_name(cur, schema, table)
+    if found:
+        return found
+    return snowflake_fold_identifier((table or "").strip())
+
+
+def snowflake_qualified_table(schema: str, table: str) -> str:
+    """Quote schema.table using the exact stored/folded names (no second fold)."""
+    from connectors.sql_identifiers import quote_sql_identifier, snowflake_fold_identifier
+
+    sch = snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+    # ``table`` must already be the resolved information_schema name, or a
+    # folded name for a table that does not exist yet.
+    return f"{quote_sql_identifier(sch)}.{quote_sql_identifier(table)}"
+
+
 def _fakesnow_db_path() -> str:
     path = os.environ.get("FAKESNOW_DB_PATH", "/tmp/fakesnow_data")
     os.makedirs(path, exist_ok=True)

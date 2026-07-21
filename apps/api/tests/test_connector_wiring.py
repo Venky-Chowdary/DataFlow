@@ -18,6 +18,7 @@ if str(_SRC) not in sys.path:
 from transfer.connector_capabilities import (  # noqa: E402
     _DRIVER_CAPS,
     _FILE_CAPS,
+    _source_only_ready,
     dest_ready,
     get_capabilities,
     source_ready,
@@ -46,8 +47,13 @@ def test_transfer_live_drivers_have_full_caps():
     assert_registry_matches_capabilities()
     for driver in transfer_live_driver_types():
         caps = get_capabilities(driver)
-        assert transfer_ready(caps), f"{driver} should be transfer-ready"
         assert caps.get("test"), f"{driver} must support test/probe"
+        # Source-only SKUs (couchbase, rest_api, …) are live for extract but
+        # are not duplex transfer-ready — assert the correct readiness tier.
+        if _source_only_ready(caps):
+            assert caps.get("read"), f"{driver} source-only must support read"
+        else:
+            assert transfer_ready(caps), f"{driver} should be transfer-ready"
 
 
 def test_registry_includes_all_db_drivers():

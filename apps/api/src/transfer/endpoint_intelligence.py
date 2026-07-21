@@ -358,8 +358,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 }
                 for k, v in intel.items()
             }
-            out["sample_data"] = safe_records[:10]
-            out["data"] = safe_records[:10]
+            # Keep Validate sample depth aligned with Execute preflight
+            # (engine uses records[:100] for encoding / integrity). Truncating
+            # to 10 here let Mongo→warehouse routes APPROVE on a clean preview
+            # while Execute failed on U+200B / format-control rows later in the set.
+            preview_n = max(1, min(int(sample_limit or 100), len(safe_records) or 1))
+            out["sample_data"] = safe_records[:preview_n]
+            out["data"] = safe_records[:preview_n]
             out["sample_row_count"] = len(records)
             try:
                 estimate = int(coll.estimated_document_count(maxTimeMS=5000)) if columns else 0
@@ -517,8 +522,12 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         out["message"] = f"{out.get('message', '')} · schema probe: {e}".strip(" ·")
 
 
-def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 10) -> None:
-    """Attach JSON-safe sample rows from a ReadBatch for Validate dry-run."""
+def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> None:
+    """Attach JSON-safe sample rows from a ReadBatch for Validate dry-run.
+
+    Default 100 matches Execute's preflight integrity window so encoding /
+    format-control findings cannot hide behind a 10-row preview.
+    """
     headers = list(batch.headers or [])
     rows = list(batch.rows or [])
     safe: list[dict] = []
@@ -580,7 +589,7 @@ def _attach_sql_sample_rows(
             auth_role=endpoint.auth_role or cfg.get("role", "") or cfg.get("auth_role", ""),
             extra=dict(endpoint.extra or {}),
         )
-        # Cap preview reads — Validate only needs a small transform sample.
+        # Cap preview reads to the same window Execute uses for preflight integrity.
         limit = max(1, min(int(sample_limit or 100), 100))
         records, headers, inferred = read_source_database(
             sample_ep, limit=limit, raise_on_truncate=False
@@ -594,7 +603,7 @@ def _attach_sql_sample_rows(
                 merged.setdefault(col, typ)
             out["schema"] = merged
         safe_records: list[dict] = []
-        for row in records[:10]:
+        for row in records[:limit]:
             safe_records.append({k: cell_to_string(row.get(k, "")) for k in (headers or out.get("columns") or [])})
         out["sample_data"] = safe_records
         out["data"] = safe_records

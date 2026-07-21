@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 from connectors.base import ReadBatch
-from connectors.snowflake_conn import get_connection, normalize_account
+from connectors.snowflake_conn import (
+    get_connection,
+    normalize_account,
+    resolve_or_fold_snowflake_table,
+    snowflake_qualified_table,
+)
 from connectors.sql_identifiers import (
     quote_column_list,
     quote_sql_identifier,
-    quote_table_ref,
     require_safe_identifier,
 )
 
@@ -36,6 +41,12 @@ def _snowflake_schema(schema: str | None) -> str:
     from connectors.sql_identifiers import snowflake_fold_identifier
 
     return snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
+
+
+def _table_ref(cur: Any, schema: str, table: str) -> str:
+    """Resolve + quote a Snowflake table (handles legacy lowercase quoted names)."""
+    resolved = resolve_or_fold_snowflake_table(cur, schema, table)
+    return snowflake_qualified_table(schema, resolved)
 
 
 def count_table_rows(
@@ -67,7 +78,7 @@ def count_table_rows(
     try:
         with conn.cursor() as cur:
             _use_warehouse(cur, warehouse)
-            table_ref = quote_table_ref(table, schema, dialect="snowflake")
+            table_ref = _table_ref(cur, schema, table)
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             return int(cur.fetchone()[0])
     finally:
@@ -106,7 +117,7 @@ def read_table_batch(
     try:
         with conn.cursor() as cur:
             _use_warehouse(cur, warehouse)
-            table_ref = quote_table_ref(table, schema, dialect="snowflake")
+            table_ref = _table_ref(cur, schema, table)
             if known_total_rows is not None:
                 total = known_total_rows
             else:
@@ -164,7 +175,7 @@ def read_table_cursor_batch(
     try:
         with conn.cursor() as cur:
             _use_warehouse(cur, warehouse)
-            table_ref = quote_table_ref(table, schema, dialect="snowflake")
+            table_ref = _table_ref(cur, schema, table)
             col_sql = (
                 quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
                 if columns

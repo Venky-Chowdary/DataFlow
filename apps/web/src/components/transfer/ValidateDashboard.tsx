@@ -120,6 +120,8 @@ interface ValidateDashboardProps {
   onApplyAction?: (action: ValidationSuggestedAction) => void;
   /** Apply strip_controls across mappings and re-run preflight. */
   onStripControlChars?: () => void | Promise<void>;
+  /** True when text mappings already carry strip_controls (Execute will sanitize). */
+  stripControlsApplied?: boolean;
   /** Soften to quarantine-friendly posture and re-run. */
   onQuarantineAndRerun?: () => void | Promise<void>;
   /** Cell-level will-quarantine / will-coerce preview from sample rows. */
@@ -447,6 +449,7 @@ export function ValidateDashboard({
   validationMode,
   onApplyAction,
   onStripControlChars,
+  stripControlsApplied = false,
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
@@ -906,8 +909,15 @@ export function ValidateDashboard({
             <p className="df2-vd-hero-engine-meta">
               Engine reported {formatDuration(engineMsTotal)} across {preflight.gates.length} gates
               {sampleScanned != null && sampleScanned > 0
-                ? ` · dry-run sampled ${sampleScanned.toLocaleString()} preview rows (full table proven after write in Job Theater)`
+                ? ` · dry-run sampled ${sampleScanned.toLocaleString()} preview rows (must cover the same integrity window Execute uses; full table proven after write in Job Theater)`
                 : " · dry-run uses the Transfer Studio preview sample, not the full table"}
+            </p>
+          )}
+          {!running && preflight?.passed && !stripControlsApplied && onStripControlChars && (
+            <p className="df2-vd-hero-engine-meta" role="status">
+              Text mappings do not yet include <code>strip_controls</code>. If a prior job failed on
+              U+200B / format-control characters, click <strong>Strip controls &amp; re-run</strong> before
+              Execute — green Validate on a clean preview is not the same as sanitizing the full load.
             </p>
           )}
         </div>
@@ -994,9 +1004,10 @@ export function ValidateDashboard({
             )}
           </div>
           <p className="df2-vd-cell-preview-hint">
-            Strip removes format-control characters from text mappings.
+            Strip controls &amp; re-run writes <code>strip_controls</code> onto text mappings, then re-validates.
+            Opening Fix bad data alone does nothing until you click Strip. Job Theater
+            &quot;Apply on replay&quot; only cleans quarantined rows after a successful write — it does not unblock Execute.
             Quarantine keeps bad cells out of the destination (never silent drop).
-            More AI suggestions appear below after analysis.
           </p>
         </div>
       )}

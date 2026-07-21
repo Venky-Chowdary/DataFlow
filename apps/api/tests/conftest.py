@@ -31,6 +31,13 @@ import services as _canonical_services  # noqa: E402,F401
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+# Slim CI images omit sentence-transformers; use a deterministic hash embedder
+# so vector destination matrices still exercise the write path.
+try:
+    import sentence_transformers  # noqa: F401
+except ImportError:
+    os.environ.setdefault("DATAFLOW_EMBEDDING_MODEL", "hash/32")
+
 
 @pytest.fixture(autouse=True)
 def _isolate_cdc_leases(monkeypatch):

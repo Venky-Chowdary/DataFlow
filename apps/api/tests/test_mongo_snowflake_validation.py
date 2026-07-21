@@ -319,38 +319,40 @@ def test_real_mongo_messy_docs_roundtrip_variant_queryable():
         {"id": 3, "tags": [], "profile": None},                  # empty / null
     ])
     try:
-        with fakesnow.patch():
-            import snowflake.connector as sc
+        from connectors.snowflake_conn import get_connection
 
-            engine = UniversalTransferEngine()
-            req = TransferRequest(
-                source=EndpointConfig(kind="database", format="mongodb", host="localhost",
-                                      port=27017, database="dataflow", table=coll),
-                destination=EndpointConfig(kind="database", format="snowflake", host="localhost",
-                                           port=443, database="dataflow", username="t", password="t",
-                                           schema="public", table=dst),
-                sync_mode="full_refresh_overwrite",
-                stream_contracts=[{"name": coll, "primary_key": "id", "selected": True,
-                                   "sync_mode": "full_refresh_overwrite"}],
-                skip_preflight=True,
-            )
-            res = engine.execute_tracked(req, uuid.uuid4().hex[:24])
-            assert res.success is True, res.error
-            assert res.records_transferred == 3
-            assert res.reconciliation.get("rejected_rows", 0) == 0  # no data dropped
+        engine = UniversalTransferEngine()
+        req = TransferRequest(
+            source=EndpointConfig(kind="database", format="mongodb", host="localhost",
+                                  port=27017, database="dataflow", table=coll),
+            destination=EndpointConfig(kind="database", format="snowflake", host="localhost",
+                                       port=443, database="dataflow", username="t", password="t",
+                                       schema="public", table=dst),
+            sync_mode="full_refresh_overwrite",
+            stream_contracts=[{"name": coll, "primary_key": "id", "selected": True,
+                               "sync_mode": "full_refresh_overwrite"}],
+            skip_preflight=True,
+        )
+        res = engine.execute_tracked(req, uuid.uuid4().hex[:24])
+        assert res.success is True, res.error
+        assert res.records_transferred == 3
+        assert res.reconciliation.get("rejected_rows", 0) == 0  # no data dropped
 
-            conn = sc.connect(account="localhost", user="t", password="t",
-                              database="dataflow", schema="public")
-            cur = conn.cursor()
-            # Nested array element is queryable as real VARIANT, not flat text.
-            cur.execute(f'SELECT "tags"[0] FROM "{dst}" WHERE "id" = 1')
-            assert cur.fetchall()[0][0].strip('"') == "vip"
-            # Bare scalar loaded as a VARIANT string (not dropped).
-            cur.execute(f'SELECT "tags" FROM "{dst}" WHERE "id" = 2')
-            assert cur.fetchall()[0][0].strip('"') == "single"
-            # Nested object field is queryable.
-            cur.execute(f'SELECT "profile":age FROM "{dst}" WHERE "id" = 1')
-            assert str(cur.fetchall()[0][0]).strip('"') == "30"
+        conn = get_connection(
+            account="localhost", username="t", password="t",
+            database="dataflow", schema="public", warehouse="", connection_string="",
+        )
+        cur = conn.cursor()
+        # Nested array element is queryable as real VARIANT, not flat text.
+        cur.execute(f'SELECT "tags"[0] FROM "{dst}" WHERE "id" = 1')
+        assert cur.fetchall()[0][0].strip('"') == "vip"
+        # Bare scalar loaded as a VARIANT string (not dropped).
+        cur.execute(f'SELECT "tags" FROM "{dst}" WHERE "id" = 2')
+        assert cur.fetchall()[0][0].strip('"') == "single"
+        # Nested object field is queryable.
+        cur.execute(f'SELECT "profile":age FROM "{dst}" WHERE "id" = 1')
+        assert str(cur.fetchall()[0][0]).strip('"') == "30"
+        conn.close()
     finally:
         client["dataflow"][coll].drop()
         client.close()

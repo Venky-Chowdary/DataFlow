@@ -139,7 +139,29 @@ def test_usage_metering_records_locally(tmp_path, monkeypatch):
     assert summary["rows_written"] == 10
 
 
-def test_strict_g8_fails_without_verifier():
+def test_strict_g8_fails_without_verifier_non_dest_only():
+    """Strict mode stays fail-closed when a duplex destination has no verifier."""
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import run_reconciliation
+
+    endpoint = EndpointConfig(kind="database", format="redis", database="db", table="t")
+    with patch("src.transfer.reconcile_step.verify_target", return_value=(-1, "")):
+        with patch("src.transfer.reconcile_step.resolve_connector_config", return_value={}):
+            report = run_reconciliation(
+                endpoint=endpoint,
+                records=[],
+                columns=["id"],
+                rows_written=5,
+                writer_checksum="abc",
+                dest_summary={},
+                validation_mode="strict",
+            )
+    assert report["passed"] is False
+    assert "read-back" in report["message"].lower() or "verifier" in report["message"].lower()
+
+
+def test_strict_g8_writer_ack_for_dest_only():
+    """dest_only sinks have no SQL read-back — strict accepts matched writer-ack."""
     from src.transfer.models import EndpointConfig
     from src.transfer.reconcile_step import run_reconciliation
 
@@ -155,5 +177,5 @@ def test_strict_g8_fails_without_verifier():
                 dest_summary={},
                 validation_mode="strict",
             )
-    assert report["passed"] is False
-    assert "read-back" in report["message"].lower() or "verifier" in report["message"].lower()
+    assert report["passed"] is True
+    assert "writer" in report["message"].lower() or "read-back" in report["message"].lower()

@@ -18,7 +18,8 @@ if str(_API_ROOT) not in sys.path:
 
 # Keep Pilot local-first during this suite (no hanging cloud race).
 os.environ.setdefault("DATAFLOW_EMBEDDING_BACKEND", "tfidf")
-os.environ.setdefault("DATAFLOW_ALLOW_STUB_WRITES", "1")
+# Do NOT set DATAFLOW_ALLOW_STUB_WRITES here — process-wide pollution makes
+# later Snowflake matrix tests stub-write and fail strict reconciliation.
 
 
 # ── Pilot natural language ──────────────────────────────────────────────────

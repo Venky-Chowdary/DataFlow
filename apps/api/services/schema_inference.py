@@ -330,6 +330,15 @@ def safe_ddl_logical_type(
         if proposed_u == "BOOLEAN" and source_type and str(source_type).upper() in {"VARCHAR", "TEXT", "STRING"}:
             return "VARCHAR"
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
+    # Loose text proposals: upgrade when every sample coerces to a tighter type.
+    # Without this, CREATE TABLE stays VARCHAR and writers skip type transforms
+    # (e.g. "true"/"false"/"1" never become BOOLEAN).
+    if proposed_u in {"VARCHAR", "TEXT", "STRING", "CHAR"}:
+        inferred = infer_type(samples, field_name=field_name)
+        if inferred not in {"VARCHAR", "TEXT"} and samples_fit_logical_type(
+            samples, inferred, field_name=field_name
+        ):
+            return inferred if inferred in LOGICAL_TYPES else "VARCHAR"
     if samples_fit_logical_type(samples, proposed_u, field_name=field_name):
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
     # Widen using fresh inference (string enums → VARCHAR, etc.)
@@ -366,6 +375,21 @@ def infer_column(
             "notes": notes,
             "samples": non_empty[:8],
         }
+
+    # true/false/yes/no mixed with 0/1 must stay BOOLEAN — classifying "1" as
+    # INTEGER alone would widen the column to VARCHAR and skip bool coercion.
+    if all(v.lower() in _BOOLEAN_STRINGS for v in non_empty):
+        only_01 = all(v.strip() in {"0", "1"} for v in non_empty)
+        if (not only_01) or _is_boolean_field_name(field_name or ""):
+            notes.append("boolean token family (true/false/0/1) → BOOLEAN")
+            return {
+                "name": field_name or "",
+                "logical_type": "BOOLEAN",
+                "semantic_role": "boolean_flag",
+                "confidence": 0.98,
+                "notes": notes,
+                "samples": non_empty[:8],
+            }
 
     counts: Counter[str] = Counter(_classify_value(s, field_name=field_name) for s in non_empty)
     types = set(counts.keys())

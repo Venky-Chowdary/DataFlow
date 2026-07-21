@@ -4753,6 +4753,9 @@ export function TransferPage({
             validationMode={validationMode}
             onApplyAction={applySuggestedAction}
             onStripControlChars={stripControlCharsAndRerun}
+            stripControlsApplied={columnMappings.some(
+              (m) => m.transform === "strip_controls",
+            )}
             onQuarantineAndRerun={quarantineAndRerun}
             cellPreview={cellPreview}
             onReviewMappings={() => setStep(STEP_MAP)}

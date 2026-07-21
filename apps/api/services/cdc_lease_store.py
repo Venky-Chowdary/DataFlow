@@ -91,7 +91,7 @@ local lease = {
 local payload = cjson.encode(lease)
 redis.call("SET", lease_key, payload, "EX", gc_ttl)
 redis.call("SET", res_key, cursor_key, "EX", gc_ttl)
-return {err="ok", payload=payload}
+return {status="ok", payload=payload}
 """
 
 _REDIS_RENEW_SCRIPT = """
@@ -119,7 +119,7 @@ redis.call("SET", lease_key, payload, "EX", gc_ttl)
 if res_key and res_key ~= "" then
   redis.call("SET", res_key, lease["cursor_key"], "EX", gc_ttl)
 end
-return {err="ok", payload=payload}
+return {status="ok", payload=payload}
 """
 
 _REDIS_RELEASE_SCRIPT = """
@@ -144,7 +144,7 @@ local owner = redis.call("GET", res_key)
 if owner == lease["cursor_key"] then
   redis.call("DEL", res_key)
 end
-return {err="ok"}
+return {status="ok"}
 """
 
 
@@ -642,6 +642,7 @@ class RedisLeaseStore(LeaseStore):
         # redis-py may return list of [k,v,k,v...] for flat dict returns from Lua tables
         parsed = _lua_table_to_dict(result)
         err = str(parsed.get("err") or "")
+        status = str(parsed.get("status") or "")
         if err == "conflict":
             raise CdcLeaseConflict(
                 f"CDC resource {resource!r} held by {parsed.get('holder')!r} "
@@ -650,7 +651,9 @@ class RedisLeaseStore(LeaseStore):
                 resource=str(parsed.get("resource") or resource),
                 cursor_key=str(parsed.get("cursor") or cursor_key),
             )
-        if err != "ok":
+        # Success must use status=ok — Redis treats Lua tables with an ``err``
+        # field as ResponseError (so err="ok" previously raised "ok").
+        if status != "ok" and err != "ok":
             raise LeaseStoreError(f"Redis acquire failed: {parsed}")
         payload = parsed.get("payload")
         if isinstance(payload, str):
@@ -678,7 +681,8 @@ class RedisLeaseStore(LeaseStore):
             [ts, holder_id, int(generation), gc_ttl],
         )
         parsed = _lua_table_to_dict(result)
-        if str(parsed.get("err")) != "ok":
+        status = str(parsed.get("status") or parsed.get("err") or "")
+        if status != "ok":
             return None
         payload = parsed.get("payload")
         if isinstance(payload, str):
@@ -703,7 +707,7 @@ class RedisLeaseStore(LeaseStore):
             [holder_id, int(generation)],
         )
         parsed = _lua_table_to_dict(result)
-        return str(parsed.get("err")) == "ok"
+        return str(parsed.get("status") or parsed.get("err") or "") == "ok"
 
     def get(self, cursor_key: str) -> dict[str, Any] | None:
         try:
