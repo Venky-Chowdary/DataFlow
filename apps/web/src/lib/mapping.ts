@@ -76,15 +76,18 @@ export function isEnumToBooleanConflict(m: EditableMapping): boolean {
     || m.semanticRole === "string_enum";
 }
 
-/** Widen destination type to VARCHAR and clear cast_boolean — safe for **new** tables only. */
+/** Widen destination type to VARCHAR and clear numeric/boolean casts — new tables. */
 export function widenMappingToVarchar(m: EditableMapping): EditableMapping {
+  const clearCast =
+    m.transform === "cast_boolean"
+    || m.transform === "cast_number";
   return {
     ...m,
     destType: "VARCHAR",
-    transform: m.transform === "cast_boolean" ? "none" : m.transform,
+    transform: clearCast ? "none" : m.transform,
     approved: false,
     requiresReview: false,
-    reason: [m.reason, "Widened to VARCHAR (string enum — not boolean)"].filter(Boolean).join(" · "),
+    reason: [m.reason, "Widened to VARCHAR (non-numeric / non-boolean samples)"].filter(Boolean).join(" · "),
   };
 }
 

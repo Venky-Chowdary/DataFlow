@@ -483,6 +483,42 @@ export function ValidateDashboard({
   const hasEncodingIssue = badDataIssues.length > 0;
   const runId = preflight?.run_id;
 
+  const typeMismatchColumns = useMemo(() => {
+    const found: Array<{ source: string; target: string }> = [];
+    const seen = new Set<string>();
+    const texts: string[] = [];
+    for (const b of preflight?.blockers || []) {
+      texts.push(b.message || "");
+      const details = b.details as { errors?: unknown[]; issues?: unknown[]; issue_texts?: unknown[] } | undefined;
+      for (const list of [details?.errors, details?.issues, details?.issue_texts]) {
+        for (const item of list || []) {
+          texts.push(typeof item === "string" ? item : JSON.stringify(item));
+        }
+      }
+    }
+    for (const g of preflight?.gates || []) {
+      if (g.status === "block") texts.push(g.message || "");
+    }
+    const re = /([A-Za-z_][\w]*)\s*\([^)]+\)\s*→\s*([A-Za-z_][\w]*)\s*\([^)]+\)/g;
+    for (const text of texts) {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) {
+        const key = `${m[1]}→${m[2]}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        found.push({ source: m[1], target: m[2] });
+      }
+    }
+    return found;
+  }, [preflight?.blockers, preflight?.gates]);
+
+  const isTypeMismatchBlock = typeMismatchColumns.length > 0
+    || Boolean(
+      preflight?.blockers.some((b) =>
+        /invalid (decimal|integer|boolean)|cannot be cast|does not safely become|lossy type/i.test(b.message),
+      ),
+    );
+
   const pushRemediation = (action: string, detail: string, outcome: string) => {
     setRemediationLog((prev) => [
       {
@@ -498,6 +534,7 @@ export function ValidateDashboard({
     preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
     || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
   );
+  const showEncodingRemediation = !isTypeMismatchBlock && (hasEncodingIssue || encodingBlocks);
 
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
@@ -943,13 +980,43 @@ export function ValidateDashboard({
         </div>
       )}
 
-      {/* Always-visible remediation — Strip / Quarantine / Fix bad data must not
-          depend on expanding the AI panel or clicking Run analysis first. */}
+      {/* Context-aware remediation: type mismatches → Remap/Widen; encoding → Strip/Quarantine. */}
       {!running && preflight && !preflight.passed && (
         <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
           <div className="df2-vd-chip-row">
-            {onStripControlChars && (
+            {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
+              <button
+                key={`${col.source}-${col.target}`}
+                type="button"
+                className="df2-vd-chip kind-change_target_type"
+                disabled={remediating || !onApplyAction}
+                onClick={() =>
+                  onApplyAction?.({
+                    kind: "change_target_type",
+                    label: `Remap ${col.source} → VARCHAR`,
+                    column: col.source,
+                    target: col.target,
+                    to_type: "VARCHAR",
+                  })
+                }
+              >
+                <DtIcon name="layers" size={13} />
+                Remap {col.source} → VARCHAR
+              </button>
+            ))}
+            {isTypeMismatchBlock && onReviewMappings && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-review_mappings"
+                onClick={onReviewMappings}
+                disabled={remediating}
+              >
+                <DtIcon name="layers" size={13} />
+                Review mappings
+              </button>
+            )}
+            {showEncodingRemediation && onStripControlChars && (
               <button
                 type="button"
                 className="df2-vd-chip kind-normalize_control_chars"
@@ -960,7 +1027,7 @@ export function ValidateDashboard({
                 Strip controls &amp; re-run
               </button>
             )}
-            {onQuarantineAndRerun && (
+            {showEncodingRemediation && onQuarantineAndRerun && (
               <button
                 type="button"
                 className="df2-vd-chip kind-quarantine_and_rerun"
@@ -971,15 +1038,17 @@ export function ValidateDashboard({
                 Quarantine &amp; re-run
               </button>
             )}
-            <button
-              type="button"
-              className="df2-vd-chip kind-open_bad_data_fix"
-              onClick={() => setBadDataOpen(true)}
-              disabled={remediating}
-            >
-              <DtIcon name="shield" size={13} />
-              Fix bad data…
-            </button>
+            {showEncodingRemediation && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-open_bad_data_fix"
+                onClick={() => setBadDataOpen(true)}
+                disabled={remediating}
+              >
+                <DtIcon name="shield" size={13} />
+                Fix bad data…
+              </button>
+            )}
             {onOpenMappingProof && (
               <button
                 type="button"
@@ -991,7 +1060,7 @@ export function ValidateDashboard({
                 Mapping proof
               </button>
             )}
-            {onReviewMappings && (
+            {!isTypeMismatchBlock && onReviewMappings && (
               <button
                 type="button"
                 className="df2-vd-chip kind-review_mappings"
@@ -1004,10 +1073,11 @@ export function ValidateDashboard({
             )}
           </div>
           <p className="df2-vd-cell-preview-hint">
-            Strip controls &amp; re-run writes <code>strip_controls</code> onto text mappings, then re-validates.
-            Opening Fix bad data alone does nothing until you click Strip. Job Theater
-            &quot;Apply on replay&quot; only cleans quarantined rows after a successful write — it does not unblock Execute.
-            Quarantine keeps bad cells out of the destination (never silent drop).
+            {isTypeMismatchBlock
+              ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
+              : showEncodingRemediation
+                ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination after Validate passes (never silent drop)."
+                : "Open Review mappings or Mapping proof. Strip/Quarantine only apply to encoding issues."}
           </p>
         </div>
       )}
@@ -1644,7 +1714,7 @@ export function ValidateDashboard({
                   {b.guidance?.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{b.guidance.why}</span>
                   )}
-                  {(b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
+                  {(encodingBlocks || hasEncodingIssue) && (b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
                     <div className="df2-vd-blocker-actions">
                       <button
                         type="button"
@@ -1654,6 +1724,35 @@ export function ValidateDashboard({
                         <DtIcon name="shield" size={13} />
                         Fix bad data…
                       </button>
+                    </div>
+                  )}
+                  {isTypeMismatchBlock && b.id.includes("dry_run") && typeMismatchColumns.length > 0 && (
+                    <div className="df2-vd-blocker-actions">
+                      <span className="df2-vd-assist-actions-title">
+                        Type mismatch — Remap (Strip/Quarantine will not clear this)
+                      </span>
+                      <div className="df2-vd-chip-row">
+                        {typeMismatchColumns.slice(0, 6).map((col) => (
+                          <button
+                            key={`block-${col.source}-${col.target}`}
+                            type="button"
+                            className="df2-vd-chip kind-change_target_type"
+                            disabled={!onApplyAction}
+                            onClick={() =>
+                              onApplyAction?.({
+                                kind: "change_target_type",
+                                label: `Remap ${col.source} → VARCHAR`,
+                                column: col.source,
+                                target: col.target,
+                                to_type: "VARCHAR",
+                              })
+                            }
+                          >
+                            <DtIcon name="layers" size={13} />
+                            Remap {col.source} → VARCHAR
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </li>

@@ -26,6 +26,50 @@ def test_passes_compatible_mapping():
     assert issues == []
 
 
+def test_varchar_to_number_passes_when_samples_coerce():
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{
+            "source": "population",
+            "target": "population",
+            "confidence": 0.93,
+            "target_type": "NUMBER(38,0)",
+        }],
+        source_schema={"population": "VARCHAR"},
+        target_schema={"population": "NUMBER(38,0)"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="snowflake",
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+        ],
+    )
+    assert ok, issues
+    assert not any("Lossy type coercion" in i for i in issues)
+
+
+def test_varchar_to_number_blocks_when_samples_fail():
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{
+            "source": "population",
+            "target": "population",
+            "confidence": 0.93,
+            "target_type": "NUMBER(38,0)",
+        }],
+        source_schema={"population": "VARCHAR"},
+        target_schema={"population": "NUMBER(38,0)"},
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="snowflake",
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "unknown"},
+        ],
+    )
+    assert not ok
+    assert any("Lossy type coercion" in i for i in issues)
+
+
 def test_fails_missing_target_column():
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "email", "target": "email_address", "confidence": 0.9}],

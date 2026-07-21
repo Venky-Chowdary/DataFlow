@@ -250,9 +250,23 @@ def evaluate_ddl_compatibility(
             continue
 
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
-            issues.append(
-                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
-            )
+            # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are
+            # declared-lossy but write-safe when values coerce. Only hard-block
+            # when samples are missing or fail the write-path transform.
+            sample_ok = False
+            if sample_rows:
+                from services.coercion_probe import samples_coerce_mapping
+
+                sample_ok = samples_coerce_mapping(
+                    m,
+                    source_types=source_schema or {},
+                    target_types=target_schema or {},
+                    rows=sample_rows,
+                )
+            if not sample_ok:
+                issues.append(
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
+                )
 
         if not schemaless and sample_rows and tgt_type:
             samples = _sample_values(sample_rows, src)

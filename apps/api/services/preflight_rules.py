@@ -87,8 +87,13 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Transform dry-run / integrity",
         "category": "hard",
         "why": "A sample row could not be transformed or violates a data-integrity rule. This means the real transfer would fail or produce bad data.",
-        "fix": "Fix the source values, choose a less strict transform, or adjust the validation mode. For schemaless destinations the transform is stored as-is and may not block.",
+        "fix": (
+            "Read the failing column message. Type mismatches (e.g. VARCHAR → NUMBER) need "
+            "Remap/Widen on Map — not Strip controls. Encoding issues need Strip/Quarantine. "
+            "Validation mode only softens confidence thresholds; it does not invent a type cast."
+        ),
         "examples": [
+            "population (VARCHAR) → population (NUMBER(38,0)) — remap off the typed column or keep cast when samples are clean numbers.",
             "'2024-13-01' cannot be parsed as a date → correct the date or use a string target.",
             "A required identifier is null → remove the row or relax the source constraint.",
         ],
@@ -168,8 +173,15 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "keywords": ["dry-run / integrity failed"],
         "gate": "g5_dry_run",
         "why": "The sample rows could not be transformed or failed an integrity check.",
-        "fix": "Open the issue list and fix the source values or the target types. For schemaless destinations (MongoDB, DynamoDB, Redis) DataFlow can store values as-is, but if a typed target is used the transform must succeed.",
-        "examples": ["'abc' could not be parsed as integer."],
+        "fix": (
+            "If the message shows a type pair like VARCHAR → NUMBER, use Remap/Widen to VARCHAR "
+            "(or fix the source values) — Strip controls and Quarantine do not change column types. "
+            "Use Strip/Quarantine only for format-control or encoding characters."
+        ),
+        "examples": [
+            "population (VARCHAR) → population (NUMBER(38,0)) — remap off the typed column or cast clean numbers.",
+            "'abc' could not be parsed as integer.",
+        ],
     },
     {
         "keywords": ["target ddl incompatible"],

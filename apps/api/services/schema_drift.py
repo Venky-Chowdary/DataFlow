@@ -193,6 +193,7 @@ def detect_schema_drift(
     stored_target_fp: str = "",
     mappings: list[dict[str, Any]] | None = None,
     destination_db_type: str = "",
+    sample_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Compare current schemas to stored fingerprints and mapping coverage.
@@ -230,6 +231,8 @@ def detect_schema_drift(
 
     type_mismatches: list[dict[str, str]] = []
     if not schemaless:
+        from services.coercion_probe import samples_coerce_mapping
+
         for m in mappings:
             src = str(m.get("source") or "")
             tgt = str(m.get("target") or "")
@@ -237,8 +240,22 @@ def detect_schema_drift(
                 continue
             src_type = source_schema.get(src) or "VARCHAR"
             tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
-            if target_schema and is_lossy_coercion(src_type, tgt_type):
-                type_mismatches.append({"source": src, "target": tgt, "source_type": src_type.upper(), "target_type": tgt_type.upper()})
+            if not (target_schema and is_lossy_coercion(src_type, tgt_type)):
+                continue
+            # Declared VARCHAR→NUMBER with clean numeric samples is not breaking drift.
+            if sample_rows and samples_coerce_mapping(
+                m,
+                source_types=source_schema,
+                target_types=target_schema,
+                rows=sample_rows,
+            ):
+                continue
+            type_mismatches.append({
+                "source": src,
+                "target": tgt,
+                "source_type": src_type.upper(),
+                "target_type": tgt_type.upper(),
+            })
 
     issues: list[str] = []
     if source_changed:

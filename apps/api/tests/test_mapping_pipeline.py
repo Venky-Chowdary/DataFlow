@@ -94,6 +94,35 @@ def test_pipeline_objectid_create_new_survives_existing_dest():
     assert by_src["name"]["target"].lower() == "name"
 
 
+def test_repair_hex_onto_snowflake_number_id():
+    """Defense-in-depth: sha256-like samples never stay on NUMBER(38,0) id."""
+    from services.mapping_pipeline import _repair_unparseable_numeric_targets
+
+    samples = [
+        "e3befcc4bfe68c256fadde759f81221eb54b42fb36105c0884c545487c642e5b",
+        "c97abd998d4bfb7d033b363648f9a9b16f77606784c37b21d9864706b103754e",
+        "d2909789b4ace07d724901b5ecfe1efeb3777638c9bb1c38a3e2eb1e7cb8e018",
+    ]
+    out = _repair_unparseable_numeric_targets(
+        [{
+            "source": "_id",
+            "target": "id",
+            "target_type": "NUMBER(38,0)",
+            "confidence": 0.73,
+            "create_new": False,
+            "transform": "none",
+            "reasoning": "semantic name match",
+        }],
+        source_schemas=[{"name": "_id", "inferred_type": "TEXT", "samples": samples}],
+        target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
+        destination_db_type="snowflake",
+    )
+    assert len(out) == 1
+    assert out[0].get("create_new") is True
+    assert out[0]["target"].lower() != "id"
+    assert str(out[0].get("target_type", "")).upper() in {"VARCHAR", "TEXT", "STRING"}
+
+
 def test_pipeline_llm_disabled_skips_agent():
     r = run_mapping_pipeline(["AMT"], ["payment_amount"], use_llm=False)
     assert "LLMMappingAgent" not in r["agents_used"]

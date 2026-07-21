@@ -152,6 +152,35 @@ def test_integrity_blocks_lossy_coercion():
     assert coercion["blocks_transfer"] is True
 
 
+def test_integrity_allows_varchar_to_number_when_samples_coerce():
+    """JSON/CSV numeric strings onto Snowflake NUMBER must not false-block G5."""
+    mappings = [{
+        "source": "population",
+        "target": "population",
+        "confidence": 0.93,
+        "transform": "none",
+        "target_type": "NUMBER(38,0)",
+    }]
+    report = run_integrity_audit(
+        source_columns=["population"],
+        target_columns=["population"],
+        mappings=mappings,
+        source_schemas=[{"name": "population", "inferred_type": "VARCHAR"}],
+        target_schemas=[{"name": "population", "inferred_type": "NUMBER(38,0)"}],
+        sample_rows=[
+            {"population": "331002651"},
+            {"population": "1402112000"},
+            {"population": "45195799"},
+        ],
+        destination_db_type="snowflake",
+        validation_mode="strict",
+    )
+    coercion = next((c for c in report["checks"] if c["check"] == "coercion_safety"), None)
+    assert coercion is not None
+    assert coercion["blocks_transfer"] is False
+    assert report["blocks_transfer"] is False
+
+
 # ── Mapping confidence ───────────────────────────────────────────────────────
 
 def test_integrity_blocks_low_confidence_in_strict_mode():

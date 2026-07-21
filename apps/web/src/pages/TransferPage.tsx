@@ -2580,6 +2580,12 @@ export function TransferPage({
             target: candidate,
             destType: action.to_type,
             existsInDestination: false,
+            createNew: true,
+            assignmentStrategy: "create_compatible_new",
+            transform:
+              m.transform === "cast_number" || m.transform === "cast_boolean"
+                ? "none"
+                : m.transform,
             approved: true,
             requiresReview: false,
             reason: [

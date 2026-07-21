@@ -551,6 +551,7 @@ def run_file_preflight(
         target_schema=destination_column_types or {},
         mappings=mappings,
         destination_db_type=destination_db_type,
+        sample_rows=sample_rows,
     )
     if drift.get("drift_detected"):
         for issue in drift.get("issues", []):

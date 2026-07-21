@@ -898,18 +898,47 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     doc["_id"] = str(doc["_id"])
                 for key, val in doc.items():
                     inferred = _sample_logical_type(val, key)
+                    sample_text = "" if val is None else str(val)
                     if key not in columns:
-                        columns[key] = {"name": key, "inferred_type": inferred, "nullable": True}
+                        columns[key] = {
+                            "name": key,
+                            "inferred_type": inferred,
+                            "nullable": val is None,
+                            "samples": [sample_text] if sample_text else [],
+                        }
                     else:
                         columns[key]["inferred_type"] = _widen_mongodb_type(
                             columns[key]["inferred_type"], inferred
                         )
+                        if val is None:
+                            columns[key]["nullable"] = True
+                        # Samples feed the mapper so hex/ObjectId _id cannot score
+                        # onto an existing Snowflake NUMBER(38,0) `id` column.
+                        samples = columns[key].setdefault("samples", [])
+                        if sample_text and len(samples) < 8 and sample_text not in samples:
+                            samples.append(sample_text)
         client.close()
         # A field that was null in every sampled document has no observed type;
         # fall back to TEXT so the column is still created.
         for col in columns.values():
             if not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
+            # Re-infer from the collected sample set so mixed docs stay honest
+            # (e.g. sha256 hex stays VARCHAR, not INTEGER-by-name).
+            samples = [s for s in (col.get("samples") or []) if str(s).strip()]
+            if len(samples) >= 2:
+                try:
+                    from services.schema_inference import infer_column
+
+                    intel = infer_column(samples, field_name=col["name"])
+                    logical = str(intel.get("logical_type") or col["inferred_type"])
+                    if logical == "VARCHAR":
+                        logical = "TEXT"
+                    # Never narrow a sticky OBJECT/ARRAY with scalar-only re-infer.
+                    if col["inferred_type"] not in _STRUCTURAL_TYPES:
+                        col["inferred_type"] = logical
+                except Exception:
+                    logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}

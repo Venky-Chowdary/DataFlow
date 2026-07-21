@@ -356,3 +356,44 @@ def test_real_mongo_messy_docs_roundtrip_variant_queryable():
     finally:
         client["dataflow"][coll].drop()
         client.close()
+
+
+def test_hex_mongo_id_does_not_map_onto_snowflake_number_id_when_samples_present():
+    """Hex/ObjectId-like ``_id`` must not bind to existing Snowflake NUMBER ``id``.
+
+    Without samples the semantic form ``_id`` → ``id`` scores ~0.73 and lands on
+    NUMBER(38,0), which Validate correctly blocks. Introspect must attach samples
+    so the mapper invents a VARCHAR create-new column instead.
+    """
+    from services.semantic_mapper import map_columns
+
+    samples = [
+        "e3befcc4bfe68c256fadde759f81221eb54b42fb36105c0884c545487c642e5b",
+        "c97abd998d4bfb7d033b363648f9a9b16f77606784c37b21d9864706b103754e",
+        "d2909789b4ace07d724901b5ecfe1efeb3777638c9bb1c38a3e2eb1e7cb8e018",
+        "72a198e224365b20ab46575aab687271181e1f7f844671de8c6de40b147e7356",
+    ]
+    # Without samples: regression marker — semantic name match onto NUMBER wins.
+    bare = map_columns(
+        ["_id"],
+        ["id"],
+        source_schemas=[{"name": "_id", "inferred_type": "TEXT", "samples": []}],
+        target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
+        destination_db_type="snowflake",
+    )
+    assert bare[0]["target"] == "id"
+    assert not bare[0].get("create_new")
+
+    mapped = map_columns(
+        ["_id"],
+        ["id"],
+        source_schemas=[{"name": "_id", "inferred_type": "TEXT", "samples": samples}],
+        target_schemas=[{"name": "id", "inferred_type": "NUMBER(38,0)"}],
+        destination_db_type="snowflake",
+    )
+    assert len(mapped) == 1
+    m = mapped[0]
+    assert m.get("create_new") is True
+    assert str(m.get("target_type", "")).upper() in {"VARCHAR", "TEXT", "STRING"}
+    # Prefer a new text field over overwriting the incompatible NUMBER id.
+    assert m["target"].lower() != "id"
