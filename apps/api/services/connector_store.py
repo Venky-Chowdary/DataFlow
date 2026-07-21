@@ -24,6 +24,34 @@ STORE_PATH = data_dir() / "connectors.json"
 
 logger = logging.getLogger(__name__)
 
+# Databases / warehouses / object stores that are valid as source *and* destination.
+# Catalog UI may pass role=source|destination from the filter tab — that must not
+# lock the saved profile into a one-sided capability.
+_BIDIRECTIONAL_TYPES = frozenset({
+    "mysql", "mariadb", "singlestore",
+    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
+    "sqlserver", "mssql", "synapse", "oracle", "db2", "generic_sql",
+    "sqlite", "duckdb", "h2",
+    "mongodb", "dynamodb", "cassandra", "couchbase", "elasticsearch", "redis",
+    "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
+    "s3", "amazon_s3", "gcs", "google_cloud_storage", "adls", "azure_blob", "azure_blob_storage",
+    "kafka", "apache_kafka", "iceberg", "apache_iceberg",
+    "salesforce", "hubspot",
+})
+
+
+def normalize_connector_role(connector_type: str, role: str | None) -> str:
+    """Return a persisted topology role. Dual-use types always store ``both``."""
+    t = (connector_type or "").strip().lower()
+    if t in _BIDIRECTIONAL_TYPES:
+        return "both"
+    r = (role or "both").strip().lower()
+    if r in ("destination", "dest"):
+        return "destination"
+    if r == "source":
+        return "source"
+    return "both"
+
 
 def _resolve_connector_schema(
     conn_type: str,

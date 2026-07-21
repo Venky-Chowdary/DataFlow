@@ -466,6 +466,14 @@ _STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
 
 
+# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
+# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
+# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
+# hard-fail on values like "invalidated".
+_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
+_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
+
+
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
     if text in NULL_SENTINELS:

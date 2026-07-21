@@ -222,6 +222,32 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
     );
   }
 
+  if (kind === "mapping") {
+    const src = ["order_amt", "cust_email", "order_id", "ts"];
+    const dst = ["payment_amount", "email", "order_key", "created_at"];
+    return (
+      <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Semantic column mapping">
+        <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />
+        <text x="96" y="34" textAnchor="middle" fontSize="11" fill="#64748b" fontWeight="700">SOURCE</text>
+        <text x="384" y="34" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="700">DESTINATION</text>
+        {src.map((s, i) => {
+          const y = 60 + i * 50;
+          return (
+            <g key={s}>
+              <rect x="24" y={y} width="144" height="36" rx="8" fill="#fff" stroke="#cbd5e1" />
+              <text x="96" y={y + 23} textAnchor="middle" fontSize="12" fill="#334155" fontFamily="ui-monospace, monospace">{s}</text>
+              <rect x="312" y={y} width="144" height="36" rx="8" fill="#fff" stroke="#99f6e4" />
+              <text x="384" y={y + 23} textAnchor="middle" fontSize="12" fill="#0f766e" fontFamily="ui-monospace, monospace">{dst[i]}</text>
+              <path d={`M168 ${y + 18}C220 ${y + 18} 260 ${y + 18} 312 ${y + 18}`} stroke="#0d9488" strokeWidth="2" fill="none" strokeDasharray="5 4" />
+              <circle cx="240" cy={y + 18} r="11" fill="#ecfdf5" stroke="#0d9488" />
+              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{96 - i * 3}</text>
+            </g>
+          );
+        })}
+      </svg>
+    );
+  }
+
   if (kind === "help") {
     return (
       <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Documentation guides">
