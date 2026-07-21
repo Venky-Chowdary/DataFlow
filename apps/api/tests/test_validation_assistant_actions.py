@@ -36,6 +36,20 @@ def test_destination_auth_suggests_check_connection_not_strip():
     assert "quarantine_and_rerun" not in kinds
 
 
+def test_encoding_blocker_still_suggests_strip_quarantine():
+    actions = _suggested_actions(
+        [{
+            "id": "g5_dry_run",
+            "message": "Dry-run / integrity failed: format-control character detected (U+200B)",
+            "details": {"errors": ["description: format-control character"]},
+        }],
+        [],
+    )
+    kinds = [a["kind"] for a in actions]
+    assert "normalize_control_chars" in kinds
+    assert "quarantine_and_rerun" in kinds
+
+
 def test_explain_type_mismatch_narrative_mentions_remap():
     explained = explain_validation(
         {
