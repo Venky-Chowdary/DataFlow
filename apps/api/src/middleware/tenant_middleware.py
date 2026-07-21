@@ -20,6 +20,7 @@ from services.tenant_store import (
 
 _PUBLIC_PREFIXES = (
     "/health",
+    "/api/v1/health",
     "/",
     "/api/v1/auth/login",
     "/api/v1/auth/bootstrap",

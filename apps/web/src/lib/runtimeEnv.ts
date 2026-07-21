@@ -40,7 +40,7 @@ export function apiOfflineMessage(): { title: string; body: string } {
     };
   }
   return {
-    title: "Control plane temporarily unreachable",
-    body: "The API timed out or is restarting. Data rules still apply — retry in a moment. This is not a validation failure.",
+    title: "Control plane busy or unreachable",
+    body: "A health check timed out — often because a long Snowflake introspect is running. This is not a validation failure. Wait for schema load to finish, then continue.",
   };
 }

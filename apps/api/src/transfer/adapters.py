@@ -68,7 +68,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     return {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
-        "rejected_details": rejected_details[:200],
+        "rejected_details": rejected_details[:2000],
         "warnings": warnings[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
     }

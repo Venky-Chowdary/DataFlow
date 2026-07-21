@@ -371,9 +371,11 @@ export function QuarantinePanel({
             </p>
           ) : (
             <p>
-              Inspect findings and Export CSV. When write-time rejects are available, Promote/Replay
-              rewrites only the quarantined rows
-              {destDlq?.table ? <> and marks them on <code>{destDlq.table}</code></> : null}.
+              Each table row is one <strong>bad cell finding</strong> (source row # + column + value + reason).
+              If the job says 30 quarantined, you should see up to 30 findings here (or Export CSV for the full set).
+              Good rows already on the destination stay put — fix mappings / types, then{" "}
+              <strong>Promote / Replay</strong> only the quarantined rows (or re-run after Map fixes).
+              {destDlq?.table ? <> Destination DLQ table: <code>{destDlq.table}</code>.</> : null}
             </p>
           )}
         </div>
@@ -449,10 +451,10 @@ export function QuarantinePanel({
           <header className="df2-quarantine-inspect-head">
             <div className="df2-quarantine-inspect-title">
               <DtIcon name="warning" size={14} />
-              <strong>Quarantined rows</strong>
+              <strong>Quarantined findings</strong>
               <span className="df2-quarantine-inspect-count">
-                {displayFindings.toLocaleString()} finding{displayFindings === 1 ? "" : "s"}
-                {displayRowCount > 0 ? ` · ${displayRowCount.toLocaleString()} rows` : ""}
+                {rows.length.toLocaleString()} shown
+                {displayRowCount > 0 ? ` · job reports ${displayRowCount.toLocaleString()} rejected row(s)` : ""}
               </span>
             </div>
             <div className="df2-job-log-actions">
@@ -462,6 +464,14 @@ export function QuarantinePanel({
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setOpen(false)}>Close</button>
             </div>
           </header>
+
+          {displayRowCount > 0 && rows.length > 0 && rows.length < displayRowCount && (
+            <div className="df2-alert df2-alert-warning" role="status">
+              Job reports {displayRowCount.toLocaleString()} rejected row(s) but only {rows.length.toLocaleString()} finding(s)
+              are stored for inspect. Export CSV for what we have; re-run the transfer after deploy to capture full row samples
+              (up to 2,000 findings per job).
+            </div>
+          )}
 
           {(topReasons.length > 0 || topColumns.length > 0) && (
             <div className="df2-quarantine-summary">

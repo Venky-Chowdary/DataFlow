@@ -107,7 +107,7 @@ class MemoryJobStore:
         with self._lock:
             job = self._jobs.get(job_id)
             if job and details:
-                job.rejected_details.extend(details[:200])
+                job.rejected_details.extend(details[:2000])
 
     def set_workflow_phase(self, job_id: str, phase: str) -> None:
         with self._lock:

@@ -58,7 +58,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     return {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
-        "rejected_details": list(getattr(result, "rejected_details", []) or [])[:50],
+        "rejected_details": list(getattr(result, "rejected_details", []) or [])[:500],
         "warnings": list(getattr(result, "warnings", []) or [])[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
@@ -1391,7 +1391,7 @@ def stream_database_transfer(
                     detail["batch_offset"] = batch_start
                     detail["row"] = batch_start + local_row  # 1-based absolute across the transfer
                 new_details.append(detail)
-            merged_details = (prev_details + new_details)[:200]
+            merged_details = (prev_details + new_details)[:2000]
             dest_summary = {
                 **prev,
                 **incoming,
@@ -1563,7 +1563,7 @@ def stream_database_transfer(
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
-    dest_summary["rejected_details"] = list(dest_summary.get("rejected_details") or [])[:200]
+    dest_summary["rejected_details"] = list(dest_summary.get("rejected_details") or [])[:2000]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync

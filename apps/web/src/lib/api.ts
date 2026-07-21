@@ -6,32 +6,34 @@ const LONG_REQUEST_TIMEOUT_MS = 120000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
 let _healthFailStreak = 0;
-const HEALTH_OFFLINE_THRESHOLD = 2;
+const HEALTH_OFFLINE_THRESHOLD = 5;
+let _lastApiOkAt = 0;
 
 export function noteApiSuccess(): void {
   _healthFailStreak = 0;
+  _lastApiOkAt = Date.now();
 }
 
 export async function probeApiHealth(): Promise<boolean> {
   const origin = API_BASE.replace(/\/api\/v1\/?$/i, "") || "";
-  // Prefer real API health over the web container's static /health stub
-  // (same-origin /health always returns 200 from nginx and hid real outages).
+  // Prefer nginx → API /health (no auth). Never lead with /api/v1/health — it was
+  // auth-gated and returned 401, which burned the fail streak during demos.
   const candidates = [
-    origin ? `${origin}/api/v1/health` : "/api/v1/health",
     origin ? `${origin}/health-api` : "/health-api",
+    origin ? `${origin}/api/v1/health` : "/api/v1/health",
     `${API_BASE.replace(/\/$/, "")}/health`,
-    // Last resort: absolute API /health when API_BASE is cross-origin.
     origin && /^https?:\/\//i.test(origin) ? `${origin}/health` : "",
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
   for (const url of candidates) {
     try {
       const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 5000);
+      const timer = window.setTimeout(() => controller.abort(), 4000);
       try {
         const res = await fetch(url, { method: "GET", cache: "no-store", signal: controller.signal });
+        // 401 on a misconfigured health path is not an outage — try next URL.
         if (res.ok) {
-          _healthFailStreak = 0;
+          noteApiSuccess();
           return true;
         }
       } finally {
@@ -41,6 +43,11 @@ export async function probeApiHealth(): Promise<boolean> {
       // try next candidate
     }
   }
+  // If any API call succeeded recently, the control plane is busy (introspect/map),
+  // not down — do not increment the offline streak.
+  if (Date.now() - _lastApiOkAt < 60_000) {
+    return true;
+  }
   _healthFailStreak += 1;
   return false;
 }
@@ -49,6 +56,9 @@ export async function probeApiHealth(): Promise<boolean> {
 export function shouldMarkApiOffline(healthOk: boolean): boolean {
   if (healthOk) {
     _healthFailStreak = 0;
+    return false;
+  }
+  if (Date.now() - _lastApiOkAt < 60_000) {
     return false;
   }
   return _healthFailStreak >= HEALTH_OFFLINE_THRESHOLD;
@@ -110,6 +120,8 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
     if (res.status === 401) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
+    } else if (res.ok) {
+      noteApiSuccess();
     }
     return res;
   } catch (error) {
@@ -1388,8 +1400,9 @@ export async function introspectTransferEndpoints(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-    // Destination probes should fail soft quickly — never block the wizard for 2+ minutes.
-    timeoutMs: options?.timeoutMs ?? 45_000,
+    // Destination schema can take 1–2 minutes on Snowflake cold start — allow it.
+    // Timeout is not "API down"; TransferPage shows schema loading, not offline banner.
+    timeoutMs: options?.timeoutMs ?? 180_000,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
   return res.json();

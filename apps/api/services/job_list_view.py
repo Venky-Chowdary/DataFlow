@@ -1,72 +1,76 @@
 """Slim job documents for list endpoints — full detail stays on GET /jobs/{id}.
 
-List payloads that include rejected_details / logs / mapping_proof routinely
-exceed nginx proxy buffers and trip browser timeouts on Railway.
+List payloads that include rejected_details / logs / mapping_proof / preflight
+routinely exceed ~100KB on Railway and trip browser timeouts + false offline banners.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# Top-level keys safe to omit from Job Theater / Overview list cards.
-_LIST_DROP_KEYS = frozenset({
-    "rejected_details",
-    "logs",
-    "log_lines",
-    "events",
-    "chunks",
-    "chunk_results",
-    "mapping_proof",
-    "sample_rows",
-    "preview_rows",
-    "quarantine_rows",
-    "quarantine_samples",
-    "row_samples",
-    "dry_run_rows",
-    "transform_errors",
-    "gate_details",
-    "preflight_raw",
-    "explain",
-    "agentic_repair",
+# Whitelist: only fields the Jobs list / Overview cards need.
+_LIST_KEEP_KEYS = frozenset({
+    "_id",
+    "id",
+    "job_id",
+    "name",
+    "status",
+    "source_type",
+    "source_name",
+    "destination_type",
+    "destination_database",
+    "destination_collection",
+    "records_processed",
+    "total_rows",
+    "rejected_rows",
+    "coerced_null_rows",
+    "progress_pct",
+    "progress_indeterminate",
+    "phase",
+    "message",
+    "error",
+    "error_code",
+    "error_title",
+    "failed_at_phase",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "completed_at",
+    "workspace_id",
+    "sync_mode",
+    "records_per_second",
+    "chunk_current",
+    "chunk_total",
+    "chunk_size",
+    "operation",
+    "triggered_by",
+    "created_by",
+    "retry_of",
+    "cdc_lag_seconds",
 })
-
-_NESTED_DROP = {
-    "destination_summary": frozenset({
-        "rejected_details",
-        "sample_rows",
-        "preview_rows",
-        "quarantine_samples",
-        "write_samples",
-    }),
-    "source_summary": frozenset({
-        "sample_rows",
-        "preview_rows",
-        "rows",
-    }),
-    "reconciliation": frozenset({
-        "mismatches",
-        "sample_mismatches",
-        "details",
-    }),
-}
 
 
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
-    """Return a copy with heavy diagnostic arrays stripped for list views."""
+    """Return a compact copy for list views — never ship quarantine samples here."""
     if not job:
         return {}
     out: dict[str, Any] = {}
     for key, value in job.items():
-        if key in _LIST_DROP_KEYS:
-            continue
-        if key in _NESTED_DROP and isinstance(value, dict):
-            drop = _NESTED_DROP[key]
-            out[key] = {k: v for k, v in value.items() if k not in drop}
-            continue
-        out[key] = value
-    # Preserve counts so UI still shows quarantine / reject totals without samples.
+        if key in _LIST_KEEP_KEYS:
+            out[key] = value
+    # Preserve reject count if only nested under destination_summary.
     if "rejected_rows" not in out and isinstance(job.get("destination_summary"), dict):
         ds = job["destination_summary"]
         if "rejected_rows" in ds:
-            out.setdefault("rejected_rows", ds.get("rejected_rows"))
+            out["rejected_rows"] = ds.get("rejected_rows")
+        if "coerced_null_rows" in ds and "coerced_null_rows" not in out:
+            out["coerced_null_rows"] = ds.get("coerced_null_rows")
+    # Tiny checkpoint summary for Resume affordance (no row samples).
+    cp = job.get("checkpoint")
+    if isinstance(cp, dict):
+        out["checkpoint"] = {
+            k: cp.get(k)
+            for k in ("chunk_index", "offset", "rows_processed", "phase", "status", "cursor_column")
+            if k in cp
+        }
     return out

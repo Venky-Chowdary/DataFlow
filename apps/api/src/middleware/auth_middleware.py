@@ -8,6 +8,7 @@ from ..services.auth_service import auth_required, lookup_user, verify_token
 
 _PUBLIC_PREFIXES = (
     "/health",
+    "/api/v1/health",
     "/api/v1/auth/login",
     "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",

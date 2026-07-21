@@ -1,7 +1,7 @@
 from services.job_list_view import slim_job_for_list
 
 
-def test_slim_job_for_list_drops_heavy_arrays_keeps_counts():
+def test_slim_job_for_list_whitelist_drops_heavy_payload():
     job = {
         "_id": "abc",
         "status": "completed",
@@ -10,14 +10,20 @@ def test_slim_job_for_list_drops_heavy_arrays_keeps_counts():
         "rejected_details": [{"row": 1, "error": "x"}] * 500,
         "logs": ["a"] * 200,
         "mapping_proof": {"pairs": [{"a": 1}] * 100},
+        "preflight": {"gates": [{"id": "g1"}] * 20},
+        "transfer_request": {"mappings": [{"source": "a"}] * 50},
+        "event_log": [{"m": 1}] * 100,
         "destination_summary": {
             "rejected_rows": 3,
             "rejected_details": [{"row": 2}],
             "written": 997,
         },
-        "reconciliation": {
-            "matched": 997,
-            "mismatches": [{"id": 1}] * 50,
+        "reconciliation": {"matched": 997, "mismatches": [{"id": 1}] * 50},
+        "checkpoint": {
+            "chunk_index": 2,
+            "rows_processed": 500,
+            "phase": "writing",
+            "huge": "x" * 1000,
         },
     }
     slim = slim_job_for_list(job)
@@ -27,7 +33,10 @@ def test_slim_job_for_list_drops_heavy_arrays_keeps_counts():
     assert "rejected_details" not in slim
     assert "logs" not in slim
     assert "mapping_proof" not in slim
-    assert slim["destination_summary"]["written"] == 997
-    assert "rejected_details" not in slim["destination_summary"]
-    assert slim["reconciliation"]["matched"] == 997
-    assert "mismatches" not in slim["reconciliation"]
+    assert "preflight" not in slim
+    assert "transfer_request" not in slim
+    assert "event_log" not in slim
+    assert "destination_summary" not in slim
+    assert "reconciliation" not in slim
+    assert slim["checkpoint"]["chunk_index"] == 2
+    assert "huge" not in slim["checkpoint"]

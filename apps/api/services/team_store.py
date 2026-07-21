@@ -257,19 +257,15 @@ def list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
 
 
 def require_workspace_isolation() -> bool:
-    """When True, empty workspace_id is denied (hard multi-tenant isolation)."""
+    """When True, empty workspace_id is denied (hard multi-tenant isolation).
+
+    Opt-in via ``DATAFLOW_REQUIRE_WORKSPACE=1``. Production no longer defaults ON —
+    the web client historically omitted ``X-Workspace-Id``, which caused schedules /
+    contracts / usage to 400 and amplified false offline banners under load.
+    """
     import os
 
-    if os.getenv("DATAFLOW_REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes"):
-        return True
-    if os.getenv("DATAFLOW_REQUIRE_WORKSPACE", "").lower() in ("0", "false", "no"):
-        return False
-    try:
-        from services.platform_config import is_production
-
-        return is_production()
-    except Exception:
-        return False
+    return os.getenv("DATAFLOW_REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes")
 
 
 def can_read_workspace(workspace_id: str, email: str) -> bool:

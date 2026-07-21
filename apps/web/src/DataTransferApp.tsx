@@ -281,17 +281,21 @@ function AppShell({
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // Soft poll — avoid hammering the API during Transfer Studio introspect/map.
   useEffect(() => {
     const poll = window.setInterval(() => {
+      if (document.hidden) return;
+      if (screen === "transfer" || screen === "pilot") return;
       void loadConnectors(false);
-    }, 30000);
+    }, 60_000);
     return () => window.clearInterval(poll);
-  }, [loadConnectors]);
+  }, [loadConnectors, screen]);
 
   // Dedicated health pulse — recovers the banner when Railway is green again,
   // and only flips offline after repeated health failures (not one slow request).
   useEffect(() => {
     const pulse = window.setInterval(async () => {
+      if (document.hidden) return;
       const up = await probeApiHealth();
       if (up) {
         noteApiSuccess();
@@ -299,7 +303,7 @@ function AppShell({
       } else if (shouldMarkApiOffline(false)) {
         setApiOnline(false);
       }
-    }, 20000);
+    }, 30_000);
     return () => window.clearInterval(pulse);
   }, []);
 
