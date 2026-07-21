@@ -57,7 +57,9 @@ def _type_compatible_transform(target_type: str, raw: str) -> bool:
     if t in {"string", "text"}:
         return raw in _STRING_TRANSFORMS
     if t == "integer":
-        return raw in {"integer", "decimal", "currency", "percentage"}
+        # Boolean coerce is valid for INTEGER destinations that store flags as 0/1
+        # (SQLite BOOLEAN → INTEGER affinity, MySQL TINYINT(1), etc.).
+        return raw in {"integer", "decimal", "currency", "percentage", "boolean"}
     if t == "decimal":
         return raw in {"decimal", "integer", "currency", "percentage"}
     if t == "boolean":

@@ -1136,6 +1136,7 @@ def _introspect_sqlite(
             columns: list[dict[str, Any]] = []
             for name in col_names:
                 declared = declared_types.get(name, "")
+                declared_base = declared.split("(", 1)[0].strip().upper()
                 values = samples.get(name, [])
                 semantic_role = None
                 if declared == "BLOB" or any(isinstance(v, bytes) for v in values):
@@ -1147,9 +1148,19 @@ def _introspect_sqlite(
                     intel = infer_column(str_values, field_name=name)
                     inferred = str(intel["logical_type"])
                     semantic_role = intel.get("semantic_role")
-                    if inferred in ("VARCHAR", "TEXT") and declared in ("INTEGER", "INT"):
+                    # Prefer declared affinity over sample narrowing. SQLite stores
+                    # NUMERIC(38,15) values as ints when they have no fraction, and
+                    # sample inference alone would report INTEGER — then SCD2/upsert
+                    # re-runs falsely block DECIMAL → INTEGER as lossy.
+                    if declared_base in {"NUMERIC", "DECIMAL", "NUMBER"} or declared.startswith(
+                        ("NUMERIC", "DECIMAL", "NUMBER")
+                    ):
+                        inferred = "DECIMAL"
+                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {"INTEGER", "INT", "BIGINT"}:
                         inferred = "INTEGER"
-                    elif inferred in ("VARCHAR", "TEXT") and declared in ("REAL", "FLOAT", "NUMERIC", "DOUBLE"):
+                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {
+                        "REAL", "FLOAT", "DOUBLE"
+                    }:
                         inferred = "DECIMAL"
 
                 col_out: dict[str, Any] = {

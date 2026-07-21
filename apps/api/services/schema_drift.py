@@ -214,7 +214,19 @@ def detect_schema_drift(
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
     mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}
     unmapped_sources = [c for c in source_columns if c not in mapped_sources]
-    orphan_targets = [c for c in target_columns if c.lower() not in mapped_targets]
+    # Engine-managed SCD2 / CDC bookkeeping columns are not mapping orphans.
+    try:
+        from services.scd2_engine import SCD2_COLUMNS
+
+        system_targets = {c.lower() for c in SCD2_COLUMNS}
+    except Exception:
+        system_targets = {"valid_from", "valid_to", "is_current", "row_hash"}
+    system_targets |= {"_df_lsn", "df_lsn"}
+    orphan_targets = [
+        c
+        for c in target_columns
+        if c.lower() not in mapped_targets and c.lower() not in system_targets
+    ]
 
     type_mismatches: list[dict[str, str]] = []
     if not schemaless:

@@ -304,7 +304,15 @@ def run_mapping_pipeline(
         enriched_mappings.append(
             {
                 **m,
-                "transform": infer_transform_for_mapping(m["source"], m["target"], src_type, tgt_type),
+                "transform": infer_transform_for_mapping(
+                    m["source"],
+                    m["target"],
+                    src_type,
+                    tgt_type,
+                    source_samples=[
+                        str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
+                    ] or None,
+                ),
                 "source_type": src_type,
                 "target_type": tgt_type,
                 "reasoning": reasoning,

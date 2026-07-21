@@ -321,10 +321,36 @@ def safe_ddl_logical_type(
     field_name: str | None = None,
     source_type: str | None = None,
 ) -> str:
-    """For new-table DDL: never emit a tight type samples cannot all coerce to."""
+    """For new-table DDL: never emit a tight type samples cannot all coerce to.
+
+    Destination-native DDL (e.g. Postgres ``TIMESTAMPTZ``, Snowflake ``TIMESTAMP_TZ``)
+    is canonicalized to a logical type first. Without that, identity mappings that
+    already projected ``ddl_type(dest, TIMESTAMP)`` were treated as unknown and
+    wrongly widened to VARCHAR — CREATE TABLE then stored ISO strings as TEXT.
+    """
+    from services.type_system import normalize_logical_type
+
     proposed_u = (proposed or source_type or "VARCHAR").upper()
     if proposed_u in {"STRING", "CHAR", "CHARACTER", "CHARACTER VARYING"}:
         proposed_u = "VARCHAR"
+    # Map dest-native / alias DDL → canonical logical vocabulary used by writers.
+    _NORM_TO_LOGICAL = {
+        "integer": "INTEGER",
+        "decimal": "DECIMAL",
+        "boolean": "BOOLEAN",
+        "date": "DATE",
+        "datetime": "TIMESTAMP",
+        "time": "TIME",
+        "string": "VARCHAR",
+        "text": "TEXT",
+        "uuid": "UUID",
+        "json": "JSON",
+        "array": "JSON",
+        "binary": "BINARY",
+    }
+    canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
+    if canonical:
+        proposed_u = canonical
     if not samples:
         # Prefer source type when no samples; still avoid BOOLEAN without evidence.
         if proposed_u == "BOOLEAN" and source_type and str(source_type).upper() in {"VARCHAR", "TEXT", "STRING"}:

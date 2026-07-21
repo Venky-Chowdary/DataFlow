@@ -65,3 +65,31 @@ def test_infer_transform_parses_currency_for_decimal_target():
 
 def test_infer_transform_parses_percentage_for_decimal_target():
     assert infer_transform_for_mapping("tax_rate", "tax_rate", "VARCHAR", "DECIMAL") == "percentage"
+
+
+def test_infer_boolean_source_to_integer_dest_uses_boolean_transform():
+    """SQLite stores BOOLEAN as INTEGER — remaps must coerce, not invent *_text."""
+    assert (
+        infer_transform_for_mapping("active", "active", "BOOLEAN", "INTEGER") == "boolean"
+    )
+    assert (
+        infer_transform_for_mapping(
+            "active",
+            "active",
+            "TEXT",
+            "INTEGER",
+            source_samples=["true", "false", "true", "false"],
+        )
+        == "boolean"
+    )
+    # Plain numeric text still uses integer.
+    assert (
+        infer_transform_for_mapping(
+            "count",
+            "count",
+            "TEXT",
+            "INTEGER",
+            source_samples=["1", "2", "3", "4"],
+        )
+        == "integer"
+    )
