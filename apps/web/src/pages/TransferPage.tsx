@@ -4658,6 +4658,11 @@ export function TransferPage({
               setSchemaPolicy(policy);
               if (policy === "propagate_columns" || policy === "propagate_all") {
                 setBackfillNewFields(true);
+              } else {
+                // Leaving propagate must clear the stuck toggle — otherwise Execute
+                // fails with "Backfill new fields requires automatic column propagation"
+                // after Validate already passed under manual_review.
+                setBackfillNewFields(false);
               }
             }}
             onValidationModeChange={setValidationMode}

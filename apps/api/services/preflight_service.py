@@ -263,8 +263,20 @@ def run_transfer_policy_gates(
     }
     if schema not in allowed_schema:
         schema_issues.append(f"Unknown schema policy '{schema}'")
-    if backfill_new_fields and schema not in {"propagate_columns", "propagate_all"}:
-        schema_issues.append("Backfill new fields requires automatic column propagation")
+
+    # Stuck Studio toggle: backfill=true while policy is still manual_review (operator
+    # switched policy back but the checkbox state was never cleared). That must not
+    # fail Execute after Validate already passed — coerce to additive propagation.
+    # type_locked / pause_on_change still forbid silent ADD COLUMN.
+    policy_coerced = False
+    if backfill_new_fields and schema == "manual_review":
+        schema = "propagate_columns"
+        policy_coerced = True
+    elif backfill_new_fields and schema in {"type_locked", "pause_on_change"}:
+        schema_issues.append(
+            "Backfill new fields conflicts with schema policy "
+            f"'{schema}' — switch to Propagate columns, or turn backfill off"
+        )
 
     breaking = {
         "manual_review": "pause_for_manual_review",
@@ -286,12 +298,16 @@ def run_transfer_policy_gates(
         gates.append({
             "id": "g10_schema_policy",
             "status": GateStatus.PASS.value,
-            "message": f"Schema policy set to {schema.replace('_', ' ')}",
+            "message": (
+                f"Schema policy set to {schema.replace('_', ' ')}"
+                + (" (aligned backfill with propagate columns)" if policy_coerced else "")
+            ),
             "duration_ms": 0,
             "details": {
                 "schema_policy": schema,
                 "backfill_new_fields": backfill_new_fields,
                 "breaking_changes": breaking,
+                "policy_coerced_from_manual_review": policy_coerced,
             },
         })
 
