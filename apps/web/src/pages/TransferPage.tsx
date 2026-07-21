@@ -38,6 +38,7 @@ import {
   createContractFromTransfer,
   createSchedule,
   createTransferPlan,
+  fetchJob,
   fetchTransferCapabilities,
   introspectTransferEndpoints,
   mapTransferColumns,
@@ -119,6 +120,8 @@ interface TransferPageProps {
     step?: "validate" | "map" | "source";
     repairProposalId?: string;
     jobId?: string;
+    preflight?: import("../lib/types").PreflightResult;
+    validationMode?: string;
     mappings?: Array<{
       source?: string;
       destination?: string;
@@ -315,6 +318,8 @@ export function TransferPage({
     status: "idle",
   });
   const sourceIntrospectGenRef = useRef(0);
+  const destSchemaGenRef = useRef(0);
+  const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
   const [savingContract, setSavingContract] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -1113,10 +1118,17 @@ export function TransferPage({
     await applyPipelineMappings(targetCols, targetSchema);
   };
 
-  const loadDestinationSchema = async () => {
-    if (destKindMode !== "database" || !targetCollection.trim()) return;
+  const loadDestinationSchema = async (): Promise<{
+    columns: string[];
+    schema: Record<string, string>;
+    tableExists: boolean;
+  }> => {
+    if (destKindMode !== "database" || !targetCollection.trim()) {
+      return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+    }
+    const gen = ++destSchemaGenRef.current;
+    const tableKey = `${connectorId}|${destType}|${targetDb}|${destSchema}|${targetCollection.trim()}`;
     setDestSchemaLoading(true);
-    setDestTableExists(null);
     try {
       // Destination-only probe: stub file source so we do not re-sample Mongo/SQL
       // (that was hanging the Destination step for minutes on large collections).
@@ -1124,42 +1136,53 @@ export function TransferPage({
         source: { kind: "file", format: "csv" },
         destination: buildDestinationEndpoint(),
       });
-      setDestColumns(destination.columns ?? []);
-      setDestSchemaMap(destination.schema ?? {});
-      const exists = destination.table_exists ?? ((destination.columns?.length ?? 0) > 0);
+      if (gen !== destSchemaGenRef.current) {
+        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+      }
+      const columns = destination.columns ?? [];
+      const schema = destination.schema ?? {};
+      const exists = destination.table_exists ?? (columns.length > 0);
+      setDestColumns(columns);
+      setDestSchemaMap(schema);
       setDestTableExists(exists);
-      if (!exists) {
+      if (!exists && lastNewTableToastRef.current !== tableKey) {
+        lastNewTableToastRef.current = tableKey;
         toast({
           title: "New table will be created",
           message: `${targetCollection.trim()} was not found on the destination — DataFlow will CREATE TABLE on first write.`,
           tone: "info",
         });
       }
-      // Mapping pipeline runs on the Map step — never block Destination on AI remap.
+      return { columns, schema, tableExists: exists };
     } catch (e) {
-      // Missing / unreachable schema must not trap the wizard: treat as create-new.
-      setDestColumns([]);
-      setDestSchemaMap({});
+      if (gen !== destSchemaGenRef.current) {
+        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+      }
+      // Keep last-known schema on transient errors so the demo does not blank out.
       setDestTableExists(false);
       toast({
         title: "Could not read destination schema",
         message: e instanceof Error ? e.message : "Continuing — table will be created on first write if missing.",
         tone: "warning",
       });
+      return { columns: destColumns, schema: destSchemaMap, tableExists: false };
+    } finally {
+      if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
-    setDestSchemaLoading(false);
   };
 
   useEffect(() => {
     if (!analysis?.columns.length || step !== STEP_MAP) return;
     void applyPipelineMappings(destColumns.length ? destColumns : undefined, destSchemaMap);
-  }, [validationMode, step]);
+  }, [validationMode, step, destColumns, destSchemaMap]);
 
   useEffect(() => {
-    if (step !== STEP_DESTINATION || destKindMode !== "database" || !targetCollection.trim()) return;
-    const t = window.setTimeout(() => { void loadDestinationSchema(); }, 400);
+    if (destKindMode !== "database" || !targetCollection.trim()) return;
+    // Load schema as soon as the table/collection is set — Destination, Map, or Validate.
+    if (step !== STEP_DESTINATION && step !== STEP_MAP && step !== STEP_VALIDATE) return;
+    const t = window.setTimeout(() => { void loadDestinationSchema(); }, 350);
     return () => window.clearTimeout(t);
-  }, [step, destKindMode, targetCollection, connectorId, destType, targetDb, destHost, destPort]);
+  }, [step, destKindMode, targetCollection, connectorId, destType, targetDb, destHost, destPort, destSchema, destWarehouse]);
 
   useEffect(() => {
     if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {
@@ -1216,6 +1239,8 @@ export function TransferPage({
     }
     if (conn.database) setTargetDb(conn.database);
     if (conn.schema) setDestSchema(conn.schema);
+    else if (resolveDriverType(conn.type) === "snowflake") setDestSchema("PUBLIC");
+    if (conn.warehouse) setDestWarehouse(conn.warehouse);
     setDestHost(conn.host || getConnectorDefaults(conn.type).host);
     setDestPort(conn.port || defaultPortForType(conn.type));
     if (resolveDriverType(conn.type) === "iceberg") {
@@ -1292,12 +1317,40 @@ export function TransferPage({
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
 
-    // Drop prior route evidence so Validate does not show a stale green result.
-    setPreflight(null);
     setCellPreview(null);
     setMappingProof(null);
     setResult(null);
     setActiveJobId(seedStudioIntent.jobId || null);
+
+    // Hydrate Validate from the job's captured gates — never leave all rules Pending
+    // when opening from Jobs. Clear only when no job preflight is available.
+    if (seedStudioIntent.preflight) {
+      setPreflight(seedStudioIntent.preflight);
+    } else if (seedStudioIntent.jobId) {
+      setPreflight(null);
+      void fetchJob(seedStudioIntent.jobId)
+        .then((job) => {
+          if (job?.preflight) setPreflight(job.preflight as typeof preflight);
+          const mode = (job as { transfer_request?: { validation_mode?: string } })
+            ?.transfer_request?.validation_mode;
+          if (mode === "balanced" || mode === "strict" || mode === "maximum") {
+            setValidationMode(mode);
+          }
+        })
+        .catch(() => {
+          /* keep null — operator can Re-run */
+        });
+    } else {
+      setPreflight(null);
+    }
+
+    if (
+      seedStudioIntent.validationMode === "balanced"
+      || seedStudioIntent.validationMode === "strict"
+      || seedStudioIntent.validationMode === "maximum"
+    ) {
+      setValidationMode(seedStudioIntent.validationMode);
+    }
 
     const maps = seedStudioIntent.mappings;
     if (Array.isArray(maps) && maps.length > 0) {
@@ -1344,7 +1397,9 @@ export function TransferPage({
       title: "Opened Validate in Studio",
       message: seedStudioIntent.repairProposalId
         ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`
-        : `Continue remediation${jobHint}. Fix mappings or re-run Validate gates.`,
+        : seedStudioIntent.preflight
+          ? `Job gates loaded${jobHint}. Review results — Re-run only if you changed mappings.`
+          : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
       tone: "info",
     });
   }, [seedStudioIntent, toast]);
@@ -1564,7 +1619,7 @@ export function TransferPage({
           data = parseCsvTextForPreview(text);
           toast({
             title: "Profiled locally",
-            message: "API unavailable — preview uses browser parsing. Start the API for full preflight and write.",
+            message: "Upload API timed out — preview uses browser parsing. Re-try upload for full server preflight and write. Data rules still apply on Validate.",
             tone: "warning",
           });
         } else {
@@ -2104,9 +2159,13 @@ export function TransferPage({
     };
     try {
       bump(8, "Preparing schema context…");
+      let freshDestCols = destColumns;
+      let freshDestSchema = destSchemaMap;
       if (destKindMode === "database") {
         bump(22, "Loading destination schema…");
-        await loadDestinationSchema();
+        const loaded = await loadDestinationSchema();
+        freshDestCols = loaded.columns;
+        freshDestSchema = loaded.schema;
       }
       bump(42, "Building transfer plan…");
       await loadTransferPlan();
@@ -2117,14 +2176,14 @@ export function TransferPage({
         }
         bump(72, "Matching source to destination fields…");
         await applyPipelineMappings(
-          destColumns.length ? destColumns : undefined,
-          destSchemaMap,
+          freshDestCols.length ? freshDestCols : undefined,
+          freshDestSchema,
         );
       } else if (analysis?.columns.length || currentSourceColumns.length) {
         bump(65, "Matching source to destination fields…");
         await applyPipelineMappings(
-          destColumns.length ? destColumns : undefined,
-          destSchemaMap,
+          freshDestCols.length ? freshDestCols : undefined,
+          freshDestSchema,
         );
       } else {
         toast({
@@ -2326,48 +2385,86 @@ export function TransferPage({
       case "change_target_type": {
         if (!action.to_type) return;
         let hit = false;
-        let existingConflict = false;
+        let remapped = false;
+        const usedTargets = new Set(columnMappings.map((m) => m.target.toLowerCase()));
+        const isTextType = (t: string) => /varchar|text|string|char|variant/i.test(t || "");
         const next = columnMappings.map((m) => {
-          if (matches(m)) {
-            hit = true;
-            if (m.existsInDestination) {
-              existingConflict = true;
-              // Keep live dest type — mapping Widen is not ALTER TABLE.
-              return {
-                ...m,
-                approved: false,
-                requiresReview: true,
-                reason: [
-                  m.reason,
-                  `Destination already typed — remap or ALTER before targeting ${action.to_type}`,
-                ]
-                  .filter(Boolean)
-                  .join(" · "),
-              };
-            }
-            return { ...m, destType: action.to_type, approved: true };
+          if (!matches(m)) return m;
+          hit = true;
+          if (!m.existsInDestination) {
+            return { ...m, destType: action.to_type, approved: true, requiresReview: false };
           }
-          return m;
+          // Existing DDL cannot be widened by mapping alone — remappoint to a free text
+          // column, or invent a new VARCHAR target (ADD / create on write).
+          const freeText = destColumns.find((c) => {
+            const lower = c.toLowerCase();
+            if (usedTargets.has(lower) && lower !== m.target.toLowerCase()) return false;
+            return isTextType(destSchemaMap[c] || "");
+          });
+          if (freeText && freeText.toLowerCase() !== m.target.toLowerCase()) {
+            usedTargets.delete(m.target.toLowerCase());
+            usedTargets.add(freeText.toLowerCase());
+            remapped = true;
+            return {
+              ...m,
+              target: freeText,
+              destType: destSchemaMap[freeText] || action.to_type,
+              existsInDestination: true,
+              approved: true,
+              requiresReview: false,
+              reason: [
+                m.reason,
+                `Remapped off incompatible ${m.destType || "typed"} column → ${freeText} (${action.to_type})`,
+              ]
+                .filter(Boolean)
+                .join(" · "),
+            };
+          }
+          let candidate = m.source.replace(/^_+/, "") || m.source;
+          if (!candidate || usedTargets.has(candidate.toLowerCase()) || destColumns.some((c) => c.toLowerCase() === candidate.toLowerCase())) {
+            candidate = `${candidate || "field"}_text`;
+          }
+          let n = 2;
+          const base = candidate;
+          while (usedTargets.has(candidate.toLowerCase()) || destColumns.some((c) => c.toLowerCase() === candidate.toLowerCase())) {
+            candidate = `${base}_${n}`;
+            n += 1;
+          }
+          usedTargets.delete(m.target.toLowerCase());
+          usedTargets.add(candidate.toLowerCase());
+          remapped = true;
+          return {
+            ...m,
+            target: candidate,
+            destType: action.to_type,
+            existsInDestination: false,
+            approved: true,
+            requiresReview: false,
+            reason: [
+              m.reason,
+              `Destination ${m.target} is typed ${m.destType || "?"} — mapping to new ${candidate} as ${action.to_type}`,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          };
         });
         setColumnMappings(next);
-        if (existingConflict) {
+        if (!hit) {
           toast({
-            title: "Remap or ALTER required",
-            message:
-              "The destination column already exists with a typed DDL. Changing the mapping type alone will not widen BOOLEAN → VARCHAR on the warehouse.",
+            title: "Column not found",
+            message: `Couldn't find '${action.column ?? action.target}' in the current mappings.`,
             tone: "warning",
           });
-          setStep(STEP_MAP);
           return;
         }
         toast({
-          title: hit ? "Target type updated — re-validating" : "Column not found",
-          message: hit
-            ? `Changed ${action.column ?? action.target} → type ${action.to_type}. Re-running Validate now so you can see if the block cleared.`
-            : `Couldn't find '${action.column ?? action.target}' in the current mappings.`,
-          tone: hit ? "success" : "warning",
+          title: remapped ? "Remapped to compatible type — re-validating" : "Target type updated — re-validating",
+          message: remapped
+            ? `${action.column ?? action.target} no longer targets an incompatible typed column. Re-running Validate.`
+            : `Changed ${action.column ?? action.target} → type ${action.to_type}. Re-running Validate.`,
+          tone: "success",
         });
-        if (hit) void executePreflight(next);
+        void executePreflight(next);
         break;
       }
       case "normalize_control_chars": {
@@ -2635,7 +2732,7 @@ export function TransferPage({
           dest_schema: destKindMode === "database" && !connectorId
             ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
             : undefined,
-          dest_warehouse: destKindMode === "database" && !connectorId && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          dest_warehouse: destKindMode === "database" && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
           // Live dest schema — required so existing BOOLEAN columns are not invisible to DDL gates.
           dest_table: destKindMode === "database" && destDriverType !== "mongodb" && destDriverType !== "dynamodb"
             ? (targetCollection || undefined)
@@ -2667,7 +2764,7 @@ export function TransferPage({
           });
           toast({
             title: "Validated locally",
-            message: "API unavailable — browser preflight passed for file export demo.",
+            message: "Server preflight timed out — browser preview gates passed for file export. Re-run Validate when the API responds. Data rules still apply before write.",
             tone: "warning",
           });
         } else {
@@ -2703,7 +2800,7 @@ export function TransferPage({
         if (pf.passed) {
           toast({
             title: "Validated locally",
-            message: "API unavailable — browser preflight passed. Review gates, then Execute for local export.",
+            message: "Server preflight timed out — browser preview gates passed. Re-run Validate when the API responds, then Execute. Data rules still apply before write.",
             tone: "warning",
           });
         } else {
@@ -2802,7 +2899,7 @@ export function TransferPage({
         destKind: destKindMode,
         destFormat: destKindMode === "file_export" ? exportFormat : destType,
         destDatabase: targetDb,
-        destSchema: destDriverType === "snowflake" ? "PUBLIC" : destDriverType === "bigquery" ? destSchema : destSchema,
+        destSchema: destSchema || (destDriverType === "snowflake" ? "PUBLIC" : undefined),
         destTable: destType !== "mongodb" ? targetCollection : undefined,
         destCollection: destDriverType === "mongodb" ? targetCollection : targetCollection,
         destConnectorId: connectorId || undefined,
@@ -4180,7 +4277,13 @@ export function TransferPage({
                 id="dest-col"
                 className="df2-input"
                 value={targetCollection}
-                onChange={(e) => setTargetCollection(e.target.value)}
+                onChange={(e) => {
+                  // Do not blank schema on every keystroke — debounce reload keeps last columns
+                  // until the new table probe returns (avoids demo flicker).
+                  setTargetCollection(e.target.value);
+                  setPreflight(null);
+                  setCellPreview(null);
+                }}
                 placeholder={
                   destDriverType === "mongodb"
                     ? "my_collection"
@@ -4198,10 +4301,17 @@ export function TransferPage({
                 }
               />
             </div>
-            {getGenericSqlGroup(destType) === "postgresql+psycopg2" && (
+            {(destDriverType === "snowflake"
+              || destDriverType.includes("mssql")
+              || getGenericSqlGroup(destType) === "postgresql+psycopg2") && (
               <div className="df2-field df2-field-120">
                 <label className="df2-label">Schema</label>
-                <input className="df2-input" value={destSchema} onChange={(e) => setDestSchema(e.target.value)} />
+                <input
+                  className="df2-input"
+                  value={destSchema}
+                  onChange={(e) => setDestSchema(e.target.value)}
+                  placeholder={destDriverType === "snowflake" ? "PUBLIC" : destDriverType.includes("mssql") ? "dbo" : "public"}
+                />
               </div>
             )}
           </div>

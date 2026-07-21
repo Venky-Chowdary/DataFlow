@@ -45,6 +45,9 @@ export type JobsStudioIntent = {
   jobId?: string;
   /** Applied or job mappings to seed into Transfer Studio Map/Validate. */
   mappings?: RepairMapping[];
+  /** Job-captured preflight so Studio Validate shows real gates, not Pending. */
+  preflight?: import("../lib/types").PreflightResult;
+  validationMode?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -529,6 +532,16 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode,
   );
   const jobPreflight = liveJob?.preflight;
+  const openValidateInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    openStudio({
+      step: "validate",
+      jobId: selectedId || liveJob?._id || undefined,
+      mappings: jobRepairMappings,
+      preflight: liveJob?.preflight,
+      validationMode: liveJob?.transfer_request?.validation_mode,
+      ...extra,
+    });
+  }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
   const loadHistory =
     liveJob?.load_history_report
@@ -966,11 +979,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                               onOpenQuarantine={
                                 showQuarantineTab ? () => setDetailTab("quarantine") : undefined
                               }
-                              onOpenValidate={() => openStudio({
-                                step: "validate",
-                                jobId: selected._id,
-                                mappings: jobRepairMappings,
-                              })}
+                              onOpenValidate={() => openValidateInStudio()}
                               onResume={
                                 liveJob.checkpoint || liveJob.chunk_current != null
                                   ? () => void handleResume()
@@ -1242,11 +1251,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   <button
                                     type="button"
                                     className="df2-btn"
-                                    onClick={() => openStudio({
-                                      step: "validate",
-                                      jobId: selected._id,
-                                      mappings: jobRepairMappings,
-                                    })}
+                                    onClick={() => openValidateInStudio()}
                                   >
                                     Open Validate in Studio
                                   </button>
@@ -1328,10 +1333,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 {(liveJob.records_processed ?? 0).toLocaleString()} row(s) were processed.
                                 {" "}
                                 {rejectedCount > 0
-                                  ? `Only ${rejectedCount.toLocaleString()} row(s) / cell finding(s) failed type or integrity checks and were isolated — they were not written as clean destination rows. The rest of the load succeeded.`
+                                  ? `Only ${rejectedCount.toLocaleString()} finding(s) failed type/integrity checks and were isolated — they were not written as clean destination rows. Inspect details for source row #, column, value, and reason. The rest of the load succeeded.`
                                   : "No write-time quarantine count on this job yet — open details to inspect preflight / integrity findings."}
                                 {" "}
-                                Example: 100,000 transferred + 2 quarantined = 2 bad findings, not 99,998 failures.
+                                Example: 37,000 transferred + 30 quarantined = 30 bad findings with reasons — not silent data loss.
                               </p>
                               <div className="df2-jobs-quarantine-metrics">
                                 <article className="df2-jobs-quarantine-metric">
@@ -1357,11 +1362,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 </Button>
                                 <Button
                                   variant="secondary"
-                                  onClick={() => openStudio({
-                                    step: "validate",
-                                    jobId: selected._id,
-                                    mappings: jobRepairMappings,
-                                  })}
+                                  onClick={() => openValidateInStudio()}
                                   leadingIcon={<DtIcon name="gate" size={14} />}
                                 >
                                   Open Validate in Studio
@@ -1460,11 +1461,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             explanation={liveJob.explanation}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
-              openStudio({
-                step: "validate",
-                jobId: selectedId || undefined,
-                mappings: jobRepairMappings,
-              });
+              openValidateInStudio();
             }}
             onOpenQuarantine={
               showQuarantineTab
@@ -1616,7 +1613,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Run metadata"
           subtitle={jobRouteLabel(liveJob)}
           icon={<DtIcon name="activity" size={18} />}
-          size="lg"
+          size="xl"
         >
           <dl className="df2-jobs-v3-summary-dl df2-jobs-operator-meta">
             {triggeredBy && (
@@ -1714,7 +1711,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Phase timeline"
           subtitle="Job phase history for this run"
           icon={<DtIcon name="clock" size={18} />}
-          size="lg"
+          size="xl"
         >
           <JobTimeline entries={timelineEntries} />
         </Drawer>
@@ -1806,7 +1803,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="Event log"
           subtitle={`${eventLog.length.toLocaleString()} durable operator events`}
           icon={<DtIcon name="activity" size={18} />}
-          size="full"
+          size="xl"
         >
           <JobLogTable lines={eventLog} empty="No events yet" />
         </Drawer>
@@ -1819,7 +1816,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="DDL & stream log"
           subtitle={`${ddlLog.length.toLocaleString()} schema / stream lines`}
           icon={<DtIcon name="code" size={18} />}
-          size="full"
+          size="xl"
         >
           <JobLogTable lines={ddlLog.map(String)} empty="No DDL lines" />
         </Drawer>
@@ -1845,7 +1842,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
           title="CDC stream health"
           subtitle={`${liveJob.streams.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
-          size="full"
+          size="xl"
         >
           <table className="df2-table df2-jobs-cdc-table">
             <thead>
@@ -1897,16 +1894,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             jobId={selectedId}
             rejectedRows={liveJob.rejected_rows}
             coercedNullRows={liveJob.coerced_null_rows}
+            initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
-              openStudio({
-                step: "validate",
-                jobId: selectedId || undefined,
-                mappings: jobRepairMappings,
-              });
+              openValidateInStudio();
             }}
             onRepairDecided={(proposal) => {
               setEvidenceDrawer(null);
@@ -1919,9 +1913,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               const reopen =
                 proposal.status === "proposed"
                 || (proposal.status === "approved" && maps.length > 0);
-              openStudio({
-                step: "validate",
-                jobId: selectedId || undefined,
+              openValidateInStudio({
                 repairProposalId: reopen ? proposal.id : undefined,
                 mappings: maps,
               });

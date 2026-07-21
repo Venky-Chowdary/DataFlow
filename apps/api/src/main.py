@@ -336,6 +336,12 @@ async def health_check():
     }
 
 
+@app.get("/api/v1/health")
+async def health_check_v1():
+    """Same liveness under the versioned API prefix (web proxy /api/v1/health)."""
+    return await health_check()
+
+
 @app.get("/health/ready")
 async def health_ready():
     """Readiness — dependencies (Mongo, storage, drivers) are usable."""

@@ -19,6 +19,13 @@ from typing import Any, Iterator
 _LOCK = threading.RLock()
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 _PATH = os.path.join(_DATA_DIR, "cdc_incremental_snapshots.json")
+_MONGO_COLL = "cdc_incremental_snapshots"
+
+
+def _signals_coll():
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(_MONGO_COLL)
 
 
 @dataclass
@@ -55,7 +62,29 @@ class SnapshotSignal:
         )
 
 
+def _doc_to_signal(doc: dict[str, Any]) -> SnapshotSignal:
+    row = dict(doc)
+    row.pop("_id", None)
+    if not row.get("id") and doc.get("_id") is not None:
+        row["id"] = str(doc["_id"])
+    return SnapshotSignal.from_dict(row)
+
+
 def _load() -> list[dict[str, Any]]:
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            docs = list(coll.find().sort("created_at", -1).limit(500))
+            out: list[dict[str, Any]] = []
+            for d in docs:
+                row = dict(d)
+                row.pop("_id", None)
+                if not row.get("id") and d.get("_id") is not None:
+                    row["id"] = str(d["_id"])
+                out.append(row)
+            return out
+        except Exception:
+            pass
     if not os.path.isfile(_PATH):
         return []
     try:
@@ -67,11 +96,44 @@ def _load() -> list[dict[str, Any]]:
 
 
 def _save(signals: list[dict[str, Any]]) -> None:
+    coll = _signals_coll()
+    if coll is not None:
+        for row in signals[-500:]:
+            sid = str(row.get("id") or "")
+            if not sid:
+                continue
+            doc = dict(row)
+            doc["_id"] = sid
+            coll.replace_one({"_id": sid}, doc, upsert=True)
+        return
     from pathlib import Path
 
     from services.atomic_file import write_json_atomic
 
     write_json_atomic(Path(_PATH), {"signals": signals})
+
+
+def _upsert_signal(sig: SnapshotSignal | dict[str, Any]) -> SnapshotSignal:
+    row = sig.to_dict() if isinstance(sig, SnapshotSignal) else dict(sig)
+    sid = str(row.get("id") or "")
+    coll = _signals_coll()
+    if coll is not None and sid:
+        doc = dict(row)
+        doc["_id"] = sid
+        coll.replace_one({"_id": sid}, doc, upsert=True)
+        return SnapshotSignal.from_dict(row)
+    with _signal_store_lock():
+        rows = _load()
+        found = False
+        for i, r in enumerate(rows):
+            if r.get("id") == sid:
+                rows[i] = row
+                found = True
+                break
+        if not found:
+            rows.append(row)
+        _save(rows)
+    return SnapshotSignal.from_dict(row)
 
 
 @contextmanager
@@ -120,14 +182,22 @@ def request_incremental_snapshot(
         primary_key=primary_key,
         chunk_size=max(1, min(int(chunk_size), 50_000)),
     )
-    with _signal_store_lock():
-        rows = _load()
-        rows.append(sig.to_dict())
-        _save(rows)
-    return sig
+    return _upsert_signal(sig)
 
 
 def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSignal]:
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            query: dict[str, Any] = {}
+            if source_key:
+                query["source_key"] = source_key
+            if status:
+                query["status"] = status
+            docs = list(coll.find(query).sort("created_at", -1).limit(500))
+            return [_doc_to_signal(d) for d in docs]
+        except Exception:
+            pass
     with _signal_store_lock():
         rows = _load()
     out = [SnapshotSignal.from_dict(r) for r in rows]
@@ -144,6 +214,35 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
     Prefers an in-progress (``running``) signal so chunked snapshots resume,
     then the oldest ``pending`` signal. Optional ``table`` filters the claim.
     """
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            from pymongo import ReturnDocument
+
+            base: dict[str, Any] = {"source_key": source_key}
+            if table:
+                base["table"] = table
+            # Resume running
+            doc = coll.find_one_and_update(
+                {**base, "status": "running"},
+                {"$set": {"updated_at": time.time()}},
+                sort=[("created_at", 1)],
+                return_document=ReturnDocument.AFTER,
+            )
+            if doc:
+                return _doc_to_signal(doc)
+            # Claim pending
+            doc = coll.find_one_and_update(
+                {**base, "status": "pending"},
+                {"$set": {"status": "running", "updated_at": time.time()}},
+                sort=[("created_at", 1)],
+                return_document=ReturnDocument.AFTER,
+            )
+            if doc:
+                return _doc_to_signal(doc)
+            return None
+        except Exception:
+            pass
     with _signal_store_lock():
         rows = _load()
         # 1) Resume running
@@ -171,6 +270,22 @@ def claim_next_signal(source_key: str, table: str = "") -> SnapshotSignal | None
 
 
 def update_signal(signal_id: str, **fields: Any) -> SnapshotSignal | None:
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            from pymongo import ReturnDocument
+
+            updates = {k: v for k, v in fields.items() if v is not None}
+            updates["updated_at"] = time.time()
+            doc = coll.find_one_and_update(
+                {"_id": signal_id},
+                {"$set": updates},
+                return_document=ReturnDocument.AFTER,
+            )
+            if doc:
+                return _doc_to_signal(doc)
+        except Exception:
+            pass
     with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):
@@ -184,6 +299,29 @@ def update_signal(signal_id: str, **fields: Any) -> SnapshotSignal | None:
 
 
 def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | None:
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            from pymongo import ReturnDocument
+
+            doc = coll.find_one_and_update(
+                {"_id": signal_id, "status": {"$in": ["pending", "running"]}},
+                {
+                    "$set": {
+                        "last_pk": last_pk,
+                        "status": "running",
+                        "updated_at": time.time(),
+                    },
+                    "$inc": {"rows_snapshotted": int(rows)},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if doc:
+                return _doc_to_signal(doc)
+            existing = coll.find_one({"_id": signal_id})
+            return _doc_to_signal(existing) if existing else None
+        except Exception:
+            pass
     with _signal_store_lock():
         rows_data = _load()
         for i, r in enumerate(rows_data):
@@ -202,6 +340,28 @@ def mark_chunk(signal_id: str, *, last_pk: str, rows: int) -> SnapshotSignal | N
 
 
 def complete_signal(signal_id: str, *, error: str = "") -> SnapshotSignal | None:
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            from pymongo import ReturnDocument
+
+            existing = coll.find_one({"_id": signal_id})
+            if not existing:
+                return None
+            if existing.get("status") == "cancelled":
+                return _doc_to_signal(existing)
+            status = "failed" if error else "completed"
+            updates: dict[str, Any] = {"status": status, "updated_at": time.time()}
+            if error:
+                updates["error"] = error
+            doc = coll.find_one_and_update(
+                {"_id": signal_id},
+                {"$set": updates},
+                return_document=ReturnDocument.AFTER,
+            )
+            return _doc_to_signal(doc) if doc else None
+        except Exception:
+            pass
     with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):
@@ -221,6 +381,14 @@ def complete_signal(signal_id: str, *, error: str = "") -> SnapshotSignal | None
 
 
 def get_signal(signal_id: str) -> SnapshotSignal | None:
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": signal_id}) or coll.find_one({"id": signal_id})
+            if doc:
+                return _doc_to_signal(doc)
+        except Exception:
+            pass
     with _signal_store_lock():
         for r in _load():
             if r.get("id") == signal_id:
@@ -230,6 +398,25 @@ def get_signal(signal_id: str) -> SnapshotSignal | None:
 
 def cancel_signal(signal_id: str) -> SnapshotSignal | None:
     """Cancel a pending/running incremental snapshot (Debezium signal stop)."""
+    coll = _signals_coll()
+    if coll is not None:
+        try:
+            from pymongo import ReturnDocument
+
+            existing = coll.find_one({"_id": signal_id})
+            if not existing:
+                return None
+            status = str(existing.get("status") or "")
+            if status in {"completed", "failed", "cancelled"}:
+                return _doc_to_signal(existing)
+            doc = coll.find_one_and_update(
+                {"_id": signal_id},
+                {"$set": {"status": "cancelled", "updated_at": time.time()}},
+                return_document=ReturnDocument.AFTER,
+            )
+            return _doc_to_signal(doc) if doc else None
+        except Exception:
+            pass
     with _signal_store_lock():
         rows = _load()
         for i, r in enumerate(rows):

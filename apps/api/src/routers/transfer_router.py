@@ -656,14 +656,21 @@ async def execute_transfer_json(
     )
 
     if body.async_mode:
+        from services.worker_fleet import fleet_enabled
+
+        queued = fleet_enabled()
         background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
-            "status": "running",
+            "status": "queued" if queued else "running",
             "operation": request_obj.operation,
-            "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
+            "message": (
+                "Transfer queued for Worker fleet — stream progress at /connectors/jobs/{job_id}/stream"
+                if queued
+                else "Transfer started — stream progress at /connectors/jobs/{job_id}/stream"
+            ),
         }
 
     result = engine.execute_tracked(request_obj, job_id)
@@ -968,14 +975,21 @@ async def run_universal_transfer(
     )
 
     if async_mode.lower() in ("true", "1", "yes"):
+        from services.worker_fleet import fleet_enabled
+
+        queued = fleet_enabled()
         background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
-            "status": "running",
+            "status": "queued" if queued else "running",
             "operation": request_obj.operation,
-            "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
+            "message": (
+                "Transfer queued for Worker fleet — stream progress at /connectors/jobs/{job_id}/stream"
+                if queued
+                else "Transfer started — stream progress at /connectors/jobs/{job_id}/stream"
+            ),
         }
 
     result = engine.execute_tracked(request_obj, job_id)

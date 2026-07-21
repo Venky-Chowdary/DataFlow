@@ -31,6 +31,25 @@ def _registry_record_for_disk(record: dict) -> dict:
 
 def _load_registry() -> None:
     global _file_registry
+    # Prefer Mongo so API + Worker share upload metadata.
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for item in coll.find().limit(2000):
+                if not isinstance(item, dict):
+                    continue
+                fid = str(item.get("file_id") or item.get("_id") or "")
+                if not fid:
+                    continue
+                row = dict(item)
+                row.pop("_id", None)
+                row["file_id"] = fid
+                _file_registry[fid] = row
+            return
+    except Exception:
+        pass
     if not REGISTRY_PATH.exists():
         return
     try:
@@ -42,11 +61,27 @@ def _load_registry() -> None:
         if not isinstance(item, dict) or not item.get("file_id"):
             continue
         path = Path(item.get("path", ""))
-        if path.exists():
+        # Keep registry even if path missing — Worker may materialize from object_uri.
+        if path.exists() or item.get("object_uri"):
             _file_registry[item["file_id"]] = item
 
 
 def _save_registry() -> None:
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for r in _file_registry.values():
+                fid = str(r.get("file_id") or "")
+                if not fid:
+                    continue
+                doc = _registry_record_for_disk(r)
+                doc["_id"] = fid
+                coll.replace_one({"_id": fid}, doc, upsert=True)
+            return
+    except Exception:
+        pass
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "files": [_registry_record_for_disk(r) for r in _file_registry.values()],
@@ -203,7 +238,43 @@ def store_upload(filename: str, content: bytes) -> dict:
 
 
 def get_file(file_id: str) -> dict | None:
-    return _file_registry.get(file_id)
+    record = _file_registry.get(file_id)
+    if not record:
+        # Reload from Mongo in case another API replica registered the upload.
+        try:
+            from services.control_plane_store import mongo_collection
+
+            coll = mongo_collection("upload_registry")
+            if coll is not None:
+                doc = coll.find_one({"_id": file_id}) or coll.find_one({"file_id": file_id})
+                if doc:
+                    row = dict(doc)
+                    row.pop("_id", None)
+                    row["file_id"] = file_id
+                    _file_registry[file_id] = row
+                    record = row
+        except Exception:
+            pass
+    if not record:
+        return None
+    path = Path(record.get("path") or "")
+    if path.exists():
+        return record
+    uri = str(record.get("object_uri") or "")
+    if uri.startswith("s3://"):
+        from services.object_store import materialize_local
+        from services.platform_config import upload_dir
+
+        dest = upload_dir() / f"{file_id}_{record.get('filename') or 'upload.bin'}"
+        if materialize_local(uri, dest):
+            record = dict(record)
+            record["path"] = str(dest)
+            _file_registry[file_id] = record
+            return record
+    if path.exists():
+        return record
+    # Metadata known but bytes unreachable on this replica.
+    return record if record.get("object_uri") else None
 
 
 def get_file_chunks(file_id: str, chunk_size: int = 10000):

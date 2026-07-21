@@ -1575,11 +1575,12 @@ export function ValidateDashboard({
             {preflight.blockers.map((b) => {
               const issues = issueTextsFromDetails(b.details);
               const blockingCols = (preflight.coercion_report?.columns ?? []).filter((c) => c.severity === "block");
+              const showIssueList = issues.length > 0 && !(b.id.includes("dry_run") && blockingCols.length > 0);
               return (
                 <li key={b.id}>
                   <strong>{metaForGate(b.id).label}</strong>
                   <span>{b.message}</span>
-                  {issues.length > 0 && (
+                  {showIssueList && (
                     <ul className="df2-vd-blocker-issues">
                       {issues.slice(0, 6).map((issue) => (
                         <li key={issue}>{issue}</li>
@@ -1588,7 +1589,9 @@ export function ValidateDashboard({
                   )}
                   {blockingCols.length > 0 && b.id.includes("dry_run") && (
                     <div className="df2-vd-blocker-actions">
-                      <span className="df2-vd-assist-actions-title">One-click type fixes</span>
+                      <span className="df2-vd-assist-actions-title">
+                        Fix on Validate (remaps off incompatible typed columns)
+                      </span>
                       <div className="df2-vd-chip-row">
                         {blockingCols.slice(0, 6).map((col) => (
                           <button
@@ -1596,11 +1599,14 @@ export function ValidateDashboard({
                             type="button"
                             className="df2-vd-chip kind-change_target_type"
                             disabled={!onApplyAction || !col.suggested_target_type}
-                            title={col.suggested_fix || `Widen ${col.source}`}
+                            title={
+                              col.suggested_fix
+                              || `Remap ${col.source} to a ${col.suggested_target_type} column (Widen alone does not ALTER DDL)`
+                            }
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
-                                label: `${col.source} → ${col.suggested_target_type}`,
+                                label: `Remap ${col.source} → ${col.suggested_target_type}`,
                                 column: col.source,
                                 target: col.target,
                                 to_type: col.suggested_target_type ?? undefined,
@@ -1608,7 +1614,7 @@ export function ValidateDashboard({
                             }
                           >
                             <DtIcon name="layers" size={13} />
-                            {col.source} → {col.suggested_target_type ?? "VARCHAR"}
+                            Remap {col.source} → {col.suggested_target_type ?? "VARCHAR"}
                           </button>
                         ))}
                       </div>
@@ -1619,7 +1625,7 @@ export function ValidateDashboard({
                       <DtIcon name="check" size={12} /> {b.guidance.fix}
                     </span>
                   )}
-                  {b.guidance?.why && (
+                  {b.guidance?.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{b.guidance.why}</span>
                   )}
                   {(b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (

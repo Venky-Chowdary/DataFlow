@@ -541,6 +541,8 @@ class MongoDBService:
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
+        from services.job_list_view import slim_job_for_list
+
         db = self.get_database()
         collection = db["transfer_jobs"]
 
@@ -553,12 +555,31 @@ class MongoDBService:
                 allowed = ["", None]
             query["$or"] = [{"workspace_id": w} for w in allowed if w is not None] + [{"workspace_id": {"$exists": False}}]
         jobs = []
-        for doc in collection.find(query).sort("created_at", -1).limit(limit):
+        # Projection drops the heaviest arrays at the Mongo layer when possible.
+        projection = {
+            "rejected_details": 0,
+            "logs": 0,
+            "log_lines": 0,
+            "events": 0,
+            "chunks": 0,
+            "mapping_proof": 0,
+            "sample_rows": 0,
+            "preview_rows": 0,
+            "quarantine_rows": 0,
+            "quarantine_samples": 0,
+            "destination_summary.rejected_details": 0,
+            "destination_summary.sample_rows": 0,
+            "destination_summary.preview_rows": 0,
+            "source_summary.sample_rows": 0,
+            "reconciliation.mismatches": 0,
+            "reconciliation.sample_mismatches": 0,
+        }
+        for doc in collection.find(query, projection).sort("created_at", -1).limit(limit):
             doc["_id"] = str(doc["_id"])
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if doc.get(key) and hasattr(doc[key], "isoformat"):
                     doc[key] = doc[key].isoformat()
-            jobs.append(doc)
+            jobs.append(slim_job_for_list(doc))
         return jobs
 
 
@@ -840,6 +861,8 @@ class MemoryMongoDBService:
         return None
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+        from services.job_list_view import slim_job_for_list
+
         items = sorted(
             self._jobs.values(),
             key=lambda j: j.get("created_at") or "",
@@ -858,7 +881,7 @@ class MemoryMongoDBService:
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
-            out.append(job)
+            out.append(slim_job_for_list(job))
         return out
 
 

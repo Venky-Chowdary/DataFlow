@@ -236,6 +236,13 @@ export function ValidateActionsRail({
             Execute starts the write. You stay on Validate until you choose to run.
           </p>
         )}
+        {!passed && preflight && !transferLaunch && (
+          <p className="df2-validate-rail-explain" role="alert">
+            Fix the blocked gate above on Validate, then Re-run. Execute stays disabled until
+            preflight passes — nothing is written yet.
+            {firstBlockerMessage ? ` Blocker: ${firstBlockerMessage}` : ""}
+          </p>
+        )}
         {executeBlocked && executeBlockedReason && (
           <p className="df2-validate-rail-explain" role="alert">
             {executeBlockedReason}

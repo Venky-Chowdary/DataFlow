@@ -508,7 +508,9 @@ export function QuarantinePanel({
               <table className="df2-query-table df2-quarantine-table">
                 <thead>
                   <tr>
-                    <th>Row</th>
+                    <th title="1-based source row across the full transfer (batch-local rows are converted to absolute)">
+                      Source row
+                    </th>
                     <th>Column</th>
                     <th>Target</th>
                     <th>Value</th>

@@ -20,6 +20,20 @@ _LOCK = threading.RLock()
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 _AUDIT_PATH = os.path.join(_DATA_DIR, "agentic_repair_audit.jsonl")
 _PROPOSALS_PATH = os.path.join(_DATA_DIR, "agentic_repair_proposals.json")
+_MONGO_COLL = "repair_proposals"
+_MONGO_AUDIT = "repair_audit"
+
+
+def _proposals_coll():
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(_MONGO_COLL)
+
+
+def _audit_coll():
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(_MONGO_AUDIT)
 
 
 @dataclass
@@ -43,14 +57,35 @@ class RepairProposal:
 
 
 def _audit(event: str, payload: dict[str, Any]) -> None:
-    os.makedirs(_DATA_DIR, exist_ok=True)
     row = {"ts": time.time(), "event": event, **payload}
+    coll = _audit_coll()
+    if coll is not None:
+        try:
+            coll.insert_one(dict(row))
+            return
+        except Exception:
+            pass
+    os.makedirs(_DATA_DIR, exist_ok=True)
     with _LOCK:
         with open(_AUDIT_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")
 
 
 def _load_proposals() -> list[dict[str, Any]]:
+    coll = _proposals_coll()
+    if coll is not None:
+        try:
+            docs = list(coll.find().sort("created_at", -1).limit(200))
+            out: list[dict[str, Any]] = []
+            for d in docs:
+                row = dict(d)
+                row.pop("_id", None)
+                if not row.get("id") and d.get("_id") is not None:
+                    row["id"] = str(d["_id"])
+                out.append(row)
+            return out
+        except Exception:
+            pass
     if not os.path.isfile(_PROPOSALS_PATH):
         return []
     try:
@@ -61,11 +96,37 @@ def _load_proposals() -> list[dict[str, Any]]:
 
 
 def _save_proposals(rows: list[dict[str, Any]]) -> None:
+    """Persist full proposal list (file fallback) or upsert each row (Mongo)."""
+    coll = _proposals_coll()
+    if coll is not None:
+        for row in rows[-200:]:
+            pid = str(row.get("id") or "")
+            if not pid:
+                continue
+            doc = dict(row)
+            doc["_id"] = pid
+            coll.replace_one({"_id": pid}, doc, upsert=True)
+        return
     os.makedirs(_DATA_DIR, exist_ok=True)
     tmp = _PROPOSALS_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"proposals": rows[-200:]}, f, indent=2, default=str)
     os.replace(tmp, _PROPOSALS_PATH)
+
+
+def _upsert_proposal(proposal: RepairProposal) -> None:
+    row = proposal.to_dict()
+    coll = _proposals_coll()
+    if coll is not None:
+        doc = dict(row)
+        doc["_id"] = proposal.id
+        coll.replace_one({"_id": proposal.id}, doc, upsert=True)
+        return
+    with _LOCK:
+        rows = _load_proposals()
+        rows = [r for r in rows if r.get("id") != proposal.id]
+        rows.append(row)
+        _save_proposals(rows)
 
 
 def _action_is_safe(action: dict[str, Any]) -> bool:
@@ -112,9 +173,7 @@ def propose_from_preflight(
         },
     )
     with _LOCK:
-        rows = _load_proposals()
-        rows.append(proposal.to_dict())
-        _save_proposals(rows)
+        _upsert_proposal(proposal)
     _audit("propose", {"proposal_id": proposal.id, "job_id": job_id, "confidence": conf})
     return proposal
 
@@ -173,9 +232,7 @@ def propose_from_quarantine(
         diagnosis={"rejected_count": len(rejected_details or [])},
     )
     with _LOCK:
-        rows = _load_proposals()
-        rows.append(proposal.to_dict())
-        _save_proposals(rows)
+        _upsert_proposal(proposal)
     _audit("propose_quarantine", {"proposal_id": proposal.id, "job_id": job_id})
     return proposal
 
@@ -199,6 +256,17 @@ def _proposal_from_row(r: dict[str, Any]) -> RepairProposal:
 
 
 def get_proposal(proposal_id: str) -> RepairProposal | None:
+    coll = _proposals_coll()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": proposal_id}) or coll.find_one({"id": proposal_id})
+            if doc:
+                row = dict(doc)
+                row.pop("_id", None)
+                row.setdefault("id", proposal_id)
+                return _proposal_from_row(row)
+        except Exception:
+            pass
     with _LOCK:
         for r in _load_proposals():
             if r.get("id") == proposal_id:
@@ -207,6 +275,25 @@ def get_proposal(proposal_id: str) -> RepairProposal | None:
 
 
 def list_proposals(*, job_id: str = "", status: str = "") -> list[RepairProposal]:
+    coll = _proposals_coll()
+    if coll is not None:
+        try:
+            query: dict[str, Any] = {}
+            if job_id:
+                query["job_id"] = job_id
+            if status:
+                query["status"] = status
+            docs = list(coll.find(query).sort("created_at", -1).limit(200))
+            out = []
+            for d in docs:
+                row = dict(d)
+                row.pop("_id", None)
+                if not row.get("id") and d.get("_id") is not None:
+                    row["id"] = str(d["_id"])
+                out.append(_proposal_from_row(row))
+            return out
+        except Exception:
+            pass
     with _LOCK:
         rows = _load_proposals()
     out = [_proposal_from_row(r) for r in rows]
@@ -233,11 +320,11 @@ def decide_proposal(
     Already terminal statuses (applied/rejected/failed) raise ValueError.
     """
     with _LOCK:
-        rows = _load_proposals()
-        idx = next((i for i, r in enumerate(rows) if r.get("id") == proposal_id), -1)
-        if idx < 0:
+        # Prefer Mongo document when available so multi-replica reads are consistent.
+        existing = get_proposal(proposal_id)
+        if existing is None:
             raise KeyError(f"Unknown proposal: {proposal_id}")
-        row = dict(rows[idx])
+        row = existing.to_dict()
         current = str(row.get("status") or "proposed")
 
         if not approve:
@@ -246,10 +333,10 @@ def decide_proposal(
             row["status"] = "rejected"
             row["decided_at"] = time.time()
             row["decided_by"] = actor
-            rows[idx] = row
-            _save_proposals(rows)
+            decided = _proposal_from_row(row)
+            _upsert_proposal(decided)
             _audit("reject", {"proposal_id": proposal_id, "actor": actor})
-            return _proposal_from_row(row)
+            return decided
 
         if current not in ("proposed", "approved"):
             raise ValueError(f"Cannot approve proposal in status {current}")
@@ -269,10 +356,10 @@ def decide_proposal(
             row["status"] = "approved"
             apply_result = {"applied": False}
         row["apply_result"] = apply_result
-        rows[idx] = row
-        _save_proposals(rows)
+        decided = _proposal_from_row(row)
+        _upsert_proposal(decided)
         _audit("approve", {"proposal_id": proposal_id, "actor": actor, "status": row["status"]})
-        return _proposal_from_row(row)
+        return decided
 
 
 def apply_actions_to_mappings(

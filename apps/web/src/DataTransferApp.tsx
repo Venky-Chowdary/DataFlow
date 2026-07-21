@@ -222,9 +222,22 @@ function AppShell({
       setJobs(await fetchJobs());
       noteApiSuccess();
       setApiOnline(true);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      const timedOut = /timed out|abort/i.test(msg);
       if (notifyOnError) {
-        toast({ title: "Could not load jobs", message: "Job history may be unavailable.", tone: "warning" });
+        const up = await probeApiHealth();
+        if (up || timedOut) {
+          toast({
+            title: timedOut ? "Jobs list took longer than usual" : "Could not refresh jobs",
+            message: up
+              ? "API is healthy — retrying in the background. Open a job for full detail."
+              : "Job history may be temporarily unavailable.",
+            tone: "warning",
+          });
+        } else if (shouldMarkApiOffline(false)) {
+          setApiOnline(false);
+        }
       }
     }
   }, [toast]);

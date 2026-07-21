@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..services.contract_store import get_contract_store
@@ -23,6 +23,7 @@ from ..services.data_contract import (
     DataContract,
     QualityRule,
 )
+from services.workspace_access import assert_resource_workspace, resolve_read_workspace, resolve_write_workspace
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
@@ -93,16 +94,37 @@ def _contract_to_response(contract: DataContract) -> _ContractResponse:
 
 
 @router.get("", response_model=_ContractListResponse)
-def list_contracts(request: Request):
+def list_contracts(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    ws = resolve_read_workspace(request, workspace_id)
     store = get_contract_store()
-    contracts = [_contract_to_response(c) for c in store.list_contracts(limit=200)]
+    contracts = []
+    for c in store.list_contracts(limit=200):
+        meta = getattr(c, "metadata", None) or {}
+        cws = str(meta.get("workspace_id") or "")
+        if ws and cws and cws != ws:
+            continue
+        if ws and not cws:
+            # Legacy unscoped contracts visible only when isolation is off.
+            from services.team_store import require_workspace_isolation
+
+            if require_workspace_isolation():
+                continue
+        contracts.append(_contract_to_response(c))
     return _ContractListResponse(contracts=contracts)
 
 
 @router.post("", response_model=_ContractResponse)
 @router.post("/from-transfer", response_model=_ContractResponse)
-def create_contract_from_transfer(body: _CreateFromTransferRequest):
+def create_contract_from_transfer(
+    body: _CreateFromTransferRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Persist a draft contract from Transfer Studio validate/mapping state."""
+    ws = resolve_write_workspace(request, workspace_id)
     store = get_contract_store()
     mappings = list(body.mappings or [])
     columns: list[ColumnRule] = []
@@ -157,6 +179,9 @@ def create_contract_from_transfer(body: _CreateFromTransferRequest):
                     )
                 )
 
+    meta = dict(body.metadata or {})
+    if ws:
+        meta["workspace_id"] = ws
     contract = DataContract(
         name=body.name.strip(),
         status=ContractStatus.DRAFT,
@@ -167,18 +192,25 @@ def create_contract_from_transfer(body: _CreateFromTransferRequest):
         quality_rules=quality_rules,
         preflight_gates=list(body.preflight_gates or []),
         strict=body.strict,
-        metadata=dict(body.metadata or {}),
+        metadata=meta,
     )
     store.save_contract(contract)
     return _contract_to_response(contract)
 
 
 @router.get("/{contract_id}", response_model=_ContractResponse)
-def get_contract(contract_id: str):
+def get_contract(
+    contract_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    resolve_read_workspace(request, workspace_id)
     store = get_contract_store()
     contract = store.get_contract(contract_id)
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
+    meta = getattr(contract, "metadata", None) or {}
+    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
     return _contract_to_response(contract)
 
 

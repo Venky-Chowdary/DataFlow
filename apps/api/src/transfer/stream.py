@@ -1369,12 +1369,36 @@ def stream_database_transfer(
         if result["batch_max"] is not None:
             if running_cursor is None or compare_cursor_values(result["batch_max"], running_cursor) > 0:
                 running_cursor = result["batch_max"]
+        # Absolute source-row offset for this batch (0-based start before commit).
+        batch_start = int(committed_offset or 0)
         committed_offset += result["batch_rows"]
         if result["dest_summary"]:
-            dest_summary = result["dest_summary"]
-            method = dest_summary.get("load_method")
+            incoming = dict(result["dest_summary"])
+            method = incoming.get("load_method")
             if method:
                 load_methods_seen.append(str(method))
+            # Merge quarantine findings across batches — never replace with last batch only.
+            prev = dest_summary if isinstance(dest_summary, dict) else {}
+            prev_details = list(prev.get("rejected_details") or [])
+            new_details: list[dict[str, Any]] = []
+            for raw in incoming.get("rejected_details") or []:
+                if not isinstance(raw, dict):
+                    continue
+                detail = dict(raw)
+                local_row = int(detail.get("row") or 0)
+                if local_row > 0:
+                    detail["batch_row"] = local_row
+                    detail["batch_offset"] = batch_start
+                    detail["row"] = batch_start + local_row  # 1-based absolute across the transfer
+                new_details.append(detail)
+            merged_details = (prev_details + new_details)[:200]
+            dest_summary = {
+                **prev,
+                **incoming,
+                "rejected_details": merged_details,
+                "rejected_rows": rejected_total,
+                "coerced_null_rows": coerced_null_total,
+            }
             batches_completed += 1
 
         # Persist durable checkpoint after the batch is committed.  We use the
@@ -1539,6 +1563,7 @@ def stream_database_transfer(
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
+    dest_summary["rejected_details"] = list(dest_summary.get("rejected_details") or [])[:200]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync

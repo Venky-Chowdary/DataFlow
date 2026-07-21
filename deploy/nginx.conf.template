@@ -26,7 +26,23 @@ server {
         proxy_set_header Authorization $http_authorization;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
+        proxy_connect_timeout 30s;
+        # Large job/connector JSON must not spill to disk under load (Railway warn).
+        proxy_buffer_size 128k;
+        proxy_buffers 32 256k;
+        proxy_busy_buffers_size 512k;
+        proxy_temp_file_write_size 512k;
         client_max_body_size 256m;
+    }
+
+    # Real API liveness (not the static web /health stub).
+    location /health-api {
+        proxy_pass ${API_ORIGIN}/health;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host ${API_PROXY_HOST};
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
     }
 
     location / {

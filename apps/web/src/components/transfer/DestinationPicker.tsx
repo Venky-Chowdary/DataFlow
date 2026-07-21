@@ -77,8 +77,14 @@ export function DestinationPicker({
             onClick={() => onSelectConnector(c.id)}
           >
             <ConnectorIcon id={c.type} size={18} />
-            <span className="df2-dest-connector-card-name">{c.name}</span>
-            <span className="df2-dest-connector-card-meta">
+            <span className="df2-dest-connector-card-name" title={c.name}>{c.name}</span>
+            <span
+              className="df2-dest-connector-card-meta"
+              title={[
+                getConnectorDefaults(c.type).label,
+                c.database || c.host || "",
+              ].filter(Boolean).join(" · ")}
+            >
               {getConnectorDefaults(c.type).label}
               {c.database ? ` · ${c.database}` : c.host ? ` · ${c.host}` : ""}
             </span>

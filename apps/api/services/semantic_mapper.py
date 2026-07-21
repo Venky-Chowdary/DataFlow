@@ -376,8 +376,11 @@ def _sample_consistency_boost(samples: list[str] | None, source_type: str, targe
         return 0.06
     if rate >= 0.7:
         return 0.03
+    if rate < 0.2:
+        # Hard demote: ObjectId/hex → DECIMAL (etc.) must lose to type-compatible targets.
+        return -0.90
     if rate < 0.4:
-        return -0.08
+        return -0.15
     return 0.0
 
 
@@ -400,10 +403,18 @@ def _score_pair(
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
 
+    type_penalty = _type_compat_penalty(source_type, target_type)
+    type_boost = _type_aware_boost(source_type, target_type)
+    sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
+
+    def _finish(score: float, reason: str) -> tuple[float, str]:
+        adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
+        return adjusted, reason
+
     if src_norm == tgt_norm:
-        return 0.995, "Exact name match"
+        return _finish(0.995, "Exact name match")
     if src_sem == tgt_sem_raw:
-        return 0.975, "Exact semantic token match"
+        return _finish(0.975, "Exact semantic token match")
 
     schematic = None
     try:
@@ -412,20 +423,20 @@ def _score_pair(
     except ImportError:
         pass
     if schematic is not None:
-        return schematic, "Schematic index match (1M+ variants)"
+        return _finish(schematic, "Schematic index match (1M+ variants)")
 
     src_canon = _canonical_form(source)
     tgt_canon = _canonical_form(target)
     expanded = _semantic_form(source)
     if src_canon and tgt_canon and src_canon == tgt_canon:
         if _normalize(target) == src_canon:
-            return 0.99, "Canonical schematic resolution (exact target)"
+            return _finish(0.99, "Canonical schematic resolution (exact target)")
         if _normalize(target) == _normalize(expanded):
-            return 0.985, "Canonical schematic resolution (expanded form)"
-        return 0.93, "Canonical schematic resolution"
+            return _finish(0.985, "Canonical schematic resolution (expanded form)")
+        return _finish(0.93, "Canonical schematic resolution")
 
     if _normalize(target) == _normalize(expanded):
-        return 0.94, "Abbreviation expansion match"
+        return _finish(0.94, "Abbreviation expansion match")
 
     if source_role and target_role:
         boost = role_match_boost(source_role, target_role)
@@ -437,17 +448,17 @@ def _score_pair(
             adjusted = min(0.995, float(boost) * 0.82 + lex * 0.18)
             if lex >= 0.72:
                 adjusted = max(adjusted, min(0.97, float(boost)))
-            return adjusted, f"Semantic role match: {source_role} → {target_role} (lex={lex:.2f})"
+            return _finish(adjusted, f"Semantic role match: {source_role} → {target_role} (lex={lex:.2f})")
 
     boosted = lexicon_boost(source, target)
     if boosted is not None:
-        return boosted, "Training lexicon match (synthetic_v1)"
+        return _finish(boosted, "Training lexicon match (synthetic_v1)")
 
     src_sem = _canonical_form(source)
     tgt_sem = _canonical_form(target)
 
     if src_sem == tgt_sem:
-        return 0.96, "Semantic token match"
+        return _finish(0.96, "Semantic token match")
 
     bm25 = _bm25_score(_tokenize(source), _tokenize(target), idf, avgdl)
     bm25_norm = min(bm25 / 8.0, 1.0)
@@ -460,19 +471,15 @@ def _score_pair(
         if _normalize(pred_tgt) == tgt_norm and pred_score > 0.5:
             ml_boost = min(pred_score * 0.15, 0.15)
             if pred_score > 0.8:
-                return 0.95, "ML Baseline highly confident match"
-
-    type_penalty = _type_compat_penalty(source_type, target_type)
-    type_boost = _type_aware_boost(source_type, target_type)
-    sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
+                return _finish(0.95, "ML Baseline highly confident match")
 
     if src_sem in tgt_sem or tgt_sem in src_sem:
         if min(len(src_sem), len(tgt_sem)) >= 4:
-            return max(0.92, 0.85 + bm25_norm * 0.1) - type_penalty + type_boost + sample_boost, "Partial semantic overlap + BM25"
+            return _finish(max(0.92, 0.85 + bm25_norm * 0.1), "Partial semantic overlap + BM25")
 
     overlap = len(set(src_sem.split("_")) & set(tgt_sem.split("_")))
     if overlap >= 2:
-        return 0.82 + overlap * 0.03 + bm25_norm * 0.05 - type_penalty + type_boost + ml_boost + sample_boost, f"Shared tokens ({overlap}) + BM25"
+        return _finish(0.82 + overlap * 0.03 + bm25_norm * 0.05 + ml_boost, f"Shared tokens ({overlap}) + BM25")
 
     fuzzy = _similarity(src_sem, tgt_sem)
 
@@ -484,14 +491,13 @@ def _score_pair(
     if s_ngrams or t_ngrams:
         jaccard = len(s_ngrams & t_ngrams) / len(s_ngrams | t_ngrams)
 
-    combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) - type_penalty + type_boost + ml_boost + sample_boost
+    combined = max(fuzzy * 0.75, bm25_norm * 0.88, jaccard * 0.82) + ml_boost
 
     if combined >= 0.78:
-        return min(combined, 0.99), "BM25 / Jaccard lexical retrieval"
+        return _finish(min(combined, 0.99), "BM25 / Jaccard lexical retrieval")
     if overlap == 1 and len(src_sem.split("_")) > 1:
-        return min(0.78 - type_penalty + type_boost + ml_boost + sample_boost, 0.99), "Single token overlap"
-    return min(combined, 0.99), "Character similarity"
-
+        return _finish(min(0.78 + ml_boost, 0.99), "Single token overlap")
+    return _finish(min(combined, 0.99), "Character similarity")
 
 def _hungarian_minimize(cost: list[list[float]]) -> list[int]:
     """Return row -> column assignment for rows <= columns."""
@@ -758,9 +764,36 @@ def map_columns(
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
         alternatives = _alternatives(source, target_columns, pair_scores)
+        src_type = src_types.get(source, "VARCHAR")
+        # Prefer create-new text column over a lossy existing target (e.g. ObjectId → DECIMAL).
+        if (not best_target or best_score < floor) and target_columns:
+            dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
+            candidate = _semantic_form(source)
+            taken = {t.lower() for t in used_targets} | {t.lower() for t in target_columns}
+            if candidate.lower() in taken:
+                candidate = f"{candidate}_text" if f"{candidate}_text".lower() not in taken else f"src_{candidate}"
+            used_targets.add(candidate)
+            mappings.append(
+                {
+                    "source": source,
+                    "target": candidate,
+                    "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
+                    "reasoning": (
+                        "No type-compatible destination column — map to a new text field "
+                        f"(create/ADD as {dest_native}); do not coerce into incompatible DDL"
+                    ),
+                    "user_override": False,
+                    "source_type": src_type,
+                    "target_type": dest_native,
+                    "assignment_strategy": "create_compatible_new",
+                    "create_new": True,
+                    "alternatives": alternatives,
+                    "score_gap": 0.0,
+                    "requires_review": True,
+                }
+            )
+            continue
         if not best_target:
-            if target_columns:
-                continue
             best_target = _semantic_form(source)
             best_score = 0.55
             best_reason = "No target match — inferred semantic name (no destination schema)"

@@ -14,11 +14,15 @@ export function noteApiSuccess(): void {
 
 export async function probeApiHealth(): Promise<boolean> {
   const origin = API_BASE.replace(/\/api\/v1\/?$/i, "") || "";
+  // Prefer real API health over the web container's static /health stub
+  // (same-origin /health always returns 200 from nginx and hid real outages).
   const candidates = [
-    origin ? `${origin}/health` : "/health",
-    `${API_BASE.replace(/\/$/, "")}/health`,
     origin ? `${origin}/api/v1/health` : "/api/v1/health",
-  ].filter((v, i, a) => a.indexOf(v) === i);
+    origin ? `${origin}/health-api` : "/health-api",
+    `${API_BASE.replace(/\/$/, "")}/health`,
+    // Last resort: absolute API /health when API_BASE is cross-origin.
+    origin && /^https?:\/\//i.test(origin) ? `${origin}/health` : "",
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
 
   for (const url of candidates) {
     try {
@@ -116,11 +120,15 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   }
 }
 
-async function requestJson<T>(urls: string[], fallbackMessage: string): Promise<T> {
+async function requestJson<T>(
+  urls: string[],
+  fallbackMessage: string,
+  options?: { timeoutMs?: number },
+): Promise<T> {
   let lastError: unknown;
   for (const url of urls) {
     try {
-      const res = await apiFetch(url);
+      const res = await apiFetch(url, { timeoutMs: options?.timeoutMs });
       if (!res.ok) throw new Error(`Request failed with ${res.status}`);
       return (await res.json()) as T;
     } catch (error) {
@@ -727,7 +735,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
 export async function fetchJobs(): Promise<TransferJob[]> {
   const data = await requestJson<{ jobs?: TransferJob[] }>(
     [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
-    "Failed to load jobs"
+    "Failed to load jobs",
+    { timeoutMs: 45_000 },
   );
   return data.jobs || [];
 }
