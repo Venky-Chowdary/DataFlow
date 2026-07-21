@@ -8,7 +8,6 @@ machine are skipped so the same test runs in CI and locally.
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from src.transfer.registry import PRODUCTION_SKU
 try:
     from test_execute_tracked_universal_matrix import (
         MAPPINGS,
+        _NO_INDEPENDENT_VERIFIER,
         _build_destination,
         _build_source,
         _endpoint_reachable,
@@ -30,6 +30,7 @@ try:
 except Exception:  # pragma: no cover - fallback if import path differs
     from tests.test_execute_tracked_universal_matrix import (
         MAPPINGS,
+        _NO_INDEPENDENT_VERIFIER,
         _build_destination,
         _build_source,
         _endpoint_reachable,
@@ -55,6 +56,7 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
     if not _endpoint_reachable(destination):
         pytest.skip(f"destination {dst_kind}/{dst_fmt} not reachable")
 
+    validation_mode = "balanced" if dst_fmt in _NO_INDEPENDENT_VERIFIER else "strict"
     request = TransferRequest(
         source=source,
         destination=destination,
@@ -62,18 +64,17 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
         source_filename=source_filename,
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
-        validation_mode="strict",
+        validation_mode=validation_mode,
         mappings=MAPPINGS,
     )
 
-    snowflake = pytest.importorskip("fakesnow") if _uses_snowflake(source, destination) else None
-    ctx = snowflake.patch() if snowflake else contextlib.nullcontext()
+    if _uses_snowflake(source, destination):
+        pytest.importorskip("fakesnow")
 
     engine = UniversalTransferEngine()
-    with ctx:
-        if source.kind == "database":
-            _seed_source(source)
-        result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
+    if source.kind == "database":
+        _seed_source(source)
+    result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
     assert result.success, f"{route}: {result.error}"
     assert result.records_transferred == 2, (

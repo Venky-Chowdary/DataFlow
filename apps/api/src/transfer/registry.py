@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-LIVE_SOURCE_FORMATS = [
+# Tabular formats for the cartesian LIVE_MATRIX fan-out (2-row fixture matrix).
+# Document formats (pdf/docx/html) remain transfer-live via chunking/OCR paths
+# and explicit PRODUCTION_SKU routes — they are not tabular matrix sources.
+LIVE_TABULAR_SOURCE_FORMATS = [
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
-    "pdf", "docx", "html",
 ]
+LIVE_DOCUMENT_SOURCE_FORMATS = ["pdf", "docx", "html"]
+LIVE_SOURCE_FORMATS = LIVE_TABULAR_SOURCE_FORMATS + LIVE_DOCUMENT_SOURCE_FORMATS
 LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml"]
 
 # Live drivers are discovered at import time; object stores and warehouses count
@@ -48,13 +52,13 @@ LIVE_SOURCE_DATABASES = _live_db_drivers("source")
 # (source_kind, source_format, dest_kind, dest_format) -> live
 LIVE_MATRIX: set[tuple[str, str, str, str]] = set()
 
-# File → Database
-for _sf in LIVE_SOURCE_FORMATS:
+# File → Database (tabular sources only — documents use dedicated SKU routes)
+for _sf in LIVE_TABULAR_SOURCE_FORMATS:
     for _db in LIVE_DEST_DATABASES:
         LIVE_MATRIX.add(("file", _sf, "database", _db))
 
-# File → File (any supported source format → any supported export format)
-for _src_fmt in LIVE_SOURCE_FORMATS:
+# File → File (tabular sources → any supported export format)
+for _src_fmt in LIVE_TABULAR_SOURCE_FORMATS:
     for _dst_fmt in LIVE_DEST_FILE_FORMATS:
         LIVE_MATRIX.add(("file", _src_fmt, "file_export", _dst_fmt))
 
@@ -209,7 +213,7 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "postgresql", "database", "qdrant"),
     ("database", "postgresql", "database", "weaviate"),
     ("file", "csv", "database", "pinecone"),
-    ("file", "pdf", "database", "milvus"),
+    ("file", "csv", "database", "milvus"),
     ("database", "rest_api", "database", "postgresql"),
     ("database", "rest_api", "database", "mongodb"),
 ]

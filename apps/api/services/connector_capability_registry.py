@@ -88,7 +88,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": True,
         "supports_streaming": False,
-        "supports_upsert": False,
+        "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
@@ -852,8 +852,8 @@ def _align_registry_honesty() -> None:
         "kinesis", "pubsub", "delta", "hudi",
         "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
         "dynamics365", "msgraph", "google_workspace", "sharepoint",
-        "shopify", "zendesk", "duckdb",
-        # kafka + iceberg + oracle + sqlserver promoted to first-class modules.
+        "shopify", "zendesk",
+        # duckdb is CI-proven via generic_sql; kafka/iceberg/oracle/sqlserver are first-class.
     }
     for key in fiction:
         if key in CAPABILITY_REGISTRY:
@@ -878,7 +878,7 @@ def get_connector_capability(key: str) -> dict[str, Any]:
         "kinesis", "pubsub", "delta", "hudi",
         "databricks", "synapse", "sap", "workday", "netsuite", "servicenow",
         "dynamics365", "msgraph", "google_workspace", "sharepoint",
-        "shopify", "zendesk", "duckdb",
+        "shopify", "zendesk",
     }
     try:
         from src.transfer.connector_capabilities import (

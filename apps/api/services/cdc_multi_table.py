@@ -82,6 +82,7 @@ class _OpenMultiTxn:
     by_table: dict[str, _TableBuf] = field(default_factory=dict)
     last_lsn: str | None = None
     event_count: int = 0
+    explicit: bool = False
 
 
 class MultiTableTransactionBuffer:
@@ -100,16 +101,27 @@ class MultiTableTransactionBuffer:
         return self._open.xid if self._open else None
 
     @property
+    def explicit_txn(self) -> bool:
+        """True when BEGIN was seen; False for autocommit/implicit row events."""
+        return bool(self._open and self._open.explicit)
+
+    @property
     def open_event_count(self) -> int:
         return int(self._open.event_count) if self._open else 0
 
-    def begin(self, xid: str | None = None, *, lsn: str | None = None) -> None:
+    def begin(self, xid: str | None = None, *, lsn: str | None = None, explicit: bool = True) -> None:
         if self._open is not None:
             if lsn:
                 self._open.last_lsn = lsn
+            if explicit:
+                self._open.explicit = True
             return
         self._anonymous_seq += 1
-        self._open = _OpenMultiTxn(xid=xid or f"anon-{self._anonymous_seq}", last_lsn=lsn)
+        self._open = _OpenMultiTxn(
+            xid=xid or f"anon-{self._anonymous_seq}",
+            last_lsn=lsn,
+            explicit=explicit,
+        )
 
     def _bucket(self, table: str) -> _TableBuf:
         assert self._open is not None
@@ -120,7 +132,8 @@ class MultiTableTransactionBuffer:
 
     def _ensure_open(self, lsn: str | None) -> None:
         if self._open is None:
-            self.begin(lsn=lsn)
+            # Row events without BEGIN → implicit autocommit window.
+            self.begin(lsn=lsn, explicit=False)
         elif lsn:
             self._open.last_lsn = lsn
 

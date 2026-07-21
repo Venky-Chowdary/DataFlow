@@ -196,6 +196,7 @@ def schematic_match_boost(source: str, target: str) -> float | None:
     - Generic source → specific target (AMT → transaction_amount) → no boost
     - Specific source → bare leaf (order_amt → amount, mobile_phone → phone) → weak
     - Exact bare source → bare leaf (AMT → amount) → strong
+    - Source resolves to target surface (billing_cust_id → customer_id) → strong
     """
     src_tokens = _token_set(source)
     tgt_tokens = _token_set(target)
@@ -206,19 +207,20 @@ def schematic_match_boost(source: str, target: str) -> float | None:
     src_q = _entity_qualifiers(src_tokens)
     tgt_q = _entity_qualifiers(tgt_tokens)
 
-    if src_q and tgt_q and src_q.isdisjoint(tgt_q):
-        return None
-
     src_canon = lookup_schematic(source)
     tgt_canon = lookup_schematic(target)
     tgt_is_bare_leaf = len(tgt_tokens - _ENTITY_STOPWORDS) == 1
+    tgt_norm = _normalize(target)
 
-    # Exact: bare source resolves to bare target (AMT → amount).
-    if src_canon and _normalize(target) == src_canon:
-        if src_q:
-            # order_amt / mobile_phone resolving to bare amount/phone — weak.
+    # Index says source ≡ target surface name — trust before entity-qualifier veto
+    # (billing_cust_id → customer_id is a valid enterprise mapping).
+    if src_canon and tgt_norm == src_canon:
+        if src_q and tgt_is_bare_leaf and len(tgt_tokens) == 1:
             return 0.76
-        return 0.99
+        return 0.99 if not src_q else 0.95
+
+    if src_q and tgt_q and src_q.isdisjoint(tgt_q):
+        return None
 
     if src_canon and tgt_canon and src_canon == tgt_canon:
         if not src_q and tgt_q:

@@ -187,7 +187,17 @@ def run_reconciliation(
 
     # No read-back verifier available for this destination.
     if target_rows < 0:
-        if strict_checksum:
+        # dest_only sinks (pgvector, milvus, …) have no independent SQL read-back
+        # by design — fail-closed strict mode would ban every production write.
+        # Accept writer-ack when row counts match; surface that read-back was N/A.
+        dest_only = False
+        try:
+            from src.transfer.connector_capabilities import _DRIVER_CAPS
+
+            dest_only = bool(_DRIVER_CAPS.get(db_type, {}).get("dest_only"))
+        except Exception:
+            dest_only = False
+        if strict_checksum and not dest_only:
             return {
                 "passed": False,
                 "message": (

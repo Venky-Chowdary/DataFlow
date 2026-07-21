@@ -126,7 +126,8 @@ def classify_sink_delivery(
 
     caps = get_connector_capability(dest_type or "")
     mode = (write_mode or "insert").strip().lower()
-    upsert_capable = bool(caps.get("supports_upsert"))
+    # SQL Server/Oracle MERGE is the upsert path; treat supports_merge as upsert-capable.
+    upsert_capable = bool(caps.get("supports_upsert") or caps.get("supports_merge"))
     upsert_mode = mode in {"upsert", "merge"}
     eligible = bool(has_primary_key and upsert_capable and upsert_mode)
     if eligible:

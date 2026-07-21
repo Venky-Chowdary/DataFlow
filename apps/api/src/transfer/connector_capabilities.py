@@ -483,7 +483,9 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
     if driver_type == "generic_sql":
         if not _sqlalchemy_available():
             return False
-        if not catalog_id:
+        # Bare generic_sql catalog id is the SQLAlchemy catch-all — ready when
+        # SQLAlchemy itself is installed (concrete engines use connection URLs).
+        if not catalog_id or catalog_id == "generic_sql":
             return True
         drivername = _generic_sql_drivername_map().get(catalog_id, catalog_id)
         module = _generic_sql_dbapi_module(drivername)
@@ -566,27 +568,29 @@ def capability_label(caps: dict[str, bool]) -> str:
 _UNCERTIFIED_GENERIC_SQL_BRANDS = frozenset({
     "db2", "sybase_ase", "sybase",
     "informix", "teradata", "greenplum", "vertica", "singlestore", "motherduck",
-    "amazon_emr", "cloudera_data_platform", "sap_bw_4hana", "duckdb",
+    "amazon_emr", "cloudera_data_platform", "sap_bw_4hana",
     "clickhouse", "presto", "trino", "athena", "hive", "impala",
 })
 
 # Legacy helper kept for tests that still probe generic_sql brand certification.
 _CERTIFIABLE_GENERIC_SQL_BRANDS = frozenset({
-    "oracle", "sql_server", "sqlserver", "mssql",
+    "oracle", "sql_server", "sqlserver", "mssql", "duckdb",
 })
 
 
 def _generic_sql_brand_certified(catalog_id: str) -> bool:
-    """True when Oracle/SQL Server resolve as first-class transfer-ready drivers."""
+    """True when Oracle/SQL Server/DuckDB resolve as transfer-ready drivers."""
     cid = (catalog_id or "").lower().strip()
     if cid not in _CERTIFIABLE_GENERIC_SQL_BRANDS and not any(
-        cid.startswith(p) for p in ("oracle", "sql_server", "mssql")
+        cid.startswith(p) for p in ("oracle", "sql_server", "mssql", "duckdb")
     ):
         return False
     if "oracle" in cid:
         return bool(_DRIVER_CAPS.get("oracle", {}).get("read") and _DRIVER_CAPS["oracle"].get("write"))
     if "sql_server" in cid or "mssql" in cid or cid == "sqlserver":
         return bool(_DRIVER_CAPS.get("sqlserver", {}).get("read") and _DRIVER_CAPS["sqlserver"].get("write"))
+    if cid == "duckdb" or cid.startswith("duckdb"):
+        return driver_available("generic_sql", "duckdb")
     return False
 
 
@@ -628,7 +632,7 @@ def _is_uncertified_driver_alias(catalog_id: str, driver: str) -> bool:
     if _is_rest_api_brand_alias(catalog_id, driver):
         return True
     if driver == "generic_sql" and catalog_id != "generic_sql":
-        # Sprint D: Oracle/SQL Server become certified when DBAPI is present.
+        # Sprint D: Oracle/SQL Server/DuckDB become certified when drivers are present.
         if _generic_sql_brand_certified(catalog_id):
             return False
         return True

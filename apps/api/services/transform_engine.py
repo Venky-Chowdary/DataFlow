@@ -410,12 +410,9 @@ def _parse_decimal(value: str) -> str | None:
     rendered = safe_decimal_text(dec)
     if rendered is None:
         return None
-    if "e" in rendered.lower() and "." in rendered:
-        # normalize 1.230000e+10 → keep scientific from safe_decimal_text
-        return rendered
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered or "0"
+    # Preserve Decimal scale (e.g. 1000.00 stays 1000.00). Stripping trailing
+    # zeros caused money-fidelity regressions and false INTEGER inferences.
+    return rendered
 
 
 def _parse_integer(value: str) -> int | None:
