@@ -1,4 +1,4 @@
-"""Tests for 600+ connector catalog API."""
+"""Tests for connector catalog API (certified + roadmap tiles)."""
 
 from services.connector_catalog import list_catalog
 

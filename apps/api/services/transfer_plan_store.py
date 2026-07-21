@@ -45,6 +45,7 @@ class PlanRevision:
     target_schema_hash: str
     agents_used: list[str]
     plan_summary: dict[str, Any] = field(default_factory=dict)
+    mapping_proof: dict[str, Any] = field(default_factory=dict)
     llm: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     approved: bool = False
@@ -64,6 +65,7 @@ class PlanRevision:
             target_schema_hash=data.get("target_schema_hash", ""),
             agents_used=list(data.get("agents_used") or []),
             plan_summary=dict(data.get("plan_summary") or {}),
+            mapping_proof=dict(data.get("mapping_proof") or {}),
             llm=dict(data.get("llm") or {}),
             created_at=data.get("created_at", _now()),
             approved=bool(data.get("approved", False)),
@@ -203,6 +205,19 @@ def add_mapping_revision(
         tgt_schema = target_schema or plan.target_schema
         mappings = list(pipeline_result.get("mappings") or [])
         version = (plan.revisions[-1].version + 1) if plan.revisions else 1
+        from services.mapping_proof import mapping_proof_or_build
+
+        dest = plan.destination or {}
+        src = plan.source or {}
+        mapping_proof = mapping_proof_or_build(
+            mappings,
+            existing=dict(pipeline_result.get("mapping_proof") or {}),
+            target_columns=tgt_cols,
+            destination_db_type=str(dest.get("format") or dest.get("type") or ""),
+            source_kind=str(src.get("kind") or ""),
+            dest_kind=str(dest.get("kind") or ""),
+            sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
+        )
         rev = PlanRevision(
             version=version,
             mappings=mappings,
@@ -213,6 +228,7 @@ def add_mapping_revision(
             target_schema_hash=fingerprint_schema(tgt_cols, tgt_schema),
             agents_used=list(pipeline_result.get("agents_used") or []),
             plan_summary=dict(pipeline_result.get("plan_summary") or {}),
+            mapping_proof=mapping_proof,
             llm=dict(pipeline_result.get("llm") or {}),
         )
         plan.revisions.append(rev)
@@ -301,16 +317,30 @@ def sync_ui_mappings(
         if plan.id != plan_id:
             continue
         version = (plan.revisions[-1].version + 1) if plan.revisions else 1
+        from services.mapping_proof import mapping_proof_or_build
+
+        dest = plan.destination or {}
+        src = plan.source or {}
+        mapping_rows = list(mappings)
+        mapping_proof = mapping_proof_or_build(
+            mapping_rows,
+            target_columns=plan.target_columns,
+            destination_db_type=str(dest.get("format") or dest.get("type") or ""),
+            source_kind=str(src.get("kind") or ""),
+            dest_kind=str(dest.get("kind") or ""),
+            sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
+        )
         rev = PlanRevision(
             version=version,
-            mappings=list(mappings),
+            mappings=mapping_rows,
             transforms=list(transforms or []),
             validation={"passed": True, "issues": [], "source": "ui_sync"},
-            mapping_hash=fingerprint_mappings(mappings),
+            mapping_hash=fingerprint_mappings(mapping_rows),
             source_schema_hash=fingerprint_schema(plan.source_columns, plan.source_schema),
             target_schema_hash=fingerprint_schema(plan.target_columns, plan.target_schema),
             agents_used=["user_review"],
-            plan_summary={"edited_in_ui": True, "mapping_count": len(mappings)},
+            plan_summary={"edited_in_ui": True, "mapping_count": len(mapping_rows)},
+            mapping_proof=mapping_proof,
         )
         plan.revisions.append(rev)
         plan.active_version = version

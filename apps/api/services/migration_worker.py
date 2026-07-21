@@ -17,14 +17,17 @@ from services.workflow import (
 )
 
 
-def _conn(d: dict[str, Any]) -> dict[str, Any]:
+def _conn(d: dict[str, Any], *, driver: str | None = None) -> dict[str, Any]:
+    from services.dialect_profiles import schema_from_cfg
+
+    dtype = driver or d.get("type") or ""
     return {
         "host": d.get("host", ""),
         "port": d.get("port", 5432),
         "database": d.get("database", ""),
         "username": d.get("username", ""),
         "password": d.get("password", ""),
-        "schema": d.get("schema", "public"),
+        "schema": schema_from_cfg(dtype, d),
         "connection_string": d.get("connection_string", ""),
         "ssl": d.get("ssl", True),
     }
@@ -75,10 +78,11 @@ def dispatch_postgresql_migration(
 
                 if dest_db_type == "snowflake":
                     from connectors.snowflake_writer import write_mapped_rows
+                    from services.dialect_profiles import schema_from_cfg
 
                     dest_kwargs = {
-                        **_conn(dest),
-                        "schema": dest.get("schema", "PUBLIC"),
+                        **_conn(dest, driver="snowflake"),
+                        "schema": schema_from_cfg("snowflake", dest),
                         "warehouse": dest.get("warehouse", ""),
                         "table_name": table_name,
                         "headers": batch.headers,
@@ -91,7 +95,7 @@ def dispatch_postgresql_migration(
                     from connectors.postgresql_writer import write_mapped_rows
 
                     result = write_mapped_rows(
-                        **_conn(dest),
+                        **_conn(dest, driver=dest_db_type or "postgresql"),
                         table_name=table_name,
                         headers=batch.headers,
                         data_rows=batch.rows,
@@ -122,10 +126,12 @@ def dispatch_postgresql_migration(
 
             source_checksum = row_checksum([tuple(r) for r in all_checksum_rows])
             set_phase(job_id, WorkflowPhase.RECONCILE, "Verifying migration fidelity")
+            from services.dialect_profiles import schema_from_cfg
+
             target_rows, target_checksum = verify_target(
                 dest_db_type,
                 dest,
-                schema=dest.get("schema", "public"),
+                schema=schema_from_cfg(dest_db_type, dest),
                 table_name=table_name,
                 fallback_rows=written,
                 fallback_checksum=source_checksum,

@@ -54,13 +54,15 @@ def dispatch_file_to_database(
 
             job_store.set_running(job_id, total_rows=total_rows, table_name=table_name)
 
+            from services.dialect_profiles import schema_from_cfg
+
             common = {
                 "host": dest.get("host", ""),
                 "port": dest.get("port", 5432),
                 "database": dest.get("database", ""),
                 "username": dest.get("username", ""),
                 "password": dest.get("password", ""),
-                "schema": dest.get("schema", "public"),
+                "schema": schema_from_cfg(db_type, dest),
                 "connection_string": dest.get("connection_string", ""),
                 "ssl": dest.get("ssl", True),
                 "table_name": table_name,
@@ -70,7 +72,7 @@ def dispatch_file_to_database(
 
             if db_type == "snowflake":
                 from connectors.snowflake_writer import write_mapped_rows
-                common["schema"] = dest.get("schema", "PUBLIC")
+                common["schema"] = schema_from_cfg("snowflake", dest)
                 common["warehouse"] = dest.get("warehouse", "")
                 verify_schema = common["schema"]
             elif db_type == "mongodb":

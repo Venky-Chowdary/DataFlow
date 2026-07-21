@@ -455,6 +455,8 @@ def run_file_preflight(
     source_table: str = "",
     destination_table: str = "",
     source_filename: str = "",
+    schema_policy: str = "manual_review",
+    backfill_new_fields: bool = False,
 ) -> dict[str, Any]:
     """Run 9 preflight gates for a file-based transfer."""
     if row_count <= 0 and sample_rows:
@@ -536,6 +538,10 @@ def run_file_preflight(
         dest_connected=destination_connected,
         dest_db_type=destination_db_type,
         allow_create=dest_can_create,
+        backfill_new_fields=backfill_new_fields,
+        schema_policy=schema_policy,
+        sync_mode=sync_mode,
+        destination_table=destination_table,
     )
 
     drift = detect_schema_drift(
@@ -801,6 +807,8 @@ def inspect_destination_for_preflight(
         # fields the user may have overridden in the current step.
         db_type = (conn.get("type") or dest_type or "mongodb").lower()
         out["db_type"] = db_type
+        from services.dialect_profiles import normalize_schema
+
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
@@ -808,7 +816,7 @@ def inspect_destination_for_preflight(
             host=dest_host or "",
             port=int(dest_port or 0),
             database=dest_database or "",
-            schema=dest_schema or "",
+            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
             username=dest_username or "",
@@ -825,13 +833,15 @@ def inspect_destination_for_preflight(
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
         out["db_type"] = db_type
+        from services.dialect_profiles import normalize_schema
+
         endpoint = EndpointConfig(
             kind="database",
             format=db_type,
             host=dest_host or "localhost",
             port=int(dest_port or 0),
             database=dest_database or "",
-            schema=dest_schema or "public",
+            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
             username=dest_username or "",

@@ -66,7 +66,7 @@ def plan_activation(
         )
 
     notes = []
-    if kind in {"pgvector", "qdrant"}:
+    if kind in {"pgvector", "qdrant", "weaviate", "pinecone", "milvus"}:
         notes.append("vector destinations use embedding writers; treat as RAG activation")
     elif kind in {"postgresql", "mysql", "sqlserver", "snowflake", "bigquery"}:
         notes.append("SQL operational sync via upsert writers (warehouse→OLTP)")
@@ -138,6 +138,9 @@ def supported_activation_kinds() -> list[str]:
             "hubspot",
             "pgvector",
             "qdrant",
+            "weaviate",
+            "pinecone",
+            "milvus",
             *(_ACTIVATION_PLANNERS.keys()),
         }
     )

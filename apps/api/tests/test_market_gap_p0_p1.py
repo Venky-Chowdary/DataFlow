@@ -227,6 +227,18 @@ def test_ops_freshness_labeled_lag() -> None:
     assert summary["worst_lag_seconds"] is not None
     assert summary["worst_lag_seconds"] >= 12.5
     assert any(p["stale"] for p in summary["pipelines"])
+    assert summary["stale_count"] >= 1
+    assert summary["slo_status"] in {"warn", "critical"}
+    assert any(a["schedule_id"] == "sched-a" for a in summary["alerts"])
+    assert summary["critical_threshold_seconds"] >= 10
+
+
+def test_ops_freshness_critical_alert() -> None:
+    record_cdc_poll(lag_seconds=400.0, job_id="j-crit", stream="orders", schedule_id="sched-crit")
+    summary = freshness_summary(max_lag_warn_seconds=60.0, max_lag_critical_seconds=120.0)
+    assert summary["slo_status"] == "critical"
+    assert summary["critical_count"] >= 1
+    assert any(a["severity"] == "critical" for a in summary["alerts"])
 
 
 def test_fiction_no_longer_includes_promoted_engines() -> None:

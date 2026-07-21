@@ -1,8 +1,9 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
 import { CadenceTiles } from "../ui/CadenceTiles";
+import { fetchContracts, type DataContractSummary } from "../../lib/api";
 import type {
   Connector,
   PipelineSchedule,
@@ -105,9 +106,49 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [notifyFailure, setNotifyFailure] = useState(initial?.notify_on_failure ?? true);
   const [notifySuccess, setNotifySuccess] = useState(initial?.notify_on_success ?? false);
 
+  // Data contract (governance)
+  const [contracts, setContracts] = useState<DataContractSummary[]>([]);
+  const [contractsLoading, setContractsLoading] = useState(false);
+  const [contractId, setContractId] = useState(initial?.contract_id ?? "");
+  const [requireSigned, setRequireSigned] = useState(
+    initial?.require_signed_contract ?? Boolean(initial?.contract_id),
+  );
+
   const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODES;
   const showCursor = syncMode === "incremental" || syncMode === "cdc";
   const showPrimaryKey = showCursor || syncMode === "scd2" || syncMode === "mirror";
+
+  useEffect(() => {
+    let cancelled = false;
+    setContractsLoading(true);
+    void fetchContracts()
+      .then((list) => {
+        if (!cancelled) setContracts(list);
+      })
+      .catch(() => {
+        if (!cancelled) setContracts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setContractsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const signedContracts = useMemo(
+    () => contracts.filter((c) => String(c.status || "").toUpperCase() === "SIGNED"),
+    [contracts],
+  );
+  const selectedContract = useMemo(
+    () => contracts.find((c) => c.id === contractId) || null,
+    [contracts, contractId],
+  );
+  const contractUnsigned =
+    Boolean(contractId)
+    && selectedContract
+    && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
+    && requireSigned;
 
   const sourceConnector = connectors.find((c) => c.id === sourceId);
   const destConnector = connectors.find((c) => c.id === destId);
@@ -128,7 +169,14 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   }, [maxRetries, retryBackoff]);
 
   const canSubmit = Boolean(
-    name.trim() && sourceId && destId && sourceTable.trim() && destTable.trim() && (cadenceMode === "preset" || cron.trim()),
+    name.trim()
+    && sourceId
+    && destId
+    && sourceTable.trim()
+    && destTable.trim()
+    && (cadenceMode === "preset" || cron.trim())
+    && !contractUnsigned
+    && !(requireSigned && !contractId.trim()),
   );
 
   const submit = (e: FormEvent) => {
@@ -153,6 +201,8 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       retry_backoff_seconds: retryBackoff,
       notify_on_failure: notifyFailure,
       notify_on_success: notifySuccess,
+      contract_id: contractId.trim(),
+      require_signed_contract: requireSigned && Boolean(contractId.trim()),
     });
   };
 
@@ -337,6 +387,76 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             </label>
           </div>
         </div>
+      </section>
+
+      {/* Panel: Data contract */}
+      <section className="df2-sched-panel">
+        <div className="df2-sched-panel-head">
+          <DtIcon name="shield" size={15} />
+          <div>
+            <strong>Data contract</strong>
+            <span>Bind a signed schema agreement so unattended runs stay fail-closed.</span>
+          </div>
+        </div>
+        <div className="df2-field">
+          <label className="df2-label" htmlFor="sched-contract">Contract</label>
+          <select
+            id="sched-contract"
+            className="df2-input"
+            value={contractId}
+            onChange={(e) => {
+              const next = e.target.value;
+              setContractId(next);
+              if (next) setRequireSigned(true);
+            }}
+            disabled={contractsLoading}
+          >
+            <option value="">None — no contract enforcement</option>
+            {signedContracts.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} · v{c.version} · SIGNED
+              </option>
+            ))}
+            {/* Keep a previously selected non-signed contract visible so the operator can clear or fix it */}
+            {selectedContract
+              && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
+              && (
+                <option value={selectedContract.id}>
+                  {selectedContract.name} · v{selectedContract.version} · {selectedContract.status} (sign required)
+                </option>
+              )}
+            {!selectedContract && contractId && (
+              <option value={contractId}>{contractId} (not in catalog)</option>
+            )}
+          </select>
+          <span className="df2-field-hint">
+            {contractsLoading
+              ? "Loading contracts…"
+              : signedContracts.length === 0
+                ? "No signed contracts yet — save + sign one from Transfer Validate → Contracts."
+                : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first."}
+          </span>
+        </div>
+        {contractId && (
+          <label className="df2-sched-check">
+            <input
+              type="checkbox"
+              checked={requireSigned}
+              onChange={(e) => setRequireSigned(e.target.checked)}
+            />
+            Require signed contract before each run (fail-closed)
+          </label>
+        )}
+        {contractUnsigned && (
+          <p className="df2-label-hint df2-dest-sync-warning" role="alert">
+            Contract is not SIGNED. Open <strong>Contracts</strong>, sign it, then return — or clear the selection.
+          </p>
+        )}
+        {requireSigned && !contractId.trim() && (
+          <p className="df2-label-hint df2-dest-sync-warning" role="alert">
+            Require signed is on but no contract is selected.
+          </p>
+        )}
       </section>
 
       {/* Panel: Retry & notifications */}

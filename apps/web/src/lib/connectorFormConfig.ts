@@ -154,6 +154,8 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isAzure = resolved === "adls";
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
   const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
+  const isVectorDest = ["pgvector", "qdrant", "weaviate", "pinecone", "milvus"].includes(resolved);
+  const isIceberg = resolved === "iceberg";
 
   const authModes: AuthModeConfig[] = [];
 
@@ -166,6 +168,35 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       auth("connection_string", "URL or object-store URI", [text("connection_string", "URL or URI", { placeholder: "s3://bucket/path or https://host/file.csv" })], (values) =>
         required(values, "connection_string", "URL or URI")
       )
+    );
+    return {
+      type: resolved,
+      label,
+      defaultAuthMode: "file_path",
+      authModes,
+      commonFields: [],
+    };
+  }
+
+  // Apache Iceberg — filesystem / mounted warehouse root (REST catalog later).
+  if (isIceberg) {
+    authModes.push(
+      auth(
+        "file_path",
+        "Warehouse path",
+        [
+          text("connection_string", "Warehouse root", {
+            placeholder: "/data/iceberg-warehouse or file:///mnt/lake",
+            hint: "Local or mounted path where Iceberg metadata + data files are written. REST/Glue catalog committers are not required for this writer.",
+          }),
+          text("database", "Default namespace (optional)", {
+            optional: true,
+            placeholder: "analytics",
+            hint: "Used as the Iceberg namespace folder under the warehouse when set. Table name is chosen in Transfer Studio.",
+          }),
+        ],
+        (values) => required(values, "connection_string", "Warehouse root"),
+      ),
     );
     return {
       type: resolved,
@@ -264,6 +295,37 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("username", "Username"),
       password("password", "Password"),
       text("table", tableLabel, { optional: true }),
+      checkbox("ssl", "Use HTTPS / TLS")
+    );
+  } else if (isVectorDest && resolved === "pgvector") {
+    userPassFields.push(
+      text("host", "Host", { placeholder: "localhost" }),
+      number("port", "Port", { placeholder: "5432" }),
+      text("database", "Database", { placeholder: "vectors" }),
+      text("username", "Username"),
+      password("password", "Password"),
+      checkbox("ssl", "Use SSL / TLS")
+    );
+  } else if (isVectorDest && resolved === "qdrant") {
+    userPassFields.push(
+      text("host", "Host", { placeholder: "localhost" }),
+      number("port", "Port", { placeholder: "6333" }),
+      password("password", "API key (optional)", {
+        optional: true,
+        hint: "Leave blank for local unauthenticated Qdrant.",
+      }),
+      checkbox("ssl", "Use HTTPS / TLS")
+    );
+  } else if (isVectorDest && resolved === "milvus") {
+    userPassFields.push(
+      text("host", "Host", { placeholder: "localhost" }),
+      number("port", "Port", { placeholder: "19530" }),
+      text("username", "Username", { placeholder: "root", optional: true }),
+      password("password", "Password", {
+        optional: true,
+        hint: "Default local auth is root:Milvus when both are blank.",
+      }),
+      text("database", "Database (optional)", { optional: true, placeholder: "default" }),
       checkbox("ssl", "Use HTTPS / TLS")
     );
   }
@@ -396,7 +458,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     }
   }
 
-  // API key mode (Elasticsearch + SaaS APIs)
+  // API key mode (Elasticsearch + SaaS APIs + Weaviate / Pinecone)
   const apiFields: FormField[] = [];
   if (isElastic) {
     apiFields.push(
@@ -406,6 +468,54 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         rows: 2,
         placeholder: "id:api_key or encoded API key",
         hint: "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
+      }),
+      checkbox("ssl", "Use HTTPS / TLS")
+    );
+  }
+  if (resolved === "weaviate") {
+    apiFields.push(
+      text("host", "Host", { placeholder: "localhost" }),
+      number("port", "Port", { placeholder: "8080" }),
+      textarea("apiKey", "API key (optional)", {
+        rows: 2,
+        optional: true,
+        placeholder: "Weaviate API key",
+        hint: "Required for Weaviate Cloud; optional for local.",
+      }),
+      text("connection_string", "Base URL override (optional)", {
+        optional: true,
+        placeholder: "https://xxx.weaviate.network",
+        hint: "When set, host/port are ignored.",
+      }),
+      checkbox("ssl", "Use HTTPS / TLS")
+    );
+  }
+  if (resolved === "pinecone") {
+    apiFields.push(
+      text("host", "Index host", {
+        placeholder: "my-index-xxxx.svc.pinecone.io",
+        hint: "Pinecone data-plane index host (not the control-plane API).",
+      }),
+      textarea("apiKey", "API key", {
+        rows: 2,
+        placeholder: "pcsk_…",
+        hint: "Required. Namespace defaults to the destination table name.",
+      })
+    );
+  }
+  if (resolved === "milvus") {
+    apiFields.push(
+      text("host", "Host", { placeholder: "localhost" }),
+      number("port", "Port", { placeholder: "19530" }),
+      textarea("apiKey", "API key / token", {
+        rows: 2,
+        optional: true,
+        placeholder: "root:Milvus or Zilliz Cloud API key",
+        hint: "Milvus REST uses Bearer user:pass or a cloud API key.",
+      }),
+      text("connection_string", "Base URL override (optional)", {
+        optional: true,
+        placeholder: "https://xxx.api.gcp-us-west1.zillizcloud.com",
       }),
       checkbox("ssl", "Use HTTPS / TLS")
     );
@@ -457,10 +567,13 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           return "Port is required.";
         }
         if (
-          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb"].includes(resolved) &&
+          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb", "qdrant", "milvus"].includes(resolved) &&
           (!fmt(values, "username") || !fmt(values, "password"))
         ) {
           if (!isSftp) return "Username and password are required.";
+        }
+        if ((resolved === "qdrant" || resolved === "milvus") && !fmt(values, "host")) {
+          return "Host is required.";
         }
         if (isSftp && !fmt(values, "database") && !fmt(values, "connection_string")) {
           return "Remote path is required. Provide it as the SFTP URL or the path field.";
@@ -514,6 +627,9 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     authModes.push(
       auth("api_key", "API key", apiFields, (values) => {
         if (!isSaaS && !fmt(values, "host")) return "Host is required.";
+        if (resolved === "weaviate" || resolved === "milvus") {
+          return null;
+        }
         if (!fmt(values, "apiKey")) return "API key is required.";
         return null;
       })
@@ -558,6 +674,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
+  if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
   if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
   return "user_pass";
 }

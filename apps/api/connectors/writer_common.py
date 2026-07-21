@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
+    quote_column_list,
+    quote_sql_identifier,
+    quote_table_ref,
+    require_safe_identifier,
+    sanitize_identifier,
+)
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
@@ -18,19 +24,26 @@ TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantin
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 
-def sanitize_identifier(name: str, preserve_case: bool = False) -> str:
-    cleaned = name.strip() if preserve_case else name.strip().lower()
-    s = re.sub(r"[^a-zA-Z0-9_]", "_", cleaned)
-    s = re.sub(r"_+", "_", s).rstrip("_")
-    if not s or s[0].isdigit():
-        s = f"col_{s or 'field'}"
-    return s[:63]
+def resolve_writer_backfill(
+    *,
+    backfill_new_fields: bool = False,
+    mappings: list | None = None,
+    schema_policy: str | None = None,
+) -> bool:
+    """Defense-in-depth: every SQL writer re-resolves ADD COLUMN intent.
 
+    Callers (engine / adapter) should already pass the effective flag, but writers
+    must not trust a stale ``False`` when mappings include ``create_compatible_new``
+    — that is the Snowflake ``invalid identifier '"id_text"'`` failure class across
+    every typed destination (Postgres, MySQL, BigQuery, SQL Server, SQLite, …).
+    """
+    from services.batch_progress import effective_backfill_new_fields
 
-def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
-    """Quote a SQL identifier and escape embedded quote characters."""
-    escaped = name.replace(quote_char, quote_char + quote_char)
-    return f"{quote_char}{escaped}{quote_char}"
+    return effective_backfill_new_fields(
+        backfill_new_fields=backfill_new_fields,
+        schema_policy=schema_policy,
+        mappings=mappings,
+    )
 
 
 def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
@@ -251,22 +264,68 @@ def dedupe_rows_by_pk_and_lsn(
 
 
 def extract_cdc_lsn(resume_token: Any) -> str | None:
-    """Pull a sortable LSN/position string from a CDC resume token."""
+    """Pull a sortable LSN/position string from a CDC resume token.
+
+    Supports PG ``lsn=``, MySQL ``file:pos`` / ``gtid``, Mongo ``_data``,
+    SQL Server LSN hex, and Oracle SCN. Used to stamp ``_df_lsn`` for
+    at-least-once upsert guards (not exactly-once).
+    """
     if resume_token is None:
         return None
     if isinstance(resume_token, dict):
+        # Nested PG hold / incremental wrappers
+        nested = resume_token.get("token")
+        if isinstance(nested, (dict, str)) and nested:
+            nested_lsn = extract_cdc_lsn(nested)
+            if nested_lsn:
+                return nested_lsn
         file_name = resume_token.get("file") or resume_token.get("filename")
         pos = resume_token.get("pos")
         if file_name is not None and pos is not None:
             return f"{file_name}:{pos}"
-        for key in ("lsn", "position", "resume_lsn", "pos"):
+        gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
+        if gtid is not None and str(gtid).strip():
+            return f"gtid:{str(gtid).strip()}"
+        for key in ("lsn", "scn", "version", "position", "resume_lsn", "pos", "_data"):
             value = resume_token.get(key)
             if value is not None and str(value).strip():
+                if key == "version":
+                    try:
+                        return f"{int(value):020d}"
+                    except (TypeError, ValueError):
+                        return str(value).strip()
                 return str(value).strip()
+        # Mongo resume token often is the whole dict with ``_data``.
+        data = resume_token.get("_data")
+        if data is not None and str(data).strip():
+            return str(data).strip()
         return None
     text = str(resume_token).strip()
     if not text or text in {"None", "null"}:
         return None
+    # JSON CDC tokens (SQL Server native / CT, Oracle LogMiner, etc.)
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            kind = str(data.get("kind") or "")
+            if kind == "mssql-cdc":
+                lsn = data.get("lsn")
+                if lsn is not None and str(lsn).strip():
+                    return str(lsn).strip()
+            if kind in {"mssql-ct", "sqlserver-ct"}:
+                ver = data.get("version")
+                if ver is not None and str(ver).strip():
+                    # Zero-pad so lexicographic compare stays monotonic for versions.
+                    try:
+                        return f"{int(ver):020d}"
+                    except (TypeError, ValueError):
+                        return str(ver).strip()
+            nested = extract_cdc_lsn(data)
+            if nested:
+                return nested
     if "lsn=" in text:
         for part in text.split("|"):
             if part.startswith("lsn=") and part[4:].strip():
@@ -275,11 +334,23 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
 
 
 def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment: apply upsert only when EXCLUDED LSN is newer (pg_lsn cast)."""
+    """WHERE fragment for ON CONFLICT when ``_df_lsn`` is a real PG ``hi/lo`` LSN.
+
+    Mixed CDC stamps (``gtid:…``, ``file:pos``, Mongo tokens) must NOT use
+    ``::pg_lsn`` alone — that casts fail under MySQL/Mongo→Postgres load and
+    aborts the upsert. Non-PG stamps fall back to text inequality (at-least-once).
+    """
     # Identifiers are sanitized by callers; values are column/table names we control.
+    pg_pat = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
+    excl = f'EXCLUDED."{lsn_column}"'
+    dest = f'"{table_name}"."{lsn_column}"'
     return (
-        f'EXCLUDED."{lsn_column}"::pg_lsn > '
-        f'COALESCE("{table_name}"."{lsn_column}"::pg_lsn, \'0/0\'::pg_lsn)'
+        f"( "
+        f"({excl} ~ '{pg_pat}' AND COALESCE({dest}, '') ~ '{pg_pat}' "
+        f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
+        f"OR "
+        f"({excl} !~ '{pg_pat}' AND {excl} IS DISTINCT FROM {dest}) "
+        f")"
     )
 
 

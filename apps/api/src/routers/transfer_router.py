@@ -19,10 +19,64 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from services.team_store import can_write_workspace
+from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
+
+
+def _can_access_job(request: Request | None, job: dict) -> bool:
+    """Workspace gate for job-scoped transfer sub-resources (CDC snapshots, etc.)."""
+    if request is None:
+        return True
+    workspace_id = (job.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return True
+    return can_read_workspace(workspace_id, _actor_email(request))
+
+
+def _stamp_job_mapping_artifacts(
+    job_id: str,
+    *,
+    status: str = "pending",
+    plan_id: str | None = None,
+    plan_payload: dict | None = None,
+    mappings: list | None = None,
+    destination_format: str = "",
+    source_kind: str = "",
+    dest_kind: str = "",
+    sync_mode: str = "",
+) -> None:
+    """Persist mapping_proof (+ plan linkage) on the job for Theater/Jobs deep-link."""
+    from services.mapping_proof import mapping_proof_or_build
+    from ..services.mongodb_service import get_mongodb_service
+
+    proof = mapping_proof_or_build(
+        list(mappings or []),
+        existing=(plan_payload or {}).get("mapping_proof") if plan_payload else None,
+        destination_db_type=(destination_format or "").lower(),
+        source_kind=source_kind or "",
+        dest_kind=dest_kind or "",
+        sync_mode=sync_mode or "",
+    )
+    updates: dict = {}
+    if proof:
+        updates["mapping_proof"] = proof
+    if plan_id:
+        updates["plan_id"] = plan_id
+        if plan_payload:
+            if plan_payload.get("mapping_version") is not None:
+                updates["mapping_version"] = plan_payload.get("mapping_version")
+            if plan_payload.get("mapping_hash"):
+                updates["mapping_hash"] = plan_payload.get("mapping_hash")
+    if not updates:
+        return
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id) or {}
+        mongo.update_job_status(job_id, job.get("status") or status, **updates)
+    except Exception:
+        pass
 
 
 def _destination_data_region(endpoint) -> str | None:
@@ -80,7 +134,7 @@ class EndpointDTO(BaseModel):
     host: str = ""
     port: int = 0
     database: str = ""
-    db_schema: str = Field("public", alias="schema")
+    db_schema: str = Field("", alias="schema")
     table: str = ""
     collection: str = ""
     username: str = ""
@@ -93,6 +147,8 @@ class EndpointDTO(BaseModel):
     auth_source: str = ""
     api_key: str = ""
     service_account: str = ""
+    # Vector / CDC / writer options (content_column, embedding_model, allow_append_only, …).
+    extra: dict = Field(default_factory=dict)
 
 
 class AnalyzeRequest(BaseModel):
@@ -114,6 +170,7 @@ class ExecuteTransferRequest(BaseModel):
     skip_preflight: bool = False
     async_mode: bool = True
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
     source_filter: dict = Field(default_factory=dict)
     priority_column: str = ""
     priority_direction: str = "desc"
@@ -135,6 +192,9 @@ class MapColumnsRequest(BaseModel):
     file_format: Optional[str] = None
     use_llm: bool = True
     source_samples: dict[str, list[str]] = Field(default_factory=dict)
+    destination_db_type: str = ""
+    sync_mode: str = ""
+    schema_policy: str = "manual_review"
 
 
 @router.get("/capabilities")
@@ -277,7 +337,9 @@ async def map_columns_route(body: MapColumnsRequest):
         use_llm=body.use_llm,
         source_samples=body.source_samples or None,
         validation_mode=body.validation_mode,
-        schema_policy=getattr(body, "schema_policy", "manual_review"),
+        destination_db_type=body.destination_db_type or "",
+        schema_policy=body.schema_policy or "manual_review",
+        sync_mode=body.sync_mode or "",
     )
     nested_fields: list[dict[str, str]] = []
     try:
@@ -298,6 +360,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "confidence_threshold": threshold,
         "destination_aware": bool(body.target_columns),
         "plan_summary": result.get("plan_summary", {}),
+        "mapping_proof": result.get("mapping_proof", {}),
         "quality_issues": result.get("quality_issues", []),
         "nested_fields": nested_fields,
     }
@@ -530,10 +593,19 @@ async def execute_transfer_json(
         workspace_id=workspace_id,
         data_region=region,
         backfill_new_fields=bool(body.backfill_new_fields),
+        write_via_staging=bool(body.write_via_staging),
         stream_contracts=list(body.stream_contracts or []),
         contract_id=body.contract_id or "",
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
+        triggered_by=_actor_email(request),
+    )
+    from services.batch_progress import effective_backfill_new_fields
+
+    request_obj.backfill_new_fields = effective_backfill_new_fields(
+        backfill_new_fields=request_obj.backfill_new_fields,
+        schema_policy=request_obj.schema_policy,
+        mappings=request_obj.mappings,
     )
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import build_run_payload
@@ -542,8 +614,18 @@ async def execute_transfer_json(
             if not request_obj.mappings:
                 request_obj.mappings = payload.get("mappings") or []
                 request_obj.column_types = payload.get("column_types") or {}
+            plan_payload = payload
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+    else:
+        plan_payload = None
+
+    # Recompute after plan mappings may have been merged (create_new → ADD COLUMN).
+    request_obj.backfill_new_fields = effective_backfill_new_fields(
+        backfill_new_fields=request_obj.backfill_new_fields,
+        schema_policy=request_obj.schema_policy,
+        mappings=request_obj.mappings,
+    )
 
     _residency_check(request, dst, region)
     engine = get_transfer_engine()
@@ -576,15 +658,33 @@ async def execute_transfer_json(
         from services.transfer_plan_store import attach_job
         attach_job(str(body.plan_id).strip(), job_id, status="running")
 
+    _stamp_job_mapping_artifacts(
+        job_id,
+        plan_id=str(body.plan_id).strip() if body.plan_id else None,
+        plan_payload=plan_payload,
+        mappings=list(request_obj.mappings or []),
+        destination_format=dst.format or "",
+        source_kind=src.kind or "",
+        dest_kind=dst.kind or "",
+        sync_mode=request_obj.sync_mode or "",
+    )
+
     if body.async_mode:
+        from services.worker_fleet import fleet_enabled
+
+        queued = fleet_enabled()
         background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
-            "status": "running",
+            "status": "queued" if queued else "running",
             "operation": request_obj.operation,
-            "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
+            "message": (
+                "Transfer queued for Worker fleet — stream progress at /connectors/jobs/{job_id}/stream"
+                if queued
+                else "Transfer started — stream progress at /connectors/jobs/{job_id}/stream"
+            ),
         }
 
     result = engine.execute_tracked(request_obj, job_id)
@@ -606,6 +706,8 @@ async def execute_transfer_json(
         "source": result.source_summary,
         "destination": result.destination_summary,
         "reconciliation": result.reconciliation,
+        "explanation": getattr(result, "explanation", "") or "",
+        "mapping_proof": getattr(result, "mapping_proof", None) or {},
     }
 
 
@@ -645,14 +747,18 @@ async def run_universal_transfer(
     async_mode: str = Form("true"),
     mappings_json: str = Form(""),
     plan_id: Optional[str] = Form(None),
-    sync_mode: str = Form("full_refresh_overwrite"),
+    sync_mode: str = Form("full_refresh_append"),
     schema_policy: str = Form("manual_review"),
-    validation_mode: str = Form("strict"),
+    validation_mode: str = Form("balanced"),
     source_filter_json: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
     backfill_new_fields: str = Form("false"),
+    write_via_staging: str = Form("false"),
+    enable_ocr: str = Form("false"),
+    dest_extra_json: str = Form(""),
+    source_extra_json: str = Form(""),
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     request: Request = None,
@@ -681,6 +787,18 @@ async def run_universal_transfer(
         content = b""
         filename = ""
 
+    use_ocr = enable_ocr.lower() in ("true", "1", "yes")
+    source_extra: dict = {}
+    if use_ocr:
+        source_extra["enable_ocr"] = True
+    if source_extra_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(source_extra_json)
+            if isinstance(parsed, dict):
+                source_extra.update(parsed)
+        except Exception:
+            pass
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -695,7 +813,18 @@ async def run_universal_transfer(
         collection=source_collection,
         connection_string=source_connection_string,
         auth_source=source_auth_source,
+        extra=source_extra,
     )
+    dest_extra: dict = {}
+    if dest_extra_json.strip():
+        try:
+            import json as _json
+            parsed = _json.loads(dest_extra_json)
+            if isinstance(parsed, dict):
+                dest_extra = parsed
+        except Exception:
+            dest_extra = {}
+
     destination = EndpointConfig(
         kind=dest_kind,
         format=dest_format,
@@ -712,6 +841,7 @@ async def run_universal_transfer(
         output_path=dest_output_path,
         warehouse=dest_warehouse,
         auth_source=dest_auth_source,
+        extra=dest_extra,
     )
 
     source_filter: dict = {}
@@ -745,19 +875,23 @@ async def run_universal_transfer(
         workspace_id=workspace_id,
         data_region=region,
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
+        write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
+        triggered_by=_actor_email(request),
     )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
     form_validation_mode = (validation_mode or "").strip()
     form_sync_mode = (sync_mode or "").strip()
     form_schema_policy = (schema_policy or "").strip()
+    form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
+    plan_payload = None
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import build_run_payload
-        from services.transfer_plan_store import attach_job
 
         try:
             payload = build_run_payload(plan_id.strip())
+            plan_payload = payload
             if not mappings_json.strip():
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
@@ -768,6 +902,14 @@ async def run_universal_transfer(
                 request_obj.schema_policy = policies.get("schema_policy", request_obj.schema_policy)
             if not form_validation_mode:
                 request_obj.validation_mode = policies.get("validation_mode", request_obj.validation_mode)
+            if policies.get("backfill_new_fields") and not request_obj.backfill_new_fields:
+                request_obj.backfill_new_fields = True
+            if policies.get("write_via_staging") and not form_write_via_staging:
+                request_obj.write_via_staging = True
+            if not stream_contracts_json.strip():
+                plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
+                if isinstance(plan_contracts, list) and plan_contracts:
+                    request_obj.stream_contracts = plan_contracts
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip():
@@ -784,6 +926,16 @@ async def run_universal_transfer(
         request_obj.sync_mode = form_sync_mode
     if form_schema_policy:
         request_obj.schema_policy = form_schema_policy
+    if form_write_via_staging:
+        request_obj.write_via_staging = True
+    # propagate_* implies additive columns even when the toggle was left off.
+    from services.batch_progress import effective_backfill_new_fields
+
+    request_obj.backfill_new_fields = effective_backfill_new_fields(
+        backfill_new_fields=request_obj.backfill_new_fields,
+        schema_policy=request_obj.schema_policy,
+        mappings=getattr(request_obj, "mappings", None),
+    )
     if stream_contracts_json.strip():
         try:
             import json as _json
@@ -826,15 +978,33 @@ async def run_universal_transfer(
         from services.transfer_plan_store import attach_job
         attach_job(plan_id.strip(), job_id, status="running")
 
+    _stamp_job_mapping_artifacts(
+        job_id,
+        plan_id=plan_id.strip() if plan_id and plan_id.strip() else None,
+        plan_payload=plan_payload,
+        mappings=list(request_obj.mappings or []),
+        destination_format=dest_format or "",
+        source_kind=source_kind or "",
+        dest_kind=dest_kind or "",
+        sync_mode=request_obj.sync_mode or "",
+    )
+
     if async_mode.lower() in ("true", "1", "yes"):
+        from services.worker_fleet import fleet_enabled
+
+        queued = fleet_enabled()
         background_tasks.add_task(run_transfer_async, job_id, request_obj)
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
-            "status": "running",
+            "status": "queued" if queued else "running",
             "operation": request_obj.operation,
-            "message": "Transfer started — stream progress at /connectors/jobs/{job_id}/stream",
+            "message": (
+                "Transfer queued for Worker fleet — stream progress at /connectors/jobs/{job_id}/stream"
+                if queued
+                else "Transfer started — stream progress at /connectors/jobs/{job_id}/stream"
+            ),
         }
 
     result = engine.execute_tracked(request_obj, job_id)
@@ -863,6 +1033,7 @@ async def run_universal_transfer(
         "payload_shape": result.payload_shape,
         "reconciliation": result.reconciliation,
         "explanation": result.explanation,
+        "mapping_proof": result.mapping_proof or {},
     }
 
 
@@ -882,7 +1053,151 @@ async def get_transfer_explanation(job_id: str):
         "job_id": job_id,
         "status": job.get("status"),
         "explanation": job.get("explanation", ""),
+        "mapping_proof": job.get("mapping_proof") or {},
+        "plan_id": job.get("plan_id") or "",
     }
+
+
+@router.get("/{job_id}/mapping-proof")
+async def get_transfer_mapping_proof(job_id: str):
+    """Return persisted per-mapping evidence for Theater / Jobs deep-link."""
+    from services.mapping_proof import mapping_proof_or_build
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    proof = job.get("mapping_proof") if isinstance(job.get("mapping_proof"), dict) else {}
+    if not proof.get("mappings"):
+        req = job.get("transfer_request") if isinstance(job.get("transfer_request"), dict) else {}
+        mappings = list(req.get("mappings") or [])
+        dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
+        src = req.get("source") if isinstance(req.get("source"), dict) else {}
+        proof = mapping_proof_or_build(
+            mappings,
+            destination_db_type=str(dest.get("format") or job.get("destination_type") or "").lower(),
+            source_kind=str(src.get("kind") or job.get("source_type") or ""),
+            dest_kind=str(dest.get("kind") or job.get("destination_kind") or ""),
+            sync_mode=str(job.get("sync_mode") or req.get("sync_mode") or ""),
+        )
+        if proof:
+            try:
+                mongo.update_job_status(job_id, job.get("status") or "completed", mapping_proof=proof)
+            except Exception:
+                pass
+
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "plan_id": job.get("plan_id") or "",
+        "mapping_version": job.get("mapping_version"),
+        "mapping_hash": job.get("mapping_hash") or "",
+        "mapping_proof": proof or {},
+        "honesty": (
+            "Mapping proof explains column match / transform / confidence decisions. "
+            "It is not row-level write fidelity (see Gate-8 reconcile) and does not imply "
+            "exactly-once CDC."
+        ),
+    }
+
+
+class JobCdcSnapshotBody(BaseModel):
+    table: str = ""
+    primary_key: str = ""
+    chunk_size: int = 1000
+
+
+@router.get("/{job_id}/cdc/snapshots")
+async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""):
+    """List incremental snapshot signals for this job's CDC source fingerprint."""
+    from services.cdc_job_snapshots import list_signals_for_job, resolve_job_cdc_snapshot_context
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        ctx = resolve_job_cdc_snapshot_context(job)
+        signals = list_signals_for_job(job, status=status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "job_id": job_id,
+        "signals": signals,
+        "context": {
+            "source_key": ctx["source_key"],
+            "source_keys": ctx["source_keys"],
+            "table": ctx["table"],
+            "primary_key": ctx["primary_key"],
+            "driver": ctx["driver"],
+            "honesty": ctx["honesty"],
+        },
+    }
+
+
+@router.post("/{job_id}/cdc/snapshots")
+async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, request: Request):
+    """Enqueue a Debezium-style incremental snapshot using the job's source_key."""
+    from services.cdc_job_snapshots import request_snapshot_for_job
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        return request_snapshot_for_job(
+            job,
+            table=body.table,
+            primary_key=body.primary_key,
+            chunk_size=body.chunk_size,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/{job_id}/cdc/snapshots/{signal_id}/cancel")
+async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request):
+    """Cancel a pending/running incremental snapshot signal for this job."""
+    from services.cdc_incremental_snapshot import cancel_signal, get_signal
+    from services.cdc_job_snapshots import resolve_job_cdc_snapshot_context
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        ctx = resolve_job_cdc_snapshot_context(job)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    sig = get_signal(signal_id)
+    if sig is None:
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
+    if sig.source_key not in ctx["source_keys"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Signal source_key does not match this job's CDC fingerprint",
+        )
+    cancelled = cancel_signal(signal_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
+    return cancelled.to_dict()
 
 
 @router.get("/download/{filename}")

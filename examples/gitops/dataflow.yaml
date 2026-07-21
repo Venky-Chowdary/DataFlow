@@ -1,0 +1,65 @@
+# Example DataFlow GitOps manifest — validated in CI (`gitops` job).
+# Replace connector IDs with real saved connectors before apply to a live workspace.
+#
+#   npm run dataflow -- validate -f examples/gitops/dataflow.yaml
+#   npm run dataflow -- plan -f examples/gitops/dataflow.yaml --local
+#   npm run dataflow -- apply -f examples/gitops/dataflow.yaml --local --yes
+#
+# Honesty: contracts import as DRAFT (sign before enforce).
+# CDC delivery remains at-least-once upsert.
+
+apiVersion: dataflow.space/v1
+kind: DataFlowManifest
+metadata:
+  generator: dataflow-gitops-example
+resources:
+  - apiVersion: dataflow.space/v1
+    kind: PipelineSchedule
+    metadata:
+      name: example-orders-incremental
+    spec:
+      name: example-orders-incremental
+      source_connector_id: src-postgres-example
+      source_table: public.orders
+      dest_connector_id: dest-snowflake-example
+      dest_table: RAW.ORDERS
+      interval: hourly
+      sync_mode: incremental
+      cursor_column: updated_at
+      primary_key: id
+      enabled: false
+      require_signed_contract: false
+
+  - apiVersion: dataflow.space/v1
+    kind: DataContract
+    metadata:
+      name: example-orders-contract
+    spec:
+      name: example-orders-contract
+      version: 1
+      status: draft
+      strict: true
+      source:
+        type: postgresql
+        table: public.orders
+      destination:
+        type: snowflake
+        table: RAW.ORDERS
+      columns:
+        - source_name: id
+          target_name: id
+          source_type: INTEGER
+          target_type: NUMBER
+        - source_name: updated_at
+          target_name: updated_at
+          source_type: TIMESTAMP
+          target_type: TIMESTAMP_NTZ
+      mappings:
+        - source: id
+          target: id
+        - source: updated_at
+          target: updated_at
+      quality_rules: []
+      preflight_gates: []
+      metadata:
+        purpose: ci-example

@@ -32,6 +32,7 @@ from connectors.writer_common import (
     build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
+    quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -120,6 +121,13 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del schema
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+        schema_policy=_kwargs.get("schema_policy"),
+    )
     try:
         import pymysql
     except ImportError:
@@ -203,34 +211,37 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     placeholders = ", ".join(["%s"] * len(target_cols))
-    col_names = ", ".join(f"`{c}`" for c in target_cols)
+    table_q = quote_sql_identifier(table_name, "`")
+    col_names = ", ".join(quote_sql_identifier(c, "`") for c in target_cols)
     if write_mode == "upsert" and conflict_columns:
         conflict = [c for c in conflict_columns if c in target_cols]
         if conflict:
             update_cols = [c for c in target_cols if c not in conflict]
             if update_cols:
                 if DF_LSN_COL in target_cols:
-                    newer = (
-                        f"VALUES(`{DF_LSN_COL}`) > COALESCE(`{DF_LSN_COL}`, '')"
-                    )
+                    lsn_q = quote_sql_identifier(DF_LSN_COL, "`")
+                    newer = f"VALUES({lsn_q}) > COALESCE({lsn_q}, '')"
                     updates = ", ".join(
-                        f"`{c}`=IF({newer}, VALUES(`{c}`), `{c}`)"
+                        f"{quote_sql_identifier(c, '`')}=IF({newer}, VALUES({quote_sql_identifier(c, '`')}), {quote_sql_identifier(c, '`')})"
                         for c in update_cols
                     )
                 else:
-                    updates = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in update_cols)
+                    updates = ", ".join(
+                        f"{quote_sql_identifier(c, '`')}=VALUES({quote_sql_identifier(c, '`')})"
+                        for c in update_cols
+                    )
                 insert_sql = (
-                    f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders}) "
+                    f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders}) "
                     f"ON DUPLICATE KEY UPDATE {updates}"
                 )
             else:
                 insert_sql = (
-                    f"INSERT IGNORE INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
+                    f"INSERT IGNORE INTO {table_q} ({col_names}) VALUES ({placeholders})"
                 )
         else:
-            insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
+            insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"
     else:
-        insert_sql = f"INSERT INTO `{table_name}` ({col_names}) VALUES ({placeholders})"
+        insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"
 
     converted_rows = [
         tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
@@ -259,16 +270,18 @@ def write_mapped_rows(
         if use_ledger:
             ensure_mysql_write_ledger(cursor)
         if create_table:
-            col_defs = ", ".join(f"`{c}` {t}" for c, t in zip(target_cols, target_types))
+            col_defs = ", ".join(
+                f"{quote_sql_identifier(c, '`')} {t}" for c, t in zip(target_cols, target_types)
+            )
             if write_mode == "upsert" and conflict_columns:
                 conflict_cols = [c for c in conflict_columns if c in target_cols]
                 if conflict_cols:
                     index_name = sanitize_identifier(
                         f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                     )
-                    cols = ", ".join(f"`{c}`" for c in conflict_cols)
-                    col_defs += f", UNIQUE KEY `{index_name}` ({cols})"
-            cursor.execute(f"CREATE TABLE IF NOT EXISTS `{table_name}` ({col_defs})")
+                    cols = ", ".join(quote_sql_identifier(c, "`") for c in conflict_cols)
+                    col_defs += f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
+            cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
 
         if backfill_new_fields:
             cursor.execute(
@@ -279,7 +292,9 @@ def write_mapped_rows(
             existing = {row[0] for row in cursor.fetchall()}
             for col, typ in zip(target_cols, target_types):
                 if col not in existing:
-                    cursor.execute(f"ALTER TABLE `{table_name}` ADD COLUMN `{col}` {typ}")
+                    cursor.execute(
+                        f"ALTER TABLE {table_q} ADD COLUMN {quote_sql_identifier(col, '`')} {typ}"
+                    )
         conn.commit()
 
     try:

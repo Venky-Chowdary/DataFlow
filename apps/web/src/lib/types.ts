@@ -137,10 +137,20 @@ export interface TransferJob {
   created_at: string;
   total_rows?: number;
   progress_pct?: number;
+  /** True when job has no finite row denominator (e.g. continuous CDC). */
+  progress_indeterminate?: boolean;
   phase?: string;
   message?: string;
   operation?: string;
   error?: string;
+  /** Structured failure details (code, title, fix, raw driver message). */
+  error_details?: Record<string, unknown>;
+  error_code?: string;
+  error_title?: string;
+  error_fix?: string;
+  error_confidence?: string;
+  /** Phase active when the job failed (e.g. load) — distinct from status phase=failed. */
+  failed_at_phase?: string;
   rejected_rows?: number;
   coerced_null_rows?: number;
   chunk_current?: number;
@@ -152,10 +162,81 @@ export interface TransferJob {
   completed_at?: string;
   /** CDC heartbeat / event age in seconds (not end-to-end pipeline latency). */
   cdc_lag_seconds?: number | null;
+  /** Logical decoding plugin (pgoutput / test_decoding) or binlog engine. */
+  cdc_plugin?: string | null;
+  cdc_slot_name?: string | null;
+  cdc_delivery?: string | null;
+  /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
+  cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
+  /** Durable CDC resume cursor (slot/LSN, GTID, change-stream token). */
+  watermark?: string | null;
+  /** True when multi-table shared log reader is active (one slot / server_id). */
+  cdc_shared_reader?: boolean | null;
+  /** Debezium-compatible snapshot mode used for this run. */
+  snapshot_mode?: string | null;
+  /** Active CDC lease holder (multi-worker fail-fast). */
+  cdc_lease_holder?: string | null;
+  cdc_lease_resource?: string | null;
+  cdc_lease_stale?: boolean | null;
+  cdc_lease_heartbeat_age_sec?: number | null;
+  /** Lease store backend: memory | file | redis. */
+  cdc_lease_backend?: string | null;
+  /** Fencing generation — increments on steal. */
+  cdc_lease_generation?: number | null;
+  /** Cursor key for the contested CDC lease (force-release). */
+  cdc_lease_cursor_key?: string | null;
+  /** True when this job failed because another worker holds the CDC resource. */
+  cdc_lease_conflict?: boolean | null;
+  /** True when resume LSN/SCN is before retained redo (AG / archive purge gap). */
+  cdc_cursor_gap?: boolean | null;
+  cdc_cursor_gap_code?: string | null;
+  cdc_cursor_gap_dialect?: string | null;
+  cdc_cursor_gap_resume?: string | null;
+  cdc_cursor_gap_retained?: string | null;
+  source_ha_role?: string | null;
+  source_ha_topology?: string | null;
+  source_ha_enabled?: boolean | null;
+  source_ha_group?: string | null;
+  source_ha_replica?: string | null;
+  source_ha_message?: string | null;
+  cdc_retention_status?: string | null;
+  cdc_retention_resume?: string | null;
+  cdc_retention_retained?: string | null;
+  cdc_retention_message?: string | null;
+  cdc_retention_dialect?: string | null;
+  /** True when CDC was blocked because dest is append-only without opt-in. */
+  cdc_append_only_sink?: boolean | null;
+  /** Composite trust score 0–100 (persisted on terminal). */
+  trust_score?: number | null;
+  trust?: {
+    score: number;
+    grade: string;
+    tone: string;
+    confidence: string;
+    factors: Array<{
+      id: string;
+      label: string;
+      score: number | null;
+      weight: number;
+      note: string;
+      present?: boolean;
+    }>;
+    next_action: { code: string; label: string; detail: string };
+    lease_conflict?: boolean;
+  } | null;
   streams?: CdcStreamHealth[];
+  sync_mode?: string;
+  schema_policy?: string;
+  validation_mode?: string;
+  triggered_by?: string;
+  created_by?: string;
+  explanation?: string;
+  ddl_executed?: string[];
+  ddl_log?: string[];
+  event_log?: string[];
 }
 
 export interface JobPhase {
@@ -199,7 +280,43 @@ export interface JobProgress extends TransferJob {
     coerced_null_rows?: number;
     source_checksum?: string;
     target_checksum?: string;
+    missing_key_count?: number;
+    extra_key_count?: number;
+    matched_key_count?: number;
+    row_fidelity_score?: number;
+    sample_compare?: {
+      passed?: boolean;
+      compared?: number;
+      skipped?: boolean;
+      mismatches?: {
+        row?: string | number;
+        source?: string;
+        target?: string;
+        source_value?: string;
+        target_value?: string;
+        column?: string;
+      }[];
+    };
   };
+  /** Plain-language pipeline explanation from the engine. */
+  explanation?: string;
+  /** Persisted per-mapping evidence (confidence, fidelity, risks) for Theater/Jobs. */
+  mapping_proof?: Record<string, unknown>;
+  /** Transfer plan id when the job was started from Studio plan flow. */
+  plan_id?: string;
+  mapping_version?: number;
+  mapping_hash?: string;
+  /** DDL / stream log lines (aliased as ddl_log for Jobs UI). */
+  ddl_executed?: string[];
+  ddl_log?: string[];
+  /** Durable operator event lines (phase / message / row milestones). */
+  event_log?: string[];
+  sync_mode?: string;
+  schema_policy?: string;
+  validation_mode?: string;
+  /** Operator who started the job. */
+  triggered_by?: string;
+  created_by?: string;
   phases?: JobPhase[];
   notifications?: JobNotificationResult[];
   records_per_second?: number;
@@ -223,6 +340,14 @@ export interface ParsedUpload {
   data?: Record<string, unknown>[];
   schema?: Record<string, string>;
   validation?: CsvValidationReport | null;
+  /** True when chunks came from Tesseract OCR (scanned PDF). */
+  ocr_used?: boolean;
+  ocr_page_count?: number;
+  ocr_status?: {
+    available?: boolean;
+    message?: string;
+    missing?: string[];
+  };
 }
 
 export interface ActiveDataContext {
@@ -465,6 +590,12 @@ export interface TransferResult {
     rejected_details?: RejectedDetail[];
     warnings?: string[];
     error_policy?: string;
+    /** Pre-ingestion staging table when write_via_staging was used. */
+    staging_table?: string;
+    staged_rows?: number;
+    promoted_rows?: number;
+    promote_blocked?: boolean;
+    pre_ingestion_staging?: Record<string, unknown>;
     filename?: string;
     download_url?: string;
     load_method?: string;
@@ -487,8 +618,54 @@ export interface TransferResult {
     coerced_null_rows?: number;
     source_checksum?: string;
     target_checksum?: string;
+    missing_key_count?: number;
+    extra_key_count?: number;
+    matched_key_count?: number;
+    row_fidelity_score?: number;
+    sample_compare?: {
+      passed?: boolean;
+      compared?: number;
+      skipped?: boolean;
+      mismatches?: {
+        row?: string | number;
+        source?: string;
+        target?: string;
+        source_value?: string;
+        target_value?: string;
+        column?: string;
+      }[];
+    };
   };
+  explanation?: string;
+  mapping_proof?: Record<string, unknown>;
   job_id?: string;
+  /** CDC operator signals copied from the completed job. */
+  cdc_lag_seconds?: number | null;
+  cdc_plugin?: string | null;
+  cdc_delivery?: string | null;
+  cdc_row_filter?: string | null;
+  cdc_shared_reader?: boolean | null;
+  snapshot_mode?: string | null;
+  watermark?: string | null;
+  cdc_lease_holder?: string | null;
+  cdc_lease_backend?: string | null;
+  /** Source Always On / Data Guard role when probed. */
+  source_ha_role?: string | null;
+  source_ha_topology?: string | null;
+  source_ha_group?: string | null;
+  source_ha_message?: string | null;
+  cdc_retention_status?: string | null;
+  cdc_retention_resume?: string | null;
+  cdc_retention_retained?: string | null;
+  cdc_retention_message?: string | null;
+  cdc_retention_dialect?: string | null;
+  cdc_cursor_gap?: boolean | null;
+  cdc_cursor_gap_code?: string | null;
+  cdc_cursor_gap_dialect?: string | null;
+  cdc_cursor_gap_resume?: string | null;
+  cdc_cursor_gap_retained?: string | null;
+  cdc_lease_cursor_key?: string | null;
+  error_code?: string | null;
   /** Workspace notification dispatch results copied from the completed job. */
   notifications?: JobNotificationResult[];
   /** Full client-captured event log from live theater (persisted for result dashboard) */
@@ -538,6 +715,10 @@ export interface ScheduleInput {
   notify_on_failure: boolean;
   notify_on_success: boolean;
   enabled: boolean;
+  /** Optional signed data contract enforced on each scheduled run. */
+  contract_id?: string;
+  /** When true (default if contract_id set), refuse to schedule/enable until SIGNED. */
+  require_signed_contract?: boolean;
 }
 
 /** Full schedule record (list/detail) — config plus read-only run state. */
@@ -571,6 +752,9 @@ export interface PipelineSchedule {
   run_count: number;
   running: boolean;
   created_at: string;
+  /** Data contract bound to this pipeline (enforced when require_signed_contract). */
+  contract_id?: string;
+  require_signed_contract?: boolean;
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
   mapping_count?: number;
@@ -609,6 +793,11 @@ export interface ScheduleIntervals {
 export const CONNECTOR_CATALOG = [
   // Relational databases
   { id: "postgresql", label: "PostgreSQL", port: 5432 },
+  { id: "pgvector", label: "pgvector (PostgreSQL)", port: 5432 },
+  { id: "qdrant", label: "Qdrant", port: 6333 },
+  { id: "weaviate", label: "Weaviate", port: 8080 },
+  { id: "pinecone", label: "Pinecone", port: 443 },
+  { id: "milvus", label: "Milvus", port: 19530 },
   { id: "mysql", label: "MySQL", port: 3306 },
   { id: "mariadb", label: "MariaDB", port: 3306 },
   { id: "sqlserver", label: "SQL Server", port: 1433 },
@@ -638,6 +827,7 @@ export const CONNECTOR_CATALOG = [
   { id: "firebolt", label: "Firebolt", port: 443 },
   { id: "clickhouse", label: "ClickHouse", port: 8123 },
   { id: "duckdb", label: "DuckDB", port: 0 },
+  { id: "iceberg", label: "Apache Iceberg", port: 0 },
   { id: "trino", label: "Trino / Presto", port: 8080 },
   { id: "hive", label: "Apache Hive", port: 10000 },
   { id: "druid", label: "Apache Druid", port: 8082 },
@@ -651,6 +841,9 @@ export const CONNECTOR_CATALOG = [
   { id: "orc", label: "ORC", port: 0 },
   { id: "excel", label: "Excel", port: 0 },
   { id: "xml", label: "XML", port: 0 },
+  { id: "pdf", label: "PDF", port: 0 },
+  { id: "docx", label: "Word (DOCX)", port: 0 },
+  { id: "html", label: "HTML", port: 0 },
   { id: "yaml", label: "YAML", port: 0 },
   { id: "fixed_width", label: "Fixed-width", port: 0 },
   // Object storage

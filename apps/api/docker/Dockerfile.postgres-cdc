@@ -1,0 +1,6 @@
+# Postgres with pgvector + logical decoding for CDC CI/integration.
+# GitHub Actions service containers cannot override CMD, so CI builds this image
+# (or docker-compose uses an equivalent ``command:``) before running live CDC ITs.
+FROM pgvector/pgvector:pg16
+
+CMD ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=16", "-c", "max_wal_senders=16", "-c", "max_slot_wal_keep_size=1GB"]

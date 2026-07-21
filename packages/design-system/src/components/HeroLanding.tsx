@@ -171,18 +171,18 @@ export function HeroLanding({ onStartTransfer, onViewDemo, onAIStudio }: HeroLan
 
           <div className="dt-hero-stats">
             <div className="dt-hero-stat">
-              <span className="dt-hero-stat-value">600+</span>
-              <span className="dt-hero-stat-label">Connectors</span>
+              <span className="dt-hero-stat-value">40+</span>
+              <span className="dt-hero-stat-label">Transfer-ready drivers</span>
             </div>
             <div className="dt-hero-stat-divider" />
             <div className="dt-hero-stat">
-              <span className="dt-hero-stat-value">99.9%</span>
-              <span className="dt-hero-stat-label">Uptime</span>
+              <span className="dt-hero-stat-value">8</span>
+              <span className="dt-hero-stat-label">Preflight gates</span>
             </div>
             <div className="dt-hero-stat-divider" />
             <div className="dt-hero-stat">
-              <span className="dt-hero-stat-value">50B+</span>
-              <span className="dt-hero-stat-label">Rows/Month</span>
+              <span className="dt-hero-stat-value">0</span>
+              <span className="dt-hero-stat-label">Silent drops</span>
             </div>
           </div>
 

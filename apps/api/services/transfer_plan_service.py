@@ -84,6 +84,7 @@ def run_plan_mapping(
         validation_mode=validation_mode,
         destination_db_type=(plan.destination.get("format") or plan.destination.get("type") or "").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
+        sync_mode=str(policies.get("sync_mode") or ""),
     )
 
     updated = add_mapping_revision(plan_id, result)
@@ -215,6 +216,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
         destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
+        schema_policy=policies.get("schema_policy", "manual_review"),
+        backfill_new_fields=bool(policies.get("backfill_new_fields")),
     )
     pf = apply_policy_gates(
         pf,
@@ -265,11 +268,26 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
     if plan.status not in {"approved", "preflight_passed", "mapped"}:
         raise ValueError(f"Plan status '{plan.status}' is not runnable — approve after preflight")
 
+    from services.mapping_proof import mapping_proof_or_build
+
+    dest = plan.destination or {}
+    src = plan.source or {}
+    mapping_proof = mapping_proof_or_build(
+        rev.mappings,
+        existing=dict(rev.mapping_proof or {}),
+        target_columns=plan.target_columns,
+        destination_db_type=str(dest.get("format") or dest.get("type") or ""),
+        source_kind=str(src.get("kind") or ""),
+        dest_kind=str(dest.get("kind") or ""),
+        sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
+    )
+
     return {
         "plan_id": plan_id,
         "mapping_version": rev.version,
         "mapping_hash": rev.mapping_hash,
         "mappings": rev.mappings,
+        "mapping_proof": mapping_proof,
         "source": plan.source,
         "destination": plan.destination,
         "column_types": plan.source_schema,

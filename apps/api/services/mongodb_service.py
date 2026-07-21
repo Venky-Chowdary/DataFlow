@@ -326,11 +326,32 @@ class MongoDBService:
         try:
             prev_doc = collection.find_one(
                 {"_id": oid},
-                {"status": 1, "phases": 1, "records_processed": 1, "rejected_rows": 1, "reconcile": 1},
+                {
+                    "status": 1,
+                    "phases": 1,
+                    "records_processed": 1,
+                    "rejected_rows": 1,
+                    "coerced_null_rows": 1,
+                    "reconciliation": 1,
+                    "cdc_lag_seconds": 1,
+                    "cdc_lease_conflict": 1,
+                    "destination_summary": 1,
+                    "reconcile": 1,
+                    "event_log": 1,
+                    "message": 1,
+                    "phase": 1,
+                },
             )
         except Exception:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
+
+        try:
+            from services.job_trust import attach_trust_to_updates
+
+            attach_trust_to_updates(status, updates, previous=prev_doc)
+        except Exception:
+            pass
 
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
@@ -339,6 +360,37 @@ class MongoDBService:
 
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
+
+        # Durable operator event log (Jobs Log tab). Cap to last 200 lines.
+        try:
+            if "event_log" not in updates:
+                prev_log = list((prev_doc or {}).get("event_log") or [])
+                line_parts: list[str] = []
+                if phase_label and str(phase_label) != str((prev_doc or {}).get("phase") or ""):
+                    line_parts.append(f"Entered {phase_label} phase")
+                msg_s = str(message or "").strip()
+                if msg_s and msg_s != str((prev_doc or {}).get("message") or "").strip():
+                    line_parts.append(msg_s[:300])
+                err_s = str(kwargs.get("error") or "").strip()
+                if err_s:
+                    line_parts.append(f"Error: {err_s[:300]}")
+                rows = kwargs.get("records_processed")
+                if rows is not None:
+                    try:
+                        rows_i = int(rows)
+                        prev_rows = int((prev_doc or {}).get("records_processed") or 0)
+                        if rows_i > 0 and rows_i - prev_rows >= 10_000:
+                            line_parts.append(f"{rows_i:,} rows processed")
+                    except Exception:
+                        pass
+                if line_parts:
+                    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                    for part in line_parts:
+                        prev_log.append(f"{stamp} — {part}")
+                    updates["event_log"] = prev_log[-200:]
+        except Exception:
+            pass
+
         if phase_label:
             try:
                 from services.job_phases import (
@@ -489,6 +541,8 @@ class MongoDBService:
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
+        from services.job_list_view import slim_job_for_list
+
         db = self.get_database()
         collection = db["transfer_jobs"]
 
@@ -501,12 +555,31 @@ class MongoDBService:
                 allowed = ["", None]
             query["$or"] = [{"workspace_id": w} for w in allowed if w is not None] + [{"workspace_id": {"$exists": False}}]
         jobs = []
-        for doc in collection.find(query).sort("created_at", -1).limit(limit):
+        # Projection drops the heaviest arrays at the Mongo layer when possible.
+        projection = {
+            "rejected_details": 0,
+            "logs": 0,
+            "log_lines": 0,
+            "events": 0,
+            "chunks": 0,
+            "mapping_proof": 0,
+            "sample_rows": 0,
+            "preview_rows": 0,
+            "quarantine_rows": 0,
+            "quarantine_samples": 0,
+            "destination_summary.rejected_details": 0,
+            "destination_summary.sample_rows": 0,
+            "destination_summary.preview_rows": 0,
+            "source_summary.sample_rows": 0,
+            "reconciliation.mismatches": 0,
+            "reconciliation.sample_mismatches": 0,
+        }
+        for doc in collection.find(query, projection).sort("created_at", -1).limit(limit):
             doc["_id"] = str(doc["_id"])
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if doc.get(key) and hasattr(doc[key], "isoformat"):
                     doc[key] = doc[key].isoformat()
-            jobs.append(doc)
+            jobs.append(slim_job_for_list(doc))
         return jobs
 
 
@@ -645,6 +718,19 @@ class MemoryMongoDBService:
             if existing_fence is not None and existing_fence != fence:
                 return False
             kwargs["lease_fence"] = fence
+
+        try:
+            from services.job_trust import attach_trust_to_updates
+
+            attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception:
+            pass
+
+        prev_phase = rec.get("phase")
+        prev_message = str(rec.get("message") or "").strip()
+        prev_rows = int(rec.get("records_processed") or 0)
+        prev_log = list(rec.get("event_log") or [])
+
         rec.update(kwargs)
         rec["status"] = status
         rec["updated_at"] = datetime.now(timezone.utc)
@@ -652,6 +738,34 @@ class MemoryMongoDBService:
             rec.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             rec["completed_at"] = datetime.now(timezone.utc)
+
+        if "event_log" not in kwargs:
+            try:
+                line_parts: list[str] = []
+                phase_label = kwargs.get("phase")
+                message = str(kwargs.get("message") or "").strip()
+                err_s = str(kwargs.get("error") or "").strip()
+                if phase_label and str(phase_label) != str(prev_phase or ""):
+                    line_parts.append(f"Entered {phase_label} phase")
+                if message and message != prev_message:
+                    line_parts.append(message[:300])
+                if err_s:
+                    line_parts.append(f"Error: {err_s[:300]}")
+                if "records_processed" in kwargs:
+                    try:
+                        rows_i = int(kwargs["records_processed"])
+                        if rows_i > 0 and rows_i - prev_rows >= 10_000:
+                            line_parts.append(f"{rows_i:,} rows processed")
+                    except Exception:
+                        pass
+                if line_parts:
+                    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                    for part in line_parts:
+                        prev_log.append(f"{stamp} — {part}")
+                    rec["event_log"] = prev_log[-200:]
+            except Exception:
+                pass
+
         phase_label = kwargs.get("phase")
         if phase_label:
             try:
@@ -747,6 +861,8 @@ class MemoryMongoDBService:
         return None
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+        from services.job_list_view import slim_job_for_list
+
         items = sorted(
             self._jobs.values(),
             key=lambda j: j.get("created_at") or "",
@@ -765,7 +881,7 @@ class MemoryMongoDBService:
             for key in ("created_at", "updated_at", "started_at", "completed_at"):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
-            out.append(job)
+            out.append(slim_job_for_list(job))
         return out
 
 

@@ -384,21 +384,42 @@ def peek_file_source(
         return headers, schema, total, sample
 
     if file_type == "json":
-        import ijson
+        from services.json_tabular import detect_ijson_records_prefix, load_json_records
 
         sample_objs: list[dict] = []
         columns: set[str] = set()
         total = 0
-        with _open_binary(content) as bio:
-            for obj in ijson.items(bio, "item"):
-                if not isinstance(obj, dict):
-                    continue
-                total += 1
-                if len(sample_objs) < 100:
-                    sample_objs.append(obj)
-                    columns.update(obj.keys())
+        head = _first_bytes(content, 65536)
+        prefix = detect_ijson_records_prefix(head)
+        if prefix:
+            try:
+                import ijson
+            except ImportError:
+                prefix = None
+        if prefix:
+            with _open_binary(content) as bio:
+                for obj in ijson.items(bio, prefix):
+                    if not isinstance(obj, dict):
+                        continue
+                    total += 1
+                    if len(sample_objs) < 100:
+                        sample_objs.append(obj)
+                        columns.update(obj.keys())
+        else:
+            raw = content if isinstance(content, (bytes, bytearray)) else None
+            if raw is None:
+                with _open_binary(content) as bio:
+                    raw = bio.read()
+            records = load_json_records(bytes(raw))
+            total = len(records)
+            sample_objs = records[:100]
+            for obj in sample_objs:
+                columns.update(obj.keys())
         if total == 0:
-            raise ValueError("JSON file must be an array of objects")
+            raise ValueError(
+                "JSON file has no object rows. Use an array of objects "
+                '[{...}], a wrapper like {"data":[{...}]}, or a single object record.'
+            )
         headers = sorted(columns)
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, total, sample_objs[:100]
@@ -451,19 +472,9 @@ def _iter_json_array_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
 ):
-    import ijson
+    from services.json_tabular import iter_json_record_dicts
 
-    batch: list[dict] = []
-    with _open_binary(content) as bio:
-        for obj in ijson.items(bio, "item"):
-            if not isinstance(obj, dict):
-                continue
-            batch.append(obj)
-            if len(batch) >= chunk_size:
-                yield batch
-                batch = []
-    if batch:
-        yield batch
+    yield from iter_json_record_dicts(_open_binary, content, chunk_size=chunk_size)
 
 
 def _batch_iterator_for_type(
@@ -538,7 +549,7 @@ def stream_file_to_database(
     schema: dict[str, str],
     on_checkpoint: Callable[..., None] | None = None,
     *,
-    sync_mode: str = "full_refresh_overwrite",
+    sync_mode: str = "full_refresh_append",
     stream_contracts: list[dict] | None = None,
     job_id: str | None = None,
     checkpoint: Checkpoint | None = None,
@@ -615,19 +626,26 @@ def stream_file_to_database(
         from services.sync_cursor import (
             map_source_to_target,
             requires_upsert,
+            resolve_effective_sync_mode,
             resolve_sync_contract,
         )
     except ImportError:
         from src.services.sync_cursor import (
             map_source_to_target,
             requires_upsert,
+            resolve_effective_sync_mode,
             resolve_sync_contract,
         )
     contract = resolve_sync_contract(stream_contracts)
-    effective_sync = contract.sync_mode if contract else sync_mode
+    effective_sync = resolve_effective_sync_mode(
+        sync_mode,
+        contract.sync_mode if contract else None,
+    )
     pk_target_cols: list[str] = []
     if contract and contract.primary_key:
-        pk_target_cols = [map_source_to_target(contract.primary_key, mappings)]
+        pk_target_cols = [
+            map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+        ]
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
 
     checkpoint_service = checkpoint_service or CheckpointService()
@@ -786,7 +804,7 @@ def stream_file_to_database(
             "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
             "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
-            "rejected_details": (dest_summary.get("rejected_details") or [])[:200],
+            "rejected_details": (dest_summary.get("rejected_details") or [])[:2000],
             "batch_rows": len(data_rows),
         }
 
@@ -860,7 +878,7 @@ def stream_file_to_database(
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
-    dest_summary["rejected_details"] = rejected_details[:200]
+    dest_summary["rejected_details"] = rejected_details[:2000]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
 

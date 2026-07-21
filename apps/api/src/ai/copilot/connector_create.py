@@ -193,7 +193,9 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
     merged.setdefault("host", "")
     merged.setdefault("connection_string", "")
     merged.setdefault("ssl", False)
-    merged.setdefault("schema", "public" if merged["type"] == "postgresql" else "")
+    from services.dialect_profiles import default_schema_for
+
+    merged.setdefault("schema", default_schema_for(merged["type"]) or "")
     merged.setdefault("auth_mode", "connection_string" if merged.get("connection_string") else "user_pass")
     return merged
 

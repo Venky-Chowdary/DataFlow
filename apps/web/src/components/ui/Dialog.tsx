@@ -8,8 +8,8 @@ interface DialogProps {
   title?: ReactNode;
   subtitle?: ReactNode;
   footer?: ReactNode;
-  /** Visual size: default ~480, lg 640, xl ~960 */
-  size?: "md" | "lg" | "xl";
+  /** Visual size for workspace dialogs. Prefer `full` for Map / proof / expanders so panels match. Confirm stays `md`. */
+  size?: "md" | "lg" | "xl" | "full";
   ariaLabel?: string;
   className?: string;
   children: ReactNode;
@@ -17,7 +17,7 @@ interface DialogProps {
 
 /**
  * Centered dialog using shared df2-modal tokens (Escape, overlay click, scroll lock).
- * Prefer this over ad-hoc modals when Transfer Studio panels need room.
+ * Studio expanders (mapping table, structure preview, proof) should use size="full".
  */
 export function Dialog({
   open,
@@ -25,7 +25,7 @@ export function Dialog({
   title,
   subtitle,
   footer,
-  size = "lg",
+  size = "full",
   ariaLabel,
   className = "",
   children,
@@ -51,7 +51,13 @@ export function Dialog({
   if (!open) return null;
 
   const sizeClass =
-    size === "xl" ? "df2-modal-xl" : size === "lg" ? "df2-modal-lg" : "";
+    size === "full"
+      ? "df2-modal-full"
+      : size === "xl"
+        ? "df2-modal-xl"
+        : size === "lg"
+          ? "df2-modal-lg"
+          : "";
 
   return createPortal(
     <div className="df2-modal-overlay" role="presentation" onClick={onClose}>
@@ -60,14 +66,15 @@ export function Dialog({
         className={`df2-modal ${sizeClass} ${className}`.trim()}
         role="dialog"
         aria-modal="true"
-        aria-label={ariaLabel}
+        aria-labelledby={title ? "df2-dialog-title" : undefined}
+        aria-label={title ? undefined : ariaLabel}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
         {(title || subtitle) && (
           <div className="df2-modal-header">
             <div>
-              {title && <h2 className="df2-modal-title">{title}</h2>}
+              {title && <h2 id="df2-dialog-title" className="df2-modal-title">{title}</h2>}
               {subtitle && <p className="df2-modal-subtitle">{subtitle}</p>}
             </div>
             <button

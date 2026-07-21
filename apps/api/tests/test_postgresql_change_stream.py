@@ -88,6 +88,7 @@ def test_snapshot_uses_repeatable_read_and_lsn_token() -> None:
         primary_key="id",
         cursor_key="pg:test:orders→sql:test:dst:stream",
         columns=["id", "amount"],
+        output_plugin="test_decoding",
     )
 
     conn = MagicMock()
@@ -141,6 +142,7 @@ def test_poll_parses_slot_changes() -> None:
         primary_key="id",
         cursor_key="pg:test:orders→sql:test:dst:stream",
         resume_token="df_test_orders_12345678",
+        output_plugin="test_decoding",
     )
 
     conn = MagicMock()

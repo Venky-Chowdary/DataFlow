@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..services.contract_store import get_contract_store
@@ -23,6 +23,7 @@ from ..services.data_contract import (
     DataContract,
     QualityRule,
 )
+from services.workspace_access import assert_resource_workspace, resolve_read_workspace, resolve_write_workspace
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
@@ -93,16 +94,37 @@ def _contract_to_response(contract: DataContract) -> _ContractResponse:
 
 
 @router.get("", response_model=_ContractListResponse)
-def list_contracts(request: Request):
+def list_contracts(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    ws = resolve_read_workspace(request, workspace_id)
     store = get_contract_store()
-    contracts = [_contract_to_response(c) for c in store.list_contracts(limit=200)]
+    contracts = []
+    for c in store.list_contracts(limit=200):
+        meta = getattr(c, "metadata", None) or {}
+        cws = str(meta.get("workspace_id") or "")
+        if ws and cws and cws != ws:
+            continue
+        if ws and not cws:
+            # Legacy unscoped contracts visible only when isolation is off.
+            from services.team_store import require_workspace_isolation
+
+            if require_workspace_isolation():
+                continue
+        contracts.append(_contract_to_response(c))
     return _ContractListResponse(contracts=contracts)
 
 
 @router.post("", response_model=_ContractResponse)
 @router.post("/from-transfer", response_model=_ContractResponse)
-def create_contract_from_transfer(body: _CreateFromTransferRequest):
+def create_contract_from_transfer(
+    body: _CreateFromTransferRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Persist a draft contract from Transfer Studio validate/mapping state."""
+    ws = resolve_write_workspace(request, workspace_id)
     store = get_contract_store()
     mappings = list(body.mappings or [])
     columns: list[ColumnRule] = []
@@ -157,6 +179,9 @@ def create_contract_from_transfer(body: _CreateFromTransferRequest):
                     )
                 )
 
+    meta = dict(body.metadata or {})
+    if ws:
+        meta["workspace_id"] = ws
     contract = DataContract(
         name=body.name.strip(),
         status=ContractStatus.DRAFT,
@@ -167,18 +192,25 @@ def create_contract_from_transfer(body: _CreateFromTransferRequest):
         quality_rules=quality_rules,
         preflight_gates=list(body.preflight_gates or []),
         strict=body.strict,
-        metadata=dict(body.metadata or {}),
+        metadata=meta,
     )
     store.save_contract(contract)
     return _contract_to_response(contract)
 
 
 @router.get("/{contract_id}", response_model=_ContractResponse)
-def get_contract(contract_id: str):
+def get_contract(
+    contract_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    resolve_read_workspace(request, workspace_id)
     store = get_contract_store()
     contract = store.get_contract(contract_id)
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
+    meta = getattr(contract, "metadata", None) or {}
+    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
     return _contract_to_response(contract)
 
 
@@ -252,27 +284,47 @@ def test_contract(body: _ContractTestRequest):
 
 @router.get("/{contract_id}/export")
 def export_contract(contract_id: str, format: Literal["yaml", "json"] = "yaml"):
-    """Export a contract as a versionable YAML or JSON artifact for GitOps."""
+    """Export a contract as ``dataflow-contract.yaml`` (kind + metadata + spec)."""
+    from services.gitops_manifest import contract_artifact
+
     store = get_contract_store()
     contract = store.get_contract(contract_id)
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
-    payload = contract.to_dict()
+    artifact = contract_artifact(contract)
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(payload, sort_keys=False, default_flow_style=False),
+            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
             media_type="application/x-yaml",
-            headers={"Content-Disposition": f"attachment; filename=contract-{contract_id}.yaml"},
+            headers={"Content-Disposition": f"attachment; filename=dataflow-contract-{contract_id}.yaml"},
         )
-    return payload
+    return artifact
 
 
 @router.post("/import", response_model=_ContractResponse)
 def import_contract(payload: dict[str, Any]):
-    """Import a contract from a YAML/JSON artifact. Replaces an existing contract with the same id."""
+    """Import a contract from YAML/JSON (raw or DataContract kind wrapper).
+
+    Imported contracts are saved as DRAFT — sign before enforcing on schedules.
+    """
+    from services.gitops_manifest import apply_manifest
+
+    # Accept bare contract dicts and kind-wrapped artifacts.
+    if payload.get("kind") == "DataContract" or payload.get("kind") == "DataFlowManifest":
+        result = apply_manifest(payload, dry_run=False)
+        rows = [r for r in (result.get("results") or []) if r.get("kind") == "DataContract" and r.get("ok")]
+        if not rows:
+            err = next((r.get("error") for r in (result.get("results") or []) if r.get("error")), None)
+            raise HTTPException(status_code=422, detail=err or "Invalid contract payload")
+        store = get_contract_store()
+        contract = store.get_contract(str(rows[0].get("id") or ""))
+        if not contract:
+            raise HTTPException(status_code=500, detail="Contract imported but not readable")
+        return _contract_to_response(contract)
+
     store = get_contract_store()
     try:
-        contract = DataContract.from_dict(payload)
+        contract = DataContract.from_dict(payload.get("spec") if isinstance(payload.get("spec"), dict) else payload)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Invalid contract payload: {exc}") from exc
     contract.status = ContractStatus.DRAFT

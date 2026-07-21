@@ -19,3 +19,13 @@ def test_type_system_redshift_ddl():
     assert ddl_type("mysql", "UUID") == "CHAR(36)"
     assert ddl_type("bigquery", "BINARY") == "BYTES"
     assert ddl_type("unknown", "DECIMAL") == "TEXT"
+
+
+def test_type_system_lakehouse_ddl():
+    assert ddl_type("databricks", "integer") == "BIGINT"
+    assert ddl_type("databricks", "json") == "STRING"
+    assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP"
+    assert ddl_type("iceberg", "integer") == "long"
+    assert ddl_type("apache_iceberg", "json") == "string"
+    assert ddl_type("iceberg", "UUID") == "uuid"
+    assert ddl_type("unity_catalog", "DECIMAL") == "DECIMAL(38,10)"

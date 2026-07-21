@@ -1,0 +1,4 @@
+{"ts": 1784516242.579288, "event": "propose_quarantine", "proposal_id": "repair_22b3e8c06553", "job_id": "job1"}
+{"ts": 1784516242.580095, "event": "approve", "proposal_id": "repair_22b3e8c06553", "actor": "tester", "status": "applied"}
+{"ts": 1784516242.581207, "event": "propose_quarantine", "proposal_id": "repair_988de0612bc6", "job_id": "j2"}
+{"ts": 1784516242.581866, "event": "reject", "proposal_id": "repair_988de0612bc6", "actor": "tester"}

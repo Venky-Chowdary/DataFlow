@@ -53,6 +53,47 @@ def normalize_connector_role(connector_type: str, role: str | None) -> str:
     return "both"
 
 
+def _resolve_connector_schema(
+    conn_type: str,
+    schema: str | None,
+    username: str | None = None,
+) -> str:
+    """Dialect-aware schema default — never force Postgres ``public`` onto other engines."""
+    from services.dialect_profiles import normalize_schema
+
+    resolved = normalize_schema(conn_type, schema, username=username)
+    return resolved or ""
+
+
+# Databases / warehouses / object stores that are valid as source *and* destination.
+# Catalog UI may pass role=source|destination from the filter tab — that must not
+# lock the saved profile into a one-sided capability.
+_BIDIRECTIONAL_TYPES = frozenset({
+    "mysql", "mariadb", "singlestore",
+    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
+    "sqlserver", "mssql", "synapse", "oracle", "db2", "generic_sql",
+    "sqlite", "duckdb", "h2",
+    "mongodb", "dynamodb", "cassandra", "couchbase", "elasticsearch", "redis",
+    "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
+    "s3", "amazon_s3", "gcs", "google_cloud_storage", "adls", "azure_blob", "azure_blob_storage",
+    "kafka", "apache_kafka", "iceberg", "apache_iceberg",
+    "salesforce", "hubspot",
+})
+
+
+def normalize_connector_role(connector_type: str, role: str | None) -> str:
+    """Return a persisted topology role. Dual-use types always store ``both``."""
+    t = (connector_type or "").strip().lower()
+    if t in _BIDIRECTIONAL_TYPES:
+        return "both"
+    r = (role or "both").strip().lower()
+    if r in ("destination", "dest"):
+        return "destination"
+    if r == "source":
+        return "source"
+    return "both"
+
+
 def _store_path() -> Path:
     """Return the effective file store path.
 
@@ -78,7 +119,7 @@ class SavedConnector:
     database: str = ""
     username: str = ""
     password: str = ""
-    schema: str = "public"
+    schema: str = ""  # filled via dialect_profiles — never assume Postgres public
     connection_string: str = ""
     ssl: bool = True
     warehouse: str = ""
@@ -115,7 +156,7 @@ class SavedConnector:
             database=data.get("database", ""),
             username=data.get("username", ""),
             password=password,
-            schema=data.get("schema", "public"),
+            schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
             connection_string=conn_str,
             ssl=bool(data.get("ssl", True)),
             warehouse=data.get("warehouse", ""),
@@ -386,7 +427,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         database=data.get("database", ""),
         username=data.get("username", ""),
         password=data.get("password", ""),
-        schema=data.get("schema", "public"),
+        schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
         connection_string=data.get("connection_string", ""),
         ssl=bool(data.get("ssl", True)),
         warehouse=data.get("warehouse", ""),

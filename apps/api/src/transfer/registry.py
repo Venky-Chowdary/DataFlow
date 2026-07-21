@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-LIVE_SOURCE_FORMATS = ["csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"]
+LIVE_SOURCE_FORMATS = [
+    "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+    "pdf", "docx", "html",
+]
 LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml"]
 
 # Live drivers are discovered at import time; object stores and warehouses count
 # as database destinations, while the listed file formats are file targets.
-_FILE_FORMATS = {"csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"}
+_FILE_FORMATS = {
+    "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+    "pdf", "docx", "html",
+}
 
 def _live_db_drivers(live_fn_name: str = "transfer_live_driver_types") -> list[str]:
     try:
@@ -201,6 +207,9 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "oracle", "database", "postgresql"),
     ("database", "postgresql", "database", "pgvector"),
     ("database", "postgresql", "database", "qdrant"),
+    ("database", "postgresql", "database", "weaviate"),
+    ("file", "csv", "database", "pinecone"),
+    ("file", "pdf", "database", "milvus"),
     ("database", "rest_api", "database", "postgresql"),
     ("database", "rest_api", "database", "mongodb"),
 ]
@@ -290,6 +299,24 @@ def get_capabilities() -> dict:
             dest_dbs.append(cid)
 
     drivers = transfer_live_driver_types()
+    try:
+        from services.pdf_ocr import ocr_dependency_status
+
+        ocr_status = ocr_dependency_status()
+    except Exception as exc:
+        ocr_status = {"available": False, "message": str(exc), "present": [], "missing": ["ocr"]}
+
+    try:
+        from services.embedding_cache import cache_stats
+
+        embedding_cache_status = cache_stats().to_dict()
+    except Exception as exc:
+        embedding_cache_status = {
+            "entries": 0,
+            "durable_default": True,
+            "error": str(exc),
+        }
+
     return {
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
@@ -304,6 +331,8 @@ def get_capabilities() -> dict:
         "live_route_combinations": summary["live_route_combinations"],
         "operations": ["upload", "migration", "convert", "dump", "transfer"],
         "auto_ddl": True,
+        "ocr": ocr_status,
+        "embedding_cache": embedding_cache_status,
         "description": (
             f"{len(drivers)} unique transfer-ready drivers "
             f"({summary['transfer_live_count']} catalog aliases). "

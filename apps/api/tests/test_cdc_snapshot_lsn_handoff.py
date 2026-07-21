@@ -35,6 +35,7 @@ def test_postgres_snapshot_handoff_token_starts_streaming_at_same_lsn() -> None:
         primary_key="id",
         cursor_key=cursor_key,
         columns=["id", "amount"],
+        output_plugin="test_decoding",
     )
 
     conn = MagicMock()

@@ -6,7 +6,7 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
@@ -227,7 +227,30 @@ async def test_connection(request: TestConnectionRequest):
             "auth_source": request.auth_source or "",
         }
         ok, msg = run_probe(driver, cfg)
-        return {"success": ok, "message": msg, "driver": driver, "auth_source": cfg.get("auth_source", "")}
+        payload: dict[str, Any] = {
+            "success": ok,
+            "message": msg,
+            "driver": driver,
+            "auth_source": cfg.get("auth_source", ""),
+        }
+        if ok and driver in {
+            "sqlserver",
+            "mssql",
+            "oracle",
+            "azure_sql_database",
+            "microsoft_sql_server",
+            "amazon_rds_sql_server",
+        }:
+            try:
+                from services.source_ha_probe import probe_source_ha_safe
+
+                ha = probe_source_ha_safe({**cfg, "type": driver})
+                payload["source_ha"] = ha.to_dict()
+                if ha.message:
+                    payload["message"] = f"{msg} · {ha.message}"
+            except Exception:
+                pass
+        return payload
 
     except Exception as e:
         return {
@@ -669,12 +692,37 @@ async def get_job_quarantine(job_id: str, request: Request):
     source = "write" if (job.get("rejected_details") or (job.get("destination_summary") or {}).get("rejected_details")) else (
         "preflight" if details else "none"
     )
+    ds = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
+    dest_q = ds.get("dest_quarantine") if isinstance(ds.get("dest_quarantine"), dict) else {}
+    dest_dlq: dict[str, Any] = {
+        "table": ds.get("dest_quarantine_table") or dest_q.get("table"),
+        "rows_written": ds.get("dest_quarantine_rows") or dest_q.get("rows_written"),
+        "ok": dest_q.get("ok"),
+        "skipped": dest_q.get("skipped"),
+        "reason": dest_q.get("reason"),
+        "error": ds.get("dest_quarantine_error") or dest_q.get("error"),
+    }
+    # Live open-row count when we have a saved transfer request + SQL dest.
+    payload = job.get("transfer_request")
+    if payload and dest_dlq.get("table"):
+        try:
+            from services.dest_quarantine import count_open_dlq_rows
+            from ..transfer.models import transfer_request_from_dict
+
+            treq = transfer_request_from_dict(payload)
+            open_info = count_open_dlq_rows(treq.destination, job_id=job_id)
+            dest_dlq["open_rows"] = open_info.get("open_rows")
+            dest_dlq["supported"] = open_info.get("supported")
+        except Exception:
+            pass
+
     return {
         "job_id": job_id,
         "rejected_rows": rejected_rows,
         "issue_count": len(details),
         "source": source,
         "quarantine": details,
+        "dest_dlq": dest_dlq,
     }
 
 
@@ -699,14 +747,16 @@ async def export_job_quarantine(job_id: str, request: Request):
 
     from services.format_converter import convert_rows
 
-    headers = ["row", "column", "value", "reason", "policy"]
+    headers = ["row", "column", "target", "value", "reason", "policy", "suggested_transform"]
     rows = [
         [
             str(d.get("row", "")),
             str(d.get("column", "")),
+            str(d.get("target", "")),
             str(d.get("value", "")),
             str(d.get("reason", "")),
             str(d.get("policy", "")),
+            str(d.get("suggested_transform", "")),
         ]
         for d in details
     ]
@@ -851,6 +901,22 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
         rejected = int(dest_summary.get("rejected_rows") or 0)
         status = "completed_with_quarantine" if rejected > 0 else "completed"
+        promote_meta: dict[str, Any] = {}
+        if rejected == 0:
+            try:
+                from services.dest_quarantine import mark_dlq_promoted
+
+                qids = [
+                    str(d.get("_df_qid") or "")
+                    for d in details
+                    if isinstance(d, dict) and d.get("_df_qid")
+                ]
+                # Prefer qids; when absent, stamp all open DLQ rows for this parent job.
+                promote_meta = mark_dlq_promoted(
+                    dest, qids=qids, job_id=job_id
+                )
+            except Exception as exc:
+                promote_meta = {"error": str(exc)[:300]}
         mongo.update_job_status(
             child_job_id,
             status,
@@ -860,7 +926,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             progress_pct=100,
             rejected_rows=rejected,
             rejected_details=dest_summary.get("rejected_details") or [],
-            destination_summary=dest_summary,
+            destination_summary={**dest_summary, "dest_dlq_promoted": promote_meta},
             ddl_log=ddl_log,
         )
         try:
@@ -901,6 +967,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "rows_attempted": len(records),
             "status": status,
             "destination_summary": dest_summary,
+            "dest_dlq_promoted": promote_meta,
         }
     except HTTPException:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message="Quarantine replay failed")
@@ -994,11 +1061,15 @@ async def delete_connector(connector_id: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    enable_ocr: str = Form("false"),
+):
     """Upload and parse a file"""
     try:
         content = await file.read()
-        result = FileParser.parse(content, file.filename)
+        use_ocr = enable_ocr.lower() in ("true", "1", "yes")
+        result = FileParser.parse(content, file.filename, enable_ocr=use_ocr)
 
         if not result.success:
             raise HTTPException(status_code=400, detail=result.error)
@@ -1033,6 +1104,8 @@ async def upload_file(file: UploadFile = File(...)):
             from services.csv_validator import validate_csv_content
             validation_report = validate_csv_content(content, result.columns, schema)
 
+        from services.pdf_ocr import ocr_dependency_status
+
         return {
             "success": True,
             "filename": file.filename,
@@ -1044,6 +1117,9 @@ async def upload_file(file: UploadFile = File(...)):
             "data": sample,
             "validation": validation_report,
             "profile": profile,
+            "ocr_used": bool(result.ocr_used),
+            "ocr_page_count": int(result.ocr_page_count or 0),
+            "ocr_status": ocr_dependency_status(),
         }
 
     except HTTPException:

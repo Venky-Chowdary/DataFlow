@@ -1,0 +1,1433 @@
+{
+  "version": 2,
+  "description": "Enterprise mapping golden \u2014 domain-batched bipartite eval with types. Accuracy is measured per domain then aggregated. Not a marketing claim.",
+  "min_cases": 200,
+  "domains": [
+    {
+      "name": "ecommerce",
+      "cases": [
+        {
+          "source": "cust_id",
+          "target": "customer_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "cust_name",
+          "target": "customer_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "fname",
+          "target": "first_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "lname",
+          "target": "last_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "email_addr",
+          "target": "email_address",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "usr_email",
+          "target": "user_email",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "ph_num",
+          "target": "phone",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "mobile_phone",
+          "target": "phone_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "ship_addr",
+          "target": "shipping_address",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "bill_zip",
+          "target": "billing_postal_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "ord_id",
+          "target": "order_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "prod_id",
+          "target": "product_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "qty",
+          "target": "quantity",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "unit_prc",
+          "target": "unit_price",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "order_amt",
+          "target": "total_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "txn_amt",
+          "target": "transaction_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "AMT",
+          "target": "amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "disc_amt",
+          "target": "discount_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "tax_amt",
+          "target": "tax_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "sku",
+          "target": "product_sku",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "created_at",
+          "target": "created_timestamp",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "updated_ts",
+          "target": "updated_at",
+          "source_type": "TIMESTAMP",
+          "target_type": "TIMESTAMP",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "order_dt",
+          "target": "order_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "ship_dt",
+          "target": "ship_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "status_cd",
+          "target": "order_status",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "curr_cd",
+          "target": "currency_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "line_amt",
+          "target": "line_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "net_amt",
+          "target": "net_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "gross_amt",
+          "target": "gross_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "promo_cd",
+          "target": "promo_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "cart_id",
+          "target": "cart_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "store_id",
+          "target": "store_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "channel",
+          "target": "sales_channel",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "refund_amt",
+          "target": "refund_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "ship_method",
+          "target": "shipping_method",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "tracking_no",
+          "target": "tracking_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "gift_msg",
+          "target": "gift_message",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "is_gift",
+          "target": "is_gift",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "item_cnt",
+          "target": "item_count",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "ecommerce"
+        },
+        {
+          "source": "weight_kg",
+          "target": "weight_kg",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "ecommerce"
+        }
+      ]
+    },
+    {
+      "name": "finance",
+      "cases": [
+        {
+          "source": "acct_no",
+          "target": "account_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "acct_bal",
+          "target": "account_balance",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "txn_id",
+          "target": "transaction_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "txn_dt",
+          "target": "transaction_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "finance"
+        },
+        {
+          "source": "pay_amt",
+          "target": "payment_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "inv_no",
+          "target": "invoice_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "invoice_amt",
+          "target": "invoice_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "wire_ref",
+          "target": "wire_reference",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "ach_trace",
+          "target": "ach_trace_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "tax_amt",
+          "target": "tax_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "vat_amt",
+          "target": "vat_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "ccy",
+          "target": "currency_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "fx_rate",
+          "target": "exchange_rate",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "int_rate",
+          "target": "interest_rate",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "princ_amt",
+          "target": "principal_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "fee_amt",
+          "target": "fee_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "gl_cd",
+          "target": "gl_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "cost_ctr",
+          "target": "cost_center",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "debit_amt",
+          "target": "debit_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "credit_amt",
+          "target": "credit_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "posting_dt",
+          "target": "posting_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "finance"
+        },
+        {
+          "source": "value_dt",
+          "target": "value_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "finance"
+        },
+        {
+          "source": "settlement_dt",
+          "target": "settlement_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "finance"
+        },
+        {
+          "source": "iban",
+          "target": "iban",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "bic",
+          "target": "bic_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "routing_no",
+          "target": "routing_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "card_no",
+          "target": "card_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "cvv",
+          "target": "cvv",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "merchant_id",
+          "target": "merchant_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "auth_cd",
+          "target": "auth_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "ledger_bal",
+          "target": "ledger_balance",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "avail_bal",
+          "target": "available_balance",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "overdraft_lim",
+          "target": "overdraft_limit",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "stmt_dt",
+          "target": "statement_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "finance"
+        },
+        {
+          "source": "recon_flg",
+          "target": "reconciled_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "finance"
+        },
+        {
+          "source": "batch_id",
+          "target": "batch_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "journal_id",
+          "target": "journal_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "finance"
+        },
+        {
+          "source": "fiscal_yr",
+          "target": "fiscal_year",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "finance"
+        },
+        {
+          "source": "fiscal_qtr",
+          "target": "fiscal_quarter",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "finance"
+        },
+        {
+          "source": "risk_score",
+          "target": "risk_score",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "finance"
+        },
+        {
+          "source": "aml_flg",
+          "target": "aml_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "finance"
+        }
+      ]
+    },
+    {
+      "name": "healthcare",
+      "cases": [
+        {
+          "source": "pat_id",
+          "target": "patient_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "mrn",
+          "target": "medical_record_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "pat_dob",
+          "target": "date_of_birth",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "healthcare"
+        },
+        {
+          "source": "gender_cd",
+          "target": "gender",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "diag_cd",
+          "target": "diagnosis_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "proc_cd",
+          "target": "procedure_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "enc_id",
+          "target": "encounter_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "admit_dt",
+          "target": "admission_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "healthcare"
+        },
+        {
+          "source": "disch_dt",
+          "target": "discharge_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "healthcare"
+        },
+        {
+          "source": "prov_id",
+          "target": "provider_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "npi",
+          "target": "npi_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "ins_id",
+          "target": "insurance_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "policy_no",
+          "target": "policy_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "claim_id",
+          "target": "claim_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "claim_amt",
+          "target": "claim_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "healthcare"
+        },
+        {
+          "source": "allowed_amt",
+          "target": "allowed_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "healthcare"
+        },
+        {
+          "source": "paid_amt",
+          "target": "paid_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "healthcare"
+        },
+        {
+          "source": "copay_amt",
+          "target": "copay_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "healthcare"
+        },
+        {
+          "source": "deduct_amt",
+          "target": "deductible_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "healthcare"
+        },
+        {
+          "source": "icd10",
+          "target": "icd10_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "cpt_cd",
+          "target": "cpt_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "loinc",
+          "target": "loinc_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "lab_result",
+          "target": "lab_result_value",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "lab_unit",
+          "target": "lab_result_unit",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "vitals_hr",
+          "target": "heart_rate",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "healthcare"
+        },
+        {
+          "source": "vitals_bp_sys",
+          "target": "bp_systolic",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "healthcare"
+        },
+        {
+          "source": "vitals_bp_dia",
+          "target": "bp_diastolic",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "healthcare"
+        },
+        {
+          "source": "allergy_cd",
+          "target": "allergy_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "med_name",
+          "target": "medication_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "dosage",
+          "target": "dosage",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "rx_norm",
+          "target": "rxnorm_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "facility_id",
+          "target": "facility_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "ward_cd",
+          "target": "ward_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "bed_no",
+          "target": "bed_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "consent_flg",
+          "target": "consent_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "healthcare"
+        },
+        {
+          "source": "hipaa_flg",
+          "target": "hipaa_authorized",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "healthcare"
+        },
+        {
+          "source": "pcp_id",
+          "target": "primary_care_provider_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "emerg_contact",
+          "target": "emergency_contact_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        },
+        {
+          "source": "emerg_phone",
+          "target": "emergency_contact_phone",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "healthcare"
+        }
+      ]
+    },
+    {
+      "name": "hr",
+      "cases": [
+        {
+          "source": "emp_id",
+          "target": "employee_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "emp_no",
+          "target": "employee_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "fname",
+          "target": "first_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "lname",
+          "target": "last_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "hire_dt",
+          "target": "hire_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "hr"
+        },
+        {
+          "source": "term_dt",
+          "target": "termination_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "hr"
+        },
+        {
+          "source": "dept_cd",
+          "target": "department_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "dept_nm",
+          "target": "department_name",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "job_title",
+          "target": "job_title",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "mgr_id",
+          "target": "manager_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "salary_amt",
+          "target": "salary_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "bonus_amt",
+          "target": "bonus_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "comm_amt",
+          "target": "commission_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "pay_grade",
+          "target": "pay_grade",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "work_email",
+          "target": "work_email",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "work_phone",
+          "target": "work_phone",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "loc_cd",
+          "target": "location_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "fte",
+          "target": "fte_ratio",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "emp_status",
+          "target": "employment_status",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "emp_type",
+          "target": "employment_type",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "ssn",
+          "target": "ssn",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "tax_id",
+          "target": "tax_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "bank_acct",
+          "target": "bank_account_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "direct_dep_flg",
+          "target": "direct_deposit_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "hr"
+        },
+        {
+          "source": "pto_bal",
+          "target": "pto_balance",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "sick_bal",
+          "target": "sick_balance",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "perf_score",
+          "target": "performance_score",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "last_review_dt",
+          "target": "last_review_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "hr"
+        },
+        {
+          "source": "cost_ctr",
+          "target": "cost_center",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "badge_no",
+          "target": "badge_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "shift_cd",
+          "target": "shift_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "hr"
+        },
+        {
+          "source": "union_flg",
+          "target": "union_member_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "hr"
+        },
+        {
+          "source": "remote_flg",
+          "target": "remote_worker_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "hr"
+        },
+        {
+          "source": "start_tm",
+          "target": "shift_start_time",
+          "source_type": "TIME",
+          "target_type": "TIME",
+          "domain": "hr"
+        },
+        {
+          "source": "end_tm",
+          "target": "shift_end_time",
+          "source_type": "TIME",
+          "target_type": "TIME",
+          "domain": "hr"
+        },
+        {
+          "source": "overtime_hrs",
+          "target": "overtime_hours",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "regular_hrs",
+          "target": "regular_hours",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "hr"
+        },
+        {
+          "source": "pay_period_end",
+          "target": "pay_period_end_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "hr"
+        },
+        {
+          "source": "benefits_elig",
+          "target": "benefits_eligible",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "hr"
+        },
+        {
+          "source": "rehire_flg",
+          "target": "rehire_eligible_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "hr"
+        }
+      ]
+    },
+    {
+      "name": "logistics",
+      "cases": [
+        {
+          "source": "ship_id",
+          "target": "shipment_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "tracking_no",
+          "target": "tracking_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "carrier_cd",
+          "target": "carrier_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "origin_zip",
+          "target": "origin_postal_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "dest_zip",
+          "target": "destination_postal_code",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "ship_dt",
+          "target": "ship_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "logistics"
+        },
+        {
+          "source": "del_dt",
+          "target": "delivery_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "logistics"
+        },
+        {
+          "source": "eta_dt",
+          "target": "estimated_arrival_date",
+          "source_type": "DATE",
+          "target_type": "DATE",
+          "domain": "logistics"
+        },
+        {
+          "source": "weight_lb",
+          "target": "weight_lb",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "weight_kg",
+          "target": "weight_kg",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "dim_l",
+          "target": "dimension_length",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "dim_w",
+          "target": "dimension_width",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "dim_h",
+          "target": "dimension_height",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "pkg_cnt",
+          "target": "package_count",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "logistics"
+        },
+        {
+          "source": "freight_amt",
+          "target": "freight_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "fuel_surcharge",
+          "target": "fuel_surcharge_amount",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "warehouse_id",
+          "target": "warehouse_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "bin_loc",
+          "target": "bin_location",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "sku",
+          "target": "product_sku",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "lot_no",
+          "target": "lot_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "serial_no",
+          "target": "serial_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "qty_shipped",
+          "target": "quantity_shipped",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "logistics"
+        },
+        {
+          "source": "qty_ordered",
+          "target": "quantity_ordered",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "logistics"
+        },
+        {
+          "source": "qty_received",
+          "target": "quantity_received",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "logistics"
+        },
+        {
+          "source": "bol_no",
+          "target": "bill_of_lading_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "po_no",
+          "target": "purchase_order_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "asn_id",
+          "target": "asn_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "dock_door",
+          "target": "dock_door",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "trailer_no",
+          "target": "trailer_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "seal_no",
+          "target": "seal_number",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "hazmat_flg",
+          "target": "hazmat_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "logistics"
+        },
+        {
+          "source": "temp_min",
+          "target": "temperature_min",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "temp_max",
+          "target": "temperature_max",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "route_id",
+          "target": "route_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "stop_seq",
+          "target": "stop_sequence",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "logistics"
+        },
+        {
+          "source": "driver_id",
+          "target": "driver_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "vehicle_id",
+          "target": "vehicle_id",
+          "source_type": "VARCHAR",
+          "target_type": "VARCHAR",
+          "domain": "logistics"
+        },
+        {
+          "source": "miles",
+          "target": "distance_miles",
+          "source_type": "DECIMAL",
+          "target_type": "DECIMAL",
+          "domain": "logistics"
+        },
+        {
+          "source": "delay_mins",
+          "target": "delay_minutes",
+          "source_type": "INTEGER",
+          "target_type": "INTEGER",
+          "domain": "logistics"
+        },
+        {
+          "source": "proof_del_flg",
+          "target": "proof_of_delivery_flag",
+          "source_type": "BOOLEAN",
+          "target_type": "BOOLEAN",
+          "domain": "logistics"
+        }
+      ]
+    }
+  ],
+  "total_cases": 200
+}

@@ -25,7 +25,7 @@ import { PilotPage } from "./pages/PilotPage";
 import { TransferPage } from "./pages/TransferPage";
 import { ConnectorsPage } from "./pages/ConnectorsPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
-import { JobsPage } from "./pages/JobsPage";
+import { JobsPage, type JobsStudioIntent } from "./pages/JobsPage";
 import { ContractsPage } from "./pages/ContractsPage";
 import { McpPage } from "./pages/McpPage";
 import { QueryPage } from "./pages/QueryPage";
@@ -34,7 +34,7 @@ import { DocsPage } from "./pages/DocsPage";
 import { BenchmarksPage } from "./pages/BenchmarksPage";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
-import { readAppHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, readAppHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -103,6 +103,10 @@ function AppShell({
   const [firstScreenPaint, setFirstScreenPaint] = useState(true);
   /** Bump to remount Transfer Studio and clear prior job/source/map cache. */
   const [transferStudioKey, setTransferStudioKey] = useState(0);
+  /** Seed Transfer Studio source from Connectors drawer (id + token so re-clicks re-apply). */
+  const [transferSeedSource, setTransferSeedSource] = useState<{ connectorId: string; token: number } | null>(null);
+  /** Jobs → Studio deep-link (Validate / repair proposal / seeded mappings). */
+  const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
@@ -121,14 +125,24 @@ function AppShell({
   }, []);
 
   const openFreshTransfer = useCallback(() => {
+    setTransferSeedSource(null);
+    setTransferStudioIntent(null);
     setTransferStudioKey((k) => k + 1);
     setScreen("transfer");
   }, [setScreen]);
 
   useEffect(() => {
     const onHash = () => {
-      const fromHash = readAppHash();
-      if (fromHash) setScreen(fromHash);
+      const focus = focusFromHash(window.location.hash);
+      if (!focus) return;
+      setScreen(focus.screen);
+      if (focus.jobId || focus.panel) {
+        setSearchFocus({
+          screen: focus.screen,
+          jobId: focus.jobId,
+          panel: focus.panel,
+        });
+      }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -208,9 +222,22 @@ function AppShell({
       setJobs(await fetchJobs());
       noteApiSuccess();
       setApiOnline(true);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      const timedOut = /timed out|abort/i.test(msg);
       if (notifyOnError) {
-        toast({ title: "Could not load jobs", message: "Job history may be unavailable.", tone: "warning" });
+        const up = await probeApiHealth();
+        if (up || timedOut) {
+          toast({
+            title: timedOut ? "Jobs list took longer than usual" : "Could not refresh jobs",
+            message: up
+              ? "API is healthy — retrying in the background. Open a job for full detail."
+              : "Job history may be temporarily unavailable.",
+            tone: "warning",
+          });
+        } else if (shouldMarkApiOffline(false)) {
+          setApiOnline(false);
+        }
       }
     }
   }, [toast]);
@@ -254,17 +281,21 @@ function AppShell({
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // Soft poll — avoid hammering the API during Transfer Studio introspect/map.
   useEffect(() => {
     const poll = window.setInterval(() => {
+      if (document.hidden) return;
+      if (screen === "transfer" || screen === "pilot") return;
       void loadConnectors(false);
-    }, 30000);
+    }, 60_000);
     return () => window.clearInterval(poll);
-  }, [loadConnectors]);
+  }, [loadConnectors, screen]);
 
   // Dedicated health pulse — recovers the banner when Railway is green again,
   // and only flips offline after repeated health failures (not one slow request).
   useEffect(() => {
     const pulse = window.setInterval(async () => {
+      if (document.hidden) return;
       const up = await probeApiHealth();
       if (up) {
         noteApiSuccess();
@@ -272,7 +303,7 @@ function AppShell({
       } else if (shouldMarkApiOffline(false)) {
         setApiOnline(false);
       }
-    }, 20000);
+    }, 30_000);
     return () => window.clearInterval(pulse);
   }, []);
 
@@ -582,6 +613,10 @@ function AppShell({
                     schedules={schedules}
                     onOpenConnectors={() => setScreen("connectors")}
                     onOpenJobs={() => setScreen("jobs")}
+                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
+                    onOpenPipeline={(scheduleId) =>
+                      navigateFromSearch({ screen: "schedules", scheduleId })
+                    }
                   />
                 </PageErrorBoundary>
                 </div>
@@ -600,6 +635,8 @@ function AppShell({
                     key={transferStudioKey}
                     connectors={connectors}
                     connectorsLoading={!connectorsReady}
+                    seedSourceConnector={transferSeedSource}
+                    seedStudioIntent={transferStudioIntent}
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
                     onFreshTransfer={openFreshTransfer}
@@ -631,7 +668,13 @@ function AppShell({
                     onEdit={openEditModal}
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
-                    onOpenTransfer={() => setScreen("transfer")}
+                    connectorEditorOpen={showModal && Boolean(editingConnector)}
+                    onOpenTransfer={(connectorId) => {
+                      if (connectorId) {
+                        setTransferSeedSource({ connectorId, token: Date.now() });
+                      }
+                      setScreen("transfer");
+                    }}
                     onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
                     showConnectionsTab={connectorsViewToken}
                     highlightConnectorId={
@@ -662,8 +705,16 @@ function AppShell({
                   <JobsPage
                     jobs={jobs}
                     onRefresh={loadJobs}
-                    onStartTransfer={() => setScreen("transfer")}
+                    onStartTransfer={(intent) => {
+                      if (intent && (intent.step || intent.repairProposalId || intent.jobId || intent.mappings?.length)) {
+                        setTransferStudioIntent({ ...intent, token: Date.now() });
+                      } else {
+                        setTransferStudioIntent(null);
+                      }
+                      setScreen("transfer");
+                    }}
                     initialJobId={searchFocus?.screen === "jobs" ? searchFocus.jobId : undefined}
+                    initialPanel={searchFocus?.screen === "jobs" ? searchFocus.panel : undefined}
                   />
                 </PageErrorBoundary>
                 </div>

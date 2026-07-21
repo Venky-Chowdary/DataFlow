@@ -102,7 +102,7 @@ After deep analysis of existing data integration products, **YES — this produc
 ### Gap 1: AI-Powered Semantic Intelligence
 **Problem:** Every product requires manual column mapping. Users spend hours mapping "cust_name" to "customer_name" to "full_name".
 
-**Our Solution:** LLM-powered semantic engine that understands data meaning, not just names. 99%+ automatic mapping accuracy.
+**Our Solution:** Semantic mapping engine (pattern + type + synonym matching) with operator-visible confidence and fidelity risks — no invented 99% claims without an eval harness.
 
 ### Gap 2: True Universal Data Support
 **Problem:** Products either support databases OR files OR APIs. None support ALL including Word, PDF, Excel with intelligent extraction.
@@ -143,7 +143,7 @@ After deep analysis of existing data integration products, **YES — this produc
 
 | Feature | Airbyte | Fivetran | Informatica | **DataTransfer.space** |
 |---------|---------|----------|-------------|------------------------|
-| AI Semantic Mapping | ❌ | ❌ | ❌ | ✅ 99% accuracy |
+| AI Semantic Mapping | ❌ | ❌ | ❌ | ✅ Proof-backed confidence |
 | Universal File Support | ❌ | ❌ | Partial | ✅ All formats |
 | Zero-Code Interface | ❌ | Partial | ❌ | ✅ Natural language |
 | Real-time Quality | ❌ | ❌ | ❌ | ✅ Pre-flight checks |

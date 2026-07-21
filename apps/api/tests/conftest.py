@@ -32,6 +32,20 @@ os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cdc_leases(monkeypatch):
+    """Isolate CDC leases per test (memory backend — no shared file/Redis bleed).
+
+    Connectors acquire leases on poll/snapshot; unit tests rarely call close().
+    Force an in-process store so leftovers never poison the suite, developer
+    ``cdc_leases.json``, or a shared Redis DB.
+    """
+    monkeypatch.setenv("DATAFLOW_CDC_LEASE_BACKEND", "memory")
+    from services.cdc_lease import configure_store
+
+    configure_store(backend="memory")
+
+
 def _is_mongo_reachable() -> bool:
     try:
         socket.create_connection(("localhost", 27017), timeout=1.0).close()

@@ -257,6 +257,8 @@ def _export_to_connector(
     from src.transfer.adapters import write_destination_database
     from src.transfer.models import EndpointConfig
 
+    from services.dialect_profiles import normalize_schema
+
     dest = EndpointConfig(
         kind="database",
         format=dest_connector.type,
@@ -264,7 +266,12 @@ def _export_to_connector(
         host=dest_connector.host,
         port=dest_connector.port,
         database=dest_connector.database,
-        schema=dest_connector.schema or "public",
+        schema=normalize_schema(
+            dest_connector.type,
+            dest_connector.schema,
+            username=dest_connector.username,
+        )
+        or "",
         table=body.destination or "query_export",
         collection=body.destination or "query_export",
         username=dest_connector.username,
@@ -282,11 +289,14 @@ def _export_to_connector(
     )
 
     mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
-    write_mode = body.sync_mode.lower()
+    # Map aliases before the allow-list so overwrite → replace (not insert).
+    write_mode = (body.sync_mode or "insert").strip().lower()
+    if write_mode in {"overwrite", "full_refresh_overwrite", "truncate", "full_overwrite"}:
+        write_mode = "replace"
+    elif write_mode in {"append", "full_refresh_append", "full_append"}:
+        write_mode = "insert"
     if write_mode not in ("insert", "upsert", "replace"):
         write_mode = "insert"
-    if write_mode == "overwrite":
-        write_mode = "replace"
 
     try:
         rows_written, ddl_log, dest_summary = write_destination_database(
@@ -311,10 +321,12 @@ def _export_to_connector(
 
 
 def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequest):
-    if connector.type == "mongodb":
+    ctype = (connector.type or "").lower().strip()
+    if ctype == "mongodb":
         return _run_mongodb_query(connector, body)
-    if connector.type == "snowflake":
+    if ctype == "snowflake":
         return _run_snowflake_query(connector, body)
+    # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
     return _run_sql_query(connector, body)
 
 

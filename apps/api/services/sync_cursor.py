@@ -28,6 +28,86 @@ INCREMENTAL_MODES = frozenset({
     "cdc",
 })
 
+OVERWRITE_SYNC_MODES = frozenset({
+    "full_refresh_overwrite",
+    "overwrite",
+    "replace",
+    "truncate",
+    "full_overwrite",
+})
+
+APPEND_SYNC_MODES = frozenset({
+    "full_refresh_append",
+    "append",
+    "incremental_append",
+    "insert",
+    "full_append",
+})
+
+_SYNC_MODE_ALIASES = {
+    "full_append": "full_refresh_append",
+    "fullappend": "full_refresh_append",
+    "append": "full_refresh_append",
+    "insert": "full_refresh_append",
+    "overwrite": "full_refresh_overwrite",
+    "full_overwrite": "full_refresh_overwrite",
+    "fulloverwrite": "full_refresh_overwrite",
+    "replace": "full_refresh_overwrite",
+    "truncate": "full_refresh_overwrite",
+    "trunc": "full_refresh_overwrite",
+}
+
+
+def normalize_sync_mode(mode: str | None, *, default: str = "full_refresh_append") -> str:
+    """Canonical sync mode string (UI + API aliases).
+
+    Default is **append** (non-destructive) so omitting sync_mode never silently
+    wipes a destination. Overwrite must be explicit.
+    """
+    raw = (mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not raw:
+        return default
+    if raw in _SYNC_MODE_ALIASES:
+        return _SYNC_MODE_ALIASES[raw]
+    return raw
+
+
+def is_overwrite_sync(mode: str | None) -> bool:
+    """True when destination objects must be dropped/replaced before load."""
+    normalized = normalize_sync_mode(mode, default="")
+    return normalized in OVERWRITE_SYNC_MODES or normalized == "full_refresh_overwrite"
+
+
+def is_append_sync(mode: str | None) -> bool:
+    normalized = normalize_sync_mode(mode, default="")
+    return normalized in APPEND_SYNC_MODES or normalized == "full_refresh_append"
+
+
+def resolve_effective_sync_mode(
+    request_mode: str | None,
+    contract_mode: str | None = None,
+) -> str:
+    """Prefer an explicit contract mode; otherwise the request mode.
+
+    Empty contract modes inherit the request so a defaulted contract cannot
+    silently upgrade append → overwrite.
+    """
+    contract = (contract_mode or "").strip()
+    if contract:
+        return normalize_sync_mode(contract, default=normalize_sync_mode(request_mode))
+    return normalize_sync_mode(request_mode)
+
+
+def should_drop_destination_for_sync(
+    *,
+    request_sync_mode: str | None,
+    contract_sync_mode: str | None = None,
+) -> bool:
+    """Gate destructive DROP/TRUNCATE on the effective sync mode only."""
+    return is_overwrite_sync(
+        resolve_effective_sync_mode(request_sync_mode, contract_sync_mode)
+    )
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -51,7 +131,9 @@ class SyncContract:
             primary_key = str(data.get("primary_key") or "").strip()
         return cls(
             name=str(data.get("name") or data.get("stream") or "stream"),
-            sync_mode=str(data.get("sync_mode") or "full_refresh_overwrite"),
+            # Empty inherits request sync_mode via resolve_effective_sync_mode —
+            # never hard-default to overwrite (that silently wiped append jobs).
+            sync_mode=str(data.get("sync_mode") or "").strip(),
             cursor_field=str(data.get("cursor_field") or data.get("cursor") or ""),
             primary_key=primary_key,
             schema_policy=str(data.get("schema_policy") or "manual_review"),
@@ -195,6 +277,37 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     _save(data)
 
 
+def clear_watermark(cursor_key: str) -> dict[str, Any]:
+    """Delete a CDC/sync watermark so the next run re-snapshots (when_needed/initial).
+
+    Returns ``{cleared: bool, cursor_key, prior_watermark}``.
+    """
+    key = (cursor_key or "").strip()
+    if not key:
+        return {"cleared": False, "cursor_key": "", "prior_watermark": None, "reason": "missing_cursor_key"}
+
+    prior: str | None = get_watermark(key)
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            coll.delete_one({"key": key})
+        except Exception:
+            _logger.exception("Mongo clear_watermark failed for %s; falling back to file", key)
+
+    data = _load()
+    entries = [e for e in data.get("cursors", []) if e.get("key") != key]
+    if len(entries) != len(data.get("cursors", [])):
+        data["cursors"] = entries
+        _save(data)
+
+    return {
+        "cleared": True,
+        "cursor_key": key,
+        "prior_watermark": prior,
+        "reason": "ok" if prior is not None else "not_found",
+    }
+
+
 def max_cursor_value(rows: list[list[str]], headers: list[str], cursor_column: str) -> str | None:
     """Find maximum cursor value using typed watermark comparator."""
     if not cursor_column or not rows:
@@ -236,7 +349,7 @@ def requires_incremental(sync_mode: str) -> bool:
 
 
 def requires_upsert(sync_mode: str) -> bool:
-    return (sync_mode or "").lower() in {
+    return normalize_sync_mode(sync_mode, default="") in {
         "upsert",
         "incremental_deduped",
         "cdc",

@@ -52,6 +52,36 @@ def test_classify_connection_refused_as_retriable():
     assert classification["retriable"] is True
 
 
+def test_classify_mysql_table_full_as_non_retriable():
+    classification = classify_error(RuntimeError('(1114, "The table \'jobs\' is full")'))
+    assert classification["retriable"] is False
+    assert any("1114" in e or "table is full" in e for e in classification["evidence"])
+
+
+def test_humanize_mysql_table_full_guides_operator():
+    from services.error_handling import humanize_transfer_failure
+
+    human = humanize_transfer_failure(RuntimeError('(1114, "The table \'jobs\' is full")'))
+    assert human["code"] == "destination_table_full"
+    assert human["retriable"] is False
+    assert human["confidence"] == "high"
+    assert "1114" in human["title"] or "full" in human["title"].lower()
+    assert "Resume" in human["fix"]
+    # Must not pretend a single guaranteed fix
+    assert "Common verified causes" in human["fix"] or "likely" in human["fix"].lower() or "Common" in human["fix"]
+    assert "1114" in human["raw"] or "full" in human["raw"].lower()
+
+
+def test_humanize_unknown_error_does_not_invent_root_cause():
+    from services.error_handling import humanize_transfer_failure
+
+    human = humanize_transfer_failure(RuntimeError("weird proprietary widget glitch 42"))
+    assert human["code"] == "transfer_failed"
+    assert human["confidence"] == "low"
+    assert "No mapped remediation" in human["fix"]
+    assert human["message"] == "weird proprietary widget glitch 42"
+
+
 def test_retry_budget_env_overrides(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATAFLOW_RETRY_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("DATAFLOW_RETRY_BASE_DELAY_SECONDS", "0.25")

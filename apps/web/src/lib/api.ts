@@ -6,28 +6,34 @@ const LONG_REQUEST_TIMEOUT_MS = 120000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
 let _healthFailStreak = 0;
-const HEALTH_OFFLINE_THRESHOLD = 2;
+const HEALTH_OFFLINE_THRESHOLD = 5;
+let _lastApiOkAt = 0;
 
 export function noteApiSuccess(): void {
   _healthFailStreak = 0;
+  _lastApiOkAt = Date.now();
 }
 
 export async function probeApiHealth(): Promise<boolean> {
   const origin = API_BASE.replace(/\/api\/v1\/?$/i, "") || "";
+  // Prefer nginx → API /health (no auth). Never lead with /api/v1/health — it was
+  // auth-gated and returned 401, which burned the fail streak during demos.
   const candidates = [
-    origin ? `${origin}/health` : "/health",
-    `${API_BASE.replace(/\/$/, "")}/health`,
+    origin ? `${origin}/health-api` : "/health-api",
     origin ? `${origin}/api/v1/health` : "/api/v1/health",
-  ].filter((v, i, a) => a.indexOf(v) === i);
+    `${API_BASE.replace(/\/$/, "")}/health`,
+    origin && /^https?:\/\//i.test(origin) ? `${origin}/health` : "",
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
 
   for (const url of candidates) {
     try {
       const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 5000);
+      const timer = window.setTimeout(() => controller.abort(), 4000);
       try {
         const res = await fetch(url, { method: "GET", cache: "no-store", signal: controller.signal });
+        // 401 on a misconfigured health path is not an outage — try next URL.
         if (res.ok) {
-          _healthFailStreak = 0;
+          noteApiSuccess();
           return true;
         }
       } finally {
@@ -37,6 +43,11 @@ export async function probeApiHealth(): Promise<boolean> {
       // try next candidate
     }
   }
+  // If any API call succeeded recently, the control plane is busy (introspect/map),
+  // not down — do not increment the offline streak.
+  if (Date.now() - _lastApiOkAt < 60_000) {
+    return true;
+  }
   _healthFailStreak += 1;
   return false;
 }
@@ -45,6 +56,9 @@ export async function probeApiHealth(): Promise<boolean> {
 export function shouldMarkApiOffline(healthOk: boolean): boolean {
   if (healthOk) {
     _healthFailStreak = 0;
+    return false;
+  }
+  if (Date.now() - _lastApiOkAt < 60_000) {
     return false;
   }
   return _healthFailStreak >= HEALTH_OFFLINE_THRESHOLD;
@@ -106,6 +120,8 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
     if (res.status === 401) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
+    } else if (res.ok) {
+      noteApiSuccess();
     }
     return res;
   } catch (error) {
@@ -116,11 +132,15 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   }
 }
 
-async function requestJson<T>(urls: string[], fallbackMessage: string): Promise<T> {
+async function requestJson<T>(
+  urls: string[],
+  fallbackMessage: string,
+  options?: { timeoutMs?: number },
+): Promise<T> {
   let lastError: unknown;
   for (const url of urls) {
     try {
-      const res = await apiFetch(url);
+      const res = await apiFetch(url, { timeoutMs: options?.timeoutMs });
       if (!res.ok) throw new Error(`Request failed with ${res.status}`);
       return (await res.json()) as T;
     } catch (error) {
@@ -164,6 +184,82 @@ export async function analyzeSchemaEnhanced(
   return res.json();
 }
 
+export interface VectorFieldRouting {
+  column: string;
+  action: "embed" | "metadata" | "exclude_pii" | "skip";
+  confidence: number;
+  reason: string;
+  semantic_role?: string;
+  is_pii?: boolean;
+}
+
+export interface VectorRoutingPlan {
+  fields: VectorFieldRouting[];
+  content_column: string | null;
+  embedding_column: string | null;
+  metadata_columns: string[];
+  exclude_pii_columns: string[];
+  skip_columns: string[];
+  summary?: {
+    embed?: string | null;
+    metadata_count?: number;
+    exclude_pii_count?: number;
+    skip_count?: number;
+  };
+}
+
+/** Recommend embed / metadata / exclude_pii / skip for vector destinations. */
+export async function fetchVectorRouting(payload: {
+  columns: string[];
+  samples?: Record<string, string[]>;
+  schema_types?: Record<string, string>;
+  analysis_columns?: Array<{ column_name: string; is_pii?: boolean; semantic_type?: string }>;
+}): Promise<VectorRoutingPlan> {
+  const res = await apiFetch(`${API_BASE}/ai/vector-routing`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Vector routing failed"));
+  return res.json();
+}
+
+export interface EmbeddingCacheStats {
+  path: string;
+  entries: number;
+  models: number;
+  approx_bytes: number;
+  session_hits: number;
+  session_misses: number;
+  session_writes: number;
+  durable_default: boolean;
+  hit_rate?: number | null;
+}
+
+/** Durable SQLite embedding cache status. */
+export async function fetchEmbeddingCacheStats(): Promise<EmbeddingCacheStats> {
+  const res = await apiFetch(`${API_BASE}/ai/embedding-cache`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Embedding cache status failed"));
+  return res.json();
+}
+
+/** Clear durable embedding cache (and process L1 by default). */
+export async function clearEmbeddingCache(options?: {
+  model?: string;
+  clearMemory?: boolean;
+}): Promise<{ deleted: number; model: string; memory_cleared: number }> {
+  const params = new URLSearchParams();
+  if (options?.model) params.set("model", options.model);
+  if (options?.clearMemory === false) params.set("clear_memory", "false");
+  const qs = params.toString();
+  const res = await apiFetch(`${API_BASE}/ai/embedding-cache${qs ? `?${qs}` : ""}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Clear embedding cache failed"));
+  return res.json();
+}
+
 export async function runPreflight(payload: {
   columns: string[];
   column_types: Record<string, string>;
@@ -175,9 +271,13 @@ export async function runPreflight(payload: {
     reason?: string;
     transform?: string;
     target_type?: string;
+    source_type?: string;
     requires_review?: boolean;
     score_gap?: number;
     user_override?: boolean;
+    create_new?: boolean;
+    assignment_strategy?: string;
+    semantic_role?: string;
   }[];
   connector_id?: string;
   source_connector_id?: string;
@@ -651,7 +751,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
 export async function fetchJobs(): Promise<TransferJob[]> {
   const data = await requestJson<{ jobs?: TransferJob[] }>(
     [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
-    "Failed to load jobs"
+    "Failed to load jobs",
+    { timeoutMs: 45_000 },
   );
   return data.jobs || [];
 }
@@ -662,6 +763,21 @@ export async function fetchJob(jobId: string): Promise<JobProgress> {
   return requestJson<JobProgress>(
     [`${API_BASE}/connectors/jobs/${jobId}`, `${API_BASE}/jobs/${jobId}`],
     "Job not found"
+  );
+}
+
+export async function fetchJobMappingProof(jobId: string): Promise<{
+  job_id: string;
+  status?: string;
+  plan_id?: string;
+  mapping_version?: number;
+  mapping_hash?: string;
+  mapping_proof: Record<string, unknown>;
+  honesty?: string;
+}> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/mapping-proof`],
+    "Mapping proof not found"
   );
 }
 
@@ -786,10 +902,19 @@ export function streamJobProgress(
       records_processed: Number(raw.records_processed ?? raw.rows_processed ?? 0),
       total_rows: Number(raw.total_rows ?? 0),
       progress_pct: Number(raw.progress_pct ?? 0),
+      progress_indeterminate: Boolean(raw.progress_indeterminate),
       phase: raw.phase ? String(raw.phase) : undefined,
       message: raw.message ? String(raw.message) : undefined,
       operation: raw.operation ? String(raw.operation) : undefined,
       error: raw.error ? String(raw.error) : undefined,
+      error_details: raw.error_details && typeof raw.error_details === "object"
+        ? raw.error_details as JobProgress["error_details"]
+        : undefined,
+      error_code: raw.error_code ? String(raw.error_code) : undefined,
+      error_title: raw.error_title ? String(raw.error_title) : undefined,
+      error_fix: raw.error_fix ? String(raw.error_fix) : undefined,
+      error_confidence: raw.error_confidence ? String(raw.error_confidence) : undefined,
+      failed_at_phase: raw.failed_at_phase ? String(raw.failed_at_phase) : undefined,
       chunk_current: raw.chunk_current != null ? Number(raw.chunk_current) : undefined,
       chunk_total: raw.chunk_total != null ? Number(raw.chunk_total) : undefined,
       chunk_size: raw.chunk_size != null
@@ -814,6 +939,33 @@ export function streamJobProgress(
       reconciliation: raw.reconciliation && typeof raw.reconciliation === "object"
         ? raw.reconciliation as JobProgress["reconciliation"]
         : undefined,
+      explanation: raw.explanation ? String(raw.explanation) : undefined,
+      mapping_proof: raw.mapping_proof && typeof raw.mapping_proof === "object"
+        ? raw.mapping_proof as JobProgress["mapping_proof"]
+        : undefined,
+      plan_id: raw.plan_id ? String(raw.plan_id) : undefined,
+      mapping_version: raw.mapping_version != null ? Number(raw.mapping_version) : undefined,
+      mapping_hash: raw.mapping_hash ? String(raw.mapping_hash) : undefined,
+      ddl_executed: Array.isArray(raw.ddl_executed)
+        ? raw.ddl_executed.map(String)
+        : Array.isArray(raw.ddl_log)
+          ? raw.ddl_log.map(String)
+          : undefined,
+      ddl_log: Array.isArray(raw.ddl_log)
+        ? raw.ddl_log.map(String)
+        : Array.isArray(raw.ddl_executed)
+          ? raw.ddl_executed.map(String)
+          : undefined,
+      event_log: Array.isArray(raw.event_log) ? raw.event_log.map(String) : undefined,
+      sync_mode: raw.sync_mode ? String(raw.sync_mode) : undefined,
+      schema_policy: raw.schema_policy ? String(raw.schema_policy) : undefined,
+      validation_mode: raw.validation_mode ? String(raw.validation_mode) : undefined,
+      triggered_by: raw.triggered_by
+        ? String(raw.triggered_by)
+        : raw.created_by
+          ? String(raw.created_by)
+          : undefined,
+      created_by: raw.created_by ? String(raw.created_by) : undefined,
       records_per_second: Number.isFinite(rpsFromRoot as number)
         ? rpsFromRoot
         : Number.isFinite(rpsFromDs as number)
@@ -823,6 +975,42 @@ export function streamJobProgress(
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
+      cdc_plugin: raw.cdc_plugin ? String(raw.cdc_plugin) : null,
+      cdc_slot_name: raw.cdc_slot_name ? String(raw.cdc_slot_name) : null,
+      cdc_delivery: raw.cdc_delivery ? String(raw.cdc_delivery) : null,
+      cdc_row_filter: raw.cdc_row_filter ? String(raw.cdc_row_filter) : null,
+      watermark: raw.watermark != null ? String(raw.watermark) : null,
+      cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
+      snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
+      cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
+      cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
+      cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),
+      cdc_lease_heartbeat_age_sec:
+        raw.cdc_lease_heartbeat_age_sec != null ? Number(raw.cdc_lease_heartbeat_age_sec) : null,
+      cdc_lease_backend: raw.cdc_lease_backend ? String(raw.cdc_lease_backend) : null,
+      cdc_lease_generation:
+        raw.cdc_lease_generation != null ? Number(raw.cdc_lease_generation) : null,
+      cdc_lease_cursor_key: raw.cdc_lease_cursor_key ? String(raw.cdc_lease_cursor_key) : null,
+      cdc_lease_conflict: raw.cdc_lease_conflict == null ? null : Boolean(raw.cdc_lease_conflict),
+      cdc_cursor_gap: raw.cdc_cursor_gap == null ? null : Boolean(raw.cdc_cursor_gap),
+      cdc_cursor_gap_code: raw.cdc_cursor_gap_code ? String(raw.cdc_cursor_gap_code) : null,
+      cdc_cursor_gap_dialect: raw.cdc_cursor_gap_dialect ? String(raw.cdc_cursor_gap_dialect) : null,
+      cdc_cursor_gap_resume: raw.cdc_cursor_gap_resume != null ? String(raw.cdc_cursor_gap_resume) : null,
+      cdc_cursor_gap_retained: raw.cdc_cursor_gap_retained != null ? String(raw.cdc_cursor_gap_retained) : null,
+      source_ha_role: raw.source_ha_role != null ? String(raw.source_ha_role) : null,
+      source_ha_topology: raw.source_ha_topology != null ? String(raw.source_ha_topology) : null,
+      source_ha_enabled: raw.source_ha_enabled == null ? null : Boolean(raw.source_ha_enabled),
+      source_ha_group: raw.source_ha_group != null ? String(raw.source_ha_group) : null,
+      source_ha_replica: raw.source_ha_replica != null ? String(raw.source_ha_replica) : null,
+      source_ha_message: raw.source_ha_message != null ? String(raw.source_ha_message) : null,
+      cdc_retention_status: raw.cdc_retention_status != null ? String(raw.cdc_retention_status) : null,
+      cdc_retention_resume: raw.cdc_retention_resume != null ? String(raw.cdc_retention_resume) : null,
+      cdc_retention_retained: raw.cdc_retention_retained != null ? String(raw.cdc_retention_retained) : null,
+      cdc_retention_message: raw.cdc_retention_message != null ? String(raw.cdc_retention_message) : null,
+      cdc_retention_dialect: raw.cdc_retention_dialect != null ? String(raw.cdc_retention_dialect) : null,
+      cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
+      trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
+      trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
       streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
@@ -1004,6 +1192,63 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
   return res.json();
 }
 
+export async function exportDataflowManifest(): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export dataflow.yaml"));
+  return res.blob();
+}
+
+export async function exportScheduleYaml(id: string): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/export?format=yaml`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export pipeline YAML"));
+  return res.blob();
+}
+
+export async function planGitopsManifest(payload: Record<string, unknown>): Promise<{
+  dry_run: boolean;
+  resource_count: number;
+  creates: number;
+  updates: number;
+  skips: number;
+  actions: Array<{ kind: string; action: string; id?: string | null; name?: string | null; reason?: string }>;
+}> {
+  const res = await apiFetch(`${API_BASE}/schedules/gitops/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "GitOps plan failed"));
+  return res.json();
+}
+
+export async function applyGitopsManifest(
+  payload: Record<string, unknown>,
+  dryRun = false,
+  opts?: { requireSignedContracts?: boolean },
+): Promise<{
+  dry_run: boolean;
+  resource_count: number;
+  applied?: number;
+  failed?: number;
+  creates?: number;
+  updates?: number;
+  require_signed_contracts?: boolean;
+  results?: Array<{ kind: string; action: string; ok?: boolean; id?: string; name?: string; error?: string }>;
+  actions?: Array<{ kind: string; action: string }>;
+}> {
+  const params = new URLSearchParams();
+  if (dryRun) params.set("dry_run", "true");
+  if (opts?.requireSignedContracts) params.set("require_signed_contracts", "true");
+  const q = params.toString() ? `?${params.toString()}` : "";
+  const res = await apiFetch(`${API_BASE}/schedules/gitops/apply${q}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "GitOps apply failed"));
+  return res.json();
+}
+
 export async function testConnection(payload: {
   type: string;
   host?: string;
@@ -1023,7 +1268,7 @@ export async function testConnection(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
-}): Promise<{ success: boolean; message: string }> {
+}): Promise<{ success: boolean; message: string; source_ha?: Record<string, unknown> }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1114,9 +1359,13 @@ export async function updateConnector(
   return res.json();
 }
 
-export async function uploadFile(file: File): Promise<ParsedUpload> {
+export async function uploadFile(
+  file: File,
+  options?: { enableOcr?: boolean },
+): Promise<ParsedUpload> {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("enable_ocr", options?.enableOcr === true ? "true" : "false");
   const res = await apiFetch(`${API_BASE}/connectors/upload`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   if (!res.ok) throw new Error(await parseApiError(res, "Upload failed"));
   return res.json();
@@ -1155,8 +1404,9 @@ export async function introspectTransferEndpoints(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-    // Destination probes should fail soft quickly — never block the wizard for 2+ minutes.
-    timeoutMs: options?.timeoutMs ?? 45_000,
+    // Destination schema can take 1–2 minutes on Snowflake cold start — allow it.
+    // Timeout is not "API down"; TransferPage shows schema loading, not offline banner.
+    timeoutMs: options?.timeoutMs ?? 180_000,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
   return res.json();
@@ -1203,6 +1453,21 @@ export async function fetchPlatformStatus(): Promise<{
 export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
   worst_lag_seconds: number | null;
   warn_threshold_seconds: number;
+  critical_threshold_seconds?: number;
+  heartbeat_stale_seconds?: number;
+  stale_count?: number;
+  critical_count?: number;
+  slo_status?: "ok" | "warn" | "critical" | "unknown" | string;
+  alerts?: Array<{
+    severity: string;
+    code: string;
+    title: string;
+    detail: string;
+    schedule_id?: string | null;
+    job_id?: string | null;
+    stream?: string | null;
+    lag_seconds?: number;
+  }>;
   pipelines: Array<{
     schedule_id: string;
     stream: string;
@@ -1210,7 +1475,9 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
     lag_seconds: number;
     polls_total: number;
     heartbeat_at?: number;
+    heartbeat_age_seconds?: number | null;
     stale: boolean;
+    severity?: string;
   }>;
   counters: Record<string, number>;
   gauges: Record<string, number>;
@@ -1228,6 +1495,119 @@ export async function fetchOpsDlq(limit = 50): Promise<{
 }> {
   const res = await apiFetch(`${API_BASE}/ops/dlq?limit=${limit}`);
   if (!res.ok) throw new Error("Failed to load quarantine DLQ");
+  return res.json();
+}
+
+export async function fetchCdcLease(cursorKey: string): Promise<{
+  found: boolean;
+  cursor_key: string;
+  backend?: string;
+  holder_job_id?: string | null;
+  lease?: {
+    holder_id?: string;
+    resource?: string;
+    generation?: number;
+    stale?: boolean;
+    age_sec?: number;
+    backend?: string;
+  };
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/ops/cdc-leases?cursor_key=${encodeURIComponent(cursorKey)}`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load CDC lease"));
+  return res.json();
+}
+
+export async function forceReleaseCdcLease(body: {
+  cursor_key: string;
+  expected_generation?: number | null;
+  reason?: string;
+}): Promise<{
+  released: boolean;
+  reason: string;
+  cursor_key: string;
+  prior?: Record<string, unknown>;
+  holder_job_id?: string | null;
+  backend?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/ops/cdc-leases/force-release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not force-release CDC lease"));
+  return res.json();
+}
+
+export async function fetchCdcCursor(cursorKey: string): Promise<{
+  cursor_key: string;
+  found: boolean;
+  watermark: string | null;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/ops/cdc-cursors?cursor_key=${encodeURIComponent(cursorKey)}`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load CDC cursor"));
+  return res.json();
+}
+
+export async function clearCdcCursor(body: {
+  cursor_key: string;
+  reason?: string;
+}): Promise<{
+  cleared: boolean;
+  cursor_key: string;
+  prior_watermark?: string | null;
+  reason?: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/ops/cdc-cursors/clear`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not clear CDC watermark"));
+  return res.json();
+}
+
+export interface CdcRetentionProbe {
+  ok: boolean;
+  cdc_retention_status: string;
+  cdc_retention_resume?: string | null;
+  cdc_retention_retained?: string | null;
+  cdc_retention_message?: string | null;
+  cdc_retention_dialect?: string | null;
+  retention?: {
+    status: string;
+    dialect: string;
+    resume?: string;
+    retained?: string;
+    cursor_key?: string;
+    message?: string;
+  };
+}
+
+/** Probe watermark vs live CDC retention (SQL Server min_lsn / Oracle oldest SCN). */
+export async function probeCdcRetention(body: {
+  type: string;
+  host?: string;
+  port?: number;
+  database?: string;
+  username?: string;
+  password?: string;
+  schema?: string;
+  connection_string?: string;
+  table?: string;
+  cursor_key?: string;
+  watermark?: string | null;
+  multi_subnet_failover?: boolean;
+}): Promise<CdcRetentionProbe> {
+  const res = await apiFetch(`${API_BASE}/ops/cdc-retention/probe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "CDC retention probe failed"));
   return res.json();
 }
 
@@ -1252,6 +1632,9 @@ export async function mapTransferColumns(payload: {
   file_format?: string;
   use_llm?: boolean;
   source_samples?: Record<string, string[]>;
+  destination_db_type?: string;
+  sync_mode?: string;
+  schema_policy?: string;
 }): Promise<{
   mappings: Array<{
     source: string;
@@ -1266,6 +1649,7 @@ export async function mapTransferColumns(payload: {
   confidence_threshold: number;
   llm?: { llm_used?: boolean; llm_provider?: string; strategy?: string };
   plan_summary?: Record<string, unknown>;
+  mapping_proof?: Record<string, unknown>;
   coercion_issues?: Array<Record<string, unknown>>;
 }> {
   const res = await apiFetch(`${API_BASE}/transfer/map`, {
@@ -1416,8 +1800,18 @@ export async function runUniversalTransfer(options: {
   schemaPolicy?: string;
   validationMode?: string;
   backfillNewFields?: boolean;
+  writeViaStaging?: boolean;
+  /** Opt-in Tesseract OCR for scanned/image-only PDF sources. */
+  enableOcr?: boolean;
+  /** Destination writer options (vector embed fields, allow_append_only, …). */
+  destExtra?: Record<string, unknown>;
+  /** Source options (multi_subnet_failover, enable_ocr already separate, …). */
+  sourceExtra?: Record<string, unknown>;
   streamContracts?: Record<string, unknown>[];
   planId?: string;
+  priorityColumn?: string;
+  priorityDirection?: "asc" | "desc";
+  limit?: number;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -1426,11 +1820,23 @@ export async function runUniversalTransfer(options: {
   formData.append("dest_kind", options.destKind || "database");
   formData.append("dest_format", options.destFormat || "mongodb");
   formData.append("dest_database", options.destDatabase || "test_db");
-  formData.append("dest_schema", options.destSchema || "public");
-  formData.append("sync_mode", options.syncMode || "full_refresh_overwrite");
+  // Empty schema is OK — API normalize_schema fills dialect default (never force Postgres public).
+  formData.append("dest_schema", options.destSchema || "");
+  formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
+  formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
+  formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
+  if (options.destExtra && Object.keys(options.destExtra).length) {
+    formData.append("dest_extra_json", JSON.stringify(options.destExtra));
+  }
+  if (options.sourceExtra && Object.keys(options.sourceExtra).length) {
+    formData.append("source_extra_json", JSON.stringify(options.sourceExtra));
+  }
+  if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
+  if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);
+  if (options.limit && options.limit > 0) formData.append("limit", String(options.limit));
   if (options.destTable) formData.append("dest_table", options.destTable);
   if (options.destCollection) formData.append("dest_collection", options.destCollection);
   formData.append("skip_preflight", options.skipPreflight === true ? "true" : "false");
@@ -1492,7 +1898,7 @@ export async function executeTransferJson(payload: {
       source: payload.source,
       destination: payload.destination,
       mappings: payload.mappings || [],
-      sync_mode: payload.syncMode || "full_refresh_overwrite",
+      sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
       skip_preflight: payload.skipPreflight === true,
@@ -1542,7 +1948,7 @@ export async function transferFile(
   formData.append("destination_collection", destinationCollection);
   formData.append("skip_preflight", options.skipPreflight === true ? "true" : "false");
   formData.append("dest_type", options.destType || "mongodb");
-  formData.append("sync_mode", options.syncMode || "full_refresh_overwrite");
+  formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
@@ -1901,7 +2307,19 @@ export interface QuarantineInfo {
     values?: Record<string, string>;
     chars?: string[];
     suggested_transform?: string;
+    _df_qid?: string;
   }[];
+  /** Destination-side DLQ table (`{table}_df_quarantine`) when written. */
+  dest_dlq?: {
+    table?: string | null;
+    rows_written?: number | null;
+    open_rows?: number | null;
+    ok?: boolean | null;
+    skipped?: boolean | null;
+    reason?: string | null;
+    error?: string | null;
+    supported?: boolean | null;
+  };
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -1942,10 +2360,23 @@ export async function downloadJobQuarantineCsv(
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
-    const lines = ["row,column,target,value,reason,policy"];
+    const lines = ["row,column,target,value,reason,policy,suggested_transform"];
+    const mark = (v: unknown) => {
+      let text = String(v ?? "");
+      text = text
+        .replace(/\u200B/g, "[U+200B]")
+        .replace(/\u200C/g, "[U+200C]")
+        .replace(/\u200D/g, "[U+200D]")
+        .replace(/\uFEFF/g, "[U+FEFF]")
+        .replace(/\u0000/g, "[U+0000]")
+        .replace(/\uFFFD/g, "[U+FFFD]");
+      return text;
+    };
     for (const r of rows) {
       lines.push(
-        [r.row, r.column, r.target, r.value, r.reason, r.policy].map(escape).join(","),
+        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform]
+          .map(escape)
+          .join(","),
       );
     }
     return `${lines.join("\n")}\n`;
@@ -1997,6 +2428,13 @@ export interface QuarantineReplayResult {
   rows_attempted: number;
   status: string;
   destination_summary?: Record<string, unknown>;
+  dest_dlq_promoted?: {
+    updated?: number;
+    table?: string;
+    promoted_at?: string;
+    error?: string;
+    skipped?: boolean;
+  };
 }
 
 export async function replayJobQuarantine(
@@ -2404,5 +2842,171 @@ export async function classifySchemaDrift(
     // Fallback: local classify via a thin mirror if endpoint missing
     throw new Error(await parseApiError(res, "Schema drift classify failed"));
   }
+  return res.json();
+}
+
+/** Agentic repair — durable propose → human decide → apply mappings. */
+export interface RepairProposal {
+  id: string;
+  job_id?: string;
+  source?: string;
+  status: string;
+  confidence?: string;
+  auto_applicable?: boolean;
+  summary?: string;
+  actions: Record<string, unknown>[];
+  diagnosis?: Record<string, unknown>;
+  created_at?: number;
+  decided_at?: number;
+  decided_by?: string;
+  apply_result?: {
+    applied?: boolean;
+    mappings?: RepairMapping[];
+    error?: string;
+  };
+}
+
+export interface RepairMapping {
+  source?: string;
+  destination?: string;
+  destination_type?: string;
+  target_type?: string;
+  transform?: string;
+  transforms?: { type?: string }[];
+  [key: string]: unknown;
+}
+
+export async function proposeRepairFromPreflight(body: {
+  preflight: Record<string, unknown>;
+  coercion_report?: Record<string, unknown>;
+  job_id?: string;
+}): Promise<RepairProposal> {
+  const res = await apiFetch(`${API_BASE}/repair/propose/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not propose repair"));
+  return res.json();
+}
+
+export async function proposeRepairFromQuarantine(body: {
+  rejected_details: Record<string, unknown>[];
+  job_id?: string;
+}): Promise<RepairProposal> {
+  const res = await apiFetch(`${API_BASE}/repair/propose/quarantine`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not propose quarantine repair"));
+  return res.json();
+}
+
+export async function listRepairProposals(opts?: {
+  job_id?: string;
+  status?: string;
+}): Promise<RepairProposal[]> {
+  const q = new URLSearchParams();
+  if (opts?.job_id) q.set("job_id", opts.job_id);
+  if (opts?.status) q.set("status", opts.status);
+  const suffix = q.toString() ? `?${q}` : "";
+  const res = await apiFetch(`${API_BASE}/repair/proposals${suffix}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not list repair proposals"));
+  const data = await res.json();
+  return Array.isArray(data.proposals) ? data.proposals : [];
+}
+
+export async function fetchRepairProposal(proposalId: string): Promise<RepairProposal> {
+  const res = await apiFetch(`${API_BASE}/repair/proposals/${encodeURIComponent(proposalId)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load repair proposal"));
+  return res.json();
+}
+
+export async function decideRepairProposal(
+  proposalId: string,
+  body: { approve: boolean; actor?: string; mappings?: RepairMapping[] },
+): Promise<RepairProposal> {
+  const res = await apiFetch(
+    `${API_BASE}/repair/proposals/${encodeURIComponent(proposalId)}/decide`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approve: body.approve,
+        actor: body.actor || "operator",
+        mappings: body.mappings || [],
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not decide repair proposal"));
+  return res.json();
+}
+
+/** Debezium-style CDC incremental snapshot (job-scoped). */
+export interface CdcSnapshotSignal {
+  id: string;
+  source_key: string;
+  table: string;
+  status: string;
+  primary_key?: string;
+  chunk_size?: number;
+  last_pk?: string;
+  rows_snapshotted?: number;
+  created_at?: number;
+  updated_at?: number;
+  error?: string;
+  resolved_source_key?: string;
+  context?: Record<string, unknown>;
+}
+
+export async function listJobCdcSnapshots(
+  jobId: string,
+  status = "",
+): Promise<{
+  job_id: string;
+  signals: CdcSnapshotSignal[];
+  context?: {
+    source_key?: string;
+    source_keys?: string[];
+    table?: string;
+    primary_key?: string;
+    driver?: string;
+    honesty?: string;
+  };
+}> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots${q}`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not list CDC snapshots"));
+  return res.json();
+}
+
+export async function requestJobCdcSnapshot(
+  jobId: string,
+  body?: { table?: string; primary_key?: string; chunk_size?: number },
+): Promise<CdcSnapshotSignal> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not request CDC snapshot"));
+  return res.json();
+}
+
+export async function cancelJobCdcSnapshot(
+  jobId: string,
+  signalId: string,
+): Promise<CdcSnapshotSignal> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots/${encodeURIComponent(signalId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not cancel CDC snapshot"));
   return res.json();
 }

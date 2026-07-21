@@ -29,6 +29,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sample_values_by_source_from_batch,
+    quote_sql_identifier,
     sanitize_identifier,
     snowflake_lsn_match_predicate,
     transform_error_policy,
@@ -310,7 +311,10 @@ def _batch_insert_rows(
             params.extend(converted)
             row_placeholders.append(f"({', '.join(['%s'] * len(target_cols))})")
         values_sql = ", ".join(row_placeholders)
-        sql = f'INSERT INTO "{table_name}" ({col_list}) SELECT {select_sql} FROM VALUES {values_sql}'
+        sql = (
+            f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "
+            f"SELECT {select_sql} FROM VALUES {values_sql}"
+        )
         cur.execute(sql, params)
         written += len(sub)
     return written
@@ -353,9 +357,12 @@ def _load_rows_into_table(
     if has_json:
         _batch_insert_rows(cur, table_name, target_cols, target_types, mapped_rows)
     else:
-        col_list = ", ".join(f'"{c}"' for c in target_cols)
+        col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
         value_placeholders = ", ".join(["%s"] * len(target_cols))
-        insert_sql = f'INSERT INTO "{table_name}" ({col_list}) VALUES ({value_placeholders})'
+        insert_sql = (
+            f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "
+            f"VALUES ({value_placeholders})"
+        )
         for offset in range(0, total, MAX_BIND_INSERT_ROWS):
             sub = mapped_rows[offset : offset + MAX_BIND_INSERT_ROWS]
             cur.executemany(insert_sql, sub)
@@ -377,37 +384,45 @@ def _merge_batch_via_temp(
     if not mapped_rows:
         return 0
     temp = f"_DF_UPSERT_{uuid.uuid4().hex[:12]}"
-    col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))
-    cur.execute(f'CREATE TEMPORARY TABLE "{temp}" ({col_defs})')
+    col_defs = ", ".join(
+        f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)
+    )
+    cur.execute(f"CREATE TEMPORARY TABLE {quote_sql_identifier(temp)} ({col_defs})")
     try:
         _load_rows_into_table(
             cur, temp, target_cols, target_types, mapped_rows,
             prefer_copy=prefer_copy, conn=conn,
         )
-        on_clause = " AND ".join(f't."{c}" = s."{c}"' for c in conflict)
-        col_list = ", ".join(f'"{c}"' for c in target_cols)
-        source_cols = ", ".join(f's."{c}"' for c in target_cols)
+        on_clause = " AND ".join(
+            f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}" for c in conflict
+        )
+        col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
+        source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
         update_cols = [c for c in target_cols if c not in conflict]
         lsn_guard = (
             f" AND {snowflake_lsn_match_predicate()}"
             if DF_LSN_COL in target_cols
             else ""
         )
+        tgt_q = quote_sql_identifier(table_name)
+        tmp_q = quote_sql_identifier(temp)
         if update_cols:
-            set_clause = ", ".join(f't."{c}" = s."{c}"' for c in update_cols)
+            set_clause = ", ".join(
+                f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}" for c in update_cols
+            )
             merge_sql = (
-                f'MERGE INTO "{table_name}" t '
-                f'USING "{temp}" s '
-                f'ON {on_clause} '
-                f'WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} '
-                f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})'
+                f"MERGE INTO {tgt_q} t "
+                f"USING {tmp_q} s "
+                f"ON {on_clause} "
+                f"WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} "
+                f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
             )
         else:
             merge_sql = (
-                f'MERGE INTO "{table_name}" t '
-                f'USING "{temp}" s '
-                f'ON {on_clause} '
-                f'WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})'
+                f"MERGE INTO {tgt_q} t "
+                f"USING {tmp_q} s "
+                f"ON {on_clause} "
+                f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
             )
         cur.execute(merge_sql)
         return len(mapped_rows)
@@ -500,6 +515,12 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del port, ssl, _kwargs
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+    )
     # When a shared connection is passed (stream reuse), default to not closing it.
     if close_connection is None:
         close_connection = connection is None
@@ -646,7 +667,8 @@ def write_mapped_rows(
             if not skip_session_setup:
                 if warehouse:
                     try:
-                        cur.execute(f'USE WAREHOUSE "{warehouse}"')
+                        wh_q = quote_sql_identifier(sanitize_identifier(warehouse, preserve_case=True))
+                        cur.execute(f"USE WAREHOUSE {wh_q}")
                     except Exception:
                         # fakesnow and some local mocks do not support USE WAREHOUSE.
                         logger.debug(
@@ -660,14 +682,20 @@ def write_mapped_rows(
                             "The SNOWFLAKE database is read-only system data. "
                             "Please specify a user database (for example, DATAFLOW) in the connector."
                         )
-                    cur.execute(f'CREATE DATABASE IF NOT EXISTS "{database}"')
-                    cur.execute(f'USE DATABASE "{database}"')
-                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
-                cur.execute(f'USE SCHEMA "{schema}"')
+                    db_q = quote_sql_identifier(sanitize_identifier(database, preserve_case=True))
+                    cur.execute(f"CREATE DATABASE IF NOT EXISTS {db_q}")
+                    cur.execute(f"USE DATABASE {db_q}")
+                sch_q = quote_sql_identifier(sanitize_identifier(schema, preserve_case=True))
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
+                cur.execute(f"USE SCHEMA {sch_q}")
 
             if create_table:
-                col_defs = ", ".join(f'"{c}" {t}' for c, t in zip(target_cols, target_types))
-                cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({col_defs})')
+                col_defs = ", ".join(
+                    f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)
+                )
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {quote_sql_identifier(table_name)} ({col_defs})"
+                )
 
             # Later stream chunks may need wider NUMBER than the first CREATE.
             _widen_existing_number_columns(cur, schema, table_name, target_cols, target_types)
@@ -676,12 +704,14 @@ def write_mapped_rows(
                 cur.execute(
                     """SELECT COLUMN_NAME FROM information_schema.columns
                        WHERE table_schema = %s AND table_name = %s""",
-                    (schema.upper(), table_name),
+                    (schema.upper(), table_name.upper()),
                 )
                 existing = {row[0].upper() for row in cur.fetchall()}
+                tbl_q = quote_sql_identifier(table_name)
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:
-                        cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
+                        col_q = quote_sql_identifier(col)
+                        cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
             total = len(mapped_rows)
             conflict = [c for c in (conflict_columns or []) if c in target_cols]

@@ -12,7 +12,7 @@
   <rect x="120" y="380" width="220" height="56" rx="12" fill="#0f766e"/>
   <text x="152" y="416" fill="#fff" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="600">Connect · Map · Transfer</text>
   <rect x="360" y="380" width="180" height="56" rx="12" fill="#1e293b" stroke="#334155"/>
-  <text x="392" y="416" fill="#cbd5e1" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="500">650+ connectors</text>
+  <text x="392" y="416" fill="#cbd5e1" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="500">Certified drivers + proof</text>
   <defs>
     <linearGradient id="g" x1="120" y1="120" x2="192" y2="192" gradientUnits="userSpaceOnUse">
       <stop stop-color="#134E4A"/>

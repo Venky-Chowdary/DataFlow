@@ -193,9 +193,9 @@ function TransferStudioMock() {
         <div className="lp-mkt-ui-pane">
           <h4>Semantic map</h4>
           {[
-            ["order_amt", "payment_amount", "96%"],
-            ["cust_email", "email", "99%"],
-            ["order_id", "order_key", "94%"],
+            ["order_amt", "payment_amount", "0.93"],
+            ["cust_email", "email", "0.91"],
+            ["order_id", "order_key", "0.88"],
           ].map(([s, d, c]) => (
             <div key={s} className="lp-mkt-ui-map-row">
               <code>{s}</code>

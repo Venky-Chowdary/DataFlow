@@ -29,7 +29,8 @@ RUN pip install -e "/app/packages/preflight[dev]" || pip install -e /app/package
 
 COPY apps/api /app/apps/api
 COPY scripts/start-api.sh /app/scripts/start-api.sh
-RUN chmod +x /app/scripts/start-api.sh
+COPY scripts/start-worker.sh /app/scripts/start-worker.sh
+RUN chmod +x /app/scripts/start-api.sh /app/scripts/start-worker.sh
 
 WORKDIR /app/apps/api
 

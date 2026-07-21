@@ -80,6 +80,7 @@ class SqlServerChangeTrackingCdc:
         batch_size: int = 500,
         resume_token: str | None = None,
         columns: list[str] | None = None,
+        cursor_key: str = "",
     ) -> None:
         self.cfg = cfg
         self.table = table
@@ -92,6 +93,31 @@ class SqlServerChangeTrackingCdc:
         self.phase = str(state.get("phase") or "initial")
         self.snapshot_offset = int(state.get("offset") or 0)
         self._last_event_at: datetime | None = None
+        database = str(cfg.get("database") or "master")
+        self.cursor_key = cursor_key or f"mssql-ct:{database}:{self.schema}.{self.table}"
+        from services.cdc_lease import CdcLeaseGuard, mssql_cdc_resource
+
+        self._lease = CdcLeaseGuard(
+            cursor_key=self.cursor_key,
+            resource=mssql_cdc_resource(database, self.schema, self.table, mode="ct"),
+            holder_id=str(cfg.get("lease_holder_id") or ""),
+            job_id=str(cfg.get("job_id") or ""),
+            meta={"engine": "sqlserver_ct", "table": self.table},
+        )
+
+    def _acquire_cdc_lease(self) -> None:
+        self._lease.ensure()
+
+    def close(self) -> None:
+        self._lease.release()
+
+    def cdc_metadata(self) -> dict[str, Any]:
+        return {
+            "plugin": "sqlserver_change_tracking",
+            "phase": self.phase,
+            "delivery": "at-least-once",
+            **self._lease.theater_fields(),
+        }
 
     def _conn(self):
         from connectors.generic_sql import get_connection
@@ -144,6 +170,7 @@ class SqlServerChangeTrackingCdc:
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump + CT version handoff (Airbyte initial sync)."""
+        self._acquire_cdc_lease()
         qualified = self._qualified()
         pk = self.primary_key
         offset = self.snapshot_offset if self.phase == "snapshot" else 0
@@ -194,6 +221,7 @@ class SqlServerChangeTrackingCdc:
         )
 
     def poll(self) -> Iterator[ChangeBatch]:
+        self._acquire_cdc_lease()
         # Resume incomplete snapshot before streaming.
         if self.phase == "snapshot" or (self.version <= 0 and self.phase != "streaming"):
             yield from self.snapshot()

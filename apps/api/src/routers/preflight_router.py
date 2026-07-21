@@ -26,9 +26,15 @@ class MappingItem(BaseModel):
     reason: str = ""
     transform: str | None = None
     target_type: str | None = None
+    source_type: str | None = None
     requires_review: bool = False
     score_gap: float = 1.0
     user_override: bool = False
+    # Must survive Validate → Execute; stripping these caused create_new maps to
+    # look like missing columns (or operators remapped onto incompatible DECIMAL id).
+    create_new: bool = False
+    assignment_strategy: str | None = None
+    semantic_role: str | None = None
 
 
 class PreflightRequest(BaseModel):
@@ -68,7 +74,9 @@ class PreflightRequest(BaseModel):
 
 
 def _schema_default(db_type: str) -> str:
-    return "PUBLIC" if db_type == "snowflake" else "public"
+    from services.dialect_profiles import default_schema_for
+
+    return default_schema_for(db_type) or ""
 
 
 def _default_port(db_type: str) -> int:
@@ -189,6 +197,8 @@ async def run_preflight(body: PreflightRequest):
         source_table="",
         destination_table=(body.dest_table or body.dest_collection or ""),
         source_filename="",
+        schema_policy=body.schema_policy,
+        backfill_new_fields=body.backfill_new_fields,
     )
     gated = apply_policy_gates(
         result,

@@ -44,6 +44,8 @@ function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMo
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
+  if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
+  if (resolved === "milvus") return conn?.api_key ? "api_key" : "user_pass";
   if (resolved === "adls" && conn?.connection_string) return "connection_string";
   if (resolved === "sftp" && conn?.connection_string) return "connection_string";
   if (resolved === "email" && conn?.connection_string) return "connection_string";
@@ -238,7 +240,11 @@ export function ConnectorModal({
 
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+    source_ha?: Record<string, unknown>;
+  } | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
 
   const validate = () => {
@@ -508,7 +514,7 @@ export function ConnectorModal({
   return (
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
-        className={`df2-modal ${step === "pick" ? "df2-modal-xl" : "df2-modal-lg"}`}
+        className="df2-modal df2-modal-full"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -626,6 +632,18 @@ export function ConnectorModal({
                   style={{ marginTop: 8 }}
                 >
                   {testResult.message}
+                </span>
+              )}
+              {testResult?.success && testResult.source_ha && (
+                <span
+                  className="df2-badge df2-badge-live"
+                  style={{ marginTop: 8, marginLeft: 8 }}
+                  title={String(testResult.source_ha.message || "")}
+                >
+                  HA: {String(testResult.source_ha.role || "—")}
+                  {testResult.source_ha.topology && testResult.source_ha.topology !== "none"
+                    ? ` · ${String(testResult.source_ha.topology)}`
+                    : ""}
                 </span>
               )}
             </>

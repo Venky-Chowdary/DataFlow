@@ -1,8 +1,18 @@
 """Universal logical type system and destination DDL mapping.
 
-The transfer layer uses these logical types as a pivot between files, SQL
-databases, warehouses, document stores, and exports. Unsupported or ambiguous
-types intentionally fall back to lossless text/JSON representations.
+ETL contract (Informatica / Airbyte / Fivetran class)
+----------------------------------------------------
+1. **Native → logical → native.** Source native types coerce into these logical
+   types; writers map logical → destination DDL. Never carry Postgres/Oracle
+   physical naming into another engine (see ``dialect_profiles.py``).
+2. **Fail-fast preflight, quarantine at write.** Incompatible coercions are
+   rejected or quarantined — never silently dropped.
+3. **High-precision numerics.** Industry rule (Informatica high-precision /
+   Databricks overflow guidance): values that exceed safe DECIMAL capacity are
+   kept as exact *text* (scientific or fixed), not cast through float64, and
+   must not abort an entire load when policy is quarantine.
+4. **Extend here** — add logical types / DDL maps / decimal budgets in this
+   module (or ``dialect_profiles``). Do not sprinkle one-off connector patches.
 """
 
 from __future__ import annotations
@@ -22,6 +32,19 @@ LOGICAL_UUID = "uuid"
 LOGICAL_JSON = "json"
 LOGICAL_ARRAY = "array"
 LOGICAL_BINARY = "binary"
+
+# ---------------------------------------------------------------------------
+# Decimal / integer wire budgets (shared by serializer + transform engine)
+# ---------------------------------------------------------------------------
+# Modest values use fixed-point text so scale is preserved (0.10 stays "0.10").
+# Beyond these budgets we keep short scientific form — same idea as Informatica
+# "store as string when precision exceeds platform DECIMAL" and Databricks
+# guidance for Oracle NUMBER overflow. Never expand 1e+1000000 into a
+# million-character string (that path raises decimal.Overflow mid-transfer).
+DECIMAL_MAX_FIXED_ABS_EXP: Final[int] = 100
+DECIMAL_MAX_FIXED_DIGITS: Final[int] = 512
+# ~NUMBER(38) class integer digit budget for typed INTEGER transforms.
+INTEGER_MAX_DIGITS: Final[int] = 38 * 2  # 76 ≈ allow slightly over common DDL
 
 LOSSLESS_TEXT_TYPES: Final[set[str]] = {
     LOGICAL_STRING,
@@ -114,13 +137,13 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "uint8": LOGICAL_INTEGER,
     "uint16": LOGICAL_INTEGER,
     "uint32": LOGICAL_INTEGER,
-    "uint64": LOGICAL_INTEGER,
+    "uint64": LOGICAL_DECIMAL,  # full unsigned 64-bit range — DECIMAL, not signed BIGINT
     "mediumint": LOGICAL_INTEGER,
     "mediumint unsigned": LOGICAL_INTEGER,
     "tinyint unsigned": LOGICAL_INTEGER,
     "smallint unsigned": LOGICAL_INTEGER,
     "int unsigned": LOGICAL_INTEGER,
-    "bigint unsigned": LOGICAL_INTEGER,
+    "bigint unsigned": LOGICAL_DECIMAL,  # MySQL BIGINT UNSIGNED → DECIMAL (fidelity)
     "smallserial": LOGICAL_INTEGER,
     "year": LOGICAL_INTEGER,
     "bit": LOGICAL_BOOLEAN,
@@ -205,6 +228,34 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_JSON: "JSON",
         LOGICAL_ARRAY: "JSON",
         LOGICAL_BINARY: "LONGBLOB",
+    },
+    "sqlserver": {
+        LOGICAL_STRING: "NVARCHAR(MAX)",
+        LOGICAL_TEXT: "NVARCHAR(MAX)",
+        LOGICAL_INTEGER: "BIGINT",
+        LOGICAL_DECIMAL: "DECIMAL(38,10)",
+        LOGICAL_BOOLEAN: "BIT",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "DATETIME2",
+        LOGICAL_TIME: "TIME",
+        LOGICAL_UUID: "UNIQUEIDENTIFIER",
+        LOGICAL_JSON: "NVARCHAR(MAX)",
+        LOGICAL_ARRAY: "NVARCHAR(MAX)",
+        LOGICAL_BINARY: "VARBINARY(MAX)",
+    },
+    "oracle": {
+        LOGICAL_STRING: "VARCHAR2(4000)",
+        LOGICAL_TEXT: "CLOB",
+        LOGICAL_INTEGER: "NUMBER(38,0)",
+        LOGICAL_DECIMAL: "NUMBER(38,10)",
+        LOGICAL_BOOLEAN: "NUMBER(1)",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "TIMESTAMP WITH TIME ZONE",
+        LOGICAL_TIME: "VARCHAR2(32)",
+        LOGICAL_UUID: "VARCHAR2(36)",
+        LOGICAL_JSON: "CLOB",
+        LOGICAL_ARRAY: "CLOB",
+        LOGICAL_BINARY: "BLOB",
     },
     "snowflake": {
         LOGICAL_STRING: "VARCHAR",
@@ -292,17 +343,51 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "JSON",
         LOGICAL_BINARY: "BLOB",
     },
+    # Databricks / Spark SQL lakehouse (Unity Catalog tables, Delta).
+    "databricks": {
+        LOGICAL_STRING: "STRING",
+        LOGICAL_TEXT: "STRING",
+        LOGICAL_INTEGER: "BIGINT",
+        LOGICAL_DECIMAL: "DECIMAL(38,10)",
+        LOGICAL_BOOLEAN: "BOOLEAN",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "TIMESTAMP",
+        LOGICAL_TIME: "STRING",
+        LOGICAL_UUID: "STRING",
+        LOGICAL_JSON: "STRING",
+        LOGICAL_ARRAY: "STRING",
+        LOGICAL_BINARY: "BINARY",
+    },
+    # Apache Iceberg table schema (writer/catalog native).
+    "iceberg": {
+        LOGICAL_STRING: "string",
+        LOGICAL_TEXT: "string",
+        LOGICAL_INTEGER: "long",
+        LOGICAL_DECIMAL: "decimal(38,10)",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "timestamptz",
+        LOGICAL_TIME: "time",
+        LOGICAL_UUID: "uuid",
+        LOGICAL_JSON: "string",
+        LOGICAL_ARRAY: "list",
+        LOGICAL_BINARY: "binary",
+    },
 }
 
 DEFAULT_DDL: Final[dict[str, str]] = {
     "postgresql": "TEXT",
     "mysql": "TEXT",
+    "sqlserver": "NVARCHAR(MAX)",
+    "oracle": "VARCHAR2(4000)",
     "snowflake": "VARCHAR",
     "bigquery": "STRING",
     "mongodb": "string",
     "redshift": "VARCHAR(65535)",
     "sqlite": "TEXT",
     "generic_sql": "TEXT",
+    "databricks": "STRING",
+    "iceberg": "string",
 }
 
 
@@ -325,12 +410,22 @@ def normalize_logical_type(inferred: str | None) -> str:
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
     key = key.replace("_", " ")
+    # Transfer fidelity: unsigned 64-bit integers must not land as signed BIGINT.
+    if "unsigned" in key and ("bigint" in key or key in {"uint64", "ubyte8"}):
+        return LOGICAL_DECIMAL
+    if key in {"uint64"}:
+        return LOGICAL_DECIMAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
 
 def ddl_type(db_type: str, inferred: str | None) -> str:
     """Map a logical source type to a destination-native DDL type."""
     db = (db_type or "").strip().lower()
+    # Alias lakehouse / Delta SKUs onto Databricks Spark SQL DDL.
+    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+        db = "databricks"
+    if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
+        db = "iceberg"
     logical = normalize_logical_type(inferred)
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
 
@@ -437,3 +532,17 @@ def default_mappings(columns: list[str]) -> list[dict]:
         {"source": c, "target": c, "confidence": 0.95, "reason": "Direct mapping"}
         for c in columns
     ]
+
+
+def decimal_needs_scientific_wire(*, digit_count: int, abs_exponent: int) -> bool:
+    """True when fixed-point expansion would violate DECIMAL wire budgets."""
+    return (
+        abs_exponent > DECIMAL_MAX_FIXED_ABS_EXP
+        or (digit_count + abs_exponent) > DECIMAL_MAX_FIXED_DIGITS
+    )
+
+
+def integer_within_wire_budget(*, digit_count: int, exponent: int) -> bool:
+    """True when a finite integral Decimal fits INTEGER transform budgets."""
+    magnitude_digits = digit_count + max(exponent, 0)
+    return magnitude_digits <= INTEGER_MAX_DIGITS

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import type { PreflightResult } from "../../lib/types";
@@ -10,6 +11,11 @@ interface ValidateActionsRailProps {
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
   savingContract?: boolean;
+  /** Extra execute block (e.g. non-CDC multi-stream). */
+  executeBlocked?: boolean;
+  executeBlockedReason?: string;
+  /** CDC retention Check control (SQL Server / Oracle). */
+  cdcRetentionSlot?: ReactNode;
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
@@ -26,6 +32,9 @@ export function ValidateActionsRail({
   rowCount,
   transferLaunch,
   savingContract,
+  executeBlocked = false,
+  executeBlockedReason,
+  cdcRetentionSlot,
   onBack,
   onRunPreflight,
   onApproveMappings,
@@ -38,6 +47,7 @@ export function ValidateActionsRail({
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
   const proofDecision = preflight?.proof_bundle?.transfer_decision?.decision || "approve";
   const proofReason = preflight?.proof_bundle?.transfer_decision?.reason || "No blocking issues detected";
+  const executeDisabled = transferring || !passed || executeBlocked;
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
   const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
@@ -63,6 +73,12 @@ export function ValidateActionsRail({
           </div>
         ) : null}
 
+        {cdcRetentionSlot ? (
+          <div className="df2-validate-rail-panel" aria-label="CDC retention">
+            {cdcRetentionSlot}
+          </div>
+        ) : null}
+
         {preflighting && (
           <div className="df2-validate-rail-panel df2-validate-status live">
             <div className="df2-validate-rail-score">
@@ -82,6 +98,11 @@ export function ValidateActionsRail({
             <p>
               <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
             </p>
+            {passed && (
+              <p className="df2-validate-rail-hint">
+                Review every gate card on the left — rules, duration, and blockers — then Execute.
+              </p>
+            )}
             {preflight.run_id && (
               <p className="df2-validate-rail-runid" title="Paste into Data Pilot to triage this validation">
                 Run <code>{preflight.run_id}</code>
@@ -193,18 +214,39 @@ export function ValidateActionsRail({
             onClick={onExecute}
             loading={transferring}
             loadingLabel="Starting…"
-            disabled={transferring || !passed}
+            disabled={executeDisabled}
             title={
-              !passed
-                ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
-                : undefined
+              executeBlocked
+                ? (executeBlockedReason || "Execution blocked")
+                : !passed
+                  ? `Blocked: ${firstBlockerMessage || "Resolve failed checks and re-run preflight"}${firstBlockerFix ? ` — Fix: ${firstBlockerFix}` : ""}`
+                  : undefined
             }
             leadingIcon={<DtIcon name="arrow-right" size={16} />}
           >
-            {passed
-              ? `Execute${rowCount != null ? ` · ${rowCount.toLocaleString()}` : ""}`
-              : "Execute (blocked)"}
+            {executeBlocked
+              ? "Execute (blocked)"
+              : passed
+                ? `Execute transfer${rowCount != null ? ` · ${rowCount.toLocaleString()} rows` : ""}`
+                : "Execute (blocked)"}
           </Button>
+        )}
+        {passed && !transferLaunch && !executeBlocked && (
+          <p className="df2-validate-rail-explain">
+            Execute starts the write. You stay on Validate until you choose to run.
+          </p>
+        )}
+        {!passed && preflight && !transferLaunch && (
+          <p className="df2-validate-rail-explain" role="alert">
+            Fix the blocked gate above on Validate, then Re-run. Execute stays disabled until
+            preflight passes — nothing is written yet.
+            {firstBlockerMessage ? ` Blocker: ${firstBlockerMessage}` : ""}
+          </p>
+        )}
+        {executeBlocked && executeBlockedReason && (
+          <p className="df2-validate-rail-explain" role="alert">
+            {executeBlockedReason}
+          </p>
         )}
 
         {preflight && onSaveAsContract && (

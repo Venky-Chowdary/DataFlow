@@ -176,6 +176,13 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "cloudera_data_platform": "impala",
     "sap_bw_4hana": "hana",
     "motherduck": "duckdb",
+    # First-class RDBMS — never fall back to bare dialect without a DBAPI.
+    "mysql": "mysql+pymysql",
+    "postgresql": "postgresql+psycopg2",
+    "postgres": "postgresql+psycopg2",
+    "redshift": "postgresql+psycopg2",
+    "amazon_redshift": "postgresql+psycopg2",
+    "snowflake": "snowflake",
 }
 
 _DEFAULT_PORT_MAP: dict[str, int] = {
@@ -252,6 +259,11 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
     "azure_database_for_mysql": 3306,
     "amazon_aurora": 3306,
     "mariadb": 3306,
+    "mysql": 3306,
+    "postgresql": 5432,
+    "postgres": 5432,
+    "redshift": 5439,
+    "amazon_redshift": 5439,
     "dremio": 32010,
     "dremio_flight": 32010,
     "firebolt": 443,
@@ -294,6 +306,38 @@ def _normalize_sqlite_url(url: str) -> str:
     return url
 
 
+def _normalize_sqlalchemy_url_string(url: str, db_type: str = "") -> str:
+    """Rewrite bare dialect schemes to installed DBAPI dialects.
+
+    Users and saved connectors often store ``mysql://…`` / ``postgresql://…``.
+    SQLAlchemy 2 requires an explicit DBAPI (``mysql+pymysql``, ``postgresql+psycopg2``).
+    Only the scheme prefix is rewritten — userinfo/password material is preserved.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    lower = raw.lower()
+
+    # Longest-first so postgresql+psycopg2 is not mistreated as postgresql://.
+    replacements: list[tuple[str, str]] = [
+        ("mysql+pymysql://", "mysql+pymysql://"),
+        ("mariadb+pymysql://", "mysql+pymysql://"),
+        ("mysql://", "mysql+pymysql://"),
+        ("mariadb://", "mysql+pymysql://"),
+        ("postgresql+psycopg2://", "postgresql+psycopg2://"),
+        ("postgresql://", "postgresql+psycopg2://"),
+        ("postgres://", "postgresql+psycopg2://"),
+        ("pgsql://", "postgresql+psycopg2://"),
+        ("redshift://", "postgresql+psycopg2://"),
+    ]
+    for src, dst in replacements:
+        if not lower.startswith(src):
+            continue
+        if src == dst:
+            return raw
+        return dst + raw[len(src):]
+    return raw
+
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
@@ -308,10 +352,16 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
             return f"duckdb:////{connection_string}" if connection_string.startswith("/") else f"duckdb:///{connection_string}"
         if db_type == "sqlite":
             return _normalize_sqlite_url(f"sqlite:///{connection_string}")
-        return connection_string
+        return _normalize_sqlalchemy_url_string(connection_string, db_type)
 
     if not db_type:
         raise ValueError("A database type or connection_string is required")
+
+    if not SQLALCHEMY_AVAILABLE:
+        raise RuntimeError(
+            "SQLAlchemy is not installed in this API environment. "
+            "Install sqlalchemy and the DBAPI for your engine (e.g. pymysql for MySQL)."
+        )
 
     # MotherDuck is DuckDB cloud: the database token/DB is addressed as md:<database>.
     if db_type == "motherduck":
@@ -348,6 +398,16 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     query = None
     if drivername.startswith("mssql+pyodbc"):
         query = {"driver": "ODBC Driver 17 for SQL Server"}
+        # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
+        multi = cfg.get("multi_subnet_failover")
+        if multi is None:
+            multi = cfg.get("MultiSubnetFailover")
+        if multi in (True, 1, "1", "true", "True", "yes", "Yes", "YES"):
+            query["MultiSubnetFailover"] = "Yes"
+        intent = str(cfg.get("application_intent") or cfg.get("ApplicationIntent") or "").strip()
+        if intent:
+            # ReadOnly routes to a readable secondary when the AG allows it.
+            query["ApplicationIntent"] = intent
 
     return sa.URL.create(
         drivername,
@@ -377,10 +437,36 @@ def _engine(cfg: dict[str, Any]) -> Any:
         # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
         # Convert it to a clear RuntimeError so callers can surface a 4xx/5xx
         # response instead of an unhandled ExceptionGroup crashing the worker.
-        raise RuntimeError(
-            f"SQLAlchemy dialect for '{db_type or url.drivername}' is not installed. "
-            f"Install the matching driver package (e.g. snowflake-sqlalchemy, databricks-sqlalchemy)."
-        ) from exc
+        driver = getattr(url, "drivername", None) or str(url).split("://", 1)[0]
+        dialect_key = str(db_type or str(driver).split("+", 1)[0]).lower()
+        driver_s = str(driver).lower()
+        hint_by_dialect = {
+            "mysql": "pymysql (scheme mysql+pymysql://)",
+            "mariadb": "pymysql (scheme mysql+pymysql://)",
+            "postgresql": "psycopg2-binary (scheme postgresql+psycopg2://)",
+            "postgres": "psycopg2-binary (scheme postgresql+psycopg2://)",
+            "redshift": "psycopg2-binary (scheme postgresql+psycopg2://)",
+            "snowflake": "snowflake-sqlalchemy",
+            "databricks": "databricks-sqlalchemy",
+        }
+        hint = hint_by_dialect.get(dialect_key)
+        if not hint:
+            if "mysql" in driver_s or "mariadb" in driver_s:
+                hint = "pymysql (scheme mysql+pymysql://)"
+            elif "postgres" in driver_s or "redshift" in driver_s:
+                hint = "psycopg2-binary (scheme postgresql+psycopg2://)"
+        detail = (
+            f"SQLAlchemy dialect/driver for '{db_type or driver}' is not available "
+            f"(tried '{driver}')."
+        )
+        if hint:
+            detail += f" Install/enable {hint}."
+        else:
+            detail += (
+                " Install the matching driver package "
+                "(e.g. pymysql, psycopg2-binary, snowflake-sqlalchemy, databricks-sqlalchemy)."
+            )
+        raise RuntimeError(detail) from exc
 
 
 def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
@@ -389,31 +475,57 @@ def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:
-    schema = cfg.get("schema") or ""
+    from services.dialect_profiles import normalize_schema
+
     db_type = (cfg.get("type") or "").lower()
     connection_string = (cfg.get("connection_string") or "").lower()
-    # MySQL, MariaDB, SQLite and DuckDB do not use schemas; database is in the URL.
-    if (
-        db_type == "mysql"
-        or db_type == "mariadb"
-        or connection_string.startswith("mysql")
-        or db_type == "sqlite"
-        or connection_string.startswith("sqlite://")
-        or db_type == "duckdb"
-        or connection_string.startswith("duckdb:")
-    ):
-        return None
-    if not schema:
-        if db_type == "presto":
-            return "public"
-        if db_type == "trino":
-            return "default"
-    return schema or None
+    # Infer dialect from URL when type is generic_sql / blank.
+    if not db_type or db_type == "generic_sql":
+        if connection_string.startswith("mysql") or "mariadb" in connection_string:
+            db_type = "mysql"
+        elif connection_string.startswith("postgresql") or connection_string.startswith("postgres"):
+            db_type = "postgresql"
+        elif "sqlserver" in connection_string or "mssql" in connection_string:
+            db_type = "sqlserver"
+        elif connection_string.startswith("oracle"):
+            db_type = "oracle"
+        elif connection_string.startswith("sqlite"):
+            db_type = "sqlite"
+        elif connection_string.startswith("duckdb"):
+            db_type = "duckdb"
+    return normalize_schema(db_type, cfg.get("schema"), username=cfg.get("username"))
 
 
 def get_sql_schema(cfg: dict[str, Any]) -> str | None:
     """Public accessor for the SQL schema name implied by a connector config."""
     return _schema_name(cfg)
+
+
+def _dialect_key(cfg: dict[str, Any]) -> str:
+    db_type = (cfg.get("type") or "").lower()
+    if db_type and db_type != "generic_sql":
+        return db_type
+    connection_string = (cfg.get("connection_string") or "").lower()
+    if connection_string.startswith("mysql") or "mariadb" in connection_string:
+        return "mysql"
+    if connection_string.startswith("postgresql") or connection_string.startswith("postgres"):
+        return "postgresql"
+    if "sqlserver" in connection_string or "mssql" in connection_string:
+        return "sqlserver"
+    if connection_string.startswith("oracle"):
+        return "oracle"
+    if connection_string.startswith("sqlite"):
+        return "sqlite"
+    if connection_string.startswith("duckdb"):
+        return "duckdb"
+    return db_type or "ansi"
+
+
+def _qualified_table_ref(cfg: dict[str, Any], table: str, schema: str | None) -> str:
+    """Dialect-aware schema.table quoting (brackets, backticks, fold)."""
+    from connectors.sql_identifiers import quote_table_ref
+
+    return quote_table_ref(table, schema, dialect=_dialect_key(cfg))
 
 
 def _type_repr(type_obj: Any) -> str:
@@ -873,10 +985,16 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
         return None
 
 
-def _sample_raw_table(conn: Any, table: str, schema: str | None) -> tuple[list[str], list[Any]]:
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
-    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+def _sample_raw_table(
+    conn: Any,
+    table: str,
+    schema: str | None,
+    *,
+    dialect: str = "ansi",
+) -> tuple[list[str], list[Any]]:
+    from connectors.sql_identifiers import quote_table_ref
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
     result = conn.execute(sa.text(f"SELECT * FROM {qualified} LIMIT 200"))
     headers = list(result.keys())
     rows = result.fetchall()
@@ -923,7 +1041,9 @@ def introspect_table_schema(
                             for name, data_type, nullable in rows
                         ]
                         # Refine text columns from a sample to recover JSON, UUID, BINARY, etc.
-                        headers, sample_rows = _sample_raw_table(conn, table, schema)
+                        headers, sample_rows = _sample_raw_table(
+                            conn, table, schema, dialect=_dialect_key(cfg)
+                        )
                         if sample_rows and headers:
                             name_to_idx = {n: i for i, n in enumerate(headers)}
                             for col in result:
@@ -943,7 +1063,9 @@ def introspect_table_schema(
                 )
 
             with engine.connect() as conn:
-                headers, sample_rows = _sample_raw_table(conn, table, schema)
+                headers, sample_rows = _sample_raw_table(
+                    conn, table, schema, dialect=_dialect_key(cfg)
+                )
                 result = [
                     {
                         "name": name,
@@ -973,7 +1095,9 @@ def introspect_table_schema(
         # Sample the table to narrow generic String columns to JSON, UUID, BINARY, etc.
         try:
             with engine.connect() as conn:
-                headers, sample_rows = _sample_raw_table(conn, table, schema)
+                headers, sample_rows = _sample_raw_table(
+                    conn, table, schema, dialect=_dialect_key(cfg)
+                )
                 if sample_rows:
                     for idx, col in enumerate(result):
                         if col["inferred_type"] == "string":
@@ -1006,9 +1130,7 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
-        table_quoted = quote_sql_identifier(table)
-        schema_quoted = quote_sql_identifier(schema) if schema else None
-        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+        qualified = _qualified_table_ref(cfg, table, schema)
         with engine.connect() as conn:
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
             conn.commit()
@@ -1037,10 +1159,14 @@ def delete_by_primary_keys(
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
-        table_quoted = quote_sql_identifier(table)
-        schema_quoted = quote_sql_identifier(schema) if schema else None
-        qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
-        pk_quoted = quote_sql_identifier(primary_key_column)
+        qualified = _qualified_table_ref(cfg, table, schema)
+        from services.dialect_profiles import quote_char_for
+
+        q = quote_char_for(_dialect_key(cfg)) or '"'
+        if q == "[":
+            pk_quoted = f"[{str(primary_key_column).replace(']', ']]')}]"
+        else:
+            pk_quoted = quote_sql_identifier(primary_key_column, q)
         placeholders = ",".join([":k{}".format(i) for i in range(len(keys))])
         params = {"k{}".format(i): k for i, k in enumerate(keys)}
         stmt = f"DELETE FROM {qualified} WHERE {pk_quoted} IN ({placeholders})"
@@ -1060,11 +1186,13 @@ def _read_table_raw(
     schema: str | None,
     offset: int,
     limit: int,
+    *,
+    dialect: str = "ansi",
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
-    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+    from connectors.sql_identifiers import quote_table_ref
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
     sql = f"SELECT * FROM {qualified}"
     if offset > 0:
         sql += f" LIMIT {limit} OFFSET {offset}"
@@ -1080,10 +1208,12 @@ def _count_table_raw(
     conn: Any,
     table: str,
     schema: str | None,
+    *,
+    dialect: str = "ansi",
 ) -> int:
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
-    qualified = f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
+    from connectors.sql_identifiers import quote_table_ref
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
     try:
         return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar() or 0
     except Exception:
@@ -1154,11 +1284,13 @@ def read_table_batch(
                         total = len(rows)
             except Exception:
                 # Engines like RisingWave/QuestDB have incomplete pg_catalog reflection.
-                headers, rows = _read_table_raw(conn, table, schema_name, offset, limit)
+                headers, rows = _read_table_raw(
+                    conn, table, schema_name, offset, limit, dialect=_dialect_key(cfg)
+                )
                 if known_total_rows is not None:
                     total = known_total_rows
                 else:
-                    total = _count_table_raw(conn, table, schema_name)
+                    total = _count_table_raw(conn, table, schema_name, dialect=_dialect_key(cfg))
                     if not total:
                         total = len(rows)
 
@@ -1288,12 +1420,20 @@ def _upsert_batch(
             if dialect_name == "postgresql":
                 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+                from connectors.writer_common import DF_LSN_COL, postgres_lsn_update_guard_sql
+
                 stmt = pg_insert(table_obj).values(rows)
                 if update_cols:
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=conflict_cols,
-                        set_={c: stmt.excluded[c] for c in update_cols},
-                    )
+                    kwargs: dict[str, Any] = {
+                        "index_elements": conflict_cols,
+                        "set_": {c: stmt.excluded[c] for c in update_cols},
+                    }
+                    # At-least-once guard: only apply when incoming _df_lsn is newer.
+                    if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
+                        kwargs["where"] = sa.text(
+                            postgres_lsn_update_guard_sql(table_obj.name)
+                        )
+                    stmt = stmt.on_conflict_do_update(**kwargs)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
                 conn.execute(stmt)
@@ -1367,6 +1507,13 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     """Write mapped rows to any SQLAlchemy-supported destination."""
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+        schema_policy=_kwargs.get("schema_policy"),
+    )
     if not SQLALCHEMY_AVAILABLE:
         return WriteResult(
             ok=False,

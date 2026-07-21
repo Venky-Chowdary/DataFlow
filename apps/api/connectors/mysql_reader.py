@@ -8,6 +8,12 @@ from typing import Any
 
 from connectors.base import ReadBatch
 from connectors.mysql_conn import get_connection
+from connectors.sql_identifiers import (
+    quote_column_list,
+    quote_sql_identifier,
+    quote_table_ref,
+    require_safe_identifier,
+)
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -18,7 +24,6 @@ from services.value_serializer import cell_to_string
 
 def _cell(value: Any) -> str:
     return cell_to_string(value)
-
 
 
 def _primary_key_columns(cur, table: str) -> list[str] | None:
@@ -46,9 +51,11 @@ def _order_by_clause(cur, table: str, columns: list[str] | None) -> str:
     """
     pk = _primary_key_columns(cur, table)
     if pk:
-        return ", ".join(f"`{c}`" for c in pk)
+        return ", ".join(
+            quote_sql_identifier(require_safe_identifier(c, preserve_case=True), "`") for c in pk
+        )
     if columns:
-        return f"`{columns[0]}`"
+        return quote_sql_identifier(require_safe_identifier(columns[0], preserve_case=True), "`")
     return "1"
 
 
@@ -69,6 +76,8 @@ def read_table_batch(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     del schema
+    table_ref = quote_table_ref(table, dialect="mysql")
+    safe_table = require_safe_identifier(table, preserve_case=True)
     conn = get_connection(
         host=host,
         port=port,
@@ -83,14 +92,17 @@ def read_table_batch(
             if known_total_rows is not None:
                 total = known_total_rows
             else:
-                cur.execute(f"SELECT COUNT(*) FROM `{table}`")
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
                 total = int(cur.fetchone()[0])
-            order_by = _order_by_clause(cur, table, columns)
+            order_by = _order_by_clause(cur, safe_table, columns)
             if columns:
-                col_list = ", ".join(f"`{c}`" for c in columns)
-                query = f"SELECT {col_list} FROM `{table}` ORDER BY {order_by} LIMIT %s OFFSET %s"
+                col_list = quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in columns],
+                    quote_char="`",
+                )
+                query = f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"
             else:
-                query = f"SELECT * FROM `{table}` ORDER BY {order_by} LIMIT %s OFFSET %s"
+                query = f"SELECT * FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
@@ -118,6 +130,8 @@ def read_table_cursor_batch(
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — for incremental sync."""
     del schema
+    table_ref = quote_table_ref(table, dialect="mysql")
+    cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True), "`")
     conn = get_connection(
         host=host,
         port=port,
@@ -130,18 +144,18 @@ def read_table_cursor_batch(
     try:
         with conn.cursor() as cur:
             if columns:
-                col_list = ", ".join(f"`{c}`" for c in columns)
-                base = f"SELECT {col_list} FROM `{table}`"
-            else:
-                base = f"SELECT * FROM `{table}`"
-            if cursor_after:
-                query = (
-                    f"{base} WHERE `{cursor_column}` > %s "
-                    f"ORDER BY `{cursor_column}` LIMIT %s"
+                col_list = quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in columns],
+                    quote_char="`",
                 )
+                base = f"SELECT {col_list} FROM {table_ref}"
+            else:
+                base = f"SELECT * FROM {table_ref}"
+            if cursor_after:
+                query = f"{base} WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s"
                 cur.execute(query, (cursor_after, limit))
             else:
-                query = f"{base} ORDER BY `{cursor_column}` LIMIT %s"
+                query = f"{base} ORDER BY {cursor_q} LIMIT %s"
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])

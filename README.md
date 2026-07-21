@@ -18,6 +18,7 @@ See [docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md) for full scope.
 
 - **apps/web** — React 19 UI (3-screen one-click flow)
 - **apps/api** — FastAPI orchestrator
+- **apps/cli** — GitOps CLI (`plan` / `apply` / `export` / `validate`)
 - **packages/preflight** — 8-gate validation engine
 - **packages/ml** — Synthetic schema factory + training pipeline
 - **design/tokens** — Precision Data design system tokens
@@ -39,6 +40,17 @@ npm run dev
 
 Open **http://localhost:5173** — dashboard with operations overview, connector catalog, and job history.  
 Click **New transfer** for the 3-step wizard with real file upload and semantic mapping.
+
+### GitOps CLI
+
+```bash
+npm run dataflow -- validate -f dataflow.yaml
+npm run dataflow -- plan -f dataflow.yaml --local
+npm run dataflow -- apply -f dataflow.yaml --local --yes
+npm run dataflow -- export --local -o dataflow.yaml
+```
+
+See [apps/cli/README.md](apps/cli/README.md). Contracts import as **DRAFT** (sign before enforce). CDC remains **at-least-once**.
 
 ### Production deploy
 

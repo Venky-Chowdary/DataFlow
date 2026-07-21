@@ -1072,6 +1072,12 @@
   color: #92400e;
 }
 
+.df2-column-review-alert-info {
+  background: #f0fdfa;
+  border-color: #99f6e4;
+  color: #0f766e;
+}
+
 .df2-column-review-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--df-line);

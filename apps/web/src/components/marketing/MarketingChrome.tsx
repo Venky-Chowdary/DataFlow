@@ -73,11 +73,14 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
   const isHome = route === "home";
 
   return (
-    <div className={`lp ${isHome ? "lp-home" : "lp-subpage"} ${scrolled ? "is-page-scrolled" : ""}`}>
-      <div className="lp-ambient" aria-hidden>
+    <div
+      className={`lp ${isHome ? "lp-home" : "lp-subpage"} ${scrolled ? "is-page-scrolled" : ""}`}
+      data-lp-route={route}
+    >
+      <div className={`lp-ambient${isHome ? "" : " lp-ambient--quiet"}`} aria-hidden>
         <span className="lp-ambient-orb lp-ambient-orb--a" />
         <span className="lp-ambient-orb lp-ambient-orb--b" />
-        <span className="lp-ambient-orb lp-ambient-orb--c" />
+        {isHome ? <span className="lp-ambient-orb lp-ambient-orb--c" /> : null}
         <span className="lp-ambient-grid" />
       </div>
 

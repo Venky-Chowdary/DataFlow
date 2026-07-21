@@ -20,7 +20,7 @@ from .mongodb_common import _mongo_client
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     """Convert a string cursor value into a BSON-native type for MongoDB queries."""
     from datetime import datetime
-    from decimal import InvalidOperation
+    from decimal import InvalidOperation, Overflow
 
     from bson.decimal128 import Decimal128
 
@@ -38,7 +38,7 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     if ctype in {"DECIMAL", "NUMERIC", "NUMBER", "MONEY", "SMALLMONEY"}:
         try:
             return Decimal128(value.replace(",", ""))
-        except (InvalidOperation, ValueError):
+        except (InvalidOperation, Overflow, ValueError):
             return value
     if ctype in {"BOOLEAN", "BOOL"}:
         return value.strip().lower() in {"true", "t", "yes", "y", "1"}
@@ -60,7 +60,7 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     if wm_type == WatermarkType.FLOAT:
         try:
             return Decimal128(value.replace(",", ""))
-        except (InvalidOperation, ValueError):
+        except (InvalidOperation, Overflow, ValueError):
             return value
     if wm_type == WatermarkType.DATETIME:
         text = value.strip().replace("Z", "+00:00")

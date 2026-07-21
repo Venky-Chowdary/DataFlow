@@ -1,0 +1,10 @@
+# Optional RAG / embedding extras.
+# Install when you need chromadb or sentence-transformers:
+#   pip install -r requirements-rag.txt
+#
+# Defaults: in-memory vector store + TF-IDF embedding fallback
+# (DATAFLOW_VECTOR_STORE_BACKEND=memory). Set chromadb via:
+#   DATAFLOW_VECTOR_STORE_BACKEND=chromadb
+
+sentence-transformers>=2.2.0
+chromadb>=0.5.0,<1.6

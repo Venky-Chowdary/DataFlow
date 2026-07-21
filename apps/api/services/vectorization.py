@@ -91,6 +91,33 @@ class _OpenAIEmbedder:
         return all_embeddings
 
 
+class _HashEmbedder:
+    """Deterministic content-hash vectors for offline/CI proofs.
+
+    Not a semantic model — same text always yields the same float vector.
+    Used when ``model`` is ``hash/...`` so cache layers can be proven without
+    network downloads or API keys.
+    """
+
+    def __init__(self, dimension: int = 32):
+        self._dimension = max(8, int(dimension))
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for text in texts:
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            # Expand digest if dimension > 32.
+            raw = digest
+            while len(raw) < self._dimension:
+                raw += hashlib.sha256(raw).digest()
+            out.append([(b / 127.5) - 1.0 for b in raw[: self._dimension]])
+        return out
+
+
 @lru_cache(maxsize=8)
 def _get_embedder(name: str | None = None) -> Embedder:
     """Return a cached embedder instance by model name or env default."""
@@ -99,6 +126,13 @@ def _get_embedder(name: str | None = None) -> Embedder:
 
     if model_name.startswith("openai/"):
         return _OpenAIEmbedder(model_name=model_name.split("/", 1)[1])
+    if model_name.startswith("hash/") or model_name.startswith("deterministic/"):
+        # Optional suffix is dimension, e.g. hash/32
+        suffix = model_name.split("/", 1)[1]
+        dim = 32
+        if suffix.isdigit():
+            dim = int(suffix)
+        return _HashEmbedder(dimension=dim)
     if model_name.startswith("sentence-transformers/"):
         return _SentenceTransformerEmbedder(model_name=model_name.split("/", 1)[1])
     if model_name in {"text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"}:
@@ -172,7 +206,7 @@ def chunk_text(
     return merged
 
 
-# In-process cache for repeated identical content across transfers.
+# In-process L1 cache for repeated identical content within a process.
 _EMBEDDING_CACHE: dict[str, list[float]] = {}
 
 
@@ -180,29 +214,78 @@ def _cache_key(text: str, model: str | None) -> str:
     return hashlib.sha256(f"{model or 'default'}:{text}".encode("utf-8")).hexdigest()
 
 
-def embed(texts: list[str], model: str | None = None, use_cache: bool = True) -> list[list[float]]:
-    """Return embeddings for a list of texts, using the configured model."""
+def clear_memory_cache() -> int:
+    """Drop the process-local L1 embedding cache. Returns prior size."""
+    n = len(_EMBEDDING_CACHE)
+    _EMBEDDING_CACHE.clear()
+    return n
+
+
+def embed(
+    texts: list[str],
+    model: str | None = None,
+    use_cache: bool = True,
+    *,
+    durable: bool | None = None,
+) -> list[list[float]]:
+    """Return embeddings for a list of texts, using the configured model.
+
+    Caching layers (when ``use_cache`` is True):
+      1. Process-local dict (L1)
+      2. SQLite durable store (L2) when ``durable`` is True (default from env)
+    """
     if not texts:
         return []
 
-    embedder = _get_embedder(model)
-    if use_cache:
-        results: list[list[float] | None] = [None] * len(texts)
-        missing: list[tuple[int, str]] = []
-        for i, text in enumerate(texts):
-            key = _cache_key(text, model)
-            if key in _EMBEDDING_CACHE:
-                results[i] = list(_EMBEDDING_CACHE[key])
-            else:
-                missing.append((i, text))
-        if missing:
-            embedded = embedder.embed([text for _, text in missing])
-            for (i, text), vector in zip(missing, embedded):
-                _EMBEDDING_CACHE[_cache_key(text, model)] = vector
-                results[i] = vector
-        return [v for v in results if v is not None]
+    from services.embedding_cache import (
+        durable_cache_enabled_by_default,
+        get_cached,
+        put_cached,
+    )
 
-    return embedder.embed(texts)
+    use_durable = durable_cache_enabled_by_default() if durable is None else bool(durable)
+    embedder = _get_embedder(model)
+    if not use_cache:
+        return embedder.embed(texts)
+
+    results: list[list[float] | None] = [None] * len(texts)
+    missing_l1: list[tuple[int, str, str]] = []  # idx, text, key
+    for i, text in enumerate(texts):
+        key = _cache_key(text, model)
+        if key in _EMBEDDING_CACHE:
+            results[i] = list(_EMBEDDING_CACHE[key])
+        else:
+            missing_l1.append((i, text, key))
+
+    if missing_l1 and use_durable:
+        durable_hits = get_cached([key for _, _, key in missing_l1])
+        still_missing: list[tuple[int, str, str]] = []
+        for i, text, key in missing_l1:
+            if key in durable_hits:
+                vector = list(durable_hits[key])
+                _EMBEDDING_CACHE[key] = vector
+                results[i] = vector
+            else:
+                still_missing.append((i, text, key))
+        missing_l1 = still_missing
+
+    if missing_l1:
+        embedded = embedder.embed([text for _, text, _ in missing_l1])
+        to_persist: list[tuple[str, str, list[float]]] = []
+        for (i, text, key), vector in zip(missing_l1, embedded):
+            _EMBEDDING_CACHE[key] = vector
+            results[i] = vector
+            if use_durable:
+                to_persist.append((key, model or "default", vector))
+        if to_persist:
+            put_cached(to_persist)
+
+    out: list[list[float]] = []
+    for v in results:
+        if v is None:
+            raise RuntimeError("embedding cache produced incomplete results")
+        out.append(v)
+    return out
 
 
 def vectorize_records(
@@ -211,30 +294,57 @@ def vectorize_records(
     content_column: str | None = None,
     embedding_column: str | None = None,
     metadata_columns: list[str] | None = None,
+    exclude_pii_columns: list[str] | None = None,
     model: str | None = None,
     chunk_size: int = 512,
     chunk_overlap: int = 50,
+    skip_chunking: bool = False,
+    durable_embedding_cache: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Expand records into vector rows: id, content, embedding, metadata, source_id, chunk_index.
 
     If ``embedding_column`` is supplied and contains a numeric vector or string
     representation, it is used directly. Otherwise the ``content_column`` is
-    chunked and embedded. If ``content_column`` is not supplied, the first
-    textual column with a ``text`` semantic type or the longest string value is
-    used.
+    chunked and embedded — unless ``skip_chunking`` is True or the record carries
+    ``_df_prechunked`` (document chunking already produced RAG-sized rows).
+
+    If ``content_column`` is not supplied, the first textual column with a
+    ``text`` semantic type or the longest string value is used.
+
+    ``exclude_pii_columns`` are stripped from metadata and rejected as content
+    (fail-closed — never embed or store excluded PII in the vector store).
     """
+    from services.document_chunking import PRECHUNKED_FLAG
+
+    exclude = {str(c) for c in (exclude_pii_columns or []) if c}
+    if content_column and content_column in exclude:
+        raise ValueError(
+            f"content_column '{content_column}' is excluded as PII — "
+            "choose a non-PII text column or remove it from exclude_pii_columns"
+        )
+
     rows: list[dict[str, Any]] = []
     for record in records:
         rec = {k: v for k, v in record.items() if v is not None}
+        prechunked = skip_chunking or str(rec.get(PRECHUNKED_FLAG) or "") in {"1", "true", "True"}
 
         content = ""
         if content_column and content_column in rec:
             content = str(rec[content_column])
         else:
             # Prefer columns flagged as text/embedding content by heuristic.
-            candidates = [k for k, v in rec.items() if isinstance(v, str) and len(v) > 20]
+            # Never auto-pick an excluded PII column as embed content.
+            candidates = [
+                k for k, v in rec.items()
+                if isinstance(v, str)
+                and len(v) > 20
+                and k != PRECHUNKED_FLAG
+                and k not in exclude
+            ]
             if candidates:
                 content = max((str(rec[c]) for c in candidates), key=len)
+            elif "content" in rec and "content" not in exclude:
+                content = str(rec["content"])
 
         embedding = None
         if embedding_column and embedding_column in rec:
@@ -255,23 +365,44 @@ def vectorize_records(
             del metadata[content_column]
         if embedding_column and embedding_column in metadata:
             del metadata[embedding_column]
+        metadata.pop(PRECHUNKED_FLAG, None)
+        for col in exclude:
+            metadata.pop(col, None)
         if metadata_columns:
-            metadata = {k: v for k, v in metadata.items() if k in metadata_columns}
+            allowed = set(metadata_columns) - exclude
+            metadata = {k: v for k, v in metadata.items() if k in allowed}
+
+        existing_chunk_index = 0
+        try:
+            existing_chunk_index = int(rec.get("chunk_index") or 0)
+        except (TypeError, ValueError):
+            existing_chunk_index = 0
 
         if embedding:
             rows.append({
-                "id": hashlib.sha256(f"{source_id}:{0}:{content}".encode()).hexdigest()[:32],
+                "id": hashlib.sha256(f"{source_id}:{existing_chunk_index}:{content}".encode()).hexdigest()[:32],
                 "content": content[:4000],
                 "embedding": embedding,
                 "metadata": metadata,
                 "source_id": source_id,
-                "chunk_index": 0,
+                "chunk_index": existing_chunk_index,
+            })
+        elif content and prechunked:
+            vectors = embed([content], model=model, durable=durable_embedding_cache)
+            vector = vectors[0] if vectors else None
+            rows.append({
+                "id": hashlib.sha256(f"{source_id}:{existing_chunk_index}:{content}".encode()).hexdigest()[:32],
+                "content": content[:4000],
+                "embedding": vector,
+                "metadata": metadata,
+                "source_id": source_id,
+                "chunk_index": existing_chunk_index,
             })
         elif content:
             chunks = chunk_text(content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
             if not chunks:
                 chunks = [content]
-            embeddings = embed(chunks, model=model)
+            embeddings = embed(chunks, model=model, durable=durable_embedding_cache)
             for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
                 rows.append({
                     "id": hashlib.sha256(f"{source_id}:{idx}:{chunk}".encode()).hexdigest()[:32],

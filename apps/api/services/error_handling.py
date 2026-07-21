@@ -107,7 +107,373 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "serialization",
     "schema",
     "partial write",
+    "refuse concurrent consumer",
+    "cdc lease",
+    "cdc_lease_conflict",
+    # Destination capacity — OperationalError-class but will not self-heal on retry.
+    "table is full",
+    "er_record_file_full",
+    "1114",
+    "disk full",
+    "no space left",
+    "enospc",
+    "tablespace is full",
+    # Source format — will not self-heal on retry without a new file.
+    "json file must be an array",
+    "json must be an array of objects",
+    "json array must contain objects",
+    "json file has no object rows",
+    "invalid json",
 }
+
+
+# Operator-facing failure catalog. Only patterns we can map accurately.
+# `fix` must list *likely checks* — never a single guaranteed remedy.
+_OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
+    (
+        ("cdc_lease_conflict", "cdc lease conflict", "refuse concurrent consumer", "cdc resource"),
+        {
+            "code": "cdc_lease_conflict",
+            "category": "cdc_ops",
+            "confidence": "high",
+            "title": "CDC lease conflict",
+            "fix": (
+                "Another worker holds this CDC resource. Stop the holder, wait for TTL expiry, "
+                "or Force-release the lease in Job Theater (fencing generation advances), then "
+                "Resume / re-run. Never run two consumers on the same slot or server_id."
+            ),
+        },
+    ),
+    (
+        (
+            "cdc_lsn_gap",
+            "cdc_scn_gap",
+            "cdc_cursor_gap",
+            "before capture retention",
+            "before available redo",
+            "min_lsn",
+            "oldest_available",
+            "ora-01291",
+            "ora-01292",
+        ),
+        {
+            "code": "cdc_cursor_gap",
+            "category": "cdc_ops",
+            "confidence": "high",
+            "title": "CDC cursor gap (retention / failover)",
+            "fix": (
+                "Reset the CDC watermark, set snapshot to when_needed or initial, then re-run. "
+                "Continuous CDC across the gap is not possible."
+            ),
+        },
+    ),
+    (
+        ("allow_append_only", "append-only (or missing pk", "cdc destination"),
+        {
+            "code": "cdc_append_only_sink",
+            "category": "cdc_ops",
+            "confidence": "high",
+            "title": "Append-only CDC sink blocked",
+            "fix": (
+                "Use a PK upsert destination, or enable Allow append-only CDC in Destination Advanced."
+            ),
+        },
+    ),
+    (
+        ("table is full", "er_record_file_full", "(1114,", " 1114,", "error 1114"),
+        {
+            "code": "destination_table_full",
+            "category": "destination_capacity",
+            "confidence": "high",
+            "title": "Destination table is full (MySQL 1114)",
+            "fix": (
+                "MySQL ER_RECORD_FILE_FULL (1114) means the engine could not allocate more space "
+                "for this table. Common verified causes: host disk full, InnoDB tablespace / "
+                "innodb_data_file_path limit, MEMORY/HEAP max size, or MyISAM max_rows. Check "
+                "which applies on your host (SHOW TABLE STATUS / disk / tablespace), free or "
+                "expand capacity, then Resume from checkpoint. Resume alone will fail again "
+                "until capacity is available."
+            ),
+        },
+    ),
+    (
+        ("disk full", "no space left", "enospc"),
+        {
+            "code": "destination_disk_full",
+            "category": "destination_capacity",
+            "confidence": "high",
+            "title": "Destination reported no free disk space",
+            "fix": (
+                "The driver reported ENOSPC / disk full. Free space on the destination host "
+                "(or expand the volume), confirm the write path is not a full mount, then Resume. "
+                "If the message was wrapped by a proxy, confirm on the DB host before assuming disk."
+            ),
+        },
+    ),
+    (
+        ("tablespace is full", "innodb: error: tablespace"),
+        {
+            "code": "destination_tablespace_full",
+            "category": "destination_capacity",
+            "confidence": "high",
+            "title": "Destination tablespace is full",
+            "fix": (
+                "InnoDB tablespace is exhausted. Expand the tablespace / data file, free space "
+                "inside it, or move the table — then Resume. Do not treat this as a mapping issue."
+            ),
+        },
+    ),
+    (
+        ("too many connections", "max_connections"),
+        {
+            "code": "destination_connection_limit",
+            "category": "destination_capacity",
+            "confidence": "medium",
+            "title": "Destination connection limit reached",
+            "fix": (
+                "Likely max_connections (or pool) saturation. Reduce concurrent DataFlow jobs "
+                "or raise the destination limit, then retry. Confirm with the DB admin if shared."
+            ),
+        },
+    ),
+    (
+        (
+            "json file must be an array of objects",
+            "json must be an array of objects",
+            "json array must contain objects",
+            "json file has no object rows",
+            "json must be an array of objects — each record",
+        ),
+        {
+            "code": "json_shape_unsupported",
+            "category": "source_format",
+            "confidence": "high",
+            "title": "JSON source shape is not tabular",
+            "fix": (
+                "DataFlow needs object rows. Accepted shapes: [{...}, ...], a wrapper like "
+                '{"data":[{...}]} / {"countries":[{...}]} / GeoJSON {"features":[...]}, or one '
+                "object as a single row. Arrays of strings/numbers, empty files, and invalid JSON "
+                "are rejected. Re-export the file in one of those shapes, re-upload, then re-run "
+                "from Source (Resume will not help if extract never started)."
+            ),
+        },
+    ),
+    (
+        (
+            "decimal.overflow",
+            "[<class 'decimal.Overflow'>]",
+            "[<class 'decimal.Overflow'>",
+            "exceeded safe decimal capacity",
+            "would raise decimal.Overflow",
+        ),
+        {
+            "code": "decimal_overflow",
+            "category": "data_type",
+            "confidence": "high",
+            "title": "Numeric value overflowed decimal capacity",
+            "fix": (
+                "A number was too large (or had too many digits) for the decimal path used on "
+                "this transfer — common with extreme scientific notation or oversized Decimal128. "
+                "Open Quarantine / the event log for the column, map overflow fields to string, "
+                "or coerce null under a quarantine policy, then Resume from checkpoint. "
+                "This is not a Redis/Snowflake-only issue; the same rule applies on every dest."
+            ),
+        },
+    ),
+    (
+        (
+            'dataflow."public"',
+            '."public"',
+            'schema "public"',
+            "schema 'public'",
+        ),
+        {
+            "code": "snowflake_schema_not_found",
+            "category": "source_schema",
+            "confidence": "high",
+            "title": "Snowflake schema not found (check PUBLIC vs public)",
+            "fix": (
+                "Snowflake folds unquoted names to UPPERCASE. A quoted lowercase schema "
+                '"public" is not the same as PUBLIC. Set the connector schema to PUBLIC '
+                "(or the real schema name in uppercase), confirm the role can USE that "
+                "schema, then reload sample preview. If the schema truly is missing, create "
+                "it or pick an existing schema your role can access."
+            ),
+        },
+    ),
+)
+
+
+def format_exception_message(error: Exception | str) -> str:
+    """Stable operator-facing raw text — never empty or bare ``[<class '...'>]``."""
+    if isinstance(error, str):
+        text = error.strip()
+        if text and not text.startswith("[<class"):
+            return text
+        if "Overflow" in text or "overflow" in text.lower():
+            return (
+                "decimal.Overflow: a numeric value exceeded safe decimal capacity "
+                "(extreme scientific notation or oversized Decimal128)"
+            )
+        return text or "unknown error"
+    name = type(error).__name__
+    module = getattr(type(error), "__module__", "") or ""
+    msg = str(error).strip()
+    if name == "Overflow" or (module == "decimal" and name == "Overflow"):
+        if not msg or msg.startswith("[<class"):
+            return (
+                "decimal.Overflow: a numeric value exceeded safe decimal capacity "
+                "(extreme scientific notation or oversized Decimal128)"
+            )
+        return f"decimal.Overflow: {msg}"
+    if not msg or msg.startswith("[<class"):
+        return f"{module}.{name}" if module else name
+    return msg
+
+
+def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
+    """Turn a raw driver exception into an operator-facing failure summary.
+
+    Honesty rules
+    -------------
+    - Only attach a concrete ``fix`` when the pattern is a known driver signal.
+    - Phrase fixes as *likely checks*, never as a guaranteed one-click remedy.
+    - Unknown errors keep the raw message and a neutral next-step — no invented root cause.
+
+    Returns keys: code, category, title, message, fix, raw, retriable, confidence.
+    """
+    raw = format_exception_message(error)
+    text = raw.lower()
+    # Type-aware match when str(exc) is empty (decimal.Overflow).
+    if isinstance(error, Exception) and type(error).__name__ == "Overflow":
+        text = f"decimal.overflow {text}"
+    try:
+        from services.cdc_lease import CdcLeaseConflict
+
+        if isinstance(error, CdcLeaseConflict):
+            holder = error.holder_id or "another worker"
+            resource = error.resource or "CDC resource"
+            return {
+                "code": "cdc_lease_conflict",
+                "category": "cdc_ops",
+                "title": "CDC lease conflict",
+                "message": (
+                    f"Another worker holds {resource!r} (holder {holder}). "
+                    "DataFlow refuses concurrent consumers — delivery stays at-least-once."
+                ),
+                "fix": (
+                    "Stop or wait for the holder job, or Force-release the lease in Job Theater "
+                    "(fencing generation advances). Then Resume / re-run — do not run two "
+                    "consumers on the same slot or server_id."
+                ),
+                "raw": raw,
+                "retriable": False,
+                "confidence": "high",
+                "holder_id": error.holder_id,
+                "resource": error.resource,
+                "cursor_key": error.cursor_key,
+            }
+    except Exception:
+        pass
+    try:
+        from services.cdc_cursor_gap import CdcCursorGapError
+
+        if isinstance(error, CdcCursorGapError):
+            dialect = error.dialect or "source"
+            return {
+                "code": error.code or "cdc_cursor_gap",
+                "category": "cdc_ops",
+                "title": "CDC cursor gap (retention / failover)",
+                "message": (
+                    f"{dialect} CDC resume is before retained log history "
+                    f"(resume={error.resume or '?'}, retained={error.retained or '?'}). "
+                    "Continuous CDC across the gap is not possible."
+                ),
+                "fix": (
+                    "Reset the CDC watermark in Job Theater, set snapshot mode to "
+                    "when_needed or initial, then re-run. Do not claim continuous CDC "
+                    "across an AG / Data Guard / archive-purge gap."
+                ),
+                "raw": raw,
+                "retriable": False,
+                "confidence": "high",
+                "cursor_key": error.cursor_key,
+                "resume": error.resume,
+                "retained": error.retained,
+                "dialect": error.dialect,
+            }
+    except Exception:
+        pass
+    try:
+        from services.cdc_effectively_once import CdcAppendOnlySinkError
+
+        if isinstance(error, CdcAppendOnlySinkError):
+            return {
+                "code": "cdc_append_only_sink",
+                "category": "cdc_ops",
+                "title": "Append-only CDC sink blocked",
+                "message": str(error),
+                "fix": (
+                    "Choose a destination that supports PK upsert, or enable "
+                    "Allow append-only CDC in Destination Advanced (acknowledges "
+                    "duplicate rows on redelivery). Exactly-once is not claimed."
+                ),
+                "raw": raw,
+                "retriable": False,
+                "confidence": "high",
+            }
+    except Exception:
+        pass
+    classification = classify_error(error)
+    matched: dict[str, str] | None = None
+    for needles, payload in _OPERATOR_FAILURE_RULES:
+        if any(n in text for n in needles):
+            matched = dict(payload)
+            break
+    if matched:
+        title = matched["title"]
+        fix = matched["fix"]
+        confidence = matched.get("confidence", "medium")
+        if matched.get("code") == "decimal_overflow":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                f"Rows already written remain; fix the overflow column then Resume."
+            )
+        elif matched.get("code") == "cdc_lease_conflict":
+            message = (
+                f"{title}. {raw}. "
+                "Concurrent CDC consumers are blocked — release or wait for the holder, then retry."
+            )
+        else:
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                f"Rows already written stay on the destination until you address capacity."
+            )
+        return {
+            "code": matched["code"],
+            "category": matched["category"],
+            "title": title,
+            "message": message,
+            "fix": fix,
+            "raw": raw,
+            "retriable": False,
+            "confidence": confidence,
+        }
+    # Unknown — never invent a specific root cause or fake remediation path.
+    return {
+        "code": "transfer_failed",
+        "category": "runtime",
+        "title": "Transfer failed",
+        "message": raw,
+        "fix": (
+            "No mapped remediation for this driver message. Use the raw error, event log, and "
+            "Quarantine tab to identify the cause. Fix that cause before Resume — do not assume "
+            "a mapping or capacity issue without evidence."
+        ),
+        "raw": raw,
+        "retriable": bool(classification.get("retriable")),
+        "confidence": "low",
+    }
 
 
 @dataclass
@@ -153,6 +519,21 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
         exc_name = ""
     retriable = False
     evidence: list[str] = []
+
+    # Structured CDC lease conflict — never auto-retry into a live holder.
+    try:
+        from services.cdc_lease import CdcLeaseConflict
+
+        if isinstance(error, CdcLeaseConflict):
+            return {
+                "retriable": False,
+                "evidence": ["cdc_lease_conflict"],
+                "message": text,
+                "class": exc_name,
+                **error.to_dict(),
+            }
+    except Exception:
+        pass
 
     for sig in RETRIABLE_EXCEPTIONS:
         if sig in text or sig in exc_name:

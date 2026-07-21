@@ -5,9 +5,12 @@ import { GENERIC_SQL_INFO } from "./genericSqlMap";
 export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+  "pdf", "docx", "html",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "sqlite", "generic_sql", "sftp", "email",
   "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
+  "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
+  "iceberg",
 ]);
 
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
@@ -36,6 +39,9 @@ const CATALOG_ALIASES: Record<string, string> = {
   amazon_elasticsearch: "elasticsearch",
   elastic_cloud: "elasticsearch",
   amazon_dynamodb: "dynamodb",
+  apache_iceberg: "iceberg",
+  iceberg_rest: "iceberg",
+  nessie: "iceberg",
   planetscale: "mysql",
   mariadb: "mysql",
   percona_mysql: "mysql",
@@ -71,6 +77,12 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   elasticsearch: { host: "localhost", port: 9200 },
   sqlite: { host: "", port: 0 },
   generic_sql: { host: "localhost", port: 0 },
+  pgvector: { host: "localhost", port: 5432 },
+  qdrant: { host: "localhost", port: 6333 },
+  weaviate: { host: "localhost", port: 8080 },
+  pinecone: { host: "", port: 443 },
+  milvus: { host: "localhost", port: 19530 },
+  iceberg: { host: "", port: 0 },
   salesforce: { host: "login.salesforce.com", port: 443 },
   hubspot: { host: "api.hubapi.com", port: 443 },
   stripe: { host: "api.stripe.com", port: 443 },

@@ -360,10 +360,25 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             }
             out["sample_data"] = safe_records[:10]
             out["data"] = safe_records[:10]
+            out["sample_row_count"] = len(records)
             try:
-                out["row_estimate"] = coll.estimated_document_count(maxTimeMS=5000) if columns else 0
+                estimate = int(coll.estimated_document_count(maxTimeMS=5000)) if columns else 0
+                out["row_estimate"] = estimate
+                # Never treat the introspection sample size as the collection size.
+                if estimate <= 0 and len(records) >= sample_limit:
+                    out["row_estimate_uncertain"] = True
+                    out["message"] = (
+                        f"{out.get('message', '')} · row estimate unavailable "
+                        f"(showing {len(records)}-row sample)"
+                    ).strip(" ·")
             except Exception:
-                out["row_estimate"] = len(records)
+                # Prefer unknown over lying that a 100-row sample is the full table.
+                out["row_estimate"] = 0
+                out["row_estimate_uncertain"] = True
+                out["message"] = (
+                    f"{out.get('message', '')} · estimated_document_count failed "
+                    f"(showing {len(records)}-row sample)"
+                ).strip(" ·")
             out["table_exists"] = bool(columns)
             return
 
@@ -647,10 +662,9 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
         if db == "mongodb":
             plan["auto_create"].append(f"MongoDB collection `{destination.database or 'test_db'}.{target}`")
         else:
-            sch = destination.schema or (
-                "PUBLIC" if db == "snowflake" else
-                "dataflow" if db == "bigquery" else "public"
-            )
+            from services.dialect_profiles import default_schema_for
+
+            sch = destination.schema or default_schema_for(db) or ""
             plan["auto_create"].append(f"{db} table `{sch}.{target}` with typed columns (CREATE IF NOT EXISTS)")
         for col in columns:
             plan["type_mappings"].append({

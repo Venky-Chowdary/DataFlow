@@ -7,12 +7,35 @@ from pathlib import Path
 
 from connectors.base import ReadBatch
 from connectors.snowflake_conn import get_connection, normalize_account
+from connectors.sql_identifiers import (
+    quote_column_list,
+    quote_sql_identifier,
+    quote_table_ref,
+    require_safe_identifier,
+)
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.value_serializer import cell_to_string
+
+
+def _use_warehouse(cur, warehouse: str) -> None:
+    if not warehouse:
+        return
+    wh = require_safe_identifier(warehouse, preserve_case=True)
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    # Warehouse names are usually uppercase; fold all-lower defaults safely.
+    wh = snowflake_fold_identifier(wh) if wh == wh.lower() or wh == wh.upper() else wh
+    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+
+
+def _snowflake_schema(schema: str | None) -> str:
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    return snowflake_fold_identifier((schema or "PUBLIC").strip() or "PUBLIC")
 
 
 def count_table_rows(
@@ -30,22 +53,22 @@ def count_table_rows(
 ) -> int:
     del port
     account = normalize_account(host)
+    schema = _snowflake_schema(schema)
     conn = get_connection(
         account=account,
         username=username,
         password=password,
         database=database,
-        schema=schema or "PUBLIC",
+        schema=schema,
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
     )
     try:
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f'USE WAREHOUSE "{warehouse}"')
-            sch = schema or "PUBLIC"
-            cur.execute(f'SELECT COUNT(*) FROM "{sch}"."{table}"')
+            _use_warehouse(cur, warehouse)
+            table_ref = quote_table_ref(table, schema, dialect="snowflake")
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")
             return int(cur.fetchone()[0])
     finally:
         conn.close()
@@ -69,21 +92,21 @@ def read_table_batch(
     role: str = "",
 ) -> ReadBatch:
     account = normalize_account(host)
+    schema = _snowflake_schema(schema)
     conn = get_connection(
         account=account,
         username=username,
         password=password,
         database=database,
-        schema=schema or "PUBLIC",
+        schema=schema,
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
     )
     try:
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f'USE WAREHOUSE "{warehouse}"')
-            sch = schema or "PUBLIC"
+            _use_warehouse(cur, warehouse)
+            table_ref = quote_table_ref(table, schema, dialect="snowflake")
             if known_total_rows is not None:
                 total = known_total_rows
             else:
@@ -92,9 +115,13 @@ def read_table_batch(
                     schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
                     role=role,
                 )
-            col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
+            col_sql = (
+                quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
+                if columns
+                else "*"
+            )
             cur.execute(
-                f'SELECT {col_sql} FROM "{sch}"."{table}" LIMIT {int(limit)} OFFSET {int(offset)}'
+                f"SELECT {col_sql} FROM {table_ref} LIMIT {int(limit)} OFFSET {int(offset)}"
             )
             headers = [desc[0] for desc in cur.description]
             rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
@@ -123,32 +150,37 @@ def read_table_cursor_batch(
     """Read rows where cursor_column > watermark — incremental sync."""
     del port
     account = normalize_account(host)
+    schema = _snowflake_schema(schema)
     conn = get_connection(
         account=account,
         username=username,
         password=password,
         database=database,
-        schema=schema or "PUBLIC",
+        schema=schema,
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
     )
     try:
         with conn.cursor() as cur:
-            if warehouse:
-                cur.execute(f'USE WAREHOUSE "{warehouse}"')
-            sch = schema or "PUBLIC"
-            col_sql = ", ".join(f'"{c}"' for c in columns) if columns else "*"
+            _use_warehouse(cur, warehouse)
+            table_ref = quote_table_ref(table, schema, dialect="snowflake")
+            col_sql = (
+                quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
+                if columns
+                else "*"
+            )
+            cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True))
             if cursor_after:
                 cur.execute(
-                    f'SELECT {col_sql} FROM "{sch}"."{table}" '
-                    f'WHERE "{cursor_column}" > %s ORDER BY "{cursor_column}" LIMIT %s',
+                    f"SELECT {col_sql} FROM {table_ref} "
+                    f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",
                     (cursor_after, limit),
                 )
             else:
                 cur.execute(
-                    f'SELECT {col_sql} FROM "{sch}"."{table}" '
-                    f'ORDER BY "{cursor_column}" LIMIT %s',
+                    f"SELECT {col_sql} FROM {table_ref} "
+                    f"ORDER BY {cursor_q} LIMIT %s",
                     (limit,),
                 )
             headers = [desc[0] for desc in cur.description]

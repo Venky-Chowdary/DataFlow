@@ -34,8 +34,14 @@ interface ColumnReviewPanelProps {
   compact?: boolean;
   destinationFields?: string[];
   destinationLabel?: string;
+  /** Destination connector/db type — drives dest-aware DDL labels (e.g. Snowflake NUMBER). */
+  destType?: string;
+  /** True while destination schema introspection is in flight. */
+  destSchemaLoading?: boolean;
   showTransforms?: boolean;
   hideTitle?: boolean;
+  /** Expand-dialog layout: table-first, no nested preview, fixed scroll height. */
+  presentation?: "default" | "dialog";
   focusSource?: string | null;
   onFocusHandled?: () => void;
   search?: string;
@@ -70,8 +76,11 @@ export function ColumnReviewPanel({
   compact = false,
   destinationFields = [],
   destinationLabel,
+  destType,
+  destSchemaLoading = false,
   showTransforms = true,
   hideTitle = false,
+  presentation = "default",
   focusSource = null,
   onFocusHandled,
   search: searchProp,
@@ -254,14 +263,25 @@ export function ColumnReviewPanel({
     );
   }
 
+  const isDialog = presentation === "dialog";
+  const showHead = !hideTitle && !isDialog;
+  const showPreview = !isDialog && !compact && Boolean(sampleRows && sampleRows.length > 0);
+
   const filterTabItems = FILTER_TABS.map((tab) => ({
     ...tab,
-    count: compact ? undefined : filterCounts[tab.id],
+    count: compact && !isDialog ? undefined : filterCounts[tab.id],
   }));
 
   return (
-    <div className={`df2-column-review ${compact ? "is-compact is-editor" : ""} ${compact && sampleRows && sampleRows.length > 0 ? "is-split" : ""}`}>
-      {!hideTitle && (
+    <div
+      className={[
+        "df2-column-review",
+        compact ? "is-compact is-editor" : "",
+        compact && sampleRows && sampleRows.length > 0 ? "is-split" : "",
+        isDialog ? "is-dialog" : "",
+      ].filter(Boolean).join(" ")}
+    >
+      {showHead && (
         <div className="df2-column-review-head">
           <div>
             <h3 className="df2-column-review-title">Edit mappings</h3>
@@ -283,7 +303,7 @@ export function ColumnReviewPanel({
         </div>
       )}
 
-      {sampleRows && sampleRows.length > 0 && (
+      {showPreview && (
         <div className="df2-column-review-data-preview">
           <StructurePreview
             columns={mappings.map((m) => m.source)}
@@ -340,8 +360,8 @@ export function ColumnReviewPanel({
 
       <div className="df2-column-review-editor">
       <div className="df2-column-review-chrome">
-        {!compact && (
-          <div className="df2-column-workbench-stats" role="status" aria-label="Mapping summary">
+        {(isDialog || !compact) && (
+          <div className="df2-column-workbench-stats" aria-label="Mapping summary">
             <div className="df2-column-workbench-stat">
               <span>Total columns</span>
               <strong>{mappings.length.toLocaleString()}</strong>
@@ -409,7 +429,7 @@ export function ColumnReviewPanel({
             )}
             {needsReview.length > 0 && (
               <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={approveAll}>
-                Approve all
+                <DtIcon name="check" size={14} /> Approve all {needsReview.length}
               </button>
             )}
           </div>
@@ -420,6 +440,17 @@ export function ColumnReviewPanel({
             <DtIcon name="alert" size={16} />
             <span>
               <strong>{needsReview.length} column(s)</strong> need review before transfer.
+            </span>
+          </div>
+        )}
+
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && (
+          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
+            <DtIcon name="sparkle" size={16} />
+            <span>
+              <strong>New destination table</strong>
+              {" — identity mapping; types will CREATE on first write"}
+              {destType ? ` with ${destType}-native DDL` : ""}.
             </span>
           </div>
         )}
@@ -487,14 +518,14 @@ export function ColumnReviewPanel({
                       />
                       <select
                         className="df2-input df2-select df2-column-dest-type-select"
-                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR")}
+                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)}
                         onChange={(e) =>
                           updateMapping(index, { destType: e.target.value, approved: false })
                         }
                         aria-label={`Destination type for ${m.source}`}
                         title="Destination logical type"
                       >
-                        {destTypeSelectOptions(m.destType || m.inferredType).map((opt) => (
+                        {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
                           </option>

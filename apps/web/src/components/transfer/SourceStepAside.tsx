@@ -7,7 +7,7 @@ import type { Connector } from "../../lib/types";
 import type { SourceKind } from "../ui/SourceKindTiles";
 import type { StreamSchemaPreview } from "../../lib/sourceStreams";
 
-const FILE_FORMATS = ["CSV", "JSON", "JSONL", "TSV", "Parquet"];
+const FILE_FORMATS = ["CSV", "JSON", "JSONL", "TSV", "Parquet", "PDF", "DOCX", "HTML"];
 
 interface SourceStepAsideProps {
   sourceKind: SourceKind;

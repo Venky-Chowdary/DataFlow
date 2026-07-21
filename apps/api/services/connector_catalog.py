@@ -1,4 +1,4 @@
-"""Searchable connector catalog — 600+ data product integrations."""
+"""Searchable connector catalog — certified drivers plus roadmap integrations."""
 
 from __future__ import annotations
 

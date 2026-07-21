@@ -9238,3 +9238,705 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Marketing v2 — Pricing / Contact / Customers (distinct motion)
+   ═══════════════════════════════════════════════════════════ */
+
+.lp-page-pricing,
+.lp-page-contact,
+.lp-page-customers {
+  --lp-page-pad: clamp(20px, 4vw, 48px);
+  overflow-x: clip;
+}
+
+.lp-page-pricing .lp-mkt-illustration,
+.lp-page-contact .lp-mkt-illustration,
+.lp-page-customers .lp-mkt-illustration {
+  animation: none;
+  max-width: 100%;
+  height: auto;
+}
+
+/* Hero motion variants — not the same float everywhere */
+.lp-mkt-hero-band--pricing .lp-mkt-hero-band-glow {
+  animation: lp-price-sheen 8s ease-in-out infinite;
+  opacity: 0.55;
+}
+
+.lp-mkt-hero-band-ruler {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(20, 184, 166, 0.55), transparent);
+  pointer-events: none;
+}
+
+.lp-mkt-hero-band--contact .lp-mkt-hero-band-glow {
+  animation: lp-contact-aurora 7s ease-in-out infinite alternate;
+}
+
+.lp-mkt-hero-band-beams {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 40% 60% at 85% 20%, rgba(20, 184, 166, 0.22), transparent 60%),
+    radial-gradient(ellipse 35% 50% at 10% 80%, rgba(15, 118, 110, 0.18), transparent 55%);
+  animation: lp-contact-beams 10s ease-in-out infinite alternate;
+}
+
+.lp-mkt-hero-band--customers .lp-mkt-hero-band-mesh {
+  opacity: 0.35;
+  animation: lp-cust-mesh 12s linear infinite;
+}
+
+@keyframes lp-price-sheen {
+  0%, 100% { transform: translateX(-6%) scale(1); opacity: 0.4; }
+  50% { transform: translateX(6%) scale(1.05); opacity: 0.7; }
+}
+
+@keyframes lp-contact-aurora {
+  from { transform: translate(-2%, -1%) scale(1); }
+  to { transform: translate(3%, 2%) scale(1.08); }
+}
+
+@keyframes lp-contact-beams {
+  from { opacity: 0.65; filter: hue-rotate(0deg); }
+  to { opacity: 1; filter: hue-rotate(12deg); }
+}
+
+@keyframes lp-cust-mesh {
+  from { background-position: 0 0; }
+  to { background-position: 120px 80px; }
+}
+
+@keyframes lp-contact-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.06); }
+}
+
+@keyframes lp-contact-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes lp-price-rise {
+  from { transform: translateY(18px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes lp-cust-tile-in {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.lp-contact-pulse {
+  transform-origin: 240px 120px;
+  animation: lp-contact-pulse 3.6s ease-in-out infinite;
+}
+
+.lp-contact-ring {
+  transform-origin: 240px 140px;
+  animation: lp-contact-spin 28s linear infinite;
+}
+
+.lp-contact-ring--slow {
+  animation-duration: 48s;
+  animation-direction: reverse;
+}
+
+.lp-price-bar {
+  animation: lp-price-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 120ms);
+}
+
+.lp-cust-tile {
+  animation: lp-cust-tile-in 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 90ms);
+}
+
+/* ── Pricing layout ── */
+.lp-pricing-promise {
+  margin: 0;
+  padding: 0 var(--lp-page-pad);
+}
+
+.lp-pricing-promise-inner {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  max-width: 1120px;
+  margin: -28px auto 8px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+  position: relative;
+  z-index: 2;
+}
+
+.lp-pricing-promise-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 20px;
+  min-width: 0;
+  border-right: 1px solid #eef2f7;
+}
+
+.lp-pricing-promise-item:last-child { border-right: none; }
+
+.lp-pricing-promise-item strong {
+  font-size: 14px;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.lp-pricing-promise-item span {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.lp-pricing-tiers {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 16px !important;
+  align-items: stretch;
+  max-width: 1120px;
+  margin: 28px auto 0;
+  padding: 0;
+}
+
+.lp-page-pricing .lp-mkt-price-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  margin: 0;
+  padding: 22px 20px 20px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.lp-page-pricing .lp-mkt-price-card .lp-mkt-list {
+  flex: 1 1 auto;
+}
+
+.lp-page-pricing .lp-mkt-price-card .lp-btn {
+  margin-top: auto;
+  width: 100%;
+  justify-content: center;
+}
+
+.lp-price-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lp-price-period {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: #0f766e;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.lp-page-pricing .lp-mkt-price {
+  margin: 4px 0 0;
+  font-size: 34px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.lp-page-pricing .lp-mkt-price-blurb {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.lp-price-badge {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #0d9488;
+  color: #ecfdf5;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lp-price-card--team.is-featured,
+.lp-page-pricing .lp-mkt-price-card.is-featured {
+  border-color: #0d9488;
+  background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 42%);
+  box-shadow: 0 16px 36px rgba(13, 148, 136, 0.14);
+  transform: translateY(-4px);
+}
+
+.lp-price-card--team.is-featured::before { display: none; }
+
+.lp-pricing-compare {
+  max-width: 1120px;
+  margin: 36px auto 48px;
+}
+
+.lp-pricing-compare-head {
+  margin-bottom: 16px;
+}
+
+.lp-pricing-compare-head h2 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+
+.lp-pricing-compare-head p {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
+  max-width: 52ch;
+}
+
+.lp-page-pricing .lp-mkt-compare-table td[data-empty="true"] {
+  color: #cbd5e1;
+}
+
+.lp-page-pricing .lp-mkt-compare-wrap {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+/* ── Customers layout ── */
+.lp-cust-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  max-width: 1120px;
+  margin: -24px auto 8px;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #fff;
+  overflow: hidden;
+  position: relative;
+  z-index: 2;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.07);
+}
+
+.lp-cust-metric {
+  padding: 18px 16px;
+  border-right: 1px solid #eef2f7;
+  min-width: 0;
+  text-align: left;
+}
+
+.lp-cust-metric:last-child { border-right: none; }
+
+.lp-cust-metric strong {
+  display: block;
+  font-size: 28px;
+  letter-spacing: -0.03em;
+  color: #0f172a;
+  line-height: 1.1;
+}
+
+.lp-cust-metric span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 650;
+}
+
+.lp-cust-sectors,
+.lp-cust-stories {
+  max-width: 1120px;
+  margin: 28px auto 0;
+}
+
+.lp-cust-sectors-head,
+.lp-cust-stories-head {
+  margin-bottom: 14px;
+}
+
+.lp-cust-sectors-head h2,
+.lp-cust-stories-head h2 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+
+.lp-cust-sectors-head p {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.lp-cust-sector-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.lp-cust-sector {
+  min-width: 0;
+  padding: 14px 12px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lp-cust-sector strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.lp-cust-sector span {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #64748b;
+}
+
+.lp-cust-story-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.lp-cust-story {
+  margin: 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 16px;
+  border-radius: 14px;
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.lp-cust-story-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.lp-cust-industry,
+.lp-cust-metric-chip {
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.lp-cust-industry {
+  background: #ecfdf5;
+  color: #0f766e;
+}
+
+.lp-cust-metric-chip {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.lp-cust-story p {
+  margin: 0;
+  flex: 1 1 auto;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.lp-cust-story footer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lp-cust-story footer strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.lp-cust-story footer span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* ── Contact sales layout ── */
+.lp-contact-stage {
+  max-width: 1120px;
+  margin: -20px auto 48px;
+  position: relative;
+  z-index: 2;
+  padding: 0;
+}
+
+.lp-contact-stage-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.35fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.lp-contact-rail {
+  min-width: 0;
+  padding: 22px 20px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: linear-gradient(165deg, #0f2744 0%, #07111f 100%);
+  color: #e2e8f0;
+  box-shadow: 0 20px 48px rgba(7, 17, 31, 0.28);
+}
+
+.lp-contact-rail h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+}
+
+.lp-contact-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0;
+}
+
+.lp-contact-steps li {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  align-items: baseline;
+}
+
+.lp-contact-steps li:first-child { border-top: none; padding-top: 0; }
+
+.lp-contact-steps strong {
+  font-size: 12px;
+  color: #5eead4;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lp-contact-steps span {
+  font-size: 13px;
+  line-height: 1.4;
+  color: #cbd5e1;
+}
+
+.lp-contact-trust {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.lp-contact-trust span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #99f6e4;
+}
+
+.lp-contact-panel {
+  min-width: 0;
+  padding: 22px 22px 20px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+}
+
+.lp-contact-form-head {
+  margin-bottom: 16px;
+}
+
+.lp-contact-form-head h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  letter-spacing: -0.02em;
+}
+
+.lp-contact-form-head p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.lp-contact-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.lp-contact-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: #475569;
+  min-width: 0;
+}
+
+.lp-contact-span-2 { grid-column: 1 / -1; }
+
+.lp-contact-form .lp-mkt-input,
+.lp-contact-form .lp-mkt-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.lp-contact-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  align-items: center;
+}
+
+.lp-contact-success {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.lp-contact-success-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: #ecfdf5;
+  color: #0f766e;
+}
+
+.lp-contact-success h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
+.lp-contact-success p {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 48ch;
+}
+
+/* Home: reduce noisy duplicate motion on logo float band */
+.lp-home .lp-logos--float .lp-logo-float {
+  animation-duration: 7s;
+}
+
+.lp-home .lp-ambient-orb--c {
+  opacity: 0.35;
+}
+
+@media (max-width: 980px) {
+  .lp-pricing-promise-inner,
+  .lp-pricing-tiers,
+  .lp-cust-metrics,
+  .lp-cust-story-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-cust-sector-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lp-contact-stage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-price-card--team.is-featured,
+  .lp-page-pricing .lp-mkt-price-card.is-featured {
+    transform: none;
+  }
+
+  .lp-pricing-promise-item,
+  .lp-cust-metric {
+    border-right: none;
+    border-bottom: 1px solid #eef2f7;
+  }
+
+  .lp-pricing-promise-item:last-child,
+  .lp-cust-metric:last-child {
+    border-bottom: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-cust-sector-grid,
+  .lp-contact-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .lp-contact-span-2 { grid-column: auto; }
+
+  .lp-pricing-promise-inner,
+  .lp-cust-metrics {
+    margin-top: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-mkt-hero-band--pricing .lp-mkt-hero-band-glow,
+  .lp-mkt-hero-band--contact .lp-mkt-hero-band-glow,
+  .lp-mkt-hero-band-beams,
+  .lp-mkt-hero-band--customers .lp-mkt-hero-band-mesh,
+  .lp-contact-pulse,
+  .lp-contact-ring,
+  .lp-price-bar,
+  .lp-cust-tile {
+    animation: none !important;
+  }
+}
+
+/* Quieter ambient on marketing subpages — distinct from home orb drift */
+.lp-ambient--quiet .lp-ambient-orb {
+  opacity: 0.28;
+  animation-duration: 28s;
+}
+
+.lp[data-lp-route="pricing"] .lp-ambient-orb--b,
+.lp[data-lp-route="contact"] .lp-ambient-orb--a,
+.lp[data-lp-route="customers"] .lp-ambient-orb--b {
+  display: none;
+}

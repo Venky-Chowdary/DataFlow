@@ -135,6 +135,13 @@ def write_mapped_rows(
 ) -> WriteResult:
     """Write records to a SQLite database file."""
     del port, username, password, ssl
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+        schema_policy=_kwargs.get("schema_policy"),
+    )
     path = sqlite_file_path(database, connection_string, host)
     if not path:
         return WriteResult(

@@ -9,6 +9,8 @@ export interface SearchNavigateTarget {
   connectorId?: string;
   jobId?: string;
   scheduleId?: string;
+  /** Optional detail panel deep-link (e.g. mapping-proof). */
+  panel?: string;
 }
 
 export interface SearchResult {

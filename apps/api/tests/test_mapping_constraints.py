@@ -22,6 +22,28 @@ def test_enforce_drops_invented_targets():
     assert "amt" in invented
 
 
+def test_enforce_keeps_create_compatible_new():
+    """Type-safe ADD COLUMN proposals must not be stripped when dest DDL exists."""
+    mappings = [
+        {
+            "source": "_id",
+            "target": "_id_text",
+            "confidence": 0.92,
+            "create_new": True,
+            "assignment_strategy": "create_compatible_new",
+        },
+        {"source": "name", "target": "name", "confidence": 0.95},
+    ]
+    kept, dropped, invented = enforce_destination_constraints(
+        mappings, ["id", "name"]
+    )
+    assert len(kept) == 2
+    assert {m["source"] for m in kept} == {"_id", "name"}
+    assert dropped == []
+    assert invented == []
+    assert next(m for m in kept if m["source"] == "_id")["create_new"] is True
+
+
 def test_enforce_resolves_target_spelling():
     mappings = [{"source": "Email", "target": "email_address", "confidence": 0.91}]
     kept, _, _ = enforce_destination_constraints(mappings, ["EMAIL_ADDRESS"])

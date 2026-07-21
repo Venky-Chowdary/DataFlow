@@ -5,7 +5,13 @@ import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ScheduleRunHistory } from "./schedules/ScheduleRunHistory";
-import { fetchJob, fetchSchedule } from "../lib/api";
+import { fetchContractBreaker, fetchJob, fetchSchedule, type ContractBreaker } from "../lib/api";
+import {
+  breakerBadgeClass,
+  breakerBlocksRuns,
+  breakerLabel,
+} from "../lib/contractBreakerUi";
+import { computeJobTrustScore } from "../lib/jobTrustScore";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
@@ -20,12 +26,16 @@ interface PipelineDetailDrawerProps {
   tab: PipelineTab;
   setTab: (tab: PipelineTab) => void;
   running?: boolean;
+  /** Hint from fleet load; refreshed via fetch when drawer opens. */
+  breakerHint?: string | null;
   onClose: () => void;
   onRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onToggle: () => void;
   onOpenJob?: (jobId: string) => void;
+  onResetBreaker?: (contractId: string) => void | Promise<void>;
+  onExportYaml?: () => void;
 }
 
 const INTERVAL_LABEL: Record<string, string> = {
@@ -67,22 +77,28 @@ export function PipelineDetailDrawer({
   tab,
   setTab,
   running,
+  breakerHint,
   onClose,
   onRun,
   onEdit,
   onDelete,
   onToggle,
   onOpenJob,
+  onResetBreaker,
+  onExportYaml,
 }: PipelineDetailDrawerProps) {
   const [mappingCount, setMappingCount] = useState(0);
   const [mappings, setMappings] = useState<{ source: string; target: string }[]>([]);
   const [lastJob, setLastJob] = useState<TransferJob | null>(null);
+  const [breaker, setBreaker] = useState<ContractBreaker | null>(null);
+  const [resettingBreaker, setResettingBreaker] = useState(false);
 
   useEffect(() => {
     if (!open || !sched?.id) {
       setMappingCount(0);
       setMappings([]);
       setLastJob(null);
+      setBreaker(null);
       return;
     }
     let cancelled = false;
@@ -117,14 +133,27 @@ export function PipelineDetailDrawer({
     } else {
       setLastJob(null);
     }
+    if (sched.contract_id) {
+      void fetchContractBreaker(sched.contract_id)
+        .then((b) => {
+          if (!cancelled) setBreaker(b);
+        })
+        .catch(() => {
+          if (!cancelled) setBreaker(null);
+        });
+    } else {
+      setBreaker(null);
+    }
     return () => {
       cancelled = true;
     };
-  }, [open, sched?.id, sched?.last_job_id]);
+  }, [open, sched?.id, sched?.last_job_id, sched?.contract_id]);
 
   if (!sched) return null;
 
   const isRunning = Boolean(running || sched.running);
+  const breakerState = breaker?.state || breakerHint || null;
+  const breakerOpen = breakerBlocksRuns(breakerState);
   const cadence = sched.cron
     ? `Cron ${sched.cron}`
     : (INTERVAL_LABEL[sched.interval] ?? sched.interval);
@@ -134,10 +163,27 @@ export function PipelineDetailDrawer({
   const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
   const rejected = Number(lastJob?.rejected_rows ?? 0);
   const coerced = Number(lastJob?.coerced_null_rows ?? 0);
+  const lastTrust = lastJob ? computeJobTrustScore(lastJob) : null;
   const needsAttention =
     Boolean(sched.last_status && /fail|error/i.test(String(sched.last_status)))
     || rejected > 0
-    || !sched.enabled;
+    || !sched.enabled
+    || breakerOpen
+    || (lastTrust != null && lastTrust.score < 60);
+
+  const handleResetBreaker = async () => {
+    if (!sched.contract_id || !onResetBreaker) return;
+    setResettingBreaker(true);
+    try {
+      await onResetBreaker(sched.contract_id);
+      const b = await fetchContractBreaker(sched.contract_id);
+      setBreaker(b);
+    } catch {
+      /* parent toasts */
+    } finally {
+      setResettingBreaker(false);
+    }
+  };
 
   return (
     <Drawer
@@ -153,6 +199,11 @@ export function PipelineDetailDrawer({
           {isRunning && (
             <span className="df2-badge df2-badge-run">
               <DtIcon name="activity" size={11} /> Running
+            </span>
+          )}
+          {breakerState && (
+            <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
+              {breakerLabel(breakerState)}
             </span>
           )}
           <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
@@ -175,12 +226,25 @@ export function PipelineDetailDrawer({
             variant="primary"
             loading={running}
             loadingLabel="Running…"
-            disabled={isRunning}
+            disabled={isRunning || breakerOpen}
+            title={breakerOpen ? "Reset the contract breaker before running" : undefined}
             onClick={onRun}
             leadingIcon={<DtIcon name="activity" size={14} />}
           >
-            {isRunning ? "Running…" : "Run now"}
+            {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
           </Button>
+          {breakerOpen && sched.contract_id && onResetBreaker && (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={resettingBreaker}
+              loadingLabel="Resetting…"
+              onClick={() => void handleResetBreaker()}
+              leadingIcon={<DtIcon name="shield" size={14} />}
+            >
+              Reset breaker
+            </Button>
+          )}
           {sched.last_job_id && onOpenJob && (
             <Button
               size="sm"
@@ -202,6 +266,16 @@ export function PipelineDetailDrawer({
           <Button size="sm" variant="ghost" onClick={onEdit} leadingIcon={<DtIcon name="settings" size={14} />}>
             Edit
           </Button>
+          {onExportYaml && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onExportYaml}
+              leadingIcon={<DtIcon name="download" size={14} />}
+            >
+              Export YAML
+            </Button>
+          )}
           <Button
             size="sm"
             variant="danger"
@@ -223,6 +297,22 @@ export function PipelineDetailDrawer({
           <span>Sync mode</span>
           <strong>{syncLabel}</strong>
         </div>
+        <div className="df2-drawer-fact">
+          <span>Data contract</span>
+          <strong title={sched.contract_id || undefined}>
+            {sched.contract_id
+              ? (sched.require_signed_contract ? "Signed · enforced" : "Bound")
+              : "None"}
+          </strong>
+        </div>
+        {sched.contract_id && (
+          <div className="df2-drawer-fact">
+            <span>Breaker</span>
+            <strong className={breakerOpen ? "df2-text-warn" : undefined}>
+              {breakerState ? breakerLabel(breakerState) : "—"}
+            </strong>
+          </div>
+        )}
         <div className="df2-drawer-fact">
           <span>Last run</span>
           <strong>{formatWhen(sched.last_run_at)}</strong>
@@ -251,6 +341,19 @@ export function PipelineDetailDrawer({
             <span>Coerced nulls</span>
             <strong>{coerced}</strong>
           </div>
+          {lastJob && lastTrust && (
+            <div className="df2-drawer-fact">
+              <span>Trust score</span>
+              <strong
+                className={lastTrust.tone === "danger" ? "df2-text-warn" : undefined}
+                title={lastTrust.next_action.detail}
+              >
+                {lastTrust.score}
+                {" · "}
+                {lastTrust.grade}
+              </strong>
+            </div>
+          )}
         </div>
       )}
 
@@ -302,9 +405,24 @@ export function PipelineDetailDrawer({
               <div><dt>Validation</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
               <div><dt>Runs</dt><dd>{sched.run_count.toLocaleString()}</dd></div>
+              {sched.contract_id && (
+                <div>
+                  <dt>Contract breaker</dt>
+                  <dd>
+                    {breaker
+                      ? `${breaker.state} · ${breaker.failure_count}/${breaker.failure_threshold} failures`
+                      : (breakerState || "—")}
+                  </dd>
+                </div>
+              )}
               {sched.primary_key && <div><dt>Primary key</dt><dd>{sched.primary_key}</dd></div>}
               {sched.cursor_column && <div><dt>Cursor</dt><dd>{sched.cursor_column}</dd></div>}
             </dl>
+            {breakerOpen && (
+              <p className="df2-drawer-empty-line">
+                Circuit breaker is open — scheduled and manual runs stay blocked until you reset it (after fixing the contract drift or quality failure that tripped it).
+              </p>
+            )}
           </section>
         )}
 

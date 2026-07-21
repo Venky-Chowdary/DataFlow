@@ -11,6 +11,9 @@ services:
       - max_replication_slots=10
       - -c
       - max_wal_senders=10
+      # Cap retained WAL for idle CDC slots (Debezium-class operator safety).
+      - -c
+      - max_slot_wal_keep_size=1GB
     environment:
       POSTGRES_USER: dataflow
       POSTGRES_PASSWORD: dataflow
@@ -100,12 +103,19 @@ services:
       - -c
       - |
         mongosh --host mongodb:27017 --quiet --eval '
+          # Dual-access: host clients use localhost; in-network also works on
+          # mapped 27017. Avoid hostname ``mongodb`` which breaks host→compose.
           try { rs.status(); }
-          catch (e) { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongodb:27017" }] }); }
+          catch (e) {
+            rs.initiate({
+              _id: "rs0",
+              members: [{ _id: 0, host: "localhost:27017" }]
+            });
+          }
         '
 
-  # SQL Server Change Tracking for CDC integration tests.
-  # Enable CT after first boot: see apps/api/tests/sqlserver_ct_init.sql
+  # SQL Server Change Tracking + native CDC for integration tests.
+  # Auto-init after first boot (sqlserver-init). Manual: sqlserver_ct_init.sql + sqlserver_cdc_init.sql
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
@@ -116,6 +126,8 @@ services:
       - "1433:1433"
     volumes:
       - mssqldata:/var/opt/mssql
+      - ./apps/api/tests/sqlserver_ct_init.sql:/docker-init/sqlserver_ct_init.sql:ro
+      - ./apps/api/tests/sqlserver_cdc_init.sql:/docker-init/sqlserver_cdc_init.sql:ro
     healthcheck:
       test:
         [
@@ -126,6 +138,23 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
+
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./apps/api/tests/sqlserver_ct_init.sql:/ct_init.sql:ro
+      - ./apps/api/tests/sqlserver_cdc_init.sql:/cdc_init.sql:ro
+    entrypoint:
+      - bash
+      - -c
+      - |
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /ct_init.sql
+        /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'DataFlow_CDC_2022!' -C -i /cdc_init.sql
+        echo "sqlserver CT + native CDC init done"
 
 volumes:
   pgdata:

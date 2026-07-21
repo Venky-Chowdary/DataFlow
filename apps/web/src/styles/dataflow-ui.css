@@ -5142,10 +5142,13 @@ body {
 .df2-schema-review-grid div,
 .df2-mapping-policy-grid div {
   min-height: 86px;
+  min-width: 0;
   padding: 12px;
   border: 1px solid var(--df-line);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.86);
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .df2-connection-status-grid span,
@@ -5163,8 +5166,22 @@ body {
 .df2-connection-status-grid strong,
 .df2-settings-mini-grid strong,
 .df2-schema-review-grid strong {
+  display: block;
   color: #101412;
   font-size: 13px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-settings-mini-endpoint strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+  text-overflow: unset;
 }
 
 .df2-schema-review-grid,
@@ -5172,6 +5189,59 @@ body {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.df2-mapping-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.df2-mapping-policy-cta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--df-line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  min-width: 0;
+}
+
+.df2-mapping-policy-cta p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #66736b;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-mapping-policy-cta .df2-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Drawer is narrow — use 2-col grids so values and CTAs stay inside cards */
+.df2-drawer .df2-connection-status-grid,
+.df2-drawer .df2-settings-mini-grid,
+.df2-drawer .df2-mapping-policy-grid,
+.df2-drawer .df2-schema-review-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.df2-drawer .df2-connection-status-grid div,
+.df2-drawer .df2-settings-mini-grid div,
+.df2-drawer .df2-mapping-policy-grid div,
+.df2-drawer .df2-schema-review-grid div {
+  min-height: 0;
+}
+
+.df2-drawer .df2-mapping-policy-cta {
+  flex-wrap: wrap;
 }
 
 .df2-schema-review-grid div.block {

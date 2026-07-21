@@ -418,14 +418,21 @@ def _snowflake_list_schemas(cur: Any) -> list[str]:
 
 def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str], str | None]:
     """Pick a usable schema. Returns (schema, available, warning_or_none)."""
-    from connectors.writer_common import quote_sql_identifier
+    from connectors.sql_identifiers import quote_sql_identifier, snowflake_fold_identifier
 
     requested = (requested or "PUBLIC").strip() or "PUBLIC"
-    # Snowflake unquoted identifiers fold to uppercase.
+    # Snowflake unquoted identifiers fold to uppercase — never USE SCHEMA "public".
     candidates = []
-    for c in (requested, requested.upper(), requested.lower(), "PUBLIC", "public"):
-        if c and c not in candidates:
-            candidates.append(c)
+    for c in (
+        snowflake_fold_identifier(requested),
+        requested.upper(),
+        "PUBLIC",
+        requested,
+        requested.lower(),
+    ):
+        folded = snowflake_fold_identifier(c) if c else ""
+        if folded and folded not in candidates:
+            candidates.append(folded)
 
     available = _snowflake_list_schemas(cur)
     available_set = {a.upper() for a in available}
@@ -433,19 +440,18 @@ def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str],
     for cand in candidates:
         try:
             cur.execute(f"USE SCHEMA {quote_sql_identifier(cand)}")
-            resolved = cand.upper()
+            resolved = snowflake_fold_identifier(cand)
             warning = None
-            if requested.upper() != resolved:
+            if snowflake_fold_identifier(requested) != resolved:
                 warning = (
                     f"Schema '{requested}' was not usable; using '{resolved}' instead."
                 )
             elif available_set and resolved not in available_set:
-                # USE succeeded even if catalog list was incomplete — fine.
                 warning = None
             return resolved, available, warning
         except Exception as exc:
             msg = str(exc).lower()
-            if "002043" in str(exc) or "does not exist" in msg or "not exist" in msg:
+            if "002043" in str(exc) or "002003" in str(exc) or "does not exist" in msg or "not exist" in msg:
                 continue
             # Unexpected errors (permissions, etc.) — re-raise for outer handler
             raise
@@ -455,7 +461,7 @@ def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str],
     if "PUBLIC" in available_set:
         fallback = "PUBLIC"
     elif available:
-        fallback = available[0]
+        fallback = snowflake_fold_identifier(available[0])
     if fallback:
         cur.execute(f"USE SCHEMA {quote_sql_identifier(fallback)}")
         sample = ", ".join(available[:12])
@@ -504,7 +510,10 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             db = (kwargs.get("database") or "").strip()
             if db:
                 try:
-                    cur.execute(f"USE DATABASE {quote_sql_identifier(db)}")
+                    from connectors.sql_identifiers import snowflake_fold_identifier
+
+                    db_folded = snowflake_fold_identifier(db)
+                    cur.execute(f"USE DATABASE {quote_sql_identifier(db_folded)}")
                 except Exception as exc:
                     conn.close()
                     return {

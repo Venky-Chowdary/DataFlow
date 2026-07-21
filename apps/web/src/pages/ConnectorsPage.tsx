@@ -29,10 +29,12 @@ interface ConnectorsPageProps {
   onEdit: (connector: Connector) => void;
   onDelete: (id: string) => void;
   onRefresh?: () => void | Promise<void>;
-  onOpenTransfer?: () => void;
+  onOpenTransfer?: (connectorId?: string) => void;
   onOpenJob?: (jobId: string) => void;
   showConnectionsTab?: number;
   highlightConnectorId?: string;
+  /** True while the connector create/edit modal is open (used to resume the detail drawer). */
+  connectorEditorOpen?: boolean;
 }
 
 function catalogType(id: string) {
@@ -52,6 +54,7 @@ export function ConnectorsPage({
   onOpenJob,
   showConnectionsTab,
   highlightConnectorId,
+  connectorEditorOpen = false,
 }: ConnectorsPageProps) {
   const { toast } = useToast();
   const [tab, setTab] = useState<"connections" | "catalog">("connections");
@@ -63,6 +66,7 @@ export function ConnectorsPage({
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [connectionTab, setConnectionTab] = useState<(typeof CONNECTION_TABS)[number]>("Status");
+  const [resumeDrawerAfterEdit, setResumeDrawerAfterEdit] = useState(false);
 
   const openDrawer = (id: string) => {
     setSelectedConnectionId(id);
@@ -94,8 +98,20 @@ export function ConnectorsPage({
     if (selectedConnectionId && !connectors.some((c) => c.id === selectedConnectionId)) {
       setSelectedConnectionId("");
       setDrawerOpen(false);
+      setResumeDrawerAfterEdit(false);
     }
   }, [connectors, selectedConnectionId]);
+
+  // Edit modal closes → return to the detail drawer (same sequence the user entered).
+  useEffect(() => {
+    if (connectorEditorOpen || !resumeDrawerAfterEdit) return;
+    if (!selectedConnectionId || !connectors.some((c) => c.id === selectedConnectionId)) {
+      setResumeDrawerAfterEdit(false);
+      return;
+    }
+    setResumeDrawerAfterEdit(false);
+    setDrawerOpen(true);
+  }, [connectorEditorOpen, resumeDrawerAfterEdit, selectedConnectionId, connectors]);
 
   const filteredConnectors = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -399,15 +415,20 @@ export function ConnectorsPage({
           onTest={() => selectedConnection && void handleTest(selectedConnection.id)}
           onEdit={() => {
             if (!selectedConnection) return;
+            setResumeDrawerAfterEdit(true);
             setDrawerOpen(false);
             onEdit(selectedConnection);
           }}
           onDelete={() => {
             if (!selectedConnection) return;
+            setResumeDrawerAfterEdit(false);
             setDrawerOpen(false);
             onDelete(selectedConnection.id);
           }}
-          onOpenTransfer={onOpenTransfer}
+          onOpenTransfer={(connectorId) => {
+            setDrawerOpen(false);
+            onOpenTransfer?.(connectorId ?? selectedConnection?.id);
+          }}
           onSelectConnection={setSelectedConnectionId}
           onOpenJob={onOpenJob}
         />

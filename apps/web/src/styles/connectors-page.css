@@ -241,7 +241,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-transform: capitalize;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.df2-drawer-fact-endpoint strong {
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.35;
 }
 
 .df2-drawer-fact .df2-fact-ok { color: #059669; }

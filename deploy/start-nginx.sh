@@ -35,9 +35,11 @@ esac
 ORIGIN=$(printf '%s' "$UPSTREAM_API" | sed -E 's|(https?://[^/]+).*|\1|')
 API_PROXY_HOST=$(printf '%s' "$ORIGIN" | sed -E 's|https?://||')
 API_PROXY_PASS="${ORIGIN}/api/"
+API_ORIGIN="$ORIGIN"
 
 export API_PROXY_PASS
 export API_PROXY_HOST
+export API_ORIGIN
 
 # Browser always uses same-origin /api/v1 — nginx proxies to UPSTREAM (no CORS).
 BROWSER_API_BASE="/api/v1"
@@ -55,7 +57,7 @@ else
   TEMPLATE=/etc/nginx/conf.d/default.conf.seed
 fi
 
-envsubst '$PORT $API_PROXY_PASS $API_PROXY_HOST' < "$TEMPLATE" > /etc/nginx/conf.d/default.conf
+envsubst '$PORT $API_PROXY_PASS $API_PROXY_HOST $API_ORIGIN' < "$TEMPLATE" > /etc/nginx/conf.d/default.conf
 
 INDEX=/usr/share/nginx/html/index.html
 if [ -f "$INDEX" ]; then

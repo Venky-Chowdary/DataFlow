@@ -7,6 +7,87 @@ on:
     branches: [main]
 
 jobs:
+  # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
+  gitops:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps (CLI --local imports services.*)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Validate example dataflow.yaml
+        run: |
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli validate -f examples/gitops/dataflow.yaml
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli validate -f examples/gitops/dataflow.staging.yaml
+
+      - name: Plan example manifest (local stores)
+        env:
+          DATAFLOW_DATA_DIR: ${{ runner.temp }}/dataflow-gitops
+          DATAFLOW_JOB_STORE: memory
+        run: |
+          mkdir -p "$DATAFLOW_DATA_DIR"
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli plan -f examples/gitops/dataflow.yaml --local
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli plan -f examples/gitops/dataflow.staging.yaml --local
+
+      - name: GitOps unit proofs
+        env:
+          DATAFLOW_DATA_DIR: ${{ runner.temp }}/dataflow-gitops-tests
+          DATAFLOW_JOB_STORE: memory
+        run: |
+          mkdir -p "$DATAFLOW_DATA_DIR"
+          cd apps/api
+          python -m pytest tests/test_gitops_plan_apply.py tests/test_dataflow_cli.py tests/test_enterprise_p0_p2.py::test_gitops_manifest_shape -q --tb=short
+
+  # Optional CD apply to a staging API — only when repo variable is set.
+  # Apply itself requires DATAFLOW_STAGING_APPLY=1 (variable) on main.
+  gitops-cd-staging:
+    runs-on: ubuntu-latest
+    needs: [gitops]
+    if: ${{ vars.DATAFLOW_STAGING_API_BASE != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Plan against staging API
+        env:
+          DATAFLOW_API_BASE: ${{ vars.DATAFLOW_STAGING_API_BASE }}
+          DATAFLOW_API_TOKEN: ${{ secrets.DATAFLOW_STAGING_API_TOKEN }}
+        run: |
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli validate -f examples/gitops/dataflow.staging.yaml
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli plan -f examples/gitops/dataflow.staging.yaml --api "$DATAFLOW_API_BASE" --token "$DATAFLOW_API_TOKEN"
+
+      - name: Apply with signed-contract gate
+        if: ${{ github.ref == 'refs/heads/main' && vars.DATAFLOW_STAGING_APPLY == '1' }}
+        env:
+          DATAFLOW_API_BASE: ${{ vars.DATAFLOW_STAGING_API_BASE }}
+          DATAFLOW_API_TOKEN: ${{ secrets.DATAFLOW_STAGING_API_TOKEN }}
+        run: |
+          PYTHONPATH=apps/api:apps/cli python -m dataflow_cli apply \
+            -f examples/gitops/dataflow.staging.yaml \
+            --api "$DATAFLOW_API_BASE" \
+            --token "$DATAFLOW_API_TOKEN" \
+            --yes \
+            --require-signed-contracts
+
   api-and-web:
     runs-on: ubuntu-latest
     services:
@@ -30,19 +111,8 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: dataflow
-          POSTGRES_PASSWORD: dataflow
-          POSTGRES_DB: dataflow
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U dataflow"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=5
+      # Postgres is started in a step (not as a service) so we can enable
+      # wal_level=logical for CDC integration tests. See Dockerfile.postgres-cdc.
       redis:
         image: redis:7-alpine
         ports:
@@ -55,6 +125,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Start Postgres with logical CDC
+        run: |
+          docker build -t dataflow-postgres-cdc:ci -f apps/api/docker/Dockerfile.postgres-cdc apps/api/docker
+          docker run -d --name dataflow-postgres-cdc \
+            -e POSTGRES_USER=dataflow \
+            -e POSTGRES_PASSWORD=dataflow \
+            -e POSTGRES_DB=dataflow \
+            -p 5432:5432 \
+            dataflow-postgres-cdc:ci
+          for i in $(seq 1 30); do
+            if docker exec dataflow-postgres-cdc pg_isready -U dataflow; then
+              wal=$(docker exec dataflow-postgres-cdc psql -U dataflow -d dataflow -Atc "SHOW wal_level")
+              echo "wal_level=${wal}"
+              test "${wal}" = "logical"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres CDC container failed to become ready" >&2
+          docker logs dataflow-postgres-cdc || true
+          exit 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,6 +175,194 @@ jobs:
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: dataflow
+          PGPASSWORD: dataflow
+          PGDATABASE: dataflow
+
+      - name: CDC matrix report
+        run: npm run test:cdc
+        env:
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: dataflow
+          PGPASSWORD: dataflow
+          PGDATABASE: dataflow
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+          DATAFLOW_CDC_LEASE_BACKEND: redis
+          DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
 
       - name: Build web
         run: npm run build
+
+  # Separate job: SQL Server image is large/slow; keep main CI lean.
+  cdc-sqlserver:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SQL Server
+        run: |
+          docker run -d --name dataflow-sqlserver \
+            -e ACCEPT_EULA=Y \
+            -e MSSQL_SA_PASSWORD='DataFlow_CDC_2022!' \
+            -e MSSQL_PID=Developer \
+            -p 1433:1433 \
+            mcr.microsoft.com/mssql/server:2022-latest
+          for i in $(seq 1 60); do
+            if docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
+              -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -Q "SELECT 1" >/dev/null 2>&1; then
+              echo "SQL Server ready"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "SQL Server failed to become ready" >&2
+          docker logs dataflow-sqlserver || true
+          exit 1
+
+      - name: Install Microsoft ODBC Driver 18
+        run: |
+          # --batch/--yes: runners have no TTY; gpg otherwise prompts to overwrite and fails.
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Init Change Tracking + native CDC
+        run: |
+          docker cp apps/api/tests/sqlserver_ct_init.sql dataflow-sqlserver:/tmp/ct_init.sql
+          docker cp apps/api/tests/sqlserver_cdc_init.sql dataflow-sqlserver:/tmp/cdc_init.sql
+          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/ct_init.sql
+          docker exec dataflow-sqlserver /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P 'DataFlow_CDC_2022!' -C -i /tmp/cdc_init.sql
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          cd apps/api
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run SQL Server CDC tests
+        working-directory: apps/api
+        run: |
+          python -m pytest \
+            tests/test_cdc_sqlserver_ct_integration.py \
+            tests/test_cdc_sqlserver_native_integration.py \
+            tests/test_sqlserver_native_cdc.py \
+            tests/test_sqlserver_oracle_cdc.py \
+            -v --tb=short
+        env:
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_CDC_LEASE_BACKEND: memory
+
+  # Optional: enable via repo variable ENABLE_ORACLE_CDC=true.
+  # Secrets must NOT appear in job `if:` (GitHub rejects `secrets` there).
+  # Missing credentials → pytest skip via DATAFLOW_ORACLE_* gates.
+  cdc-oracle:
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_ORACLE_CDC == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require Oracle password secret
+        id: oracle_creds
+        env:
+          DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
+        run: |
+          if [ -z "${DATAFLOW_ORACLE_PASSWORD}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "DATAFLOW_ORACLE_PASSWORD secret not set — skipping Oracle CDC live IT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.oracle_creds.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps + Oracle client
+        if: steps.oracle_creds.outputs.skip != 'true'
+        run: |
+          cd apps/api
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install oracledb
+
+      - name: Run Oracle CDC live IT
+        if: steps.oracle_creds.outputs.skip != 'true'
+        working-directory: apps/api
+        run: |
+          python -m pytest \
+            tests/test_cdc_oracle_integration.py \
+            tests/test_sqlserver_oracle_cdc.py \
+            -v --tb=short
+        env:
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_ORACLE_ENABLE: "1"
+          DATAFLOW_ORACLE_HOST: ${{ secrets.DATAFLOW_ORACLE_HOST }}
+          DATAFLOW_ORACLE_PORT: ${{ secrets.DATAFLOW_ORACLE_PORT }}
+          DATAFLOW_ORACLE_SERVICE: ${{ secrets.DATAFLOW_ORACLE_SERVICE }}
+          DATAFLOW_ORACLE_USER: ${{ secrets.DATAFLOW_ORACLE_USER }}
+          DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
+          DATAFLOW_ORACLE_SCHEMA: ${{ secrets.DATAFLOW_ORACLE_SCHEMA }}
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit tools and default API deps
+        run: |
+          python -m pip install --upgrade pip pip-audit bandit
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Assert optional RAG deps are not in default install
+        run: |
+          python - <<'PY'
+          import importlib.util
+          for name in ("chromadb", "sentence_transformers"):
+              if importlib.util.find_spec(name) is not None:
+                  raise SystemExit(f"{name} must not be installed from default requirements.txt")
+          print("ok: chromadb/sentence_transformers absent from default env")
+          PY
+
+      - name: pip-audit installed default API environment
+        # Optional RAG extras (chromadb / sentence-transformers) live in
+        # requirements-rag.txt and are intentionally out of this gate.
+        run: pip-audit --local
+
+      - name: bandit high-severity gate (production code)
+        # Fail on High only — Medium SQL f-string debt is tracked separately;
+        # key identifier paths are hardened via connectors/sql_identifiers.py.
+        run: >
+          bandit -r apps/api/connectors apps/api/services apps/api/src
+          -lll
+          -q

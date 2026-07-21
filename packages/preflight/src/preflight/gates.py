@@ -145,18 +145,14 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             issues.append(label)
 
     if issues:
-        if (ctx.plan.validation_mode or "strict").lower() in {"strict", "maximum"}:
-            return _block(
-                GateId.G3_SCHEMA_CONTRACT,
-                f"{len(issues)} type coercion issue(s)",
-                start,
-                {"issues": issues, "issues_detail": issues_detail, "warnings": warnings},
-            )
-        return _pass(
+        # Critical write hazards always block Validate — balanced mode may soften
+        # *declared* mismatches that samples prove safe (those land in warnings),
+        # but anything that would fail at Run must stop here with a fix path.
+        return _block(
             GateId.G3_SCHEMA_CONTRACT,
-            f"{len(issues)} type coercion warning(s) — will be verified by dry-run",
+            f"{len(issues)} type coercion issue(s)",
             start,
-            {"issues": issues, "issues_detail": issues_detail, "warnings": issues + warnings},
+            {"issues": issues, "issues_detail": issues_detail, "warnings": warnings},
         )
     if warnings:
         return _pass(

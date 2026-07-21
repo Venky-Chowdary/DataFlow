@@ -13,9 +13,42 @@ import json
 import math
 import uuid
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, Overflow
 from enum import Enum
 from typing import Any
+
+# Fixed-point expansion past type_system DECIMAL budgets is unsafe
+# (memory / driver Overflow). Prefer short scientific form for Redis/JSON/CSV.
+from services.type_system import decimal_needs_scientific_wire
+
+
+def safe_decimal_text(value: Decimal) -> str | None:
+    """Serialize a Decimal per type_system DECIMAL wire policy.
+
+    Modest values → fixed-point (exact scale). Extreme exponents → scientific
+    text (Informatica-class: preserve digits as text when platform DECIMAL
+    cannot hold them). Never expand into multi-megabyte strings; never raise
+    decimal.Overflow into the transfer loop.
+    """
+    if not isinstance(value, Decimal):
+        try:
+            value = Decimal(value)
+        except (InvalidOperation, Overflow, ValueError, TypeError):
+            return None
+    try:
+        if value.is_nan() or value.is_infinite():
+            return None
+        _sign, digits, exp = value.as_tuple()
+        if not isinstance(exp, int):
+            return str(value)
+        if decimal_needs_scientific_wire(digit_count=len(digits), abs_exponent=abs(exp)):
+            return format(value, "e")
+        return format(value, "f")
+    except (Overflow, InvalidOperation, ValueError, TypeError):
+        try:
+            return str(value)
+        except Exception:
+            return None
 
 
 def _is_na(value: Any) -> bool:
@@ -63,12 +96,11 @@ def _decimal_to_json(value: Decimal) -> Any:
     exactly representable in binary64 (e.g. 0.1, 1.2345, large integers). A
     string preserves every digit and can be parsed back to an exact numeric
     value by any downstream consumer.
+
+    Extreme exponents stay scientific — never expand into a multi-megabyte
+    fixed-point string (that path raised decimal.Overflow mid-transfer).
     """
-    if value.is_nan() or value.is_infinite():
-        return None
-    # Use fixed-point notation so values like 1E-13 are emitted as
-    # "0.0000000000001" and trailing zeros are preserved.
-    return format(value, "f")
+    return safe_decimal_text(value)
 
 
 def _json_default(value: Any) -> Any:
@@ -108,9 +140,15 @@ def _json_default(value: Any) -> Any:
     if cls_name == "ObjectId":
         return str(value)
 
-    # bson.decimal128.Decimal128
+    # bson.decimal128.Decimal128 — to_decimal() can raise decimal.Overflow
     if cls_name == "Decimal128":
-        return _json_default(value.to_decimal())
+        try:
+            return _json_default(value.to_decimal())
+        except (Overflow, InvalidOperation, ValueError, TypeError):
+            try:
+                return str(value)
+            except Exception:
+                return None
 
     # boto3 DynamoDB Binary
     if cls_name == "Binary":
@@ -162,11 +200,7 @@ def cell_to_string(value: Any) -> str:
         return base64.b64encode(bytes(value)).decode("ascii")
 
     if isinstance(value, Decimal):
-        if value.is_nan() or value.is_infinite():
-            return ""
-        # Fixed-point notation preserves scale and avoids scientific notation
-        # in CSV/JSON/JSONL exports (e.g. 1E-13 becomes "0.0000000000001").
-        return format(value, "f")
+        return safe_decimal_text(value) or ""
 
     if isinstance(value, datetime):
         return value.isoformat()
@@ -189,9 +223,15 @@ def cell_to_string(value: Any) -> str:
     if cls_name == "ObjectId":
         return str(value)
 
-    # bson.decimal128.Decimal128
+    # bson.decimal128.Decimal128 — never let Overflow abort a whole batch
     if cls_name == "Decimal128":
-        return cell_to_string(value.to_decimal())
+        try:
+            return cell_to_string(value.to_decimal())
+        except (Overflow, InvalidOperation, ValueError, TypeError):
+            try:
+                return str(value)
+            except Exception:
+                return ""
 
     # boto3 DynamoDB Binary
     if cls_name == "Binary":
@@ -260,7 +300,13 @@ def sanitize_json_value(value: Any) -> Any:
     if _is_objectid(value):
         return str(value)
     if _is_decimal128(value):
-        return sanitize_json_value(value.to_decimal())
+        try:
+            return sanitize_json_value(value.to_decimal())
+        except (Overflow, InvalidOperation, ValueError, TypeError):
+            try:
+                return str(value)
+            except Exception:
+                return None
     if _is_binary(value):
         return base64.b64encode(value.value).decode("ascii")
     if isinstance(value, Enum):

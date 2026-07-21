@@ -31,6 +31,25 @@ def _registry_record_for_disk(record: dict) -> dict:
 
 def _load_registry() -> None:
     global _file_registry
+    # Prefer Mongo so API + Worker share upload metadata.
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for item in coll.find().limit(2000):
+                if not isinstance(item, dict):
+                    continue
+                fid = str(item.get("file_id") or item.get("_id") or "")
+                if not fid:
+                    continue
+                row = dict(item)
+                row.pop("_id", None)
+                row["file_id"] = fid
+                _file_registry[fid] = row
+            return
+    except Exception:
+        pass
     if not REGISTRY_PATH.exists():
         return
     try:
@@ -42,11 +61,27 @@ def _load_registry() -> None:
         if not isinstance(item, dict) or not item.get("file_id"):
             continue
         path = Path(item.get("path", ""))
-        if path.exists():
+        # Keep registry even if path missing — Worker may materialize from object_uri.
+        if path.exists() or item.get("object_uri"):
             _file_registry[item["file_id"]] = item
 
 
 def _save_registry() -> None:
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection("upload_registry")
+        if coll is not None:
+            for r in _file_registry.values():
+                fid = str(r.get("file_id") or "")
+                if not fid:
+                    continue
+                doc = _registry_record_for_disk(r)
+                doc["_id"] = fid
+                coll.replace_one({"_id": fid}, doc, upsert=True)
+            return
+    except Exception:
+        pass
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "files": [_registry_record_for_disk(r) for r in _file_registry.values()],
@@ -101,13 +136,19 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
 
 
 def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
-    data = json.loads(content.decode("utf-8", errors="replace"))
-    if isinstance(data, list) and data:
-        if isinstance(data[0], dict):
-            headers = list(data[0].keys())
-            rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in data]
-            return headers, rows[:100], len(data)
-    raise ValueError("JSON must be an array of objects")
+    from services.json_tabular import load_json_records
+
+    objects = load_json_records(content)
+    if not objects:
+        return [], [], 0
+    headers = list(objects[0].keys())
+    # Union keys across sample so wrapped/geojson rows do not drop fields.
+    for item in objects[:50]:
+        for k in item.keys():
+            if k not in headers:
+                headers.append(k)
+    rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in objects]
+    return headers, rows[:100], len(objects)
 
 
 def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
@@ -197,7 +238,43 @@ def store_upload(filename: str, content: bytes) -> dict:
 
 
 def get_file(file_id: str) -> dict | None:
-    return _file_registry.get(file_id)
+    record = _file_registry.get(file_id)
+    if not record:
+        # Reload from Mongo in case another API replica registered the upload.
+        try:
+            from services.control_plane_store import mongo_collection
+
+            coll = mongo_collection("upload_registry")
+            if coll is not None:
+                doc = coll.find_one({"_id": file_id}) or coll.find_one({"file_id": file_id})
+                if doc:
+                    row = dict(doc)
+                    row.pop("_id", None)
+                    row["file_id"] = file_id
+                    _file_registry[file_id] = row
+                    record = row
+        except Exception:
+            pass
+    if not record:
+        return None
+    path = Path(record.get("path") or "")
+    if path.exists():
+        return record
+    uri = str(record.get("object_uri") or "")
+    if uri.startswith("s3://"):
+        from services.object_store import materialize_local
+        from services.platform_config import upload_dir
+
+        dest = upload_dir() / f"{file_id}_{record.get('filename') or 'upload.bin'}"
+        if materialize_local(uri, dest):
+            record = dict(record)
+            record["path"] = str(dest)
+            _file_registry[file_id] = record
+            return record
+    if path.exists():
+        return record
+    # Metadata known but bytes unreachable on this replica.
+    return record if record.get("object_uri") else None
 
 
 def get_file_chunks(file_id: str, chunk_size: int = 10000):
@@ -226,17 +303,22 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 yield headers, chunk
     elif fmt == "json":
         import json
+        from services.json_tabular import extract_json_records
+
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-            if not isinstance(data, list):
-                raise ValueError("JSON must be an array of objects")
-            if not data:
-                return
-            headers = list(data[0].keys())
-            for i in range(0, len(data), chunk_size):
-                batch = data[i:i+chunk_size]
-                rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
-                yield headers, rows
+        records = extract_json_records(data)
+        if not records:
+            return
+        headers = list(records[0].keys())
+        for item in records[:50]:
+            for k in item.keys():
+                if k not in headers:
+                    headers.append(k)
+        for i in range(0, len(records), chunk_size):
+            batch = records[i : i + chunk_size]
+            rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
+            yield headers, rows
     elif fmt == "jsonl":
         import json
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -273,12 +355,17 @@ class ParseResult:
     row_count: int
     error: str = ""
     file_type: str = ""
+    ocr_used: bool = False
+    ocr_page_count: int = 0
 
 
 class FileParser:
     """Universal file parser for DataTransfer platform"""
 
-    SUPPORTED_TYPES = ["json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"]
+    SUPPORTED_TYPES = [
+        "json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+        "pdf", "docx", "html",
+    ]
 
     @staticmethod
     def detect_file_type(filename: str, content: bytes | None = None) -> str:
@@ -309,6 +396,12 @@ class FileParser:
                 return "avro"
             if name.endswith(".orc"):
                 return "orc"
+            if name.endswith(".pdf"):
+                return "pdf"
+            if name.endswith(".docx"):
+                return "docx"
+            if name.endswith((".html", ".htm")):
+                return "html"
             return None
 
         ext_result = _from_extension(filename_lower)
@@ -321,6 +414,18 @@ class FileParser:
             ext_result = _from_extension(inner)
             if ext_result:
                 return ext_result
+
+        # Document sniffing before tabular heuristics.
+        try:
+            from services.document_chunking import detect_document_type
+
+            doc_kind = detect_document_type(filename or "", content)
+            if doc_kind == "html":
+                return "html"
+            if doc_kind:
+                return doc_kind
+        except Exception:
+            pass
 
         # Content sniffing — decompress a gzip prefix if needed.
         sample_bytes: bytes = b""
@@ -348,30 +453,21 @@ class FileParser:
 
     @staticmethod
     def parse_json(content: str) -> ParseResult:
-        """Parse JSON file content"""
+        """Parse JSON file content (array, wrapper object, or single record)."""
         try:
-            data = json.loads(content)
+            from services.json_tabular import extract_json_records
 
-            if isinstance(data, list):
-                records = data
-            elif isinstance(data, dict):
-                if any(isinstance(v, list) for v in data.values()):
-                    for key, value in data.items():
-                        if isinstance(value, list) and value and isinstance(value[0], dict):
-                            records = value
-                            break
-                    else:
-                        records = [data]
-                else:
-                    records = [data]
-            else:
+            data = json.loads(content)
+            try:
+                records = extract_json_records(data)
+            except ValueError as exc:
                 return ParseResult(
                     success=False,
                     data=[],
                     columns=[],
                     row_count=0,
-                    error="JSON must be an array or object",
-                    file_type="json"
+                    error=str(exc),
+                    file_type="json",
                 )
 
             if not records:
@@ -380,10 +476,10 @@ class FileParser:
                     data=[],
                     columns=[],
                     row_count=0,
-                    file_type="json"
+                    file_type="json",
                 )
 
-            columns = set()
+            columns: set[str] = set()
             object_rows = 0
             for record in records:
                 if isinstance(record, dict):
@@ -415,7 +511,7 @@ class FileParser:
                 data=records,
                 columns=sorted(list(columns)),
                 row_count=len(records),
-                file_type="json"
+                file_type="json",
             )
 
         except json.JSONDecodeError as e:
@@ -425,7 +521,7 @@ class FileParser:
                 columns=[],
                 row_count=0,
                 error=f"Invalid JSON: {str(e)}",
-                file_type="json"
+                file_type="json",
             )
 
     @staticmethod
@@ -760,7 +856,7 @@ class FileParser:
         return out
 
     @classmethod
-    def parse(cls, content: str | bytes, filename: str) -> ParseResult:
+    def parse(cls, content: str | bytes, filename: str, *, enable_ocr: bool = False) -> ParseResult:
         """Parse file based on type detection, transparently handling gzip."""
         raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
 
@@ -800,6 +896,8 @@ class FileParser:
             return cls.parse_orc(raw_bytes)
         elif file_type == "xml":
             return cls.parse_xml(raw_bytes)
+        elif file_type in ("pdf", "docx", "html"):
+            return cls.parse_document(raw_bytes, filename, file_type, enable_ocr=enable_ocr)
         else:
             return ParseResult(
                 success=False,
@@ -808,6 +906,72 @@ class FileParser:
                 row_count=0,
                 error=f"Unsupported file type: {file_type}",
                 file_type=file_type
+            )
+
+    @staticmethod
+    def parse_document(
+        content: bytes,
+        filename: str,
+        file_type: str,
+        *,
+        enable_ocr: bool = False,
+    ) -> ParseResult:
+        """Parse PDF / Word / HTML into provenance-aware chunk rows."""
+        try:
+            from services.document_chunking import document_columns, extract_document_chunks
+
+            rows = extract_document_chunks(
+                content,
+                filename or f"document.{file_type}",
+                doc_type=file_type,
+                enable_ocr=enable_ocr,
+            )
+            if not rows:
+                hint = (
+                    "Enable “OCR scanned PDFs” in Transfer Studio (requires Tesseract), "
+                    "or provide a PDF with an extractable text layer."
+                    if file_type == "pdf"
+                    else "Document has no extractable text."
+                )
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=document_columns(),
+                    row_count=0,
+                    error=f"No extractable text in {file_type.upper()} — {hint}",
+                    file_type=file_type,
+                )
+            ocr_pages = {
+                str(r.get("page") or "")
+                for r in rows
+                if str(r.get("element_type") or "") == "ocr" and r.get("page")
+            }
+            return ParseResult(
+                success=True,
+                data=rows,
+                columns=document_columns(),
+                row_count=len(rows),
+                file_type=file_type,
+                ocr_used=bool(ocr_pages),
+                ocr_page_count=len(ocr_pages),
+            )
+        except RuntimeError as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type=file_type,
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=f"Document parse failed: {exc}",
+                file_type=file_type,
             )
 
     @staticmethod

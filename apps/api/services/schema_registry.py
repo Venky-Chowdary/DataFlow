@@ -1,13 +1,12 @@
 """Versioned schema registry and automated column-level lineage.
 
-The registry records schemas observed from source/destination connectors and
-maintains a directed graph of source-column -> target-column mappings for every
-transfer job. This enables impact analysis, schema drift detection, and
-automated downstream propagation.
+Mongo is the primary store so API replicas and Workers share the same
+schemas/lineage. Local JSON remains the fallback for single-node / offline.
 """
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,12 +16,28 @@ from typing import Any
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 
+_logger = logging.getLogger(__name__)
+
 _SCHEMAS_PATH = data_dir() / "schema_registry_schemas.json"
 _LINEAGE_PATH = data_dir() / "schema_registry_lineage.json"
+_SCHEMAS_COLL = "schema_registry_schemas"
+_LINEAGE_COLL = "schema_registry_lineage"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _schemas_coll():
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(_SCHEMAS_COLL)
+
+
+def _lineage_coll():
+    from services.control_plane_store import mongo_collection
+
+    return mongo_collection(_LINEAGE_COLL)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -36,6 +51,80 @@ def _load(path: Path) -> dict[str, Any]:
 
 def _save(path: Path, data: dict[str, Any]) -> None:
     write_json_atomic(path, data, indent=2)
+
+
+def _load_schema_versions(key: str) -> list[dict[str, Any]]:
+    coll = _schemas_coll()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": key})
+            if doc:
+                return list(doc.get("versions") or [])
+            return []
+        except Exception as exc:
+            _logger.warning("schema registry Mongo read failed: %s", exc)
+    data = _load(_SCHEMAS_PATH)
+    return list(data.get(key, []))
+
+
+def _save_schema_versions(key: str, versions: list[dict[str, Any]]) -> None:
+    trimmed = versions[-100:]
+    coll = _schemas_coll()
+    if coll is not None:
+        try:
+            coll.replace_one(
+                {"_id": key},
+                {"_id": key, "key": key, "versions": trimmed, "updated_at": _now()},
+                upsert=True,
+            )
+            return
+        except Exception as exc:
+            _logger.warning("schema registry Mongo write failed, file fallback: %s", exc)
+    data = _load(_SCHEMAS_PATH)
+    data[key] = trimmed
+    _save(_SCHEMAS_PATH, data)
+
+
+def _load_lineage_edges() -> list[dict[str, Any]]:
+    coll = _lineage_coll()
+    if coll is not None:
+        try:
+            docs = list(coll.find().sort("created_at", -1).limit(5000))
+            out: list[dict[str, Any]] = []
+            for d in docs:
+                row = dict(d)
+                row.pop("_id", None)
+                out.append(row)
+            # Newest-first from Mongo; callers historically expect chronological append order.
+            out.reverse()
+            return out
+        except Exception as exc:
+            _logger.warning("lineage Mongo read failed: %s", exc)
+    data = _load(_LINEAGE_PATH)
+    return list(data.get("edges") or [])
+
+
+def _append_lineage_edges(edges: list[dict[str, Any]]) -> None:
+    if not edges:
+        return
+    coll = _lineage_coll()
+    if coll is not None:
+        try:
+            docs = []
+            for e in edges:
+                doc = dict(e)
+                doc["_id"] = e.get("edge_id") or str(uuid.uuid4())
+                docs.append(doc)
+            coll.insert_many(docs, ordered=False)
+            return
+        except Exception as exc:
+            _logger.warning("lineage Mongo write failed, file fallback: %s", exc)
+    data = _load(_LINEAGE_PATH)
+    if "edges" not in data:
+        data["edges"] = []
+    data["edges"].extend(edges)
+    data["edges"] = data["edges"][-5000:]
+    _save(_LINEAGE_PATH, data)
 
 
 @dataclass
@@ -108,9 +197,8 @@ def _schema_key(connector_id: str, object_name: str, connector_type: str = "") -
 
 
 def _latest_version(connector_id: str, object_name: str, connector_type: str = "") -> int:
-    data = _load(_SCHEMAS_PATH)
     key = _schema_key(connector_id, object_name, connector_type)
-    versions = [int(v.get("version", 0)) for v in data.get(key, [])]
+    versions = [int(v.get("version", 0)) for v in _load_schema_versions(key)]
     return max(versions) if versions else 0
 
 
@@ -124,22 +212,19 @@ def register_schema(
     source_of_truth: bool = False,
 ) -> SchemaVersion:
     """Store a new schema version if it differs from the previous one."""
-    data = _load(_SCHEMAS_PATH)
     key = _schema_key(connector_id, object_name, connector_type)
-    prior = data.get(key, [])
+    prior = _load_schema_versions(key)
     last = SchemaVersion.from_dict(prior[-1]) if prior else None
 
-    # Normalize columns for comparison
     norm_cols = _normalize_columns(columns)
     last_norm = _normalize_columns(last.columns) if last else None
 
     if last_norm == norm_cols:
-        # No change; optionally update source_of_truth and job_id
         if source_of_truth and last:
             last.source_of_truth = True
             last.job_id = job_id or last.job_id
             prior[-1] = last.to_dict()
-            _save(_SCHEMAS_PATH, data)
+            _save_schema_versions(key, prior)
         return last or SchemaVersion(connector_type, connector_id, object_name, 0, columns)
 
     version = (last.version if last else 0) + 1
@@ -153,8 +238,7 @@ def register_schema(
         source_of_truth=source_of_truth,
     )
     prior.append(entry.to_dict())
-    data[key] = prior[-100:]  # keep last 100 versions
-    _save(_SCHEMAS_PATH, data)
+    _save_schema_versions(key, prior)
     return entry
 
 
@@ -165,9 +249,8 @@ def get_schema(
     version: int | None = None,
 ) -> SchemaVersion | None:
     """Return a specific or latest schema version."""
-    data = _load(_SCHEMAS_PATH)
     key = _schema_key(connector_id, object_name, connector_type)
-    versions = data.get(key, [])
+    versions = _load_schema_versions(key)
     if not versions:
         return None
     if version is None:
@@ -190,10 +273,6 @@ def record_lineage(
     object_name.
     """
     edges: list[LineageEdge] = []
-    data = _load(_LINEAGE_PATH)
-    if "edges" not in data:
-        data["edges"] = []
-
     source_connector = source.get("connector_type", "") + ":" + source.get("connector_id", "")
     target_connector = target.get("connector_type", "") + ":" + target.get("connector_id", "")
 
@@ -214,10 +293,8 @@ def record_lineage(
             job_id=job_id,
         )
         edges.append(edge)
-        data["edges"].append(edge.to_dict())
 
-    data["edges"] = data["edges"][-5000:]
-    _save(_LINEAGE_PATH, data)
+    _append_lineage_edges([e.to_dict() for e in edges])
     return edges
 
 
@@ -232,8 +309,7 @@ def get_lineage(
 ) -> list[dict[str, Any]]:
     """Filter lineage edges. If ``upstream`` or ``downstream`` is set, traverse
     one hop in that direction from the given source or target column."""
-    data = _load(_LINEAGE_PATH)
-    edges = data.get("edges", [])
+    edges = _load_lineage_edges()
     matches = edges
     if connector_id:
         needle = connector_id.lower()

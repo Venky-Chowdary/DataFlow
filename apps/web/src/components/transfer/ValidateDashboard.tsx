@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
-import { explainPreflight, type CellPreviewResult } from "../../lib/api";
+import { explainPreflight, fetchRepairProposal, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -13,6 +13,7 @@ import type {
 import { isLocalPreflight } from "../../lib/localPreflight";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 interface GateMeta {
   key: string;
@@ -125,8 +126,30 @@ interface ValidateDashboardProps {
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced column mappings. */
   onReviewMappings?: () => void;
+  /** Open Mapping proof drawer — how columns match, confidence evidence, fidelity risks. */
+  onOpenMappingProof?: () => void;
+  /** Compact Map proof KPIs for Validate (exact overlaps / risks / mode). */
+  mappingProofSummary?: {
+    destMode?: string;
+    mappedCount?: number;
+    exactOverlaps?: number;
+    riskCount?: number;
+    reviewCount?: number;
+    avgConfidence?: number;
+    maxConfidence?: number;
+  } | null;
   /** Trigger preflight from the dashboard (same as the rail CTA). */
   onRunPreflight?: () => void;
+  /** Current Studio mappings for durable repair apply. */
+  repairMappings?: RepairMapping[];
+  /** After Approve & apply — merge updated mappings into Studio. */
+  onRepairMappingsApplied?: (mappings: RepairMapping[]) => void;
+  /** Optional job id stamped onto the repair proposal. */
+  repairJobId?: string;
+  /** Open an existing repair proposal (Jobs → Studio deep-link). */
+  seedRepairProposalId?: string | null;
+  /** Clear seed after the drawer has opened (or failed). */
+  onSeedRepairConsumed?: () => void;
 }
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
@@ -427,12 +450,22 @@ export function ValidateDashboard({
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
+  onOpenMappingProof,
+  mappingProofSummary = null,
   onRunPreflight,
+  repairMappings = [],
+  onRepairMappingsApplied,
+  repairJobId = "",
+  seedRepairProposalId = null,
+  onSeedRepairConsumed,
 }: ValidateDashboardProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
   const [explaining, setExplaining] = useState(false);
+  const [repairOpen, setRepairOpen] = useState(false);
+  const [repairProposal, setRepairProposal] = useState<RepairProposal | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
   const [badDataOpen, setBadDataOpen] = useState(false);
   const [remediating, setRemediating] = useState(false);
@@ -469,6 +502,48 @@ export function ValidateDashboard({
       setBadDataOpen(true);
     }
   }, [running, encodingBlocks, hasEncodingIssue, preflight?.passed_count, preflight?.blockers?.length]);
+
+  // Jobs → Studio: open a durable repair proposal in the Validate drawer.
+  useEffect(() => {
+    if (!seedRepairProposalId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const proposal = await fetchRepairProposal(seedRepairProposalId);
+        if (cancelled) return;
+        // Skip terminal proposals — they would open a no-op drawer.
+        if (proposal.status === "applied" || proposal.status === "rejected" || proposal.status === "failed") {
+          pushRemediation(
+            "Repair already decided",
+            `${proposal.id} · ${proposal.status}`,
+            proposal.status,
+          );
+          return;
+        }
+        setRepairProposal(proposal);
+        setRepairOpen(true);
+        pushRemediation(
+          "Opened repair from Jobs",
+          proposal.summary || proposal.id,
+          proposal.status,
+        );
+      } catch (e) {
+        if (!cancelled) {
+          pushRemediation(
+            "Could not open repair proposal",
+            (e as Error).message || seedRepairProposalId,
+            "Failed",
+          );
+        }
+      } finally {
+        if (!cancelled) onSeedRepairConsumed?.();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedRepairProposalId]);
 
   // A new preflight run invalidates any prior explanation.
   useEffect(() => {
@@ -563,25 +638,14 @@ export function ValidateDashboard({
     return () => window.clearInterval(timer);
   }, [running]);
 
-  // After results return, reveal gates in engine order paced by real duration_ms.
+  // Show every gate result as soon as the engine returns — operators must be able
+  // to read rules/status before Execute. duration_ms still appears on each card.
   useEffect(() => {
     if (running || !preflight?.gates?.length) {
       setRevealCount(0);
       return;
     }
-    setRevealCount(0);
-    let i = 0;
-    let timer = 0;
-    const advance = () => {
-      i += 1;
-      setRevealCount(i);
-      if (i >= (preflight.gates?.length ?? 0)) return;
-      const justShown = preflight.gates[i - 1];
-      const pace = Math.min(900, Math.max(140, Number(justShown?.duration_ms) || 180));
-      timer = window.setTimeout(advance, pace);
-    };
-    timer = window.setTimeout(advance, 60);
-    return () => window.clearTimeout(timer);
+    setRevealCount(preflight.gates.length);
   }, [running, preflight?.run_id, preflight?.gates]);
 
   const proof = preflight?.proof_bundle;
@@ -688,6 +752,28 @@ export function ValidateDashboard({
       setBadDataOpen(false);
     } finally {
       setRemediating(false);
+    }
+  };
+
+  const proposeDurableRepair = async () => {
+    if (!preflight) return;
+    setRepairBusy(true);
+    try {
+      const proposal = await proposeRepairFromPreflight({
+        preflight: preflight as unknown as Record<string, unknown>,
+        coercion_report: (preflight.coercion_report || {}) as unknown as Record<string, unknown>,
+        job_id: repairJobId,
+      });
+      setRepairProposal(proposal);
+      setRepairOpen(true);
+    } catch (e) {
+      pushRemediation(
+        "Repair propose failed",
+        (e as Error).message || "Could not create repair proposal",
+        "Failed",
+      );
+    } finally {
+      setRepairBusy(false);
     }
   };
 
@@ -884,6 +970,17 @@ export function ValidateDashboard({
               <DtIcon name="shield" size={13} />
               Fix bad data…
             </button>
+            {onOpenMappingProof && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-mapping_proof"
+                onClick={onOpenMappingProof}
+                disabled={remediating}
+              >
+                <DtIcon name="sparkle" size={13} />
+                Mapping proof
+              </button>
+            )}
             {onReviewMappings && (
               <button
                 type="button"
@@ -991,6 +1088,11 @@ export function ValidateDashboard({
               ))}
             </ul>
             <div className="df2-vd-cell-preview-actions">
+              {onOpenMappingProof && (
+                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
+                  <DtIcon name="sparkle" size={14} /> Mapping proof
+                </button>
+              )}
               {onReviewMappings && (
                 <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onReviewMappings}>
                   <DtIcon name="layers" size={14} /> Review mappings
@@ -1025,6 +1127,54 @@ export function ValidateDashboard({
           </div>
         );
       })()}
+
+      {!running && mappingProofSummary && onOpenMappingProof && (
+        <div className="df2-vd-map-proof-card" aria-label="Column match proof summary">
+          <div className="df2-vd-map-proof-card-head">
+            <div>
+              <strong>Column matches</strong>
+              <span>
+                {mappingProofSummary.destMode === "create_new"
+                  ? "Create-new — DDL on first write"
+                  : "Matched to destination schema"}
+                {" · "}
+                every pair has confidence evidence and fidelity risks
+              </span>
+            </div>
+            <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
+              <DtIcon name="sparkle" size={14} /> Open mapping proof
+            </button>
+          </div>
+          <div className="df2-vd-map-proof-kpis">
+            <div>
+              <span>Pairs</span>
+              <strong>{mappingProofSummary.mappedCount ?? 0}</strong>
+            </div>
+            <div>
+              <span>Exact overlaps</span>
+              <strong>{mappingProofSummary.exactOverlaps ?? 0}</strong>
+            </div>
+            <div>
+              <span>Avg / max conf</span>
+              <strong>
+                {mappingProofSummary.avgConfidence != null
+                  ? `${Math.round(mappingProofSummary.avgConfidence * 100)}%`
+                  : "—"}
+                {" / "}
+                {mappingProofSummary.maxConfidence != null
+                  ? `${Math.round(mappingProofSummary.maxConfidence * 100)}%`
+                  : "—"}
+              </strong>
+            </div>
+            <div>
+              <span>Risks / review</span>
+              <strong>
+                {mappingProofSummary.riskCount ?? 0} / {mappingProofSummary.reviewCount ?? 0}
+              </strong>
+            </div>
+          </div>
+        </div>
+      )}
 
       {!running && preflight && (
         <div className="df2-vd-metrics">
@@ -1267,6 +1417,31 @@ export function ValidateDashboard({
                             {action.label}
                           </button>
                         ))}
+                        <button
+                          type="button"
+                          className="df2-vd-chip kind-review_mappings"
+                          onClick={() => void proposeDurableRepair()}
+                          disabled={repairBusy || !preflight}
+                          title="Persist a human-gated repair proposal with audit trail"
+                        >
+                          <DtIcon name="sparkle" size={13} />
+                          {repairBusy ? "Proposing…" : "Propose durable repair"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {explain.suggested_actions.length === 0 && !explain.passed && (
+                    <div className="df2-vd-assist-actions">
+                      <div className="df2-vd-chip-row">
+                        <button
+                          type="button"
+                          className="df2-vd-chip kind-review_mappings"
+                          onClick={() => void proposeDurableRepair()}
+                          disabled={repairBusy || !preflight}
+                        >
+                          <DtIcon name="sparkle" size={13} />
+                          {repairBusy ? "Proposing…" : "Propose durable repair"}
+                        </button>
                       </div>
                     </div>
                   )}
@@ -1393,18 +1568,24 @@ export function ValidateDashboard({
         <div className="df2-vd-blockers">
           <div className="df2-vd-blockers-head">
             <DtIcon name="alert" size={15} />
-            <strong>Resolve to continue</strong>
+            <strong>Fix before Run</strong>
             <span>{preflight.blockers.length}</span>
           </div>
+          <p className="df2-vd-blocker-precaution">
+            Schema mismatches, bad data, and type hazards are blocked here on purpose.
+            Resolve each item below (why + fix), re-validate, then Execute — Run should
+            only surface operational issues like timeouts or connectivity.
+          </p>
           <ul>
             {preflight.blockers.map((b) => {
               const issues = issueTextsFromDetails(b.details);
               const blockingCols = (preflight.coercion_report?.columns ?? []).filter((c) => c.severity === "block");
+              const showIssueList = issues.length > 0 && !(b.id.includes("dry_run") && blockingCols.length > 0);
               return (
                 <li key={b.id}>
                   <strong>{metaForGate(b.id).label}</strong>
                   <span>{b.message}</span>
-                  {issues.length > 0 && (
+                  {showIssueList && (
                     <ul className="df2-vd-blocker-issues">
                       {issues.slice(0, 6).map((issue) => (
                         <li key={issue}>{issue}</li>
@@ -1413,7 +1594,9 @@ export function ValidateDashboard({
                   )}
                   {blockingCols.length > 0 && b.id.includes("dry_run") && (
                     <div className="df2-vd-blocker-actions">
-                      <span className="df2-vd-assist-actions-title">One-click type fixes</span>
+                      <span className="df2-vd-assist-actions-title">
+                        Fix on Validate (remaps off incompatible typed columns)
+                      </span>
                       <div className="df2-vd-chip-row">
                         {blockingCols.slice(0, 6).map((col) => (
                           <button
@@ -1421,11 +1604,14 @@ export function ValidateDashboard({
                             type="button"
                             className="df2-vd-chip kind-change_target_type"
                             disabled={!onApplyAction || !col.suggested_target_type}
-                            title={col.suggested_fix || `Widen ${col.source}`}
+                            title={
+                              col.suggested_fix
+                              || `Remap ${col.source} to a ${col.suggested_target_type} column (Widen alone does not ALTER DDL)`
+                            }
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
-                                label: `${col.source} → ${col.suggested_target_type}`,
+                                label: `Remap ${col.source} → ${col.suggested_target_type}`,
                                 column: col.source,
                                 target: col.target,
                                 to_type: col.suggested_target_type ?? undefined,
@@ -1433,7 +1619,7 @@ export function ValidateDashboard({
                             }
                           >
                             <DtIcon name="layers" size={13} />
-                            {col.source} → {col.suggested_target_type ?? "VARCHAR"}
+                            Remap {col.source} → {col.suggested_target_type ?? "VARCHAR"}
                           </button>
                         ))}
                       </div>
@@ -1444,7 +1630,7 @@ export function ValidateDashboard({
                       <DtIcon name="check" size={12} /> {b.guidance.fix}
                     </span>
                   )}
-                  {b.guidance?.why && (
+                  {b.guidance?.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{b.guidance.why}</span>
                   )}
                   {(b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
@@ -1476,6 +1662,28 @@ export function ValidateDashboard({
         onExplainWithAI={() => {
           setBadDataOpen(false);
           void runExplain();
+        }}
+      />
+      <RepairProposalDrawer
+        open={repairOpen}
+        proposal={repairProposal}
+        mappings={repairMappings}
+        onClose={() => setRepairOpen(false)}
+        onApplied={(updated) => {
+          onRepairMappingsApplied?.(updated);
+          pendingVerifyRef.current = true;
+          pushRemediation(
+            "Repair applied",
+            `${updated.length} mapping(s) updated from approved proposal ${repairProposal?.id || ""}`,
+            "Applied — re-run Validate",
+          );
+        }}
+        onDecided={(p) => {
+          pushRemediation(
+            p.status === "rejected" ? "Repair rejected" : "Repair approved",
+            p.summary || p.id,
+            p.status,
+          );
         }}
       />
     </section>

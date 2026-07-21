@@ -33,10 +33,10 @@ export function HelpAppPreview({ kind, bare = false }: { kind: PreviewKind; bare
 
     if (kind === "mapping") {
       const rows = [
-        ["order_amt", "payment_amount", "96%"],
-        ["cust_id", "customer_key", "99%"],
-        ["email_addr", "email", "94%"],
-        ["created_at", "order_ts", "91%"],
+        ["order_amt", "payment_amount", "0.93"],
+        ["cust_id", "customer_key", "0.91"],
+        ["email_addr", "email", "0.88"],
+        ["created_at", "order_ts", "0.86"],
       ];
       return (
         <div className="lp-help-preview-body">

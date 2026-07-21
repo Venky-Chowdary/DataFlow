@@ -122,13 +122,27 @@ def _column_entailed(candidate: str, target: str) -> bool:
     return set(c_parts) == set(t_parts)
 
 
+def _is_create_new_mapping(m: dict) -> bool:
+    if m.get("create_new"):
+        return True
+    strategy = str(m.get("assignment_strategy") or "")
+    return strategy in {"create_compatible_new", "identity_passthrough"}
+
+
 def entailment_prune(mappings: list[dict], target_columns: list[str]) -> tuple[list[dict], list[str]]:
-    """Drop mappings whose target is not entailed by any known target column."""
+    """Drop mappings whose target is not entailed by any known target column.
+
+    Create-new / ADD COLUMN proposals are kept — they intentionally name a
+    column that does not exist yet (e.g. ObjectId → `_id_text` beside DECIMAL `id`).
+    """
     if not target_columns:
         return mappings, []
     kept: list[dict] = []
     pruned: list[str] = []
     for m in mappings:
+        if _is_create_new_mapping(m):
+            kept.append(m)
+            continue
         tgt = m["target"]
         if any(_column_entailed(tgt, known) for known in target_columns):
             kept.append(m)
@@ -175,6 +189,7 @@ def run_mapping_pipeline(
     validation_mode: str = "strict",
     destination_db_type: str = "",
     schema_policy: str = "manual_review",
+    sync_mode: str = "",
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -218,6 +233,7 @@ def run_mapping_pipeline(
         target_columns,
         source_schemas=source_schemas,
         target_schemas=target_schemas,
+        destination_db_type=destination_db_type,
     )
 
     # If the destination schema is unknown, derive it from the identity mapping.
@@ -277,6 +293,14 @@ def run_mapping_pipeline(
             reasoning = f"{reasoning} · enriched: {enrichment}"
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
+        # Create-new / missing dest type: auto-widen unsigned 64-bit to DECIMAL.
+        if not tgt_type:
+            from services.type_system import normalize_logical_type
+
+            if normalize_logical_type(src_type) == "decimal" and "unsigned" in str(src_type).lower():
+                tgt_type = "DECIMAL"
+            else:
+                tgt_type = src_type
         enriched_mappings.append(
             {
                 **m,
@@ -408,6 +432,17 @@ def run_mapping_pipeline(
     if unmapped_after_prune:
         plan_summary["entailment_unmapped"] = unmapped_after_prune
 
+    from services.mapping_proof import build_mapping_proof
+
+    mapping_proof = build_mapping_proof(
+        enriched_mappings,
+        target_columns=target_columns,
+        destination_db_type=destination_db_type,
+        sync_mode=sync_mode,
+    )
+    plan_summary["dest_mode"] = mapping_proof.get("dest_mode")
+    plan_summary["mapping_proof_summary"] = mapping_proof.get("summary")
+
     agents_used = [
         "FormatClassifierAgent",
         "ColumnEnrichmentAgent",
@@ -418,6 +453,7 @@ def run_mapping_pipeline(
         "DataIntegrityAgent",
         "TransformCodegenAgent",
         "ValidationCriticAgent",
+        "MappingProofAgent",
     ]
     if llm_meta.get("llm_used"):
         agents_used.insert(3, "LLMMappingAgent")
@@ -432,6 +468,7 @@ def run_mapping_pipeline(
         "semantic_analysis": semantic_analysis,
         "pruned_sources": dropped,
         "plan_summary": plan_summary,
+        "mapping_proof": mapping_proof,
         "quality_issues": quality_issues,
         "coercion_issues": coercion_issues,
         "sample_quality": sample_quality_report,

@@ -137,6 +137,13 @@ def write_mapped_rows(
     backfill_new_fields: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+        schema_policy=_kwargs.get("schema_policy"),
+    )
     if importlib.util.find_spec("psycopg2") is None:
         from connectors.driver_guard import require_driver, stub_writes_allowed
         from connectors.stub_writer import simulate_stub_write
