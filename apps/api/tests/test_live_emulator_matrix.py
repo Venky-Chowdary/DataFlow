@@ -7,7 +7,6 @@ has the containers) exercises the live connector surface.
 
 from __future__ import annotations
 
-import contextlib
 import socket
 import sys
 from pathlib import Path
@@ -346,20 +345,38 @@ CASES = [
 @pytest.mark.parametrize("endpoint", CASES)
 def test_write_destination_database_local_emulator(endpoint: EndpointConfig):
     if endpoint.format == "snowflake":
-        fakesnow = pytest.importorskip("fakesnow")
-        ctx = fakesnow.patch()
+        # snowflake_conn auto-patches local accounts; do not nest fakesnow.patch().
+        pytest.importorskip("fakesnow")
     else:
         if not _is_reachable(endpoint.host, endpoint.port):
             pytest.skip(f"{endpoint.format} emulator not reachable on {endpoint.host}:{endpoint.port}")
-        ctx = contextlib.nullcontext()
+    if endpoint.format == "pgvector":
+        try:
+            import psycopg2
 
-    with ctx:
-        rows, ddl_log, summary = write_destination_database(
-            endpoint,
-            RECORDS,
-            COLUMNS,
-            SCHEMA,
-            MAPPINGS,
-        )
+            conn = psycopg2.connect(
+                host=endpoint.host or "127.0.0.1",
+                port=int(endpoint.port or 5432),
+                dbname=endpoint.database or "dataflow",
+                user=endpoint.username or "dataflow",
+                password=endpoint.password or "dataflow",
+                connect_timeout=2,
+            )
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            finally:
+                conn.close()
+        except Exception as exc:
+            pytest.skip(f"pgvector extension unavailable: {exc}")
+
+    rows, ddl_log, summary = write_destination_database(
+        endpoint,
+        RECORDS,
+        COLUMNS,
+        SCHEMA,
+        MAPPINGS,
+    )
     assert rows == 2, f"{endpoint.format}: expected 2 rows, got {rows} (summary={summary})"
     assert summary.get("error") is None, f"{endpoint.format}: {summary.get('error')}"

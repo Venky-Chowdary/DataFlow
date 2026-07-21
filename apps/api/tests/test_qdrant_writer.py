@@ -81,6 +81,7 @@ def test_qdrant_write_mapped_rows_gracefully_fails_when_unreachable():
         mappings=[{"source": "id", "target": "id"}, {"source": "content", "target": "content"}],
         column_types={"id": "INTEGER", "content": "STRING"},
         content_column="content",
+        embedding_model="hash/32",
     )
     assert not result.ok
     assert "refused" in result.error.lower() or "connection" in result.error.lower()

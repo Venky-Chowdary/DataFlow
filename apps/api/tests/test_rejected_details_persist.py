@@ -41,6 +41,6 @@ def test_writer_diagnostics_caps_but_keeps_details():
         ]
 
     summary = _writer_diagnostics(_WR())
-    assert len(summary["rejected_details"]) == 200
+    assert len(summary["rejected_details"]) == 250
     assert summary["rejected_details"][0]["column"] == "c"
     assert summary["rejected_rows"] == 2

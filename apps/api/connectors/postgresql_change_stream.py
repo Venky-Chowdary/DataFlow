@@ -1123,6 +1123,15 @@ class PostgreSqlChangeStreamCdc:
                         buf.delete(tbl, pk, lsn=lsn)
 
         if buf.open_xid is not None:
+            if not buf.explicit_txn:
+                for batch in buf.commit(
+                    resume_token=self._resume_token(phase="streaming"),
+                    table_order=self.tables,
+                ):
+                    emitted = True
+                    self.resume_token = batch.resume_token
+                    yield batch
+                return
             if not emitted:
                 yield ChangeBatch(
                     resume_token={

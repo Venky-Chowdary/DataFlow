@@ -841,8 +841,12 @@ class MySqlChangeStreamCdc:
         finally:
             stream.close()
 
-        # Mid-window open txn: hold (do not flush). Next poll re-reads from resume.
+        # Mid-window open txn: hold only when BEGIN was seen (explicit txn).
+        # Implicit autocommit windows (row events without BEGIN) flush at end of poll.
         if buf.open_xid is not None:
+            if not buf.explicit_txn:
+                yield from _emit_commit()
+                return
             if not emitted:
                 yield ChangeBatch(
                     resume_token={

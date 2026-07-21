@@ -807,6 +807,67 @@ def verify_mongodb_collection(
         return -1, ""
 
 
+def verify_redis_prefix(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    ssl: bool,
+    prefix: str,
+    target_columns: list[str] | None = None,
+    limit: int = 0,
+) -> tuple[int, str]:
+    """Reconcile Redis keys under ``prefix:*`` (writer key layout)."""
+    try:
+        from connectors.redis_reader import _decode, _redis_client
+
+        client = _redis_client(
+            {
+                "host": host,
+                "port": port,
+                "database": database,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "ssl": ssl,
+            }
+        )
+        pattern = f"{prefix}:*" if prefix else "*"
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
+            for raw in batch:
+                keys.append(raw.decode() if isinstance(raw, bytes) else str(raw))
+            if cursor == 0:
+                break
+
+        def _row_iter():
+            for key in keys:
+                raw = client.get(key)
+                text = _decode(raw)
+                try:
+                    payload = json.loads(text) if text.startswith("{") else {"value": text}
+                except (json.JSONDecodeError, TypeError):
+                    payload = {"value": text}
+                if isinstance(payload, dict):
+                    yield payload
+                else:
+                    yield {"value": text}
+
+        columns = target_columns or []
+        if not columns and keys:
+            sample = next(_row_iter(), {})
+            columns = sorted(sample.keys()) if sample else ["value"]
+        checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
+        return len(keys), checksum
+    except Exception:
+        return -1, ""
+
+
 def verify_dynamodb_table(
     *,
     connection_string: str,
@@ -907,7 +968,32 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
         )
-    elif db_type == "postgresql":
+    elif db_type == "generic_sql":
+        # Route local file engines by URL/path; otherwise no independent verifier.
+        conn = (dest.get("connection_string") or dest.get("database") or "").lower()
+        if "sqlite" in conn or conn.endswith(".db") or conn.endswith(".sqlite"):
+            count, chk = verify_sqlite_table(
+                connection_string=dest.get("connection_string", ""),
+                database=dest.get("database", ""),
+                host=dest.get("host", ""),
+                table_name=table_name,
+                target_columns=target_columns,
+                limit=limit,
+            )
+        elif "duckdb" in conn or conn.endswith(".duckdb") or conn.endswith(".duck"):
+            count, chk = verify_duckdb_table(
+                connection_string=dest.get("connection_string", ""),
+                database=dest.get("database", ""),
+                table_name=table_name,
+                target_columns=target_columns,
+                limit=limit,
+            )
+        else:
+            count, chk = -1, ""
+    elif db_type in ("postgresql", "redshift", "pgvector"):
+        # Redshift wire protocol is Postgres; local CI uses the PG emulator.
+        # pgvector tables live in the same Postgres — COUNT(*) read-back works
+        # for row proof (embedding columns are opaque to checksum fidelity).
         count, chk = verify_postgres_table(
             host=dest.get("host", ""),
             port=dest.get("port", 5432),
@@ -916,8 +1002,21 @@ def verify_target(
             password=dest.get("password", ""),
             schema=schema,
             connection_string=dest.get("connection_string", ""),
-            ssl=dest.get("ssl", True),
+            ssl=dest.get("ssl", True) if db_type == "postgresql" else dest.get("ssl", False),
             table_name=table_name,
+            target_columns=target_columns,
+            limit=limit,
+        )
+    elif db_type == "redis":
+        count, chk = verify_redis_prefix(
+            host=dest.get("host", ""),
+            port=int(dest.get("port") or 6379),
+            database=dest.get("database", "0"),
+            username=dest.get("username", ""),
+            password=dest.get("password", ""),
+            connection_string=dest.get("connection_string", ""),
+            ssl=bool(dest.get("ssl", False)),
+            prefix=table_name,
             target_columns=target_columns,
             limit=limit,
         )

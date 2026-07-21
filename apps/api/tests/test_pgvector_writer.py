@@ -40,7 +40,8 @@ def test_vectorize_records_with_content_column():
     records = [
         {"id": "r1", "title": "hello world", "body": "This is a test document."},
     ]
-    rows = vectorize_records(records, content_column="body", model="sentence-transformers/all-MiniLM-L6-v2")
+    # CI-stable hash embedder — no sentence-transformers download required.
+    rows = vectorize_records(records, content_column="body", model="hash/32")
     assert len(rows) == 1
     assert rows[0]["content"] == "This is a test document."
     assert rows[0]["source_id"] == "r1"

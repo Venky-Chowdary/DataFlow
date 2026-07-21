@@ -92,19 +92,28 @@ def get_connection(
         product_managed = False
         with _fakesnow_lock:
             already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
+            connect_mod = getattr(snowflake.connector.connect, "__module__", "") or ""
+            if not already_patched and connect_mod.startswith("fakesnow"):
+                already_patched = True
             if _fakesnow_refcount > 0:
                 # Product already owns the active patch; just share it.
                 _fakesnow_refcount += 1
                 product_managed = True
             elif not already_patched:
                 # No existing patch — install one and own it.
-                _fakesnow_patch_cm = fakesnow.patch(
-                    db_path=_fakesnow_db_path(),
-                    nop_regexes=[r"^USE WAREHOUSE"],
-                )
-                _fakesnow_patch_cm.__enter__()
-                _fakesnow_refcount = 1
-                product_managed = True
+                try:
+                    _fakesnow_patch_cm = fakesnow.patch(
+                        db_path=_fakesnow_db_path(),
+                        nop_regexes=[r"^USE WAREHOUSE"],
+                    )
+                    _fakesnow_patch_cm.__enter__()
+                    _fakesnow_refcount = 1
+                    product_managed = True
+                except (AssertionError, RuntimeError) as exc:
+                    # Nested fakesnow.patch() raises when a test already patched.
+                    if "already patched" not in str(exc).lower():
+                        raise
+                    product_managed = False
             else:
                 # A test/framework already patched the connector; use it but do
                 # not manage its lifecycle.

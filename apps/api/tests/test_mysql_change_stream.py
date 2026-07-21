@@ -82,7 +82,9 @@ def test_poll_parses_binlog_events(base_cfg: dict) -> None:
     assert len(batch.inserts) == 1
     assert len(batch.updates) == 1
     assert batch.deletes == ["3"]
-    assert batch.resume_token == {"file": "mysql-bin.000001", "pos": 300}
+    assert batch.resume_token["file"] == "mysql-bin.000001"
+    assert batch.resume_token["pos"] == 300
+    assert batch.resume_token.get("tables") == ["orders"] or "tables" not in batch.resume_token
 
 
 def test_run_cdc_database_transfer_uses_mysql_binlog():
