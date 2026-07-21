@@ -88,7 +88,9 @@ def test_pipeline_objectid_create_new_survives_existing_dest():
     by_src = {m["source"]: m for m in r["mappings"]}
     assert "_id" in by_src
     assert by_src["_id"]["target"].lower() != "id"
+    assert by_src["_id"]["target"].lower() != "id"
     assert by_src["_id"].get("create_new") is True or by_src["_id"]["target"] not in {"id", "ID"}
+    assert by_src["_id"]["target"] in {"_id", "column_2", "column_5"} or by_src["_id"].get("create_new")
     assert by_src["name"]["target"].lower() == "name"
 
 

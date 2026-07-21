@@ -216,6 +216,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
         destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
+        schema_policy=policies.get("schema_policy", "manual_review"),
+        backfill_new_fields=bool(policies.get("backfill_new_fields")),
     )
     pf = apply_policy_gates(
         pf,

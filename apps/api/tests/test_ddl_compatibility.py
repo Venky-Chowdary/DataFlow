@@ -38,6 +38,43 @@ def test_fails_missing_target_column():
     assert any("does not exist" in i for i in issues)
 
 
+def test_allow_create_alone_does_not_pass_missing_column_on_existing_table():
+    """CREATE TABLE permission must not paper over missing ADD COLUMN."""
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[{"source": "email", "target": "email_address", "confidence": 0.9}],
+        source_schema={"email": "VARCHAR"},
+        target_schema={"email": "TEXT"},
+        table_exists=True,
+        dest_connected=True,
+        allow_create=True,
+        backfill_new_fields=False,
+    )
+    assert not ok
+    assert any("does not exist" in i for i in issues)
+
+
+def test_create_new_mapping_passes_missing_column_on_existing_table():
+    ok, issues = evaluate_ddl_compatibility(
+        mappings=[
+            {
+                "source": "_id",
+                "target": "_id",
+                "create_new": True,
+                "assignment_strategy": "create_compatible_new",
+            }
+        ],
+        source_schema={"_id": "VARCHAR"},
+        target_schema={"id": "DECIMAL"},
+        table_exists=True,
+        dest_connected=True,
+        allow_create=False,
+        backfill_new_fields=False,
+        dest_db_type="snowflake",
+    )
+    assert ok
+    assert issues == []
+
+
 def test_fails_varchar_width_overflow():
     ok, issues = evaluate_ddl_compatibility(
         mappings=[{"source": "code", "target": "code", "confidence": 0.9}],

@@ -66,13 +66,39 @@ def schema_policy_implies_backfill(schema_policy: str | None) -> bool:
     }
 
 
+def mappings_require_new_columns(mappings: list | None) -> bool:
+    """True when any mapping intentionally proposes ADD COLUMN / create-new DDL."""
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("create_new"):
+            return True
+        strategy = str(m.get("assignment_strategy") or "")
+        if strategy in {"create_compatible_new", "identity_passthrough"}:
+            # identity_passthrough on an existing dest is not ADD — only create_compatible_new
+            # always means a new physical column. identity on empty dest is CREATE TABLE.
+            if strategy == "create_compatible_new":
+                return True
+    return False
+
+
 def effective_backfill_new_fields(
     *,
     backfill_new_fields: bool = False,
     schema_policy: str | None = None,
+    mappings: list | None = None,
 ) -> bool:
-    """Honor explicit backfill toggle or propagate schema policies."""
-    return bool(backfill_new_fields) or schema_policy_implies_backfill(schema_policy)
+    """Honor explicit backfill toggle, propagate schema policies, or create_new maps.
+
+    create_compatible_new mappings (e.g. Mongo ObjectId → new VARCHAR beside DECIMAL id)
+    must ADD COLUMN on an existing destination — otherwise Snowflake fails with
+    invalid identifier on names like id_text.
+    """
+    return (
+        bool(backfill_new_fields)
+        or schema_policy_implies_backfill(schema_policy)
+        or mappings_require_new_columns(mappings)
+    )
 
 
 class ThrottledCheckpoint:

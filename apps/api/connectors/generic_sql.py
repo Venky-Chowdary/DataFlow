@@ -1507,6 +1507,13 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     """Write mapped rows to any SQLAlchemy-supported destination."""
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+        schema_policy=_kwargs.get("schema_policy"),
+    )
     if not SQLALCHEMY_AVAILABLE:
         return WriteResult(
             ok=False,

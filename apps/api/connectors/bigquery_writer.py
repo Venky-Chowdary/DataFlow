@@ -95,6 +95,12 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del username, password, ssl, warehouse, _kwargs
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+    )
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_name = sanitize_identifier(table_name)

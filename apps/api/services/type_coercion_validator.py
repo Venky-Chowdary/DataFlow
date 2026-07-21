@@ -22,8 +22,9 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Lossy coercions with confidence below ``confidence_floor`` block; the floor
-    must match the active validation mode (not a hardcoded strict 0.85).
+    Lossy coercions always block — Validate must not green-light a write that will
+    fail or silently truncate at the warehouse. Confidence only affects non-lossy
+    logical-type changes under non-type_locked policies.
     """
     type_locked = (schema_policy or "").lower() == "type_locked"
     floor = max(0.0, min(1.0, float(confidence_floor)))
@@ -38,10 +39,10 @@ def validate_mapping_coercions(
         if src_logical == tgt_logical:
             continue
         lossy = is_lossy_coercion(src_type, tgt_type)
-        if type_locked:
+        if type_locked or lossy:
             severity = "block"
         else:
-            severity = "block" if lossy and float(m.get("confidence", 0)) < floor else "warn"
+            severity = "block" if float(m.get("confidence", 0)) < floor else "warn"
         issues.append({
             "source": src,
             "target": tgt,

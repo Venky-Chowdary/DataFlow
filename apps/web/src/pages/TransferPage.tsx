@@ -350,7 +350,7 @@ export function TransferPage({
   const [result, setResult] = useState<TransferResult | null>(null);
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
   const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
-  const [validationMode, setValidationMode] = useState<ValidationMode>("balanced");
+  const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
@@ -2552,14 +2552,24 @@ export function TransferPage({
                 .join(" · "),
             };
           }
-          let candidate = m.source.replace(/^_+/, "") || m.source;
-          if (!candidate || usedTargets.has(candidate.toLowerCase()) || destColumns.some((c) => c.toLowerCase() === candidate.toLowerCase())) {
-            candidate = `${candidate || "field"}_text`;
+          // Prefer original source name for ADD COLUMN (_id stays _id).
+          // Stripping underscores first produced id_text beside DECIMAL id and
+          // Snowflake failed with invalid identifier when ADD COLUMN was skipped.
+          let candidate = m.source;
+          const isTaken = (name: string) =>
+            usedTargets.has(name.toLowerCase())
+            || destColumns.some((c) => c.toLowerCase() === name.toLowerCase());
+          if (!candidate || isTaken(candidate)) {
+            const base = (m.source || "field").replace(/[^\w]+/g, "_").replace(/^_+|_+$/g, "") || "field";
+            candidate = `${m.source.startsWith("_") ? m.source : base}_text`;
+            if (isTaken(candidate)) {
+              candidate = `src_${base}`;
+            }
           }
           let n = 2;
-          const base = candidate;
-          while (usedTargets.has(candidate.toLowerCase()) || destColumns.some((c) => c.toLowerCase() === candidate.toLowerCase())) {
-            candidate = `${base}_${n}`;
+          const baseName = candidate;
+          while (isTaken(candidate)) {
+            candidate = `${baseName}_${n}`;
             n += 1;
           }
           usedTargets.delete(m.target.toLowerCase());

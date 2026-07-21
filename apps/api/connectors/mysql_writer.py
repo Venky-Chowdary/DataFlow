@@ -121,6 +121,13 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del schema
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+        schema_policy=_kwargs.get("schema_policy"),
+    )
     try:
         import pymysql
     except ImportError:

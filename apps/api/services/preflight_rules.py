@@ -97,11 +97,17 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Target DDL compatibility",
         "category": "hard",
         "why": "The target table or collection cannot accept the data as mapped. This could be a duplicate primary key, a missing column, a width overflow, or a NOT-NULL constraint.",
-        "fix": "Allow DataFlow to create/alter the target, remove the duplicate key values, widen the target column, or map to an existing column with a compatible type.",
+        "fix": (
+            "Fix every listed issue before Run: remap columns, enable create-new / "
+            "backfill so DataFlow can ADD COLUMN, widen types, or clean source samples. "
+            "Do not Execute until this gate is green — warehouse errors after Run are too late."
+        ),
         "examples": [
             "Duplicate '_id' values in MongoDB → remove duplicates or choose a different primary key.",
             "VARCHAR(10) target cannot fit a 50-character email → widen to VARCHAR(255) or TEXT.",
-            "Target column does not exist → enable 'create table' or add the column manually.",
+            "Target column does not exist → enable create-new / backfill or remap.",
+            "Decimal capacity overflow → widen NUMBER/DECIMAL or map to VARCHAR.",
+            "Could not load destination schema → refresh Map destination columns.",
         ],
     },
     "g7_capacity": {
@@ -226,10 +232,149 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "examples": ["12.34 cannot fit into an INTEGER target."],
     },
     {
+        "keywords": ["could not load destination schema", "cannot prove mapped columns"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "Validate could not introspect the destination table schema, so it cannot "
+            "prove that mapped columns exist. Running now would risk invalid-identifier "
+            "or missing-column failures after the transfer starts."
+        ),
+        "fix": (
+            "Confirm the destination table/schema name, refresh destination columns on "
+            "Map, fix credentials, or choose full_refresh_overwrite if you intend to "
+            "recreate the table from the mapping."
+        ),
+        "examples": [
+            "Could not load destination schema for existing target — Validate cannot prove mapped columns exist.",
+        ],
+    },
+    {
+        "keywords": ["decimal capacity overflow"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "A sample value is larger than the destination DECIMAL/NUMBER precision or "
+            "scale. The warehouse will reject or truncate the value at write time."
+        ),
+        "fix": (
+            "Widen the destination column (higher precision/scale), map to VARCHAR/TEXT, "
+            "or round/scale the source value with an explicit transform before Run."
+        ),
+        "examples": [
+            "Decimal capacity overflow: amount (NUMBER(10,2)) cannot hold sample value '12345678901.99'",
+        ],
+    },
+    {
+        "keywords": ["000904", "invalid identifier", "sql compilation error"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "Snowflake rejected a column name in the write SQL. Usually the mapping "
+            "targets a create-new column (for example id_text / _id) that does not "
+            "exist on the destination table yet."
+        ),
+        "fix": (
+            "Go back to Map and confirm create-new columns. Re-run so DataFlow can "
+            "ADD COLUMN for create_compatible_new mappings, or remap onto an existing "
+            "compatible column. Enable 'backfill new fields' if you added columns manually."
+        ),
+        "examples": [
+            'invalid identifier \'"id_text"\'',
+            "SQL compilation error: error line 1 at position 25",
+        ],
+    },
+    {
+        "keywords": [
+            "undefinedcolumn",
+            "undefined column",
+            "column does not exist",
+            "of relation",
+        ],
+        "gate": "g6_target_ddl",
+        "why": (
+            "PostgreSQL (or another SQL engine) rejected a column that is not on the "
+            "destination table. Same class as Snowflake 000904: create-new / drift "
+            "column was referenced without ADD COLUMN."
+        ),
+        "fix": (
+            "Remap create-new fields, enable backfill new fields / propagate columns, "
+            "or map onto an existing column. Re-run Validate then Execute."
+        ),
+        "examples": [
+            'column "_id" of relation "customers" does not exist',
+            "UndefinedColumn: column \"id_text\" does not exist",
+        ],
+    },
+    {
+        "keywords": ["1054", "unknown column", "er_bad_field_error"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "MySQL/MariaDB rejected an unknown column in INSERT/UPDATE. Usually a "
+            "create_compatible_new target was written before ALTER TABLE ADD COLUMN."
+        ),
+        "fix": (
+            "Confirm create-new mappings on Map, re-run so DataFlow ADDs the column, "
+            "or enable backfill new fields / remap to an existing column."
+        ),
+        "examples": [
+            "Unknown column '_id' in 'field list'",
+            "ERROR 1054 (42S22): Unknown column 'id_text' in 'field list'",
+        ],
+    },
+    {
+        "keywords": ["not found in table", "unrecognized name", "name not found inside"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "BigQuery rejected a column name that is not in the table schema — the "
+            "create-new / drift column class across warehouses."
+        ),
+        "fix": (
+            "Re-run with create-new backfill enabled (automatic for create_compatible_new), "
+            "or remap onto an existing BigQuery field."
+        ),
+        "examples": [
+            "Name _id not found inside customers",
+            "Unrecognized name: id_text",
+        ],
+    },
+    {
+        "keywords": ["207", "invalid column name", "s0022"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "SQL Server rejected an invalid/missing column name during write — same "
+            "missing ADD COLUMN failure mode as other SQL destinations."
+        ),
+        "fix": (
+            "Ensure create-new mappings trigger ADD COLUMN (automatic), enable backfill "
+            "new fields, or remap to an existing column."
+        ),
+        "examples": [
+            "Invalid column name '_id'",
+            "Msg 207, Level 16, State 1, Line 1",
+        ],
+    },
+    {
+        "keywords": ["ora-00904", "invalid identifier"],
+        "gate": "g6_target_ddl",
+        "why": (
+            "Oracle rejected an identifier that is not a column on the target table — "
+            "typically a create-new mapping without schema evolution."
+        ),
+        "fix": (
+            "Re-run so DataFlow can ADD the missing column for create_compatible_new, "
+            "enable backfill new fields, or remap onto an existing Oracle column."
+        ),
+        "examples": [
+            'ORA-00904: "_ID": invalid identifier',
+            "ORA-00904: invalid identifier",
+        ],
+    },
+    {
         "keywords": ["target column", "does not exist"],
         "gate": "g6_target_ddl",
         "why": "The mapping references a target column that does not exist and the destination cannot be altered.",
-        "fix": "Enable 'allow create table' so DataFlow can create/alter the target, or map only to existing columns.",
+        "fix": (
+            "Enable backfill new fields / create-new so DataFlow can ADD COLUMN, allow "
+            "create table for new targets, or map only to existing columns."
+        ),
         "examples": ["Target 'email' does not exist in the existing table."],
     },
     {

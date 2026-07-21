@@ -455,6 +455,8 @@ def run_file_preflight(
     source_table: str = "",
     destination_table: str = "",
     source_filename: str = "",
+    schema_policy: str = "manual_review",
+    backfill_new_fields: bool = False,
 ) -> dict[str, Any]:
     """Run 9 preflight gates for a file-based transfer."""
     if row_count <= 0 and sample_rows:
@@ -536,6 +538,10 @@ def run_file_preflight(
         dest_connected=destination_connected,
         dest_db_type=destination_db_type,
         allow_create=dest_can_create,
+        backfill_new_fields=backfill_new_fields,
+        schema_policy=schema_policy,
+        sync_mode=sync_mode,
+        destination_table=destination_table,
     )
 
     drift = detect_schema_drift(

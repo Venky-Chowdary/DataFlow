@@ -24,6 +24,28 @@ TRANSFORM_ERROR_POLICY = os.getenv("DATAFLOW_TRANSFORM_ERROR_POLICY", "quarantin
 VALID_ERROR_POLICIES = {"fail", "quarantine", "coerce_null"}
 
 
+def resolve_writer_backfill(
+    *,
+    backfill_new_fields: bool = False,
+    mappings: list | None = None,
+    schema_policy: str | None = None,
+) -> bool:
+    """Defense-in-depth: every SQL writer re-resolves ADD COLUMN intent.
+
+    Callers (engine / adapter) should already pass the effective flag, but writers
+    must not trust a stale ``False`` when mappings include ``create_compatible_new``
+    — that is the Snowflake ``invalid identifier '"id_text"'`` failure class across
+    every typed destination (Postgres, MySQL, BigQuery, SQL Server, SQLite, …).
+    """
+    from services.batch_progress import effective_backfill_new_fields
+
+    return effective_backfill_new_fields(
+        backfill_new_fields=backfill_new_fields,
+        schema_policy=schema_policy,
+        mappings=mappings,
+    )
+
+
 def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     """Convert a mapped cell to a JSON-serializable scalar.
 

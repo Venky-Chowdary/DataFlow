@@ -412,9 +412,9 @@ def _check_encoding_anomalies(
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
-    Balanced/review modes warn (industry default: sanitize at write); strict/maximum
-    block until the operator applies ``strip_controls`` or cleans the source.
-    Columns already mapped with ``strip_controls`` / ``normalize_unicode`` are skipped.
+    Always blocks at Validate when findings exist — operators must apply
+    ``strip_controls`` (or clean the source) before Run. Columns already mapped
+    with ``strip_controls`` / ``normalize_unicode`` are skipped.
     """
     sanitized_cols = {
         str(m.get("source") or "").lower()
@@ -467,15 +467,17 @@ def _check_encoding_anomalies(
             break
 
     mode = (validation_mode or "strict").strip().lower()
-    # Balanced/review: warn so Mongo/CMS extracts aren't hard-blocked; strict blocks.
-    blocks = bool(findings) and mode in {"strict", "maximum"}
+    # Control/format characters break Snowflake/PG/MySQL loads — always block at
+    # Validate with an explicit strip_controls fix path (never discover at Run).
+    del mode
+    blocks = bool(findings)
     issue_payload: list[Any] = findings[:12] if findings else []
     return {
         "check": "encoding_anomalies",
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issue_payload,
-        "warnings": [] if blocks else [f.get("message", "") for f in findings[:8]],
+        "warnings": [],
         "values_checked": checked,
         "affected_columns": sorted({f["column"] for f in findings}),
         "suggested_transform": "strip_controls" if findings else None,

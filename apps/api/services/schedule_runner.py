@@ -202,15 +202,23 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
         assert_signed_contract(contract_id, require_signed=require_signed)
 
+    from services.batch_progress import effective_backfill_new_fields
+
+    mappings = list(sched.mappings or [])
+    schema_policy = sched.schema_policy or "manual_review"
     return TransferRequest(
         source=source,
         destination=destination,
-        mappings=list(sched.mappings or []),
+        mappings=mappings,
         skip_preflight=False,
         sync_mode=effective_mode,
-        schema_policy=sched.schema_policy or "manual_review",
+        schema_policy=schema_policy,
         validation_mode=sched.validation_mode or "strict",
-        backfill_new_fields=bool(sched.backfill_new_fields),
+        backfill_new_fields=effective_backfill_new_fields(
+            backfill_new_fields=bool(sched.backfill_new_fields),
+            schema_policy=schema_policy,
+            mappings=mappings,
+        ),
         stream_contracts=stream_contracts,
         workspace_id=sched.workspace_id or "",
         contract_id=contract_id,

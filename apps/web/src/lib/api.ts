@@ -271,9 +271,13 @@ export async function runPreflight(payload: {
     reason?: string;
     transform?: string;
     target_type?: string;
+    source_type?: string;
     requires_review?: boolean;
     score_gap?: number;
     user_override?: boolean;
+    create_new?: boolean;
+    assignment_strategy?: string;
+    semantic_role?: string;
   }[];
   connector_id?: string;
   source_connector_id?: string;

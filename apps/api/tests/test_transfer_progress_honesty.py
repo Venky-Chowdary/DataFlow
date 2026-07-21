@@ -62,6 +62,24 @@ def test_propagate_schema_policy_implies_backfill():
     assert effective_backfill_new_fields(backfill_new_fields=True, schema_policy="manual_review")
 
 
+def test_create_compatible_new_mapping_implies_backfill():
+    assert effective_backfill_new_fields(
+        backfill_new_fields=False,
+        schema_policy="manual_review",
+        mappings=[{
+            "source": "_id",
+            "target": "_id",
+            "create_new": True,
+            "assignment_strategy": "create_compatible_new",
+        }],
+    )
+    assert not effective_backfill_new_fields(
+        backfill_new_fields=False,
+        schema_policy="manual_review",
+        mappings=[{"source": "a", "target": "b", "create_new": False}],
+    )
+
+
 @pytest.mark.parametrize(
     "rows,total,expected_min,expected_max",
     [

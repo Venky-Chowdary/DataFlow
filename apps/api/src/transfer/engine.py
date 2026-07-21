@@ -1199,6 +1199,8 @@ class UniversalTransferEngine:
                         request.destination.table or request.destination.collection or ""
                     ),
                     source_filename=request.source_filename or "",
+                    schema_policy=request.schema_policy,
+                    backfill_new_fields=request.backfill_new_fields,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1332,6 +1334,7 @@ class UniversalTransferEngine:
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
+                mappings=getattr(request, "mappings", None),
             )
 
             if request.destination.kind == "database":
@@ -1741,6 +1744,8 @@ class UniversalTransferEngine:
                         request.destination.table or request.destination.collection or ""
                     ),
                     source_filename=request.source_filename or "",
+                    schema_policy=request.schema_policy,
+                    backfill_new_fields=request.backfill_new_fields,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -1877,6 +1882,7 @@ class UniversalTransferEngine:
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
+                mappings=getattr(request, "mappings", None),
             )
 
             mongo.update_job_status(
@@ -2186,6 +2192,8 @@ class UniversalTransferEngine:
                         request.destination.table or request.destination.collection or ""
                     ),
                     source_filename=request.source_filename or "",
+                    schema_policy=request.schema_policy,
+                    backfill_new_fields=request.backfill_new_fields,
                 )
                 pf = apply_policy_gates(
                     pf,
@@ -2308,6 +2316,7 @@ class UniversalTransferEngine:
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
+                mappings=getattr(request, "mappings", None),
             )
 
             mongo.update_job_status(

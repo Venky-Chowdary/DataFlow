@@ -600,6 +600,13 @@ async def execute_transfer_json(
         require_signed_contract=bool(body.require_signed_contract),
         triggered_by=_actor_email(request),
     )
+    from services.batch_progress import effective_backfill_new_fields
+
+    request_obj.backfill_new_fields = effective_backfill_new_fields(
+        backfill_new_fields=request_obj.backfill_new_fields,
+        schema_policy=request_obj.schema_policy,
+        mappings=request_obj.mappings,
+    )
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import build_run_payload
         try:
@@ -612,6 +619,13 @@ async def execute_transfer_json(
             raise HTTPException(status_code=400, detail=str(e)) from e
     else:
         plan_payload = None
+
+    # Recompute after plan mappings may have been merged (create_new → ADD COLUMN).
+    request_obj.backfill_new_fields = effective_backfill_new_fields(
+        backfill_new_fields=request_obj.backfill_new_fields,
+        schema_policy=request_obj.schema_policy,
+        mappings=request_obj.mappings,
+    )
 
     _residency_check(request, dst, region)
     engine = get_transfer_engine()
@@ -920,6 +934,7 @@ async def run_universal_transfer(
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
+        mappings=getattr(request_obj, "mappings", None),
     )
     if stream_contracts_json.strip():
         try:

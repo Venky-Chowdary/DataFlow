@@ -41,6 +41,9 @@ export interface EditableMapping {
   scoreGap?: number;
   /** From schema intelligence — e.g. string_enum, boolean_flag */
   semanticRole?: string;
+  /** Intentionally ADD COLUMN / create-new (e.g. ObjectId → _id beside DECIMAL id). */
+  createNew?: boolean;
+  assignmentStrategy?: string;
 }
 
 const STATUS_ENUM_TOKENS = new Set([
@@ -200,6 +203,17 @@ export function buildPreflightMappings(
         requires_review: Boolean((safe.requiresReview || enumBool) && !safe.approved),
         score_gap: safe.scoreGap ?? 1,
         semantic_role: safe.semanticRole,
+        // Preserve create-new so Validate G6 matches Execute ADD COLUMN behavior.
+        create_new: Boolean(
+          safe.createNew
+          || safe.assignmentStrategy === "create_compatible_new"
+          || (safe.existsInDestination === false && Boolean(safe.target)),
+        ),
+        assignment_strategy:
+          safe.assignmentStrategy
+          || (safe.createNew || safe.existsInDestination === false
+            ? "create_compatible_new"
+            : undefined),
       };
     });
   }
@@ -287,6 +301,8 @@ export function editableFromPipelineMappings(
       scoreGap: m.score_gap,
       transform: m.is_pii ? "hash_pii" : engineTransformToUi(m.transform),
       semanticRole: m.semantic_role,
+      createNew: Boolean(m.create_new) || m.assignment_strategy === "create_compatible_new",
+      assignmentStrategy: m.assignment_strategy,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {

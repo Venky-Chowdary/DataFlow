@@ -26,4 +26,5 @@ def test_mongo_object_id_does_not_map_to_decimal_id():
     )
     assert len(out) == 1
     assert out[0]["target"].lower() != "id"
-    assert out[0].get("create_new") is True or out[0]["target"] in {"column_2", "column_5"}
+    assert out[0]["target"] == "_id" or out[0].get("create_new") is True
+    assert out[0].get("create_new") is True or out[0]["target"] in {"column_2", "column_5", "_id"}

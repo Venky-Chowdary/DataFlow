@@ -1568,9 +1568,14 @@ export function ValidateDashboard({
         <div className="df2-vd-blockers">
           <div className="df2-vd-blockers-head">
             <DtIcon name="alert" size={15} />
-            <strong>Resolve to continue</strong>
+            <strong>Fix before Run</strong>
             <span>{preflight.blockers.length}</span>
           </div>
+          <p className="df2-vd-blocker-precaution">
+            Schema mismatches, bad data, and type hazards are blocked here on purpose.
+            Resolve each item below (why + fix), re-validate, then Execute — Run should
+            only surface operational issues like timeouts or connectivity.
+          </p>
           <ul>
             {preflight.blockers.map((b) => {
               const issues = issueTextsFromDetails(b.details);

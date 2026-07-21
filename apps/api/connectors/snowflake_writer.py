@@ -515,6 +515,12 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     del port, ssl, _kwargs
+    from connectors.writer_common import resolve_writer_backfill
+
+    backfill_new_fields = resolve_writer_backfill(
+        backfill_new_fields=backfill_new_fields,
+        mappings=mappings,
+    )
     # When a shared connection is passed (stream reuse), default to not closing it.
     if close_connection is None:
         close_connection = connection is None
@@ -698,12 +704,14 @@ def write_mapped_rows(
                 cur.execute(
                     """SELECT COLUMN_NAME FROM information_schema.columns
                        WHERE table_schema = %s AND table_name = %s""",
-                    (schema.upper(), table_name),
+                    (schema.upper(), table_name.upper()),
                 )
                 existing = {row[0].upper() for row in cur.fetchall()}
+                tbl_q = quote_sql_identifier(table_name)
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:
-                        cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" {typ}')
+                        col_q = quote_sql_identifier(col)
+                        cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
             total = len(mapped_rows)
             conflict = [c for c in (conflict_columns or []) if c in target_cols]

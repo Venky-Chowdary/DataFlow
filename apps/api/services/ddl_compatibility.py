@@ -9,7 +9,8 @@ from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
 
 _VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
-_DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric)\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", re.I)
+_DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric|number)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", re.I)
+_NUMBERISH = re.compile(r"^(?:decimal|numeric|number|float|double|real|int|bigint|smallint)", re.I)
 
 
 def _max_string_len(values: list[str]) -> int:
@@ -19,6 +20,57 @@ def _max_string_len(values: list[str]) -> int:
 def _parse_varchar_width(ddl: str) -> int | None:
     m = _VARCHAR_WIDTH.search(ddl or "")
     return int(m.group(1)) if m else None
+
+
+def _parse_decimal_capacity(ddl: str) -> tuple[int, int] | None:
+    """Return (precision, scale) for DECIMAL/NUMERIC/NUMBER DDL, if present."""
+    text = (ddl or "").strip()
+    if not text:
+        return None
+    m = _DECIMAL_PRECISION.search(text)
+    if m:
+        precision = int(m.group(1))
+        scale = int(m.group(2) or 0)
+        return precision, scale
+    # Bare NUMBER / DECIMAL (Snowflake NUMBER defaults to 38,0)
+    if _NUMBERISH.match(text) and "(" not in text:
+        logical = normalize_logical_type(text)
+        if logical in {"decimal", "float"}:
+            return 38, 0
+        if logical == "integer":
+            return 38, 0
+    return None
+
+
+def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str | None:
+    capacity = _parse_decimal_capacity(tgt_type)
+    if not capacity or not samples:
+        return None
+    precision, scale = capacity
+    max_int_digits = max(0, precision - scale)
+    try:
+        from decimal import Decimal, InvalidOperation
+    except ImportError:
+        return None
+    for raw in samples[:50]:
+        text = (raw or "").strip().replace(",", "")
+        if not text or text.lower() in {"null", "none", "nan"}:
+            continue
+        try:
+            value = Decimal(text)
+        except (InvalidOperation, ValueError):
+            # Non-numeric into DECIMAL is a type/coercion problem handled elsewhere.
+            continue
+        sign, digits, exp = value.as_tuple()
+        del sign
+        scale_digits = -exp if exp < 0 else 0
+        int_digits = len(digits) - scale_digits if exp < 0 else len(digits) + max(exp, 0)
+        if int_digits > max_int_digits or scale_digits > scale:
+            return (
+                f"Decimal capacity overflow: {tgt} ({tgt_type}) cannot hold sample value "
+                f"'{raw[:40]}' (needs ~{int_digits},{scale_digits} vs {precision},{scale})"
+            )
+    return None
 
 
 def _sample_values(sample_rows: list[dict] | None, column: str) -> list[str]:
@@ -31,6 +83,14 @@ def _sample_values(sample_rows: list[dict] | None, column: str) -> list[str]:
             continue
         out.append(str(val).strip())
     return out
+
+
+_OVERWRITE_SYNC = {
+    "full_refresh_overwrite",
+    "overwrite",
+    "full_refresh",
+    "replace",
+}
 
 
 def _primary_key_target(
@@ -116,6 +176,10 @@ def evaluate_ddl_compatibility(
     dest_connected: bool = False,
     dest_db_type: str = "postgresql",
     allow_create: bool = False,
+    backfill_new_fields: bool = False,
+    schema_policy: str | None = None,
+    sync_mode: str | None = None,
+    destination_table: str | None = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -129,6 +193,39 @@ def evaluate_ddl_compatibility(
 
     if not mappings:
         return False, ["No column mappings defined"]
+
+    from services.batch_progress import effective_backfill_new_fields
+
+    # CREATE TABLE permission ≠ ALTER ADD COLUMN. Missing columns on an existing
+    # table are only safe when writers will ADD COLUMN (create_new / backfill /
+    # propagate_*). Otherwise preflight must fail-fast — same class as Snowflake
+    # 000904 invalid identifier across every SQL destination.
+    will_add_columns = effective_backfill_new_fields(
+        backfill_new_fields=backfill_new_fields,
+        schema_policy=schema_policy,
+        mappings=mappings,
+    )
+
+    sync = (sync_mode or "").strip().lower()
+    overwrite = sync in _OVERWRITE_SYNC
+    named_target = bool((destination_table or "").strip())
+
+    # Honest schema gate: empty live schema on a named non-overwrite target means
+    # Validate cannot prove columns exist — do not pretend the table is new.
+    if (
+        dest_connected
+        and not schemaless
+        and named_target
+        and not overwrite
+        and not target_schema
+        and (table_exists or named_target)
+    ):
+        issues.append(
+            "Could not load destination schema for existing target — "
+            "Validate cannot prove mapped columns exist. Re-check table/schema name "
+            "and credentials, refresh destination columns on Map, or use "
+            "full_refresh_overwrite to recreate the table."
+        )
 
     seen_targets: set[str] = set()
     for m in mappings:
@@ -146,12 +243,14 @@ def evaluate_ddl_compatibility(
         tgt_type = ci_get(target_schema, tgt)
 
         if not schemaless and table_exists and target_schema and tgt_type is None:
-            # If the destination connector supports creating tables, we can evolve
-            # the target schema (e.g. CREATE TABLE or ALTER TABLE ADD COLUMN) so
-            # missing columns do not block the transfer.
-            if not allow_create:
-                issues.append(f"Target column '{tgt}' does not exist in destination table")
+            if will_add_columns:
                 continue
+            issues.append(
+                f"Target column '{tgt}' does not exist in destination table; "
+                "enable backfill new fields / create-new mapping so DataFlow can ADD COLUMN, "
+                "or remap onto an existing column"
+            )
+            continue
 
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             issues.append(
@@ -169,6 +268,10 @@ def evaluate_ddl_compatibility(
                             f"Value width overflow: {src} sample max {max_len} chars "
                             f"exceeds {tgt} ({tgt_type})"
                         )
+
+                overflow = _decimal_overflow_issue(samples, tgt, tgt_type)
+                if overflow:
+                    issues.append(overflow)
 
                 src_logical = normalize_logical_type(src_type)
                 tgt_logical = normalize_logical_type(tgt_type)
@@ -205,7 +308,9 @@ def evaluate_ddl_compatibility(
                 f"{', '.join(required_unmapped[:3])}"
             )
 
+    # Keep issues visible even when dest is disconnected — G2 still blocks connectivity,
+    # but operators must see schema hazards immediately rather than a false clean G6.
     if not dest_connected:
-        return True, []
+        return len(issues) == 0, issues
 
     return len(issues) == 0, issues
