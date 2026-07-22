@@ -260,6 +260,8 @@ def run_integrity_audit(
     required_targets: list[str] | None = None,
     primary_key: str | None = None,
     validation_mode: str = "strict",
+    *,
+    dest_kind: str = "",
 ) -> DataQualityReport:
     """Run a sample-based integrity and anomaly audit over raw source rows.
 
@@ -268,6 +270,11 @@ def run_integrity_audit(
     low cardinality, encoding anomalies) produce warnings.  Warnings become
     blockers only in ``maximum`` validation mode; in ``strict`` / ``balanced``
     they are surfaced but do not stop the transfer.
+
+    Identity-key selection MUST match Validate (G6/G8/G9) via
+    ``services.primary_key.resolve_identity_key``. Never invent a PK from
+    ``headers[0]`` — that falsely blocks Mongo business ``id`` fields when
+    ``_id`` is the real document key.
     """
     report = DataQualityReport()
     if not rows or not headers:
@@ -287,23 +294,40 @@ def run_integrity_audit(
     stats: dict[str, Any] = {"total_rows": total, "columns": {}}
     anomalous_rows: set[int] = set()
 
-    # ── Identify primary-key source column ───────────────────────────────────
-    pk_source = primary_key
+    # ── Identify primary-key source column (same contract as Validate) ────────
+    pk_source = primary_key if primary_key and primary_key in header_index else None
     if not pk_source:
-        for tgt in ("_id", "id", "ID"):
-            if target_to_source.get(tgt):
-                pk_source = target_to_source[tgt]
-                break
-        if not pk_source:
-            for h in headers:
-                if h.lower() in {"_id", "id"}:
-                    pk_source = h
-                    break
-        if not pk_source:
-            pk_source = headers[0]
+        try:
+            from services.primary_key import resolve_identity_key
 
-    pk_idx = header_index.get(pk_source, 0)
-    pk_values = [row[pk_idx] if pk_idx < len(row) else "" for row in rows]
+            pk_source, _pk_tgt = resolve_identity_key(
+                mappings=mappings or [{"source": h, "target": h} for h in headers],
+                source_columns=headers,
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+                purpose="uniqueness",
+            )
+        except Exception:
+            pk_source = None
+        if pk_source and pk_source not in header_index:
+            # Case-insensitive header match
+            lower_map = {h.lower(): h for h in headers}
+            pk_source = lower_map.get(pk_source.lower())
+    if not pk_source:
+        # Last resort: exact id/_id in headers — never headers[0].
+        for key in ("_id", "id"):
+            hit = next((h for h in headers if h.lower() == key), None)
+            if hit:
+                # Schemaless dests: only _id counts as identity.
+                try:
+                    from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+
+                    if normalize_dest_kind(dest_kind) in SCHEMALESS_DESTS and key != "_id":
+                        continue
+                except Exception:
+                    pass
+                pk_source = hit
+                break
 
     def _hard(msg: str) -> None:
         report.issues.append(msg)
@@ -313,16 +337,28 @@ def run_integrity_audit(
         report.warnings.append(msg)
         report.checks_warned += 1
 
-    # 1. Duplicate primary keys (hard)
-    dup_counts = Counter(pk_values)
-    duplicates = {v: c for v, c in dup_counts.items() if c > 1 and str(v).strip()}
-    if duplicates:
-        _hard(
-            f"Duplicate primary key values in '{pk_source}': "
-            f"{len(duplicates)} keys repeat (e.g. {', '.join(str(v) for v in list(duplicates)[:3])})"
+    # 1. Duplicate primary keys (hard) — skip when no identity key is known
+    if not pk_source:
+        _warn(
+            "No identity key resolved for duplicate check "
+            "(schemaless needs _id; SQL needs id/_id or a stream-contract primary_key)"
         )
-    else:
         report.checks_passed += 1
+        stats["primary_key"] = None
+    else:
+        pk_idx = header_index.get(pk_source, 0)
+        pk_values = [row[pk_idx] if pk_idx < len(row) else "" for row in rows]
+        stats["primary_key"] = pk_source
+
+        dup_counts = Counter(pk_values)
+        duplicates = {v: c for v, c in dup_counts.items() if c > 1 and str(v).strip()}
+        if duplicates:
+            _hard(
+                f"Duplicate primary key values in '{pk_source}': "
+                f"{len(duplicates)} keys repeat (e.g. {', '.join(str(v) for v in list(duplicates)[:3])})"
+            )
+        else:
+            report.checks_passed += 1
 
     # 2. Per-column checks
     null_spike_threshold = 0.90

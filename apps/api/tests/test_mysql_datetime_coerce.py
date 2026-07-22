@@ -45,8 +45,11 @@ def test_plain_mysql_datetime_string_passthrough_parse():
 
 
 def test_postgres_timestamptz_also_coerces_iso_z():
+    from datetime import timezone
+
     got = coerce_sql_temporal("2024-08-09T01:58:42Z", "TIMESTAMPTZ")
-    assert got == datetime(2024, 8, 9, 1, 58, 42)
+    # TIMESTAMPTZ binds as aware UTC so the driver does not reinterpret session TZ.
+    assert got == datetime(2024, 8, 9, 1, 58, 42, tzinfo=timezone.utc)
 
 
 def test_incorrect_datetime_is_data_error_not_connection_lost():

@@ -47,7 +47,7 @@ _STRING_TRANSFORMS: frozenset[str] = {
     "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "none",
     "date", "datetime", "json", "binary", "decimal",
     "phone", "email", "url", "iban", "postal",
-    "currency", "percentage", "base64",
+    "currency", "percentage", "base64", "strip_controls", "normalize_unicode",
 }
 
 

@@ -737,6 +737,7 @@ def stream_file_to_database(
                 column_types=column_types,
                 mappings=mappings,
                 validation_mode=validation_mode,
+                dest_kind=dest_type,
             )
             if audit.issues:
                 local_warnings.extend(audit.issues[:10])

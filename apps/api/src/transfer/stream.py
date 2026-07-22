@@ -1221,14 +1221,37 @@ def stream_database_transfer(
 
     batch = _filter_batch(_fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe)
     batch_quality_enabled = validation_mode in ("strict", "maximum")
-    pk_source_col = cursor_source_col or ""
-    if not pk_source_col and pk_target_cols and mappings:
+    # Identity key for duplicate audit — NEVER reuse the CDC cursor column.
+    # Cursor fields (updated_at, id) are not the uniqueness contract; Mongo→Redis
+    # must audit `_id`, not a business `id` that legitimately repeats.
+    pk_source_col = ""
+    if pk_target_cols and mappings:
         target_to_source = {m.get("target", "").lower(): m.get("source", "") for m in mappings if m.get("target")}
         for pk in pk_target_cols:
             src = target_to_source.get(pk.lower())
             if src:
                 pk_source_col = src
                 break
+    if not pk_source_col:
+        try:
+            from services.primary_key import resolve_primary_key_source
+
+            pk_source_col = (
+                resolve_primary_key_source(
+                    mappings,
+                    list(columns or (batch.headers if batch else [])),
+                    dest_type,
+                    validation_mode=validation_mode,
+                    purpose="uniqueness",
+                )
+                or ""
+            )
+        except Exception:
+            pk_source_col = ""
+    # Prefer live batch headers when available for the first chunk.
+    if batch and getattr(batch, "headers", None) and pk_source_col:
+        lower = {h.lower(): h for h in batch.headers}
+        pk_source_col = lower.get(pk_source_col.lower(), pk_source_col)
 
     max_workers = int(os.getenv("DATAFLOW_PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
@@ -1296,6 +1319,7 @@ def stream_database_transfer(
                 required_targets=pk_target_cols or [],
                 primary_key=pk_source_col if pk_source_col in batch.headers else None,
                 validation_mode=validation_mode,
+                dest_kind=dest_type,
             )
             if audit.issues:
                 local_warnings.extend(audit.issues[:10])

@@ -41,6 +41,7 @@ from services.transform_engine import (
 LOGICAL_TYPES = frozenset({
     "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP", "TIME",
     "VARCHAR", "TEXT", "UUID", "JSON", "BINARY",
+    "INTERVAL", "GEOGRAPHY", "VECTOR",
 })
 
 # Tokens that may become BOOLEAN only when the field name looks like a flag.

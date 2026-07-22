@@ -84,13 +84,36 @@ def test_dry_run_catches_bad_decimal():
     assert errors
 
 
-def test_apply_hash_pii_is_deterministic():
+def test_dry_run_reports_multiple_errors_per_mapping():
+    """Sporadic mid-sample bad values must not hide behind first-error-only break."""
+    rows = [["1.00"], ["2.00"], ["bad-a"], ["3.00"], ["bad-b"], ["bad-c"], ["4.00"]]
+    ok, errors = dry_run_sample(
+        headers=["AMT"],
+        sample_rows=rows,
+        mappings=[{"source": "AMT", "target": "payment_amount", "transform": "decimal"}],
+        column_types={"AMT": "DECIMAL"},
+        max_errors_per_mapping=3,
+    )
+    assert not ok
+    assert sum(1 for e in errors if "Invalid decimal" in e) >= 3
+
+
+def test_apply_hash_pii_is_deterministic(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "unit-test-pii-key")
     val, err = apply_transform("secret@email.com", "hash_pii")
     assert err is None
     assert val
     assert len(val) == 32
     again, _ = apply_transform("secret@email.com", "hash_pii")
     assert again == val
+
+
+def test_hash_pii_fails_closed_without_secret(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_PII_HASH_KEY", raising=False)
+    monkeypatch.delenv("DATAFLOW_SECRET", raising=False)
+    val, err = apply_transform("secret@email.com", "hash_pii")
+    assert val is None
+    assert err and "DATAFLOW_PII_HASH_KEY" in err
 
 
 def test_apply_uuid_validates():

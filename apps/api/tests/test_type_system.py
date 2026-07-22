@@ -29,3 +29,16 @@ def test_type_system_lakehouse_ddl():
     assert ddl_type("apache_iceberg", "json") == "string"
     assert ddl_type("iceberg", "UUID") == "uuid"
     assert ddl_type("unity_catalog", "DECIMAL") == "DECIMAL(38,10)"
+
+
+def test_decimal_precision_propagated_not_truncated():
+    """Oracle NUMBER(38,18) → MySQL must keep scale 18 (was hardcoded DECIMAL(38,15))."""
+    from services.type_system import decimal_scale_would_truncate
+
+    assert ddl_type("mysql", "NUMBER(38,18)") == "DECIMAL(38,18)"
+    assert ddl_type("snowflake", "DECIMAL(28,12)") == "NUMBER(28,12)"
+    assert ddl_type("sqlserver", "NUMERIC(20,8)") == "DECIMAL(20,8)"
+    # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
+    assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
+    assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True
+    assert decimal_scale_would_truncate("NUMBER(38,18)", "mysql") is False

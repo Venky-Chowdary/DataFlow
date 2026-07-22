@@ -7,7 +7,7 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
   "pdf", "docx", "html",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
-  "sqlite", "generic_sql", "sftp", "email",
+  "adls", "sqlite", "generic_sql", "sftp", "email", "sqlserver", "oracle",
   "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
   "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
   "iceberg",
@@ -16,7 +16,14 @@ export const TRANSFER_LIVE_TYPES = new Set([
 export const CONNECT_ONLY_TYPES = new Set<string>([]);
 
 /** SQL engines that are first-class drivers; the rest of generic SQL IDs route through generic_sql. */
-const FIRST_CLASS_SQL = new Set(["mysql", "postgresql", "redshift", "sqlite"]);
+const FIRST_CLASS_SQL = new Set([
+  "mysql",
+  "postgresql",
+  "redshift",
+  "sqlite",
+  "sqlserver",
+  "oracle",
+]);
 
 const CATALOG_ALIASES: Record<string, string> = {
   csv___tsv: "csv",

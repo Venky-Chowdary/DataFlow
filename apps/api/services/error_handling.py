@@ -197,6 +197,30 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         },
     ),
     (
+        (
+            "duplicate primary key",
+            "keys repeat",
+            "duplicate key values",
+            "failed data-quality audit: duplicate",
+        ),
+        {
+            "code": "duplicate_primary_key",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "Duplicate identity-key values in a write batch",
+            "fix": (
+                "DataFlow blocked the batch because the identity key repeats inside it "
+                "(same rule Validate uses: `_id` on Mongo/Redis/Dynamo; `id`/`_id` on SQL). "
+                "Business fields named `id` that are not the document key are not treated as "
+                "primary keys on schemaless routes. To proceed: (1) Open Validate — if this "
+                "was a false `id` block on Mongo→Redis, restart API and Resume; (2) If the "
+                "identity key truly duplicates, dedupe the source or switch sync mode to "
+                "upsert with that key; (3) Or set an explicit stream-contract primary_key. "
+                "No rows from the failed batch were committed."
+            ),
+        },
+    ),
+    (
         ("disk full", "no space left", "enospc"),
         {
             "code": "destination_disk_full",

@@ -73,9 +73,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         return _pass(GateId.G3_SCHEMA_CONTRACT, "Schemaless destination — no DDL type contract to validate", start)
 
     try:
-        from services.type_system import is_lossy_coercion
+        from services.type_system import decimal_scale_would_truncate, is_lossy_coercion, normalize_logical_type
     except ImportError:
         is_lossy_coercion = None
+        decimal_scale_would_truncate = None
+        normalize_logical_type = None
 
     # Value-aware report (host-injected). When sample rows exist we can predict
     # the *real* write outcome per value instead of guessing from declared types.
@@ -101,6 +103,17 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         lossy = pair in LOSSY_COERCIONS
         if not lossy and is_lossy_coercion:
             lossy = is_lossy_coercion(source_col.inferred_type, target.inferred_type)
+        # Fractional scale that exceeds destination DECIMAL caps is silent truncation
+        # unless the mapping target is already a lossless text sink.
+        if (
+            not lossy
+            and decimal_scale_would_truncate
+            and normalize_logical_type
+            and decimal_scale_would_truncate(source_col.inferred_type, dest_kind)
+            and normalize_logical_type(target.inferred_type) not in {"string", "text", "json"}
+        ):
+            lossy = True
+            pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [scale truncates]")
         if not lossy:
             continue
 

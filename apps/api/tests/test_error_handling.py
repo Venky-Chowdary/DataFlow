@@ -82,6 +82,18 @@ def test_humanize_unknown_error_does_not_invent_root_cause():
     assert human["message"] == "weird proprietary widget glitch 42"
 
 
+def test_humanize_duplicate_primary_key_has_concrete_fix():
+    from services.error_handling import humanize_transfer_failure
+
+    human = humanize_transfer_failure(
+        ValueError("Batch 1 failed data-quality audit: Duplicate primary key values in 'id': 1 keys repeat (e.g. 11)")
+    )
+    assert human["code"] == "duplicate_primary_key"
+    assert human["confidence"] == "high"
+    assert "identity key" in human["fix"].lower() or "_id" in human["fix"]
+    assert "No mapped remediation" not in human["fix"]
+
+
 def test_retry_budget_env_overrides(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATAFLOW_RETRY_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("DATAFLOW_RETRY_BASE_DELAY_SECONDS", "0.25")

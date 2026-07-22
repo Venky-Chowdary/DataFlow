@@ -23,9 +23,59 @@ def test_detects_duplicate_primary_keys():
         headers=["id", "amount"],
         rows=[["1", "100"], ["2", "200"], ["1", "300"]],
         column_types={"id": "INTEGER", "amount": "DECIMAL"},
+        dest_kind="postgresql",
     )
     assert not report.passed
     assert "Duplicate primary key" in report.issues[0]
+
+
+def test_schemaless_uses_underscore_id_not_business_id():
+    """Mongo/Redis: repeating business `id` must not fail when `_id` is unique."""
+    report = run_integrity_audit(
+        headers=["_id", "id", "name"],
+        rows=[
+            ["oid1", "11", "a"],
+            ["oid2", "11", "b"],
+            ["oid3", "12", "c"],
+        ],
+        mappings=[
+            {"source": "_id", "target": "_id"},
+            {"source": "id", "target": "id"},
+            {"source": "name", "target": "name"},
+        ],
+        dest_kind="redis",
+        validation_mode="strict",
+    )
+    assert report.passed, report.issues
+    assert report.stats.get("primary_key") == "_id"
+
+
+def test_schemaless_still_blocks_duplicate_underscore_id():
+    report = run_integrity_audit(
+        headers=["_id", "id"],
+        rows=[["oid1", "1"], ["oid1", "2"]],
+        mappings=[
+            {"source": "_id", "target": "_id"},
+            {"source": "id", "target": "id"},
+        ],
+        dest_kind="mongodb",
+        validation_mode="strict",
+    )
+    assert not report.passed
+    assert "_id" in report.issues[0]
+
+
+def test_never_falls_back_to_first_header_as_pk():
+    """A lone non-key column must not become the PK just because it is headers[0]."""
+    report = run_integrity_audit(
+        headers=["name", "city"],
+        rows=[["Alice", "NYC"], ["Alice", "LA"]],
+        dest_kind="postgresql",
+        validation_mode="strict",
+    )
+    # No id/_id → warn, do not hard-fail on duplicate names
+    assert report.passed, report.issues
+    assert any("No identity key" in w for w in report.warnings)
 
 
 def test_detects_required_nulls():

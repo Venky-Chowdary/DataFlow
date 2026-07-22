@@ -627,8 +627,12 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     if t == "decimal":
         if db_type == "risingwave":
             return sa.Numeric()
-        if db_type in ("questdb", "duckdb"):
+        # QuestDB lacks true DECIMAL — DOUBLE is the platform limit (documented).
+        if db_type == "questdb":
             return sa.Double()
+        # DuckDB has DECIMAL(p,s) — never coerce through float64 (silent precision loss).
+        if db_type == "duckdb":
+            return sa.Numeric(38, 15)
         if db_type == "presto":
             return sa.DECIMAL(38, 15)
         # PostgreSQL-wire engines (Citus, Materialize, CrateDB, etc.) store

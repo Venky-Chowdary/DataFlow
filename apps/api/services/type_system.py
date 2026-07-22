@@ -32,6 +32,10 @@ LOGICAL_UUID = "uuid"
 LOGICAL_JSON = "json"
 LOGICAL_ARRAY = "array"
 LOGICAL_BINARY = "binary"
+# Specialty types — native DDL where the engine supports them, else lossless text.
+LOGICAL_INTERVAL = "interval"
+LOGICAL_GEOGRAPHY = "geography"
+LOGICAL_VECTOR = "vector"
 
 # ---------------------------------------------------------------------------
 # Decimal / integer wire budgets (shared by serializer + transform engine)
@@ -147,23 +151,25 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "smallserial": LOGICAL_INTEGER,
     "year": LOGICAL_INTEGER,
     "bit": LOGICAL_BOOLEAN,
-    "year_month": LOGICAL_STRING,
-    "interval": LOGICAL_STRING,
+    "year_month": LOGICAL_INTERVAL,
+    "interval": LOGICAL_INTERVAL,
+    "interval year to month": LOGICAL_INTERVAL,
+    "interval day to second": LOGICAL_INTERVAL,
     "enum": LOGICAL_STRING,
     "set": LOGICAL_STRING,
     "inet": LOGICAL_STRING,
     "cidr": LOGICAL_STRING,
     "macaddr": LOGICAL_STRING,
     "macaddr8": LOGICAL_STRING,
-    "geometry": LOGICAL_STRING,
-    "geography": LOGICAL_STRING,
-    "point": LOGICAL_STRING,
-    "linestring": LOGICAL_STRING,
-    "polygon": LOGICAL_STRING,
-    "multipoint": LOGICAL_STRING,
-    "multilinestring": LOGICAL_STRING,
-    "multipolygon": LOGICAL_STRING,
-    "geometrycollection": LOGICAL_STRING,
+    "geometry": LOGICAL_GEOGRAPHY,
+    "geography": LOGICAL_GEOGRAPHY,
+    "point": LOGICAL_GEOGRAPHY,
+    "linestring": LOGICAL_GEOGRAPHY,
+    "polygon": LOGICAL_GEOGRAPHY,
+    "multipoint": LOGICAL_GEOGRAPHY,
+    "multilinestring": LOGICAL_GEOGRAPHY,
+    "multipolygon": LOGICAL_GEOGRAPHY,
+    "geometrycollection": LOGICAL_GEOGRAPHY,
     "hstore": LOGICAL_JSON,
     "map": LOGICAL_JSON,
     "xml": LOGICAL_TEXT,
@@ -179,7 +185,9 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "xid": LOGICAL_INTEGER,
     "tid": LOGICAL_INTEGER,
     "cid": LOGICAL_INTEGER,
-    "vector": LOGICAL_STRING,
+    "vector": LOGICAL_VECTOR,
+    "halfvec": LOGICAL_VECTOR,
+    "sparsevec": LOGICAL_VECTOR,
     "pg_lsn": LOGICAL_STRING,
     "character large object": LOGICAL_TEXT,
     "national character varying": LOGICAL_STRING,
@@ -198,6 +206,42 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "time without time zone": LOGICAL_TIME,
     "datetime2": LOGICAL_DATETIME,
     "smalldatetime": LOGICAL_DATETIME,
+    "datetimeoffset": LOGICAL_DATETIME,
+    "sysname": LOGICAL_STRING,
+    "hierarchyid": LOGICAL_STRING,
+    "nclob": LOGICAL_TEXT,
+    "bfile": LOGICAL_BINARY,
+    # Bare "long" is the lakehouse/Java 64-bit integer (Iceberg/Spark). Oracle's
+    # deprecated LONG text LOB is rare; prefer integer fidelity for universal transfers.
+    "long": LOGICAL_INTEGER,
+    "fixed": LOGICAL_DECIMAL,  # MySQL FIXED synonym for DECIMAL
+    "bit varying": LOGICAL_BINARY,
+    "varbit": LOGICAL_BINARY,
+    "citext": LOGICAL_STRING,
+    "regclass": LOGICAL_STRING,
+    "regtype": LOGICAL_STRING,
+    "regproc": LOGICAL_STRING,
+    "regnamespace": LOGICAL_STRING,
+    "numrange": LOGICAL_STRING,
+    "int4range": LOGICAL_STRING,
+    "int8range": LOGICAL_STRING,
+    "tsrange": LOGICAL_STRING,
+    "tstzrange": LOGICAL_STRING,
+    "daterange": LOGICAL_STRING,
+    "uint128": LOGICAL_DECIMAL,
+    "int128": LOGICAL_DECIMAL,
+    "uint256": LOGICAL_DECIMAL,
+    "int256": LOGICAL_DECIMAL,
+    "hugeint": LOGICAL_DECIMAL,  # DuckDB
+    "uhugeint": LOGICAL_DECIMAL,
+    "super": LOGICAL_JSON,  # Redshift SUPER
+    "document": LOGICAL_JSON,
+    "bson": LOGICAL_JSON,
+    "rowid": LOGICAL_STRING,
+    "urowid": LOGICAL_STRING,
+    "currency": LOGICAL_DECIMAL,
+    "halfvec": LOGICAL_VECTOR,
+    "sparsevec": LOGICAL_VECTOR,
 }
 
 DDL_TYPES: Final[dict[str, dict[str, str]]] = {
@@ -373,7 +417,190 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "list",
         LOGICAL_BINARY: "binary",
     },
+    # Schemaless / document / KV — wire as string; no SQL DDL contract.
+    "redis": {
+        LOGICAL_STRING: "string",
+        LOGICAL_TEXT: "string",
+        LOGICAL_INTEGER: "string",
+        LOGICAL_DECIMAL: "string",
+        LOGICAL_BOOLEAN: "string",
+        LOGICAL_DATE: "string",
+        LOGICAL_DATETIME: "string",
+        LOGICAL_TIME: "string",
+        LOGICAL_UUID: "string",
+        LOGICAL_JSON: "string",
+        LOGICAL_ARRAY: "string",
+        LOGICAL_BINARY: "string",
+    },
+    "dynamodb": {
+        LOGICAL_STRING: "S",
+        LOGICAL_TEXT: "S",
+        LOGICAL_INTEGER: "N",
+        LOGICAL_DECIMAL: "N",
+        LOGICAL_BOOLEAN: "BOOL",
+        LOGICAL_DATE: "S",
+        LOGICAL_DATETIME: "S",
+        LOGICAL_TIME: "S",
+        LOGICAL_UUID: "S",
+        LOGICAL_JSON: "M",
+        LOGICAL_ARRAY: "L",
+        LOGICAL_BINARY: "B",
+    },
+    "elasticsearch": {
+        LOGICAL_STRING: "text",
+        LOGICAL_TEXT: "text",
+        LOGICAL_INTEGER: "long",
+        LOGICAL_DECIMAL: "double",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "date",
+        LOGICAL_TIME: "keyword",
+        LOGICAL_UUID: "keyword",
+        LOGICAL_JSON: "object",
+        LOGICAL_ARRAY: "object",
+        LOGICAL_BINARY: "binary",
+    },
+    # Engines reached via generic_sql — keep DDL honest for preflight.
+    "duckdb": {
+        LOGICAL_STRING: "VARCHAR",
+        LOGICAL_TEXT: "VARCHAR",
+        LOGICAL_INTEGER: "BIGINT",
+        LOGICAL_DECIMAL: "DECIMAL(38,15)",
+        LOGICAL_BOOLEAN: "BOOLEAN",
+        LOGICAL_DATE: "DATE",
+        LOGICAL_DATETIME: "TIMESTAMP",
+        LOGICAL_TIME: "TIME",
+        LOGICAL_UUID: "UUID",
+        LOGICAL_JSON: "JSON",
+        LOGICAL_ARRAY: "JSON",
+        LOGICAL_BINARY: "BLOB",
+    },
+    "clickhouse": {
+        LOGICAL_STRING: "String",
+        LOGICAL_TEXT: "String",
+        LOGICAL_INTEGER: "Int64",
+        LOGICAL_DECIMAL: "Decimal(38, 15)",
+        LOGICAL_BOOLEAN: "UInt8",
+        LOGICAL_DATE: "Date",
+        LOGICAL_DATETIME: "DateTime64(3)",
+        LOGICAL_TIME: "String",
+        LOGICAL_UUID: "UUID",
+        LOGICAL_JSON: "String",
+        LOGICAL_ARRAY: "String",
+        LOGICAL_BINARY: "String",
+    },
+    "trino": {
+        LOGICAL_STRING: "varchar",
+        LOGICAL_TEXT: "varchar",
+        LOGICAL_INTEGER: "bigint",
+        LOGICAL_DECIMAL: "decimal(38,15)",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "timestamp(3) with time zone",
+        LOGICAL_TIME: "time(3)",
+        LOGICAL_UUID: "uuid",
+        LOGICAL_JSON: "json",
+        LOGICAL_ARRAY: "json",
+        LOGICAL_BINARY: "varbinary",
+    },
+    "presto": {
+        LOGICAL_STRING: "varchar",
+        LOGICAL_TEXT: "varchar",
+        LOGICAL_INTEGER: "bigint",
+        LOGICAL_DECIMAL: "decimal(38,15)",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "timestamp",
+        LOGICAL_TIME: "time",
+        LOGICAL_UUID: "varchar",
+        LOGICAL_JSON: "json",
+        LOGICAL_ARRAY: "json",
+        LOGICAL_BINARY: "varbinary",
+    },
 }
+
+# Native specialty DDL where the engine supports the type; otherwise lossless text.
+# Applied after base maps so every destination has interval/geography/vector keys.
+_NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
+    "postgresql": {
+        LOGICAL_INTERVAL: "INTERVAL",
+        LOGICAL_GEOGRAPHY: "GEOMETRY",
+        LOGICAL_VECTOR: "VECTOR",
+    },
+    "mysql": {
+        LOGICAL_INTERVAL: "TEXT",
+        LOGICAL_GEOGRAPHY: "GEOMETRY",
+        LOGICAL_VECTOR: "TEXT",
+    },
+    "sqlserver": {
+        LOGICAL_INTERVAL: "NVARCHAR(MAX)",
+        LOGICAL_GEOGRAPHY: "GEOGRAPHY",
+        LOGICAL_VECTOR: "NVARCHAR(MAX)",
+    },
+    "oracle": {
+        LOGICAL_INTERVAL: "INTERVAL DAY TO SECOND",
+        LOGICAL_GEOGRAPHY: "SDO_GEOMETRY",
+        LOGICAL_VECTOR: "CLOB",
+    },
+    "snowflake": {
+        LOGICAL_INTERVAL: "VARCHAR",
+        LOGICAL_GEOGRAPHY: "GEOGRAPHY",
+        LOGICAL_VECTOR: "VECTOR(FLOAT, 1536)",
+    },
+    "bigquery": {
+        LOGICAL_INTERVAL: "STRING",
+        LOGICAL_GEOGRAPHY: "GEOGRAPHY",
+        LOGICAL_VECTOR: "STRING",
+    },
+    "redshift": {
+        LOGICAL_INTERVAL: "VARCHAR(65535)",
+        LOGICAL_GEOGRAPHY: "GEOMETRY",
+        LOGICAL_VECTOR: "SUPER",
+    },
+    "databricks": {
+        LOGICAL_INTERVAL: "STRING",
+        LOGICAL_GEOGRAPHY: "STRING",
+        LOGICAL_VECTOR: "ARRAY<FLOAT>",
+    },
+    "iceberg": {
+        LOGICAL_INTERVAL: "string",
+        LOGICAL_GEOGRAPHY: "string",
+        LOGICAL_VECTOR: "list",
+    },
+    "clickhouse": {
+        LOGICAL_INTERVAL: "String",
+        LOGICAL_GEOGRAPHY: "String",
+        LOGICAL_VECTOR: "Array(Float32)",
+    },
+    "duckdb": {
+        LOGICAL_INTERVAL: "INTERVAL",
+        LOGICAL_GEOGRAPHY: "VARCHAR",
+        LOGICAL_VECTOR: "FLOAT[]",
+    },
+    "trino": {
+        LOGICAL_INTERVAL: "interval day to second",
+        LOGICAL_GEOGRAPHY: "varchar",
+        LOGICAL_VECTOR: "array(real)",
+    },
+    "presto": {
+        LOGICAL_INTERVAL: "interval day to second",
+        LOGICAL_GEOGRAPHY: "varchar",
+        LOGICAL_VECTOR: "array(real)",
+    },
+}
+
+for _dest, _map in DDL_TYPES.items():
+    _native = _NATIVE_SPECIALTY_DDL.get(_dest, {})
+    _fallback = {
+        "redis": "string",
+        "mongodb": "string",
+        "dynamodb": "S",
+        "elasticsearch": "keyword",
+        "sqlite": "TEXT",
+        "generic_sql": "TEXT",
+    }.get(_dest, "TEXT")
+    for _logical in (LOGICAL_INTERVAL, LOGICAL_GEOGRAPHY, LOGICAL_VECTOR):
+        _map[_logical] = _native.get(_logical, _fallback)
 
 DEFAULT_DDL: Final[dict[str, str]] = {
     "postgresql": "TEXT",
@@ -388,7 +615,83 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "generic_sql": "TEXT",
     "databricks": "STRING",
     "iceberg": "string",
+    "redis": "string",
+    "dynamodb": "S",
+    "elasticsearch": "text",
+    "duckdb": "VARCHAR",
+    "clickhouse": "String",
+    "trino": "varchar",
+    "presto": "varchar",
 }
+
+# Destination fixed-point caps (precision, scale). When source scale exceeds the
+# destination scale cap we fall back to a lossless text type — never silently
+# truncate fractional digits (financial / scientific fidelity).
+_DECIMAL_CAPS: Final[dict[str, tuple[int, int]]] = {
+    "mysql": (38, 30),
+    "sqlserver": (38, 38),
+    "oracle": (38, 127),
+    "snowflake": (38, 37),
+    "redshift": (38, 37),
+    "generic_sql": (38, 37),
+    "databricks": (38, 37),
+    "iceberg": (38, 37),
+    "duckdb": (38, 38),
+    "clickhouse": (76, 38),
+    "trino": (38, 37),
+    "presto": (38, 37),
+    # BigQuery NUMERIC is (38,9); BIGNUMERIC is (76,38). We emit BIGNUMERIC
+    # for DECIMAL logicals; caps used when source params force a check.
+    "bigquery": (76, 38),
+}
+
+# DDL templates that accept (precision, scale). Bare NUMERIC / BIGNUMERIC /
+# schemaless "decimal" stay as-is (no silent scale floor).
+_DECIMAL_PARAM_TEMPLATES: Final[dict[str, str]] = {
+    "mysql": "DECIMAL({p},{s})",
+    "sqlserver": "DECIMAL({p},{s})",
+    "oracle": "NUMBER({p},{s})",
+    "snowflake": "NUMBER({p},{s})",
+    "redshift": "DECIMAL({p},{s})",
+    "generic_sql": "NUMERIC({p},{s})",
+    "databricks": "DECIMAL({p},{s})",
+    "iceberg": "decimal({p},{s})",
+    "duckdb": "DECIMAL({p},{s})",
+    "clickhouse": "Decimal({p}, {s})",
+    "trino": "decimal({p},{s})",
+    "presto": "decimal({p},{s})",
+}
+
+_DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
+    "mysql": 15,
+    "sqlserver": 10,
+    "oracle": 10,
+    "snowflake": 10,
+    "redshift": 15,
+    "generic_sql": 15,
+    "databricks": 10,
+    "iceberg": 10,
+    "duckdb": 15,
+    "clickhouse": 15,
+    "trino": 15,
+    "presto": 15,
+}
+
+
+def parse_numeric_precision_scale(inferred: str | None) -> tuple[int | None, int | None]:
+    """Extract (precision, scale) from NUMBER(p,s) / DECIMAL(p,s) / NUMERIC(p)."""
+    raw = (inferred or "").strip()
+    if not raw:
+        return None, None
+    m = re.match(
+        r"^[A-Za-z_ ]+?\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$",
+        raw,
+    )
+    if not m:
+        return None, None
+    precision = int(m.group(1))
+    scale = int(m.group(2)) if m.group(2) is not None else None
+    return precision, scale
 
 
 def normalize_logical_type(inferred: str | None) -> str:
@@ -397,37 +700,109 @@ def normalize_logical_type(inferred: str | None) -> str:
     if not raw:
         return LOGICAL_STRING
 
-    # Numeric DDL such as NUMBER(38,0) or DECIMAL(10,0) is integer when scale is 0,
-    # while NUMBER(38,10) stays decimal.
-    m = re.match(r"^([A-Za-z_ ]+?)\s*\(\s*\d+\s*(?:,\s*(\d+))?\s*\)$", raw)
+    # Parametric types — preserve precision semantics before stripping ().
+    m = re.match(r"^([A-Za-z_ ]+?)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", raw)
     if m:
         base = m.group(1).strip().lower()
-        if base in {"number", "numeric", "decimal"}:
-            scale = m.group(2)
+        p1 = int(m.group(2))
+        scale = m.group(3)
+        if base in {"number", "numeric", "decimal", "fixed"}:
             if scale is not None and int(scale) == 0:
                 return LOGICAL_INTEGER
             return LOGICAL_DECIMAL
+        # SQL Server BIT is boolean; PostgreSQL BIT(n>1) / BIT VARYING is a bitstring.
+        if base == "bit":
+            return LOGICAL_BOOLEAN if p1 <= 1 else LOGICAL_BINARY
+        # MySQL TINYINT(1) is the conventional boolean display width.
+        if base == "tinyint" and p1 == 1:
+            return LOGICAL_BOOLEAN
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
     key = key.replace("_", " ")
     # Transfer fidelity: unsigned 64-bit integers must not land as signed BIGINT.
     if "unsigned" in key and ("bigint" in key or key in {"uint64", "ubyte8"}):
         return LOGICAL_DECIMAL
-    if key in {"uint64"}:
+    if key in {"uint64", "uint128", "uint256", "int128", "int256", "hugeint", "uhugeint"}:
         return LOGICAL_DECIMAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
 
 
+def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
+    """Emit destination DECIMAL preserving source scale when possible.
+
+    If source scale exceeds the destination platform cap, return the destination
+    lossless text type instead of truncating fractional digits.
+    """
+    template = _DECIMAL_PARAM_TEMPLATES.get(db)
+    default_ddl = DDL_TYPES.get(db, {}).get(LOGICAL_DECIMAL, DEFAULT_DDL.get(db, "TEXT"))
+    if not template:
+        return default_ddl
+
+    precision, scale = parse_numeric_precision_scale(inferred)
+    cap_p, cap_s = _DECIMAL_CAPS.get(db, (38, 37))
+
+    # No source params → use documented platform default scale (not silent truncate).
+    if precision is None and scale is None:
+        default_s = min(_DECIMAL_DEFAULT_SCALE.get(db, 10), cap_s)
+        return template.format(p=cap_p, s=default_s)
+
+    src_p = precision if precision is not None else cap_p
+    src_s = scale if scale is not None else 0
+
+    if src_s > cap_s:
+        # Preserve digits as text rather than silently truncating scale.
+        return DEFAULT_DDL.get(db, "TEXT")
+
+    out_s = min(src_s, cap_s)
+    out_p = min(max(src_p, out_s), cap_p)
+    if out_p < out_s:
+        out_p = out_s
+    return template.format(p=out_p, s=out_s)
+
+
 def ddl_type(db_type: str, inferred: str | None) -> str:
-    """Map a logical source type to a destination-native DDL type."""
+    """Map a logical source type to a destination-native DDL type.
+
+    For DECIMAL sources with ``NUMBER(p,s)`` / ``DECIMAL(p,s)``, precision and
+    scale are propagated within destination caps. Scale that exceeds the
+    destination platform falls back to a lossless text type — never silent
+    truncation of fractional digits.
+    """
     db = (db_type or "").strip().lower()
     # Alias lakehouse / Delta SKUs onto Databricks Spark SQL DDL.
     if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
         db = "databricks"
     if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
         db = "iceberg"
+    if db in {"opensearch", "amazon_elasticsearch", "elastic_cloud"}:
+        db = "elasticsearch"
+    if db in {"amazon_dynamodb"}:
+        db = "dynamodb"
+    if db in {"redis-kv", "redis_kv"}:
+        db = "redis"
+    if db in {"ch", "clickhouse_cloud"}:
+        db = "clickhouse"
     logical = normalize_logical_type(inferred)
+    if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:
+        return _decimal_ddl_for_dest(db, inferred)
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
+
+
+def decimal_scale_would_truncate(source_type: str | None, dest_db_type: str | None) -> bool:
+    """True when mapping source DECIMAL(p,s) onto dest would truncate scale."""
+    db = (dest_db_type or "").strip().lower()
+    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+        db = "databricks"
+    if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
+        db = "iceberg"
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if db not in _DECIMAL_CAPS:
+        return False
+    _, scale = parse_numeric_precision_scale(source_type)
+    if scale is None:
+        return False
+    return scale > _DECIMAL_CAPS[db][1]
 
 
 def is_structural_type(inferred: str | None) -> bool:
@@ -515,6 +890,17 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_UUID, LOGICAL_BINARY),
         (LOGICAL_JSON, LOGICAL_BINARY),
         (LOGICAL_ARRAY, LOGICAL_BINARY),
+        # Specialty → lossless text / JSON (never invent a fake numeric cast)
+        (LOGICAL_INTERVAL, LOGICAL_STRING),
+        (LOGICAL_INTERVAL, LOGICAL_TEXT),
+        (LOGICAL_INTERVAL, LOGICAL_JSON),
+        (LOGICAL_GEOGRAPHY, LOGICAL_STRING),
+        (LOGICAL_GEOGRAPHY, LOGICAL_TEXT),
+        (LOGICAL_GEOGRAPHY, LOGICAL_JSON),
+        (LOGICAL_VECTOR, LOGICAL_STRING),
+        (LOGICAL_VECTOR, LOGICAL_TEXT),
+        (LOGICAL_VECTOR, LOGICAL_JSON),
+        (LOGICAL_VECTOR, LOGICAL_ARRAY),
     }
 
     if (src, tgt) in safe:

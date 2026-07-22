@@ -172,12 +172,27 @@ _CURRENCY_RE = re.compile(
 )
 
 
-def _to_utc_z(dt: datetime) -> str:
+def _format_datetime(dt: datetime) -> str:
+    """Canonical datetime wire form.
+
+    - Naive values are treated as UTC and emitted with ``Z``.
+    - UTC-aware values use ``Z`` (same instant, canonical form).
+    - Non-UTC aware values keep their original offset (instant + offset fidelity).
+      Destination NTZ writers (MySQL DATETIME, Snowflake TIMESTAMP_NTZ) normalize
+      at bind time — never erase offset on the shared transform wire.
+    """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    offset = dt.utcoffset()
+    if offset is not None and offset.total_seconds() == 0:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.isoformat(timespec="seconds")
+
+
+def _to_utc_z(dt: datetime) -> str:
+    """Backward-compatible alias — prefer :func:`_format_datetime` for new code."""
+    return _format_datetime(dt)
 
 
 def _detect_dayfirst(text: str) -> bool | None:
@@ -514,8 +529,20 @@ def _parse_uuid(value: str) -> str | None:
 
 
 def _hash_pii(value: str) -> str:
-    secret = os.getenv("DATAFLOW_PII_HASH_KEY", os.getenv("DATAFLOW_SECRET", "dataflow-dev-key"))
-    digest = hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+    """HMAC-SHA256 digest for PII masking. Requires DATAFLOW_PII_HASH_KEY in prod."""
+    secret = os.getenv("DATAFLOW_PII_HASH_KEY") or os.getenv("DATAFLOW_SECRET")
+    if not secret:
+        # Fail closed — never hash with a shared public default (would be reversible
+        # across tenants that ship the same binary).
+        raise ValueError(
+            "hash_pii requires DATAFLOW_PII_HASH_KEY (or DATAFLOW_SECRET) — "
+            "refusing insecure default key"
+        )
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
     return digest[:32]
 
 
@@ -664,6 +691,9 @@ def infer_transform_for_mapping(
             return "time"
         if tgt == "uuid":
             return "uuid"
+        # Specialty types travel as identity text/binary payloads — never invent a cast.
+        if tgt in {"interval", "geography", "vector"}:
+            return "none"
 
     # Source type is the pivot when the target is generic (e.g., VARCHAR).
     if src == "integer":
@@ -684,6 +714,8 @@ def infer_transform_for_mapping(
         return "time"
     if src == "uuid":
         return "uuid"
+    if src in {"interval", "geography", "vector"}:
+        return "none"
 
     # Semantic column names drive the transform for generic string targets.
     # For string/unknown targets, preserve currency/percentage as text to avoid
@@ -829,7 +861,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return text.lower(), None
 
     if transform == "hash_pii":
-        return _hash_pii(text), None
+        try:
+            return _hash_pii(text), None
+        except ValueError as exc:
+            return None, str(exc)
 
     if transform == "mask_pii":
         return pii_mask(text), None
@@ -868,7 +903,13 @@ def dry_run_sample(
     mappings: list[dict],
     column_types: dict[str, str],
     sample_size: int = 100,
+    max_errors_per_mapping: int = 5,
 ) -> tuple[bool, list[str]]:
+    """Apply write-path transforms to the sample window.
+
+    Collects up to ``max_errors_per_mapping`` failures per column so sporadic
+    bad values mid-sample cannot slip past Validate while early rows look clean.
+    """
     if not sample_rows:
         return False, ["No sample rows available for dry-run validation"]
 
@@ -891,14 +932,26 @@ def dry_run_sample(
         # Resolve UI aliases (cast_number → decimal) before dry-run — never leave
         # Unknown transform: 'cast_number' as a false quarantine signal.
         transform = resolve_transform(m, column_types=column_types, dest_types=dest_types)
+        mapping_errors = 0
+        scanned = 0
         for row in sample_rows[:sample_size]:
+            scanned += 1
             raw = row[idx] if idx < len(row) else ""
             _, err = apply_transform(raw, transform)
             if err:
                 errors.append(f"{m['source']}→{m['target']}: {err}")
-                break
+                mapping_errors += 1
+                if mapping_errors >= max_errors_per_mapping:
+                    remaining = max(0, min(len(sample_rows), sample_size) - scanned)
+                    if remaining:
+                        errors.append(
+                            f"{m['source']}→{m['target']}: "
+                            f"+{remaining} sample row(s) not fully reported "
+                            f"(stopped after {max_errors_per_mapping} errors)"
+                        )
+                    break
 
-    return len(errors) == 0, errors[:25]
+    return len(errors) == 0, errors[:40]
 
 
 def preview_quarantine_cells(

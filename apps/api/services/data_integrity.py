@@ -316,39 +316,28 @@ def _check_duplicate_keys(
     dest_kind: str = "",
     primary_key: str | None = None,
 ) -> dict[str, Any]:
+    """Duplicate check on the resolved identity key only (same as write-time audit)."""
     issues: list[str] = []
-    schemaless = dest_kind in SCHEMALESS_DESTS
     if not primary_key:
         return {
             "check": "duplicate_keys",
             "passed": True,
             "blocks_transfer": False,
             "issues": [],
+            "primary_key": None,
         }
-    pk_targets = set()
-    for m in mappings:
-        if m.get("source", "") == primary_key:
-            pk_targets.add(m.get("target", "").lower())
-    if not pk_targets:
-        pk_targets = {primary_key.lower()}
-    for m in mappings:
-        tgt = m.get("target", "").lower()
-        src = m.get("source", "")
-        if schemaless and tgt != "_id":
+    # Check the source identity column directly — do not re-filter by schemaless
+    # target name in a way that skips the resolved key or invents another.
+    seen: dict[str, int] = {}
+    for row in rows:
+        val = cell_to_string(row.get(primary_key, "")).strip()
+        if not val:
             continue
-        if not schemaless and tgt not in pk_targets:
-            continue
-        seen: dict[str, int] = {}
-        for row in rows:
-            val = cell_to_string(row.get(src, "")).strip()
-            if not val:
-                continue
-            seen[val] = seen.get(val, 0) + 1
-        dupes = [(v, c) for v, c in seen.items() if c > 1]
-        if dupes:
-            sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
-            issues.append(f"{src}: duplicate key values ({sample})")
-    # Duplicate primary key values are only a hard blocker in strict/maximum modes.
+        seen[val] = seen.get(val, 0) + 1
+    dupes = [(v, c) for v, c in seen.items() if c > 1]
+    if dupes:
+        sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+        issues.append(f"{primary_key}: duplicate key values ({sample})")
     mode = (validation_mode or "strict").strip().lower()
     blocks = len(issues) > 0 and mode in {"strict", "maximum"}
     return {
@@ -356,6 +345,8 @@ def _check_duplicate_keys(
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issues[:15],
+        "primary_key": primary_key,
+        "dest_kind": dest_kind,
     }
 
 
@@ -393,11 +384,10 @@ def _check_mapping_confidence(
     confidence_min: float,
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
-    # In strict/maximum mode, hold mappings to the full configured threshold.
-    # In balanced mode, align with the preflight G4 confidence floor so a
-    # mapping that is accepted by the mapping gate is not rejected again here.
+    # Keep G9 aligned with the published/preflight mode floors:
+    # maximum=0.95, strict=0.85, balanced=0.75.
     mode = (validation_mode or "strict").strip().lower()
-    floor = confidence_min if mode in {"strict", "maximum"} else max(0.55, confidence_min - 0.3)
+    floor = confidence_min
     issues: list[str] = []
     warnings: list[str] = []
     for m in mappings:
@@ -585,6 +575,23 @@ def run_integrity_audit(
     )
 
     checks: list[dict[str, Any]] = []
+
+    # Validation without a schema or a representative sample proves nothing.
+    # Fail closed instead of returning a green "No integrity checks run" report.
+    if not source_columns:
+        checks.append({
+            "check": "source_columns_available",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": ["No source columns available for integrity validation"],
+        })
+    if not rows:
+        checks.append({
+            "check": "sample_available",
+            "passed": False,
+            "blocks_transfer": True,
+            "issues": ["No sample rows available for integrity validation"],
+        })
 
     if mappings:
         checks.append(

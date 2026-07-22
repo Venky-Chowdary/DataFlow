@@ -4,6 +4,12 @@ import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
 import { CadenceTiles } from "../ui/CadenceTiles";
 import { fetchContracts, type DataContractSummary } from "../../lib/api";
+import {
+  DEFAULT_SYNC_MODE_IDS,
+  SCHEMA_POLICIES,
+  SYNC_MODE_META,
+  VALIDATION_MODES,
+} from "../../lib/transferConstants";
 import type {
   Connector,
   PipelineSchedule,
@@ -21,28 +27,6 @@ interface ScheduleFormProps {
   onCancel: () => void;
 }
 
-const SYNC_MODE_META: Record<string, { label: string; detail: string }> = {
-  full_refresh_overwrite: { label: "Full overwrite", detail: "Snapshot replaces destination rows each run." },
-  full_refresh_append: { label: "Full append", detail: "Snapshot appended to destination history." },
-  incremental: { label: "Incremental", detail: "Cursor-based sync of new / changed rows." },
-  cdc: { label: "CDC", detail: "Change data capture with cursor + key contract." },
-  scd2: { label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
-  mirror: { label: "Mirror", detail: "Keep destination in sync with inferred deletes; requires primary key." },
-};
-
-const VALIDATION_MODES = [
-  { id: "balanced", label: "Balanced" },
-  { id: "strict", label: "Strict" },
-  { id: "maximum", label: "Maximum" },
-];
-
-const SCHEMA_POLICIES = [
-  { id: "manual_review", label: "Manual approval" },
-  { id: "propagate_columns", label: "Column changes" },
-  { id: "propagate_all", label: "All changes" },
-  { id: "pause_on_change", label: "Pause on change" },
-];
-
 const COMMON_TIMEZONES = [
   "UTC",
   "America/New_York",
@@ -58,8 +42,6 @@ const COMMON_TIMEZONES = [
   "Asia/Tokyo",
   "Australia/Sydney",
 ];
-
-const DEFAULT_SYNC_MODES = ["full_refresh_overwrite", "full_refresh_append", "incremental", "cdc", "scd2", "mirror"];
 
 function formatWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -114,9 +96,17 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     initial?.require_signed_contract ?? Boolean(initial?.contract_id),
   );
 
-  const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODES;
-  const showCursor = syncMode === "incremental" || syncMode === "cdc";
-  const showPrimaryKey = showCursor || syncMode === "scd2" || syncMode === "mirror";
+  const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS;
+  const showCursor =
+    syncMode === "incremental_append" ||
+    syncMode === "incremental_deduped" ||
+    syncMode === "incremental" || // legacy schedules
+    syncMode === "cdc";
+  const showPrimaryKey =
+    showCursor ||
+    syncMode === "incremental_deduped" ||
+    syncMode === "scd2" ||
+    syncMode === "mirror";
 
   useEffect(() => {
     let cancelled = false;

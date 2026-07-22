@@ -43,23 +43,10 @@ def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
 
 
 def _logical_to_iceberg_type(logical: str) -> str:
-    t = (logical or "string").lower()
-    return {
-        "int": "int",
-        "integer": "int",
-        "long": "long",
-        "bigint": "long",
-        "float": "float",
-        "double": "double",
-        "decimal": "decimal(38,9)",
-        "boolean": "boolean",
-        "bool": "boolean",
-        "date": "date",
-        "timestamp": "timestamptz",
-        "datetime": "timestamptz",
-        "json": "string",
-        "binary": "binary",
-    }.get(t, "string")
+    """Single source of truth: type_system.ddl_type — never a parallel scale map."""
+    from services.type_system import ddl_type
+
+    return ddl_type("iceberg", logical or "string")
 
 
 def _load_metadata(meta_path: Path) -> dict[str, Any] | None:
