@@ -156,8 +156,7 @@ interface ValidateDashboardProps {
   /** True when text mappings already carry strip_controls (Execute will sanitize). */
   stripControlsApplied?: boolean;
   /** Soften to quarantine-friendly posture, strip, and re-run. Returns what changed. */
-  onQuarantineAndRerun?: () => void | Promise<RemediationOpResult | void>;
-  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
+  onQuarantineAndRerun?: () => void | Promise<RemediationOpResult | void>;  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced column mappings. */
   onReviewMappings?: () => void;
@@ -601,8 +600,7 @@ export function ValidateDashboard({
     ),
   );
 
-  const pushRemediation = (action: string, detail: string, outcome: string, steps?: string[]) => {
-    setRemediationLog((prev) => [
+  const pushRemediation = (action: string, detail: string, outcome: string, steps?: string[]) => {    setRemediationLog((prev) => [
       {
         at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
         action,
@@ -618,7 +616,6 @@ export function ValidateDashboard({
     || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
   );
   const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
-
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
     if (!running && encodingBlocks && hasEncodingIssue) {
@@ -1183,8 +1180,7 @@ export function ValidateDashboard({
                 <DtIcon name="activity" size={13} />
                 Re-validate after grant
               </button>
-            )}
-            {isConnectionBlock && (
+            )}            {isConnectionBlock && (
               <button
                 type="button"
                 className="df2-vd-chip kind-check_connection"
@@ -1299,7 +1295,7 @@ export function ValidateDashboard({
             {isPrivilegeBlock
               ? "Write privilege is denied (or CREATE is missing). Grant the privilege named in the G2 gate (INSERT/CREATE, ACL, IAM, index/write) on the destination — then Re-validate. Re-testing connector login alone will not fix a privilege deny."
               : isConnectionBlock
-              ? "Destination (or source) authentication failed. Open Connectors for this saved connection, click Test until it passes (connection string or username/password — one place only), then return here and Re-validate. Strip/Quarantine cannot fix credentials."
+              ? "Destination (or source) authentication failed. Open Connectors for this saved connection, set Auth source (often admin for Railway/Atlas Mongo), click Test until it passes (connection string or username/password — one place only), then return here and Re-validate. Strip/Quarantine cannot fix credentials."
               : isTypeMismatchBlock
               ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
               : showEncodingRemediation

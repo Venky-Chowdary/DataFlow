@@ -98,6 +98,8 @@ def test_manual_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> None:
         mappings=MANUAL_MAPPINGS,
     )
 
+    if destination.format == "snowflake":
+        pytest.importorskip("fakesnow")
     engine = UniversalTransferEngine()
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 

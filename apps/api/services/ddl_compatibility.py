@@ -228,7 +228,6 @@ def evaluate_ddl_compatibility(
             issues.append(
                 f"Vector dimension mismatch: {src} ({src_type}) → {tgt} ({tgt_type})"
             )
-
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are
             # declared-lossy but write-safe when values coerce. Only hard-block

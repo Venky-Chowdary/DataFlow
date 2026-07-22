@@ -1119,7 +1119,6 @@ def inspect_destination_for_preflight(
                 "can_write": None,
                 "can_create_table": None,
             }
-
     # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
     resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()
     if out["connected"] and resolved_auth and (out.get("db_type") or "").lower() == "mongodb":

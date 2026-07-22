@@ -1013,7 +1013,9 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     logical = str(intel.get("logical_type") or col["inferred_type"])
                     if logical == "VARCHAR":
                         logical = "TEXT"
-                    col["inferred_type"] = logical
+                    # Never narrow a sticky OBJECT/ARRAY with scalar-only re-infer.
+                    if col["inferred_type"] not in _STRUCTURAL_TYPES:
+                        col["inferred_type"] = logical
                 except Exception:
                     logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}

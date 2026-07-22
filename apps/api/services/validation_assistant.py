@@ -209,7 +209,6 @@ def _suggested_actions(
                     "kind": "open_bad_data_fix",
                     "label": "Inspect integrity findings",
                 })
-
     if "g4_mapping_confidence" in gate_ids:
         if not any(a.get("kind") == "review_mappings" for a in actions):
             actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
