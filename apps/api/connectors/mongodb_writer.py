@@ -208,7 +208,12 @@ def write_mapped_rows(
             upper = stype.upper()
             # An explicit mapping transform overrides the inferred source type so
             # values like decimal strings are stored as the correct BSON type.
-            if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC"}:
+            if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return value
+            if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
                 return Decimal128(str(value))
             if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 try:

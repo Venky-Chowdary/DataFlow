@@ -1094,7 +1094,13 @@ def verify_target(
 
 def normalize_cell(value: Any) -> str:
     if value is None:
-        return ""
+        # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
+        return "\x00NULL\x00"
+    if isinstance(value, str) and value.strip().lower() in {
+        "__df_sql_null__",
+        "__df_ddb_null__",
+    }:
+        return "\x00NULL\x00"
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, _datetime):

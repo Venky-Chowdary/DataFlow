@@ -8,9 +8,11 @@ from typing import Any
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.type_system import (
     ddl_type,
+    decimal_scale_would_truncate,
     is_lossy_coercion,
     normalize_logical_type,
     vector_dim_mismatch,
+    vector_dim_unknown_for_native,
 )
 
 _VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
@@ -228,6 +230,24 @@ def evaluate_ddl_compatibility(
             issues.append(
                 f"Vector dimension mismatch: {src} ({src_type}) → {tgt} ({tgt_type})"
             )
+        if (
+            not schemaless
+            and vector_dim_unknown_for_native(src_type, dest_kind)
+            and normalize_logical_type(tgt_type or src_type) == "vector"
+        ):
+            issues.append(
+                f"Vector dimension unknown: {src} ({src_type}) → {tgt} "
+                f"— native VECTOR requires VECTOR(n); refuse invented default width"
+            )
+        if (
+            not schemaless
+            and decimal_scale_would_truncate(src_type, dest_kind)
+            and normalize_logical_type(tgt_type or "") not in {"string", "text", "json"}
+        ):
+            issues.append(
+                f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type or 'proposed'}) "
+                f"— scale truncates on {dest_kind}"
+            )
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are
             # declared-lossy but write-safe when values coerce. Only hard-block
@@ -243,8 +263,11 @@ def evaluate_ddl_compatibility(
                     rows=sample_rows,
                 )
             if not sample_ok:
+                note = ""
+                if normalize_logical_type(src_type) == "float" and normalize_logical_type(tgt_type) == "decimal":
+                    note = " — float→decimal (IEEE precision risk)"
                 issues.append(
-                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type})"
+                    f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
 
         if not schemaless and sample_rows and tgt_type:

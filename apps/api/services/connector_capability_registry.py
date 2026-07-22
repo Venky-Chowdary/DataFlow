@@ -1,9 +1,11 @@
-"""Connector capability registry.
+"""Connector capability registry (sidecar — NOT transfer-liveness SSOT).
 
-A structured sidecar of connector capabilities, tier priorities, rate limits,
-CDC prerequisites, write semantics, and idempotency properties.  Used by the
-universal orchestrator, the catalog service, and the preflight engine to make
-connector-aware decisions rather than assume a one-size-fits-all path.
+Holds CDC notes, rate limits, batch sizes, and orchestrator hints.
+
+``transfer_ready`` on static ``CAPABILITY_REGISTRY`` entries is marketing-only
+and is **always overwritten** by ``get_connector_capability`` from
+``src.transfer.connector_capabilities`` (driver/file caps + package probes).
+Never read ``CAPABILITY_REGISTRY[k]["transfer_ready"]`` directly for catalog UI.
 """
 
 from __future__ import annotations
@@ -188,10 +190,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
-        "supports_merge": True,
+        # Native MERGE not yet wired; upsert uses delete+insert (at-least-once).
+        "supports_merge": False,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["VARCHAR columns without length may truncate. Use VARCHAR(max) or SUPER for JSON."],
+        "common_issues": [
+            "VARCHAR without length maps to VARCHAR(65535) — still truncates beyond that.",
+            "JSON/ARRAY land as SUPER; binary as VARBYTE.",
+            "Upsert is delete+insert (Redshift has no ON CONFLICT); not exactly-once.",
+            "DISTKEY/SORTKEY are operator-owned — DataFlow does not invent them.",
+        ],
         "recommended_batch_size": 5000,
     },
     "databricks": {
@@ -472,11 +480,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "cdc_prerequisites": "Kafka is a destination (JSON produce). Optional Schema Registry hook. Native DB CDC does not require Kafka; Debezium envelope bridge is available for existing Connect estates.",
+        "cdc_prerequisites": "Kafka is a destination (JSON produce) and optional Debezium source. When schema_registry_url is set, register/decode are fail-closed Confluent wire (magic+id+JSON). Native DB CDC does not require Kafka.",
         "common_issues": [
             "At-least-once produce with acks=all; exactly-once needs transactional IDs.",
             "Vault SASL username/password via connector secret fields.",
-            "Schema Registry URL may be passed as schema_registry_url or an http(s) connection_string.",
+            "Schema Registry URL may be passed as schema_registry_url or an http(s) connection_string — register failures abort the write.",
+            "Empty topics do not invent TEXT columns; introspect waits for samples.",
         ],
         "recommended_batch_size": 1000,
     },

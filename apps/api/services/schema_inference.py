@@ -39,8 +39,8 @@ from services.transform_engine import (
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
-    "INTEGER", "DECIMAL", "BOOLEAN", "DATE", "TIMESTAMP", "TIME",
-    "VARCHAR", "TEXT", "UUID", "JSON", "BINARY",
+    "INTEGER", "DECIMAL", "FLOAT", "BOOLEAN", "DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME",
+    "VARCHAR", "TEXT", "UUID", "JSON", "ARRAY", "BINARY",
     "INTERVAL", "GEOGRAPHY", "VECTOR",
 })
 
@@ -288,7 +288,7 @@ def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | Non
             if len(vec) >= min_dim:
                 # Provisional — infer_column promotes to VECTOR(n) when dims agree.
                 return "VECTOR"
-        return "JSON"
+        return "ARRAY"
     return "JSON"
 
 
@@ -336,6 +336,9 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         return "DATE"
 
     if _parse_datetime(s) is not None:
+        # Preserve TZ awareness when the sample carries Z / offset — never invent SRID/cast.
+        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I):
+            return "TIMESTAMPTZ"
         return "TIMESTAMP"
 
     for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
@@ -454,15 +457,40 @@ def safe_ddl_logical_type(
     cannot fit the chosen type. Explicit TEXT is how operators keep high-precision
     money / opaque payloads lossless.
     """
-    from services.type_system import normalize_logical_type
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        ddl_carrier_type,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+        parse_vector_dimension,
+    )
 
     proposed_u = (proposed or source_type or "VARCHAR").upper()
     if proposed_u in {"STRING", "CHAR", "CHARACTER", "CHARACTER VARYING"}:
         proposed_u = "VARCHAR"
+    # Preserve DECIMAL(p,s) / VECTOR(n) / FLOAT carriers before class-level collapse.
+    carrier_src = ddl_carrier_type(proposed or source_type or "VARCHAR")
+    if normalize_logical_type(carrier_src) == LOGICAL_DECIMAL:
+        precision, _scale = parse_numeric_precision_scale(carrier_src)
+        if precision is not None:
+            if not samples or samples_fit_logical_type(
+                samples, "DECIMAL", field_name=field_name
+            ):
+                return carrier_src
+    if normalize_logical_type(carrier_src) == "vector":
+        dim = parse_vector_dimension(carrier_src)
+        # Keep declared width even when samples are opaque float arrays as text.
+        if dim is not None:
+            return carrier_src
+    if normalize_logical_type(carrier_src) == "float":
+        if not samples or samples_fit_logical_type(samples, "FLOAT", field_name=field_name):
+            return "FLOAT"
+
     # Map dest-native / alias DDL → canonical logical vocabulary used by writers.
     _NORM_TO_LOGICAL = {
         "integer": "INTEGER",
         "decimal": "DECIMAL",
+        "float": "FLOAT",
         "boolean": "BOOLEAN",
         "date": "DATE",
         "datetime": "TIMESTAMP",
@@ -471,11 +499,12 @@ def safe_ddl_logical_type(
         "text": "TEXT",
         "uuid": "UUID",
         "json": "JSON",
-        "array": "JSON",
+        "array": "ARRAY",
         "binary": "BINARY",
         "interval": "INTERVAL",
         "geography": "GEOGRAPHY",
         "vector": "VECTOR",
+        "timestamptz": "TIMESTAMPTZ",
     }
     canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
     if canonical:
@@ -559,8 +588,10 @@ def infer_column(
     if types <= {"INTEGER", "DECIMAL"}:
         inferred = "DECIMAL" if "DECIMAL" in types else "INTEGER"
         role = "numeric"
-    elif types <= {"DATE", "TIMESTAMP", "TIME"}:
-        if counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
+    elif types <= {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}:
+        if counts.get("TIMESTAMPTZ", 0) > 0:
+            inferred = "TIMESTAMPTZ"
+        elif counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
             inferred = "TIMESTAMP"
         elif counts.get("DATE", 0) >= counts.get("TIME", 0):
             inferred = "DATE"
@@ -573,18 +604,19 @@ def infer_column(
             "BOOLEAN": "boolean_flag",
             "UUID": "identifier",
             "JSON": "semi_structured",
+            "ARRAY": "semi_structured",
             "BINARY": "binary",
             "TEXT": "text",
             "VARCHAR": "text",
             "VECTOR": "embedding",
             "GEOGRAPHY": "geography",
             "INTERVAL": "duration",
+            "TIMESTAMPTZ": "temporal",
         }.get(inferred, "unknown")
     else:
-        # Specialty + JSON: prefer specialty when every non-JSON sample agrees
-        # and JSON leftovers are empty arrays / nullish objects only.
+        # Specialty + JSON/ARRAY: prefer specialty when mixed with structural leftovers.
         specialty = types & {"VECTOR", "GEOGRAPHY", "INTERVAL"}
-        if len(specialty) == 1 and types <= specialty | {"JSON", "VARCHAR"}:
+        if len(specialty) == 1 and types <= specialty | {"JSON", "ARRAY", "VARCHAR"}:
             inferred = next(iter(specialty))
             role = {
                 "VECTOR": "embedding",
@@ -592,6 +624,9 @@ def infer_column(
                 "INTERVAL": "duration",
             }[inferred]
             notes.append(f"majority specialty {inferred} — identity payload")
+        elif types <= {"JSON", "ARRAY"}:
+            inferred = "ARRAY" if counts.get("ARRAY", 0) >= counts.get("JSON", 0) else "JSON"
+            role = "semi_structured"
         elif "TEXT" in counts and max(len(s) for s in non_empty if _classify_value(s, field_name=field_name) == "TEXT") > 255:
             inferred = "TEXT"
             role = "text"
@@ -617,9 +652,9 @@ def infer_column(
             role = "embedding"
             notes.append(f"homogeneous float array → VECTOR({n}) (dims from samples)")
         else:
-            inferred = "JSON"
+            inferred = "ARRAY"
             role = "semi_structured"
-            notes.append("float arrays with disagreeing/invalid dims — JSON (no invented VECTOR dim)")
+            notes.append("float arrays with disagreeing/invalid dims — ARRAY (no invented VECTOR dim)")
 
     # GEOGRAPHY / INTERVAL stay identity — no invented SRID or cast.
     if inferred in {"GEOGRAPHY", "INTERVAL"}:

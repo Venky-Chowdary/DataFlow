@@ -216,7 +216,6 @@ def test_transfer_matrix_pg_mysql_mongo(seeded):
             source=pg_src,
             destination=sqlite_dst,
             mappings=mappings,
-            skip_preflight=True,
             validation_mode="permissive",
             sync_mode="full_refresh_overwrite",
         )
@@ -252,7 +251,6 @@ def test_transfer_matrix_pg_mysql_mongo(seeded):
             source=my_src,
             destination=mongo_dst,
             mappings=mappings,
-            skip_preflight=True,
             validation_mode="permissive",
             sync_mode="full_refresh_overwrite",
         )
@@ -291,7 +289,6 @@ def test_transfer_matrix_pg_mysql_mongo(seeded):
                 {"source": "email", "target": "email", "confidence": 1.0},
                 {"source": "amount", "target": "amount", "confidence": 1.0},
             ],
-            skip_preflight=True,
             validation_mode="permissive",
             sync_mode="full_refresh_overwrite",
         )

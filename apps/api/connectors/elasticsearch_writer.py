@@ -28,7 +28,10 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     if value is None:
         return None
     upper = source_type.upper()
-    if upper in {"DECIMAL", "NUMERIC"}:
+    if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
+        # Keep as string — float64 would silently lose precision (no quarantine).
+        return str(value)
+    if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
         try:
             return float(value)
         except (ValueError, TypeError):

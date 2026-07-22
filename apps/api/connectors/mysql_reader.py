@@ -23,7 +23,7 @@ from services.value_serializer import cell_to_string
 
 
 def _cell(value: Any) -> str:
-    return cell_to_string(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def _primary_key_columns(cur, table: str) -> list[str] | None:

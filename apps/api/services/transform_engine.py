@@ -139,6 +139,9 @@ NULL_SENTINELS = frozenset({
     "null", "none", "nil", "undefined", "n/a", "na", "nan", "",
     "-", "--", "—", "empty", "blank", "missing", "not available",
     "not applicable", "not_applicable",
+    # Dynamo / SQL explicit NULL — distinct from missing attr / empty string.
+    "__df_ddb_null__",
+    "__df_sql_null__",
 })
 
 # Currency symbols and codes that are safe to strip from numeric values.
@@ -677,6 +680,9 @@ def infer_transform_for_mapping(
             if src in {"string", "text", "unknown"} and semantic == "percentage":
                 return "percentage"
             return "decimal"
+        if tgt == "float":
+            # Wire as decimal transform — IEEE float DDL is chosen by type_system.
+            return "decimal"
         if tgt == "boolean":
             return "boolean"
         if tgt in {"json", "array"}:
@@ -699,6 +705,8 @@ def infer_transform_for_mapping(
     if src == "integer":
         return "integer"
     if src == "decimal":
+        return "decimal"
+    if src == "float":
         return "decimal"
     if src == "boolean":
         return "boolean"
@@ -771,15 +779,35 @@ def infer_transform_for_mapping(
 
 
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
-    """Returns (value, error). Empty string becomes None for nullable columns."""
+    """Returns (value, error).
+
+    Explicit SQL/Dynamo NULL sentinels → None. Empty string is preserved for
+    identity/string transforms so ``''`` ≠ SQL NULL on VARCHAR round-trips;
+    typed transforms still coerce empty → None.
+    """
     if raw is None:
         return None, None
-    text = str(raw).strip()
+    raw_s = str(raw)
+    lowered = raw_s.strip().lower()
+    # Explicit NULL sentinels must never land as literal strings in any dest.
+    if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
+        return None, None
+
+    text = raw_s.strip()
+    transform_l = (transform or "none").strip().lower()
+
+    # Identity / text transforms: empty string is a real value.
+    _KEEP_EMPTY = frozenset({
+        "none", "identity", "upper", "lower", "trim", "trim_id",
+        "strip_controls", "normalize_unicode",
+    })
+    if text == "" and transform_l in _KEEP_EMPTY:
+        return "", None
     if text == "":
         return None, None
 
     # Null/missing sentinels for typed transforms are treated as None.
-    if transform in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
+    if transform_l in {"decimal", "integer", "boolean", "date", "datetime", "time", "json", "uuid", "binary"}:
         if text.lower() in NULL_SENTINELS:
             return None, None
 

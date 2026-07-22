@@ -1476,8 +1476,8 @@
   border-top: 1px dashed #e2e8f0;
 }
 
-/* Login layout — no overlap between back bar and card */
-.lp-login {
+/* Login layout — no overlap between back bar and card (legacy layouts only) */
+.lp-login:not(.lp-login--gate) {
   overflow-x: hidden;
   overflow-y: auto;
   justify-content: flex-start;

@@ -70,6 +70,17 @@ def request(
     return with_retry(_call, budget=retry_budget or RetryBudget())
 
 
+def is_auth_error(exc: Exception) -> bool:
+    """True for HTTP 401/403-class failures — callers must not swallow these."""
+    text = str(exc).lower()
+    if "401" in text or "403" in text:
+        return True
+    if "unauthorized" in text or "forbidden" in text:
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in {401, 403}
+
+
 def humanize_http_error(exc: Exception, driver: str) -> str:
     text = str(exc).lower()
     if "401" in text or "unauthorized" in text:
@@ -93,7 +104,10 @@ def extract_records(records: list[dict[str, Any]]) -> ReadBatch:
     if not records:
         return ReadBatch(headers=[], rows=[], offset=0, total_rows=0)
     headers = list(records[0].keys())
-    rows = [[cell_to_string(r.get(h, "")) for h in headers] for r in records]
+    rows = [
+        [cell_to_string(r.get(h), preserve_sql_null=True) for h in headers]
+        for r in records
+    ]
     return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
 
 

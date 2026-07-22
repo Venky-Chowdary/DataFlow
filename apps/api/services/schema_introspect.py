@@ -110,6 +110,7 @@ def introspect_schema(
     table: str | None = None,
     catalog_type: str = "",
     auth_source: str = "",
+    api_key: str = "",
 ) -> dict[str, Any]:
     if db_type in ("generic_sql", "duckdb"):
         from connectors.generic_sql import introspect_table_schema
@@ -160,6 +161,30 @@ def introspect_schema(
             ssl=ssl,
             table=table,
         )
+    if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
+        return _introspect_oracle(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            schema=schema,
+            connection_string=connection_string,
+            ssl=ssl,
+            table=table,
+        )
+    if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
+        return _introspect_sqlserver(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            schema=schema or "dbo",
+            connection_string=connection_string,
+            ssl=ssl,
+            table=table,
+        )
     if db_type == "bigquery":
         return _introspect_bigquery(
             database=database,
@@ -197,6 +222,36 @@ def introspect_schema(
             ssl=ssl,
             database=database,
             table=table,
+        )
+    if db_type == "salesforce":
+        return _introspect_salesforce(
+            host=host,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            username=username,
+            password=password,
+        )
+    if db_type == "hubspot":
+        return _introspect_hubspot(
+            host=host,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            username=username,
+            password=password,
+        )
+    if db_type == "kafka":
+        return _introspect_kafka(
+            host=host,
+            port=port,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            username=username,
+            password=password,
         )
     if db_type in ("s3", "amazon_s3"):
         return _introspect_object_store("s3", host=host, database=database, table=table, schema=schema, **{
@@ -664,14 +719,18 @@ def _bq_to_logical(dtype: str) -> str:
     d = dtype.upper()
     if d in ("INT64", "INTEGER"):
         return "INTEGER"
-    if d in ("NUMERIC", "BIGNUMERIC", "FLOAT64"):
+    if d in ("NUMERIC", "BIGNUMERIC"):
         return "DECIMAL"
+    if d in ("FLOAT64", "FLOAT", "DOUBLE"):
+        return "FLOAT"
     if d == "BOOL":
         return "BOOLEAN"
     if d == "DATE":
         return "DATE"
     if "TIMESTAMP" in d:
         return "TIMESTAMP"
+    if d == "INTERVAL":
+        return "INTERVAL"
     return "TEXT"
 
 
@@ -738,8 +797,10 @@ def _pg_to_logical(dtype: str) -> str:
     if d in ("integer", "smallint", "bigint", "serial", "bigserial",
              "smallserial", "oid", "xid", "cid", "tid"):
         return "INTEGER"
-    if d in ("numeric", "decimal", "real", "double precision", "double",
-             "float", "float4", "float8", "money"):
+    # IEEE floats stay FLOAT — never silently rewrite to fixed-point DECIMAL.
+    if d in ("real", "double precision", "double", "float", "float4", "float8"):
+        return "FLOAT"
+    if d in ("numeric", "decimal", "money"):
         return "DECIMAL"
     if d == "boolean":
         return "BOOLEAN"
@@ -752,6 +813,11 @@ def _pg_to_logical(dtype: str) -> str:
     if d == "uuid":
         return "UUID"
     if d == "bytea":
+        return "BINARY"
+    # Redshift SUPER / VARBYTE (exposed via PG wire format_type).
+    if d == "super":
+        return "JSON"
+    if d == "varbyte" or d.startswith("varbyte("):
         return "BINARY"
     if d in {"json", "jsonb"} or d.endswith("[]") or " array" in d:
         return "JSON"
@@ -789,8 +855,9 @@ def _mysql_to_logical(dtype: str) -> str:
         return "GEOGRAPHY"
     if "int" in d:
         return "INTEGER"
+    # IEEE float/double/real — distinct from DECIMAL(p,s).
     if "double" in d or "float" in d or "real" in d:
-        return "DECIMAL"
+        return "FLOAT"
     if "bool" in d:
         return "BOOLEAN"
     if d == "date":
@@ -806,6 +873,292 @@ def _mysql_to_logical(dtype: str) -> str:
     if "uuid" in d:
         return "UUID"
     return "TEXT"
+
+
+def _oracle_to_logical(dtype: str) -> str:
+    """Map Oracle data_type (+ optional precision/scale) to logical carriers.
+
+    NUMBER(p,0) → INTEGER; NUMBER(p,s) → DECIMAL(p,s); BINARY_FLOAT/DOUBLE → FLOAT.
+    Oracle DATE includes time-of-day → TIMESTAMP (not bare DATE).
+    """
+    raw = (dtype or "").strip()
+    d = raw.upper().replace(" ", "")
+    # NUMBER(p,s) / FLOAT(p) carriers
+    m = re.match(r"^NUMBER\((\d+)(?:,(\d+))?\)$", d)
+    if m:
+        if m.group(2) is not None and int(m.group(2)) == 0:
+            return "INTEGER"
+        if m.group(2) is not None:
+            return f"DECIMAL({m.group(1)},{m.group(2)})"
+        return f"DECIMAL({m.group(1)})"
+    if d == "NUMBER" or d.startswith("NUMBER("):
+        return "DECIMAL"
+    if d in {"BINARY_FLOAT", "BINARY_DOUBLE"} or d.startswith("FLOAT"):
+        return "FLOAT"
+    if d in {"INTEGER", "INT", "SMALLINT", "BIGINT"}:
+        return "INTEGER"
+    if d == "BOOLEAN":
+        return "BOOLEAN"
+    if d == "DATE":
+        return "TIMESTAMP"  # Oracle DATE is datetime
+    if "TIMESTAMP" in d:
+        return "TIMESTAMP"
+    if d.startswith("INTERVAL"):
+        return "INTERVAL"
+    if d in {"CLOB", "NCLOB", "LONG", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "VARCHAR"}:
+        return "TEXT"
+    if d in {"BLOB", "RAW", "LONGRAW", "BFILE"} or d.startswith("RAW("):
+        return "BINARY"
+    if d == "JSON":
+        return "JSON"
+    if "SDO_GEOMETRY" in d or d in {"GEOMETRY", "GEOGRAPHY"}:
+        return "GEOGRAPHY"
+    return "TEXT"
+
+
+def _sqlserver_to_logical(dtype: str) -> str:
+    """Map SQL Server type_name (+ optional (p,s)) to logical carriers."""
+    raw = (dtype or "").strip()
+    d = raw.lower()
+    m = re.match(r"^(decimal|numeric)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
+    if m:
+        if m.group(3) is not None and int(m.group(3)) == 0:
+            return "INTEGER"
+        if m.group(3) is not None:
+            return f"DECIMAL({m.group(2)},{m.group(3)})"
+        return f"DECIMAL({m.group(2)})"
+    if d.startswith("decimal") or d.startswith("numeric"):
+        return "DECIMAL"
+    if d in {"money", "smallmoney"}:
+        return "DECIMAL(19,4)" if d == "money" else "DECIMAL(10,4)"
+    if d in {"float", "real"}:
+        return "FLOAT"
+    if d in {"int", "bigint", "smallint", "tinyint"}:
+        return "INTEGER"
+    if d == "bit":
+        return "BOOLEAN"
+    if d == "date":
+        return "DATE"
+    if d == "time" or d.startswith("time("):
+        return "TIME"
+    if d in {"datetime", "datetime2", "smalldatetime", "datetimeoffset"} or d.startswith("datetime"):
+        return "TIMESTAMP"
+    if d == "uniqueidentifier":
+        return "UUID"
+    if d == "xml":
+        return "TEXT"
+    if d in {"geography", "geometry"}:
+        return "GEOGRAPHY"
+    if d in {"binary", "varbinary", "image", "rowversion", "timestamp"}:
+        return "BINARY"
+    if "binary" in d or d.endswith("(max)") and "varbinary" in d:
+        return "BINARY"
+    if any(tok in d for tok in ("nvarchar", "varchar", "nchar", "char", "text", "ntext", "sysname")):
+        return "TEXT"
+    return "TEXT"
+
+
+def _introspect_oracle(**kwargs) -> dict[str, Any]:
+    """Oracle ALL_TAB_COLUMNS introspect with NUMBER(p,s) / FLOAT honesty."""
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import _engine
+    except Exception:
+        return {
+            "ok": False,
+            "error": "Install oracledb/SQLAlchemy for Oracle introspection",
+            "columns": [],
+            "tables": [],
+        }
+
+    table = (kwargs.get("table") or "").strip()
+    schema = (kwargs.get("schema") or kwargs.get("username") or "").strip().upper()
+    cfg = {
+        "type": "oracle",
+        "host": kwargs.get("host") or "",
+        "port": int(kwargs.get("port") or 1521),
+        "database": kwargs.get("database") or "",
+        "username": kwargs.get("username") or "",
+        "password": kwargs.get("password") or "",
+        "schema": schema,
+        "connection_string": kwargs.get("connection_string") or "",
+        "ssl": bool(kwargs.get("ssl", True)),
+    }
+    try:
+        engine = _engine(cfg)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+
+    try:
+        with engine.connect() as conn:
+            tables: list[str] = []
+            if schema:
+                rows = conn.execute(
+                    sa.text(
+                        "SELECT table_name FROM all_tables WHERE owner = :owner ORDER BY table_name"
+                    ),
+                    {"owner": schema},
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    sa.text("SELECT table_name FROM user_tables ORDER BY table_name")
+                ).fetchall()
+            tables = [r[0] for r in rows]
+
+            if not table:
+                return {"ok": True, "columns": [], "tables": tables, "schema": schema}
+
+            owner = schema or (kwargs.get("username") or "").upper()
+            col_rows = conn.execute(
+                sa.text(
+                    """
+                    SELECT column_name, data_type, data_precision, data_scale, nullable
+                    FROM all_tab_columns
+                    WHERE owner = :owner AND table_name = :table
+                    ORDER BY column_id
+                    """
+                ),
+                {"owner": owner, "table": table.upper()},
+            ).fetchall()
+            columns: list[dict] = []
+            for name, data_type, precision, scale, nullable in col_rows:
+                dtype = str(data_type or "")
+                if str(data_type or "").upper() == "NUMBER" and precision is not None:
+                    if scale is not None:
+                        dtype = f"NUMBER({int(precision)},{int(scale)})"
+                    else:
+                        dtype = f"NUMBER({int(precision)})"
+                columns.append(
+                    {
+                        "name": name,
+                        "inferred_type": _oracle_to_logical(dtype),
+                        "nullable": str(nullable).upper() == "Y",
+                        "data_type": dtype,
+                    }
+                )
+            return {"ok": True, "columns": columns, "tables": tables, "schema": owner}
+    except Exception as exc:
+        logger.warning("oracle introspect failed", exc_info=True)
+        try:
+            from connectors.generic_sql import introspect_table_schema
+
+            info = introspect_table_schema(cfg, table)
+            if info.get("ok") and info.get("columns"):
+                for col in info["columns"]:
+                    inferred = str(col.get("inferred_type") or "").lower()
+                    if inferred in {"float", "double"}:
+                        col["inferred_type"] = "FLOAT"
+                    elif inferred.startswith("decimal"):
+                        col["inferred_type"] = col["inferred_type"].upper() if "(" in inferred else "DECIMAL"
+                return info
+        except Exception:
+            pass
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    finally:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+
+
+def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
+    """SQL Server INFORMATION_SCHEMA introspect with FLOAT≠DECIMAL honesty."""
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import _engine
+    except Exception:
+        return {
+            "ok": False,
+            "error": "Install pyodbc/SQLAlchemy for SQL Server introspection",
+            "columns": [],
+            "tables": [],
+        }
+
+    table = (kwargs.get("table") or "").strip()
+    schema = (kwargs.get("schema") or "dbo").strip()
+    cfg = {
+        "type": "sqlserver",
+        "host": kwargs.get("host") or "",
+        "port": int(kwargs.get("port") or 1433),
+        "database": kwargs.get("database") or "",
+        "username": kwargs.get("username") or "",
+        "password": kwargs.get("password") or "",
+        "schema": schema,
+        "connection_string": kwargs.get("connection_string") or "",
+        "ssl": bool(kwargs.get("ssl", True)),
+    }
+    try:
+        engine = _engine(cfg)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+
+    try:
+        with engine.connect() as conn:
+            tables = [
+                r[0]
+                for r in conn.execute(
+                    sa.text(
+                        """
+                        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
+                        ORDER BY TABLE_NAME
+                        """
+                    ),
+                    {"schema": schema},
+                ).fetchall()
+            ]
+            if not table:
+                return {"ok": True, "columns": [], "tables": tables, "schema": schema}
+
+            col_rows = conn.execute(
+                sa.text(
+                    """
+                    SELECT
+                      c.COLUMN_NAME,
+                      c.DATA_TYPE,
+                      c.NUMERIC_PRECISION,
+                      c.NUMERIC_SCALE,
+                      c.IS_NULLABLE
+                    FROM INFORMATION_SCHEMA.COLUMNS c
+                    WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
+                    ORDER BY c.ORDINAL_POSITION
+                    """
+                ),
+                {"schema": schema, "table": table},
+            ).fetchall()
+            columns: list[dict] = []
+            for name, data_type, precision, scale, nullable in col_rows:
+                dtype = str(data_type or "")
+                base = dtype.lower()
+                if base in {"decimal", "numeric"} and precision is not None:
+                    if scale is not None:
+                        dtype = f"{base}({int(precision)},{int(scale)})"
+                    else:
+                        dtype = f"{base}({int(precision)})"
+                columns.append(
+                    {
+                        "name": name,
+                        "inferred_type": _sqlserver_to_logical(dtype),
+                        "nullable": str(nullable).upper() == "YES",
+                        "data_type": dtype,
+                    }
+                )
+            return {"ok": True, "columns": columns, "tables": tables, "schema": schema}
+    except Exception as exc:
+        logger.warning("sqlserver introspect failed", exc_info=True)
+        try:
+            from connectors.generic_sql import introspect_table_schema
+
+            return introspect_table_schema(cfg, table)
+        except Exception:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    finally:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
 
 
 def _sf_to_logical(dtype: str) -> str:
@@ -828,6 +1181,9 @@ def _sf_to_logical(dtype: str) -> str:
         return f"DECIMAL({m.group(2)})"
     if "NUMBER" in d or "DECIMAL" in d or "NUMERIC" in d or "INT" in d:
         return "INTEGER" if ",0" in d.replace(" ", "") else "DECIMAL"
+    # Snowflake FLOAT / DOUBLE / REAL — approximate IEEE, not NUMBER.
+    if d in {"FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL"} or d.startswith("FLOAT"):
+        return "FLOAT"
     if "BOOLEAN" in d:
         return "BOOLEAN"
     if d == "DATE":
@@ -847,7 +1203,7 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, int):
         return "INTEGER"
     if isinstance(value, float):
-        return "DECIMAL"
+        return "FLOAT"
     if isinstance(value, datetime.datetime):
         return "TIMESTAMP"
     if isinstance(value, datetime.date):
@@ -1028,9 +1384,11 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         return {"ok": False, "error": "DynamoDB table name required", "columns": [], "tables": []}
     try:
         from connectors.dynamodb_reader import (
+            DDB_NULL_SENTINEL,
             describe_table_schema,
             estimate_item_count,
             list_tables,
+            union_attribute_keys,
         )
 
         cfg = {
@@ -1041,22 +1399,33 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "connection_string": kwargs.get("connection_string") or "",
         }
         names, types = describe_table_schema(cfg, table)
-        # Sample real items and let the schema inference engine decide types for
-        # attributes not defined by the table key schema.
+        # Sample real items — union every attribute (sparse keys) + native types.
         try:
             from connectors.dynamodb_reader import read_table_batch
             from services.schema_inference import infer_schema_map
 
             sample, _ = read_table_batch(cfg=cfg, table=table, limit=50)
+            if sample.headers:
+                names = union_attribute_keys(names, sample.headers)
+            meta = getattr(sample, "meta", None) or {}
+            native_types = meta.get("native_types") if isinstance(meta, dict) else {}
+            if isinstance(native_types, dict):
+                for name, lt in native_types.items():
+                    if name not in types or types.get(name) in {"VARCHAR", "TEXT", "S"}:
+                        types[name] = str(lt)
             if sample.rows:
                 samples_by_col: dict[str, list[str]] = {h: [] for h in sample.headers}
                 for row in sample.rows:
                     for i, h in enumerate(sample.headers):
                         if i < len(row):
-                            samples_by_col[h].append(row[i])
+                            cell = row[i]
+                            # Skip explicit Dynamo NULL sentinel for inference.
+                            if cell == DDB_NULL_SENTINEL or cell == "":
+                                continue
+                            samples_by_col[h].append(cell)
                 inferred_map, _intel = infer_schema_map(samples_by_col)
                 for name in names:
-                    if name in inferred_map and (types.get(name) == "TEXT" or name not in types):
+                    if name in inferred_map and (types.get(name) in {"TEXT", "VARCHAR", "S"} or name not in types):
                         types[name] = inferred_map[name]
         except Exception:
             logger.warning("DynamoDB sample inference failed for %s", table, exc_info=True)
@@ -1113,15 +1482,18 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 .get("properties", {})
             )
 
-            # Sample real docs so date fields become TIMESTAMP when they carry time
-            # and so text/binary/object fields are classified by value, not just mapping.
+            # Sample real docs — union mapping ⊕ dynamic _source keys (no silent miss).
             samples_by_name: dict[str, list[str]] = {name: [] for name in props}
+            dynamic_keys: dict[str, None] = {}
             try:
                 resp = client.search(index=index, body={"size": 50, "query": {"match_all": {}}, "sort": ["_doc"]})
                 for hit in resp.get("hits", {}).get("hits") or []:
                     src = hit.get("_source") or {}
-                    for name in props:
-                        value = src.get(name)
+                    for name, value in src.items():
+                        if name not in props and name not in dynamic_keys:
+                            dynamic_keys[name] = None
+                        if name not in samples_by_name:
+                            samples_by_name[name] = []
                         if value is None:
                             continue
                         if isinstance(value, (dict, list)):
@@ -1162,6 +1534,16 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 if semantic_role:
                     col_rec["semantic_role"] = semantic_role
                 columns.append(col_rec)
+            # Dynamic fields present in docs but absent from index mapping.
+            for name in dynamic_keys:
+                samples = samples_by_name.get(name, [])
+                intel = infer_column(samples, field_name=name) if samples else {"logical_type": "TEXT"}
+                columns.append({
+                    "name": name,
+                    "inferred_type": str(intel.get("logical_type") or "TEXT"),
+                    "nullable": True,
+                    "semantic_role": intel.get("semantic_role"),
+                })
             return {"ok": True, "tables": [index], "columns": columns, "schema": index}
         finally:
             client.close()
@@ -1173,7 +1555,10 @@ def _es_mapping_type(es_type: str) -> str:
     t = (es_type or "text").lower()
     if t in ("long", "integer", "short", "byte"):
         return "INTEGER"
-    if t in ("float", "double", "scaled_float"):
+    if t in ("float", "double"):
+        return "FLOAT"
+    if t == "scaled_float":
+        # Elasticsearch scaled_float is fixed-point-like — keep as DECIMAL.
         return "DECIMAL"
     if t == "boolean":
         return "BOOLEAN"
@@ -1290,3 +1675,236 @@ def _introspect_sqlite(
             "columns": [],
             "tables": [],
         }
+
+
+def salesforce_field_to_logical(
+    field_type: str,
+    *,
+    precision: int | None = None,
+    scale: int | None = None,
+) -> str:
+    """Map Salesforce describe field type → DataFlow logical carrier."""
+    t = (field_type or "string").strip().lower()
+    if t in {"boolean"}:
+        return "BOOLEAN"
+    if t in {"int", "long", "integer"}:
+        return "INTEGER"
+    if t in {"double", "currency", "percent"}:
+        if precision is not None and scale is not None and int(scale) > 0:
+            return f"DECIMAL({int(precision)},{int(scale)})"
+        if t == "double":
+            return "FLOAT"
+        return "DECIMAL"
+    if t == "date":
+        return "DATE"
+    if t in {"datetime", "time"}:
+        return "TIMESTAMP" if t == "datetime" else "TIME"
+    if t == "base64":
+        return "BINARY"
+    if t in {"address", "location", "complexvalue", "json"}:
+        return "JSON"
+    if t == "id":
+        return "TEXT"  # Salesforce Ids are 15/18-char strings, not UUID
+    # string, textarea, phone, url, email, picklist, reference, …
+    return "TEXT"
+
+
+def hubspot_property_to_logical(prop_type: str, *, field_type: str = "") -> str:
+    """Map HubSpot property type → DataFlow logical carrier."""
+    t = (prop_type or "string").strip().lower()
+    ft = (field_type or "").strip().lower()
+    if t == "bool" or ft == "booleancheckbox":
+        return "BOOLEAN"
+    if t == "number":
+        return "DECIMAL"
+    if t == "date":
+        return "DATE"
+    if t == "datetime":
+        return "TIMESTAMP"
+    if t == "json" or ft in {"html", "calculation_equation"}:
+        return "JSON" if t == "json" else "TEXT"
+    # string, enumeration, phone_number, …
+    return "TEXT"
+
+
+def _saas_cfg(**kwargs: Any) -> dict[str, Any]:
+    return {
+        "host": kwargs.get("host") or "",
+        "database": kwargs.get("database") or "",
+        "table": kwargs.get("table") or "",
+        "connection_string": kwargs.get("connection_string") or "",
+        "api_key": kwargs.get("api_key") or "",
+        "username": kwargs.get("username") or "",
+        "password": kwargs.get("password") or "",
+    }
+
+
+def _introspect_salesforce(**kwargs: Any) -> dict[str, Any]:
+    """Salesforce Describe → typed columns for Map / preflight."""
+    try:
+        from connectors.salesforce import describe_sobject, list_sobjects
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+    cfg = _saas_cfg(**kwargs)
+    table = (kwargs.get("table") or kwargs.get("database") or "").strip()
+    try:
+        tables = list_sobjects(cfg)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+
+    if not table:
+        return {"ok": True, "columns": [], "tables": tables, "schema": ""}
+
+    try:
+        fields = describe_sobject(cfg, table)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": tables}
+
+    columns = [
+        {
+            "name": f["name"],
+            "inferred_type": salesforce_field_to_logical(
+                str(f.get("type") or "string"),
+                precision=f.get("precision") if isinstance(f.get("precision"), int) else None,
+                scale=f.get("scale") if isinstance(f.get("scale"), int) else None,
+            ),
+            "nullable": bool(f.get("nillable", True)),
+            "data_type": f.get("type") or "string",
+            "label": f.get("label") or "",
+        }
+        for f in fields
+        if f.get("name")
+    ]
+    return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+
+
+def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
+    """HubSpot Properties API → typed columns for Map / preflight."""
+    try:
+        from connectors.hubspot import describe_properties, list_object_types
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+    cfg = _saas_cfg(**kwargs)
+    table = (kwargs.get("table") or kwargs.get("database") or "").strip()
+    try:
+        tables = list_object_types(cfg)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+
+    if not table:
+        return {"ok": True, "columns": [], "tables": tables, "schema": ""}
+
+    try:
+        props = describe_properties(cfg, table)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": tables}
+
+    columns = [
+        {
+            "name": "id",
+            "inferred_type": "TEXT",
+            "nullable": False,
+            "data_type": "string",
+            "label": "Record ID",
+        }
+    ]
+    for p in props:
+        if not p.get("name") or p["name"] == "id":
+            continue
+        columns.append(
+            {
+                "name": p["name"],
+                "inferred_type": hubspot_property_to_logical(
+                    str(p.get("type") or "string"),
+                    field_type=str(p.get("fieldType") or ""),
+                ),
+                "nullable": True,
+                "data_type": p.get("type") or "string",
+                "label": p.get("label") or "",
+            }
+        )
+    return {"ok": True, "columns": columns, "tables": tables, "schema": table}
+
+
+def _kafka_value_to_logical(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "INTEGER"
+    if isinstance(value, float):
+        return "FLOAT"
+    if isinstance(value, dict):
+        return "JSON"
+    if isinstance(value, list):
+        return "ARRAY"
+    if isinstance(value, str):
+        try:
+            from services.schema_inference import infer_column
+
+            inferred = str(infer_column([value], field_name="")["logical_type"])
+            return "TEXT" if inferred == "VARCHAR" else inferred
+        except Exception:
+            return "TEXT"
+    return "TEXT"
+
+
+def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
+    """Infer Kafka topic field types from a small poll of JSON/Debezium envelopes."""
+    try:
+        from connectors.kafka_reader import infer_topic_schema
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+    topic = (kwargs.get("table") or kwargs.get("database") or "").strip()
+    registry = str(
+        kwargs.get("schema_registry_url")
+        or (
+            kwargs.get("api_key")
+            if str(kwargs.get("api_key") or "").startswith("http")
+            else ""
+        )
+        or (
+            kwargs.get("connection_string")
+            if str(kwargs.get("connection_string") or "").startswith("http")
+            else ""
+        )
+        or ""
+    ).strip()
+    cfg = {
+        "host": kwargs.get("host") or "localhost",
+        "port": int(kwargs.get("port") or 9092),
+        "database": kwargs.get("database") or "",
+        "table": topic,
+        "connection_string": (
+            ""
+            if str(kwargs.get("connection_string") or "").startswith("http")
+            else (kwargs.get("connection_string") or "")
+        ),
+        "username": kwargs.get("username") or "",
+        "password": kwargs.get("password") or "",
+        "schema_registry_url": registry,
+    }
+    if not topic:
+        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+    try:
+        schema_map, native, warning = infer_topic_schema(cfg, topic, sample_limit=50)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": [topic]}
+
+    columns = [
+        {
+            "name": name,
+            "inferred_type": logical,
+            "nullable": True,
+            "data_type": native.get(name, logical),
+        }
+        for name, logical in schema_map.items()
+    ]
+    out: dict[str, Any] = {"ok": True, "columns": columns, "tables": [topic], "schema": topic}
+    if warning:
+        out["warning"] = warning
+    return out

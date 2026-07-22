@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import uuid
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, Overflow
@@ -20,6 +21,11 @@ from typing import Any
 # Fixed-point expansion past type_system DECIMAL budgets is unsafe
 # (memory / driver Overflow). Prefer short scientific form for Redis/JSON/CSV.
 from services.type_system import decimal_needs_scientific_wire
+
+# Explicit SQL NULL on the transfer string wire — distinct from empty string "".
+# SQL readers use ``cell_to_string(..., preserve_sql_null=True)``; apply_transform
+# maps the sentinel back to Python None → destination SQL NULL.
+SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
 
 def safe_decimal_text(value: Decimal) -> str | None:
@@ -86,6 +92,60 @@ def _format_timedelta(value: timedelta) -> str:
     if seconds == int(seconds):
         return f"{sign}{hours:02d}:{minutes:02d}:{int(seconds):02d}"
     return f"{sign}{hours:02d}:{minutes:02d}:{seconds:09.6f}".rstrip("0").rstrip(".")
+
+
+def format_bigquery_interval(value: Any) -> str:
+    """Canonical BigQuery INTERVAL wire: ``Y-M D H:M:S[.F]`` (day-to-second).
+
+    Accepts timedelta, ISO-8601 duration (``P…T…``), HH:MM:SS, or already
+    canonical BQ form. Unparseable input is returned stripped for quarantine.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, timedelta):
+        total = value.total_seconds()
+        sign = "-" if total < 0 else ""
+        total = abs(total)
+        days = int(total // 86400)
+        rem = total - days * 86400
+        hours = int(rem // 3600)
+        rem -= hours * 3600
+        minutes = int(rem // 60)
+        seconds = rem - minutes * 60
+        if seconds == int(seconds):
+            sec_s = f"{int(seconds):02d}"
+        else:
+            sec_s = f"{seconds:09.6f}".rstrip("0").rstrip(".")
+            if "." in sec_s:
+                whole, frac = sec_s.split(".", 1)
+                sec_s = f"{int(whole):02d}.{frac}"
+            else:
+                sec_s = f"{int(float(sec_s)):02d}"
+        return f"{sign}0-0 {days} {hours}:{minutes:02d}:{sec_s}"
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    if re.match(r"^-?\d+-\d+\s+-?\d+\s+-?\d+:\d{2}:\d{2}", text):
+        return text
+    m = re.fullmatch(
+        r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$",
+        text,
+        re.I,
+    )
+    if m:
+        days = int(m.group("days") or 0)
+        hours = int(m.group("hours") or 0)
+        minutes = int(m.group("minutes") or 0)
+        seconds = float(m.group("seconds") or 0)
+        return format_bigquery_interval(
+            timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+        )
+    m2 = re.fullmatch(r"^(-)?(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$", text)
+    if m2:
+        sign, h, mi, s = m2.groups()
+        return f"{sign or ''}0-0 0 {int(h)}:{mi}:{s}"
+    return text
 
 
 def _decimal_to_json(value: Decimal) -> Any:
@@ -170,10 +230,11 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
-def cell_to_string(value: Any) -> str:
+def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     """Convert a typed Python value into a canonical intermediate string.
 
-    * None, NaN-like, and missing values -> ""
+    * None → "" by default, or ``SQL_NULL_SENTINEL`` when ``preserve_sql_null``
+      (SQL readers) so empty string and SQL NULL stay distinct on the wire
     * bool -> "true" / "false" (lowercase)
     * bytes / bytearray / memoryview -> base64
     * datetime / date / time -> ISO 8601
@@ -187,7 +248,7 @@ def cell_to_string(value: Any) -> str:
     * unknown -> str(value) (never repr)
     """
     if value is None:
-        return ""
+        return SQL_NULL_SENTINEL if preserve_sql_null else ""
 
     # Missing-like values (pd.NA, np.nan, etc.) where value != value.
     if _is_na(value):

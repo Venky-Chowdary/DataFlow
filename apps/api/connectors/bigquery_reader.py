@@ -78,7 +78,7 @@ def read_table_batch(
             safe_table = require_safe_identifier(table, preserve_case=True, max_len=1024)
             bq_table = client.get_table(f"{safe_project}.{safe_dataset}.{safe_table}")
             headers = [field.name for field in bq_table.schema]
-        rows = [[cell_to_string(v) for v in row.values()] for row in rows_iter]
+        rows = [[cell_to_string(v, preserve_sql_null=True) for v in row.values()] for row in rows_iter]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     except Exception as exc:
         raise RuntimeError(f"BigQuery read failed for {table_ref}: {exc}") from exc

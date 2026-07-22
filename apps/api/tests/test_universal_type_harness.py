@@ -22,6 +22,7 @@ from services.type_system import (
     LOGICAL_DATE,
     LOGICAL_DATETIME,
     LOGICAL_DECIMAL,
+    LOGICAL_FLOAT,
     LOGICAL_GEOGRAPHY,
     LOGICAL_INTEGER,
     LOGICAL_INTERVAL,
@@ -42,6 +43,7 @@ ALL_LOGICALS = [
     LOGICAL_TEXT,
     LOGICAL_INTEGER,
     LOGICAL_DECIMAL,
+    LOGICAL_FLOAT,
     LOGICAL_BOOLEAN,
     LOGICAL_DATE,
     LOGICAL_DATETIME,
@@ -58,9 +60,9 @@ ALL_LOGICALS = [
 # Vendor introspect strings that MUST NOT fall through to bare string when
 # they carry numeric / temporal / binary / boolean semantics.
 VENDOR_MUST_MAP: list[tuple[str, str]] = [
-    ("FLOAT", LOGICAL_DECIMAL),
-    ("DOUBLE", LOGICAL_DECIMAL),
-    ("REAL", LOGICAL_DECIMAL),
+    ("FLOAT", LOGICAL_FLOAT),
+    ("DOUBLE", LOGICAL_FLOAT),
+    ("REAL", LOGICAL_FLOAT),
     ("MONEY", LOGICAL_DECIMAL),
     ("SMALLMONEY", LOGICAL_DECIMAL),
     ("CURRENCY", LOGICAL_DECIMAL),
@@ -159,6 +161,7 @@ def test_duckdb_clickhouse_trino_have_real_ddl():
 def test_lossy_coercion_matrix_hard_rules():
     assert is_lossy_coercion("decimal", "integer") is True
     assert is_lossy_coercion("float", "integer") is True
+    assert is_lossy_coercion("float", "decimal") is True
     assert is_lossy_coercion("datetime", "date") is True
     assert is_lossy_coercion("integer", "decimal") is False
     assert is_lossy_coercion("date", "datetime") is False

@@ -24,6 +24,7 @@ LOGICAL_STRING = "string"
 LOGICAL_TEXT = "text"
 LOGICAL_INTEGER = "integer"
 LOGICAL_DECIMAL = "decimal"
+LOGICAL_FLOAT = "float"
 LOGICAL_BOOLEAN = "boolean"
 LOGICAL_DATE = "date"
 LOGICAL_DATETIME = "datetime"
@@ -83,11 +84,13 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "number": LOGICAL_DECIMAL,
     "numeric": LOGICAL_DECIMAL,
     "decimal": LOGICAL_DECIMAL,
-    "double": LOGICAL_DECIMAL,
-    "double precision": LOGICAL_DECIMAL,
-    "float": LOGICAL_DECIMAL,
-    "float64": LOGICAL_DECIMAL,
-    "real": LOGICAL_DECIMAL,
+    # Approximate IEEE floats — distinct from fixed-point DECIMAL/NUMBER.
+    "double": LOGICAL_FLOAT,
+    "double precision": LOGICAL_FLOAT,
+    "float": LOGICAL_FLOAT,
+    "float64": LOGICAL_FLOAT,
+    "float32": LOGICAL_FLOAT,
+    "real": LOGICAL_FLOAT,
     "bool": LOGICAL_BOOLEAN,
     "boolean": LOGICAL_BOOLEAN,
     "date": LOGICAL_DATE,
@@ -130,11 +133,11 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "dec": LOGICAL_DECIMAL,
     "num": LOGICAL_DECIMAL,
     "decfloat": LOGICAL_DECIMAL,
-    "float4": LOGICAL_DECIMAL,
-    "float8": LOGICAL_DECIMAL,
-    "binary_float": LOGICAL_DECIMAL,
-    "binary_double": LOGICAL_DECIMAL,
-    "single": LOGICAL_DECIMAL,
+    "float4": LOGICAL_FLOAT,
+    "float8": LOGICAL_FLOAT,
+    "binary_float": LOGICAL_FLOAT,
+    "binary_double": LOGICAL_FLOAT,
+    "single": LOGICAL_FLOAT,
     "int16": LOGICAL_INTEGER,
     "int32": LOGICAL_INTEGER,
     "int64": LOGICAL_INTEGER,
@@ -450,7 +453,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "text",
         LOGICAL_TEXT: "text",
         LOGICAL_INTEGER: "long",
-        LOGICAL_DECIMAL: "double",
+        LOGICAL_DECIMAL: "scaled_float",  # fixed-point-ish; never invent float64 for DECIMAL
+        LOGICAL_FLOAT: "double",
         LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "date",
         LOGICAL_DATETIME: "date",
@@ -554,7 +558,7 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
         LOGICAL_VECTOR: "VARCHAR",
     },
     "bigquery": {
-        LOGICAL_INTERVAL: "STRING",
+        LOGICAL_INTERVAL: "INTERVAL",
         LOGICAL_GEOGRAPHY: "GEOGRAPHY",
         LOGICAL_VECTOR: "STRING",
     },
@@ -608,6 +612,31 @@ for _dest, _map in DDL_TYPES.items():
     for _logical in (LOGICAL_INTERVAL, LOGICAL_GEOGRAPHY, LOGICAL_VECTOR):
         _map[_logical] = _native.get(_logical, _fallback)
 
+# Approximate float DDL — never silently rewrite FLOAT → NUMBER(38,10).
+_FLOAT_DDL: Final[dict[str, str]] = {
+    "postgresql": "DOUBLE PRECISION",
+    "mysql": "DOUBLE",
+    "sqlserver": "FLOAT",
+    "oracle": "BINARY_DOUBLE",
+    "snowflake": "FLOAT",
+    "bigquery": "FLOAT64",
+    "mongodb": "double",
+    "redshift": "DOUBLE PRECISION",
+    "sqlite": "REAL",
+    "generic_sql": "DOUBLE PRECISION",
+    "databricks": "DOUBLE",
+    "iceberg": "double",
+    "redis": "string",
+    "dynamodb": "N",
+    "elasticsearch": "double",
+    "duckdb": "DOUBLE",
+    "clickhouse": "Float64",
+    "trino": "double",
+    "presto": "double",
+}
+for _dest, _map in DDL_TYPES.items():
+    _map[LOGICAL_FLOAT] = _FLOAT_DDL.get(_dest, "DOUBLE PRECISION")
+
 DEFAULT_DDL: Final[dict[str, str]] = {
     "postgresql": "TEXT",
     "mysql": "TEXT",
@@ -646,13 +675,15 @@ _DECIMAL_CAPS: Final[dict[str, tuple[int, int]]] = {
     "clickhouse": (76, 38),
     "trino": (38, 37),
     "presto": (38, 37),
+    # Postgres NUMERIC precision max 1000; typmod scale 0..precision.
+    "postgresql": (1000, 1000),
     # BigQuery NUMERIC is (38,9); BIGNUMERIC is (76,38). We emit BIGNUMERIC
     # for DECIMAL logicals; caps used when source params force a check.
     "bigquery": (76, 38),
 }
 
 # DDL templates that accept (precision, scale). Bare NUMERIC / BIGNUMERIC /
-# schemaless "decimal" stay as-is (no silent scale floor).
+# only when the source has no (p,s) — never strip known source scale.
 _DECIMAL_PARAM_TEMPLATES: Final[dict[str, str]] = {
     "mysql": "DECIMAL({p},{s})",
     "sqlserver": "DECIMAL({p},{s})",
@@ -666,6 +697,8 @@ _DECIMAL_PARAM_TEMPLATES: Final[dict[str, str]] = {
     "clickhouse": "Decimal({p}, {s})",
     "trino": "decimal({p},{s})",
     "presto": "decimal({p},{s})",
+    "postgresql": "NUMERIC({p},{s})",
+    "bigquery": "BIGNUMERIC({p},{s})",
 }
 
 _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
@@ -681,6 +714,8 @@ _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
     "clickhouse": 15,
     "trino": 15,
     "presto": 15,
+    "postgresql": 0,
+    "bigquery": 38,
 }
 
 
@@ -824,8 +859,12 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     precision, scale = parse_numeric_precision_scale(inferred)
     cap_p, cap_s = _DECIMAL_CAPS.get(db, (38, 37))
 
-    # No source params → use documented platform default scale (not silent truncate).
+    # No source params → platform default (PG stays bare NUMERIC; others use floor).
     if precision is None and scale is None:
+        if db == "postgresql":
+            return default_ddl  # bare NUMERIC — unbounded until source declares (p,s)
+        if db == "bigquery":
+            return default_ddl  # bare BIGNUMERIC when scale unknown
         default_s = min(_DECIMAL_DEFAULT_SCALE.get(db, 10), cap_s)
         return template.format(p=cap_p, s=default_s)
 
@@ -841,6 +880,59 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     if out_p < out_s:
         out_p = out_s
     return template.format(p=out_p, s=out_s)
+
+
+def ddl_carrier_type(inferred: str | None) -> str:
+    """Logical DDL carrier that keeps DECIMAL(p,s) / VECTOR(n) params.
+
+    Use this for CREATE / column_types — never ``normalize_logical_type().upper()``,
+    which strips precision and invents bare DECIMAL / VECTOR.
+    """
+    raw = (inferred or "").strip()
+    if not raw:
+        return "VARCHAR"
+    logical = normalize_logical_type(raw)
+    if logical == LOGICAL_DECIMAL:
+        precision, scale = parse_numeric_precision_scale(raw)
+        if precision is not None and scale is not None:
+            return f"DECIMAL({precision},{scale})"
+        if precision is not None:
+            return f"DECIMAL({precision})"
+        return "DECIMAL"
+    if logical == LOGICAL_VECTOR:
+        dim = parse_vector_dimension(raw)
+        if dim is not None:
+            return f"VECTOR({dim})"
+        return "VECTOR"
+    if logical == LOGICAL_FLOAT:
+        return "FLOAT"
+    if logical == LOGICAL_INTEGER:
+        return "INTEGER"
+    if logical == LOGICAL_BOOLEAN:
+        return "BOOLEAN"
+    if logical == LOGICAL_DATE:
+        return "DATE"
+    if logical == LOGICAL_DATETIME:
+        return "TIMESTAMP"
+    if logical == LOGICAL_TIME:
+        return "TIME"
+    if logical == LOGICAL_UUID:
+        return "UUID"
+    if logical == LOGICAL_JSON:
+        return "JSON"
+    if logical == LOGICAL_ARRAY:
+        return "ARRAY"
+    if logical == LOGICAL_BINARY:
+        return "BINARY"
+    if logical == LOGICAL_INTERVAL:
+        return "INTERVAL"
+    if logical == LOGICAL_GEOGRAPHY:
+        return "GEOGRAPHY"
+    if logical == LOGICAL_TEXT:
+        return "TEXT"
+    if logical == LOGICAL_STRING:
+        return "VARCHAR"
+    return logical.upper() if logical else "VARCHAR"
 
 
 def _normalize_dest_db(db_type: str | None) -> str:
@@ -945,9 +1037,10 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
     transform engine can perform without losing the original value:
 
       * any value → string/text/json/array (structural serialization)
-      * integer → decimal/string/text/json
-      * decimal → string/text/json
-      * boolean → string/text/json/integer/decimal
+      * integer → decimal/float/string/text/json
+      * decimal → string/text/json (decimal→float is lossy)
+      * float → string/text/json (float→decimal and float→integer are lossy)
+      * boolean → string/text/json/integer/decimal/float
       * date → datetime/string/text/json
       * datetime/time → string/text/json
       * uuid → string/text/json
@@ -978,18 +1071,24 @@ def is_lossy_coercion(source_type: str, target_type: str) -> bool:
         (LOGICAL_JSON, LOGICAL_ARRAY),
         # numeric widening and text renderings
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
+        (LOGICAL_INTEGER, LOGICAL_FLOAT),
         (LOGICAL_INTEGER, LOGICAL_STRING),
         (LOGICAL_INTEGER, LOGICAL_TEXT),
         (LOGICAL_INTEGER, LOGICAL_JSON),
         (LOGICAL_DECIMAL, LOGICAL_STRING),
         (LOGICAL_DECIMAL, LOGICAL_TEXT),
         (LOGICAL_DECIMAL, LOGICAL_JSON),
+        (LOGICAL_FLOAT, LOGICAL_STRING),
+        (LOGICAL_FLOAT, LOGICAL_TEXT),
+        (LOGICAL_FLOAT, LOGICAL_JSON),
+        # float→decimal is LOSSY (IEEE → fixed-point) — not in this allow-list
         # boolean renderings and scalar widenings
         (LOGICAL_BOOLEAN, LOGICAL_STRING),
         (LOGICAL_BOOLEAN, LOGICAL_TEXT),
         (LOGICAL_BOOLEAN, LOGICAL_JSON),
         (LOGICAL_BOOLEAN, LOGICAL_INTEGER),
         (LOGICAL_BOOLEAN, LOGICAL_DECIMAL),
+        (LOGICAL_BOOLEAN, LOGICAL_FLOAT),
         # date/time renderings and date→datetime widening
         (LOGICAL_DATE, LOGICAL_DATETIME),
         (LOGICAL_DATE, LOGICAL_STRING),

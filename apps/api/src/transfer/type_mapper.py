@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-__all__ = ["build_column_types", "ddl_type", "default_mappings", "normalize_inferred"]
+__all__ = [
+    "build_column_types",
+    "ddl_carrier_type",
+    "ddl_type",
+    "default_mappings",
+    "normalize_inferred",
+]
 
 try:
     from services.type_system import (
         build_column_types,
+        ddl_carrier_type,
         ddl_type,
         default_mappings,
         normalize_logical_type,
@@ -14,6 +21,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.type_system import (
         build_column_types,
+        ddl_carrier_type,
         ddl_type,
         default_mappings,
         normalize_logical_type,
@@ -21,4 +29,5 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 
 def normalize_inferred(inferred: str) -> str:
+    """Class-level logical type (strips DECIMAL params). Prefer ``ddl_carrier_type`` for CREATE."""
     return normalize_logical_type(inferred)

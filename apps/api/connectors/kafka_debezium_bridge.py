@@ -104,19 +104,51 @@ class KafkaDebeziumConsumer:
             group_id=self.config.get("group_id") or "dataflow-debezium",
             auto_offset_reset=self.config.get("auto_offset_reset") or "earliest",
             enable_auto_commit=True,
-            value_deserializer=lambda b: b.decode("utf-8") if b else "",
+            # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
+            value_deserializer=lambda b: b if b is not None else b,
         )
 
-    def poll_changes(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[DebeziumChange]:
+    def poll_rows(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[dict[str, Any]]:
+        """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
         if self._consumer is None:
             self.connect()
         assert self._consumer is not None
+        from connectors.confluent_schema_registry import SchemaRegistryError, decode_kafka_value
+
+        registry_url = str(self.config.get("schema_registry_url") or "").strip()
         batch = self._consumer.poll(timeout_ms=timeout_ms, max_records=max_records)
         for _tp, messages in batch.items():
             for msg in messages:
-                change = parse_debezium_envelope(msg.value)
+                val = msg.value
+                if not val:
+                    continue
+                try:
+                    parsed = decode_kafka_value(val, registry_url=registry_url)
+                except SchemaRegistryError:
+                    raise
+                except Exception:
+                    parsed = val
+                # Debezium envelopes may arrive as dict (JSON) or still need string parse.
+                change = parse_debezium_envelope(parsed if isinstance(parsed, (dict, str)) else None)
                 if change is not None:
-                    yield change
+                    row = debezium_to_row(change)
+                    if row:
+                        yield row
+                    continue
+                if isinstance(parsed, dict):
+                    yield parsed
+                elif isinstance(parsed, str):
+                    try:
+                        obj = json.loads(parsed)
+                    except json.JSONDecodeError:
+                        yield {"_kafka_value": parsed}
+                        continue
+                    if isinstance(obj, dict):
+                        yield obj
+                    else:
+                        yield {"_kafka_value": str(obj)}
+                else:
+                    yield {"_kafka_value": str(parsed)}
 
     def close(self) -> None:
         if self._consumer is not None:

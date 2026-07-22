@@ -235,6 +235,24 @@ def _persist_load_history_profile(
         logger.debug("load-history save_profile skipped", exc_info=True)
 
 
+def _validation_plan_for_result(pf: dict | None) -> dict:
+    """Checklist plus live gate outcomes so operators see float→decimal etc. warnings."""
+    if not pf:
+        return {}
+    plan = dict(pf.get("validation_plan") or {})
+    if pf.get("gates") is not None:
+        plan["gates"] = pf.get("gates") or []
+    if "passed" in pf:
+        plan["passed"] = pf.get("passed")
+    if pf.get("warnings") is not None:
+        plan["warnings"] = pf.get("warnings") or []
+    if pf.get("blockers") is not None:
+        plan["blockers"] = pf.get("blockers") or []
+    if pf.get("readiness_score") is not None:
+        plan["readiness_score"] = pf.get("readiness_score")
+    return plan
+
+
 def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
     """Mark job failed at preflight and persist inspectable quarantine rows."""
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
@@ -266,7 +284,7 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
             "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get("risk_score"),
         },
         "readiness_score": pf.get("readiness_score"),
-        "validation_plan": pf.get("validation_plan"),
+        "validation_plan": _validation_plan_for_result(pf),
         "payload_shape": pf.get("payload_shape"),
         "quarantine_issue_count": len(qrows),
         "quarantine_row_count": rejected_rows,
@@ -276,7 +294,7 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
         run_id=job_id, passed=False,
         readiness_score=pf.get("readiness_score", 0),
         blockers=pf.get("blockers", []),
-        validation_plan=pf.get("validation_plan"),
+        validation_plan=_validation_plan_for_result(pf),
     )
     lineage.emit_run_failed(
         run_id=job_id, job_id=job_id, error=error_message,
@@ -365,7 +383,7 @@ def _build_explanation(
         mappings=mappings,
         reconciliation=recon,
         destination_summary=dest_summary,
-        validation_plan=pf.get("validation_plan") if pf else None,
+        validation_plan=_validation_plan_for_result(pf) or None,
         rows_written=rows_written,
         rejected_rows=rejected,
     )
@@ -1238,7 +1256,7 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
-                        validation_plan=pf.get("validation_plan") or {},
+                        validation_plan=_validation_plan_for_result(pf),
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
@@ -1617,7 +1635,7 @@ class UniversalTransferEngine:
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
             )
             lineage.emit_lineage(
                 run_id=job_id,
@@ -1654,7 +1672,7 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
@@ -1784,7 +1802,7 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
-                        validation_plan=pf.get("validation_plan") or {},
+                        validation_plan=_validation_plan_for_result(pf),
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
@@ -2067,7 +2085,7 @@ class UniversalTransferEngine:
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
             )
             lineage.emit_lineage(
                 run_id=job_id,
@@ -2098,7 +2116,7 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,
@@ -2233,7 +2251,7 @@ class UniversalTransferEngine:
                         success=False,
                         error=error_message,
                         error_details=error_details,
-                        validation_plan=pf.get("validation_plan") or {},
+                        validation_plan=_validation_plan_for_result(pf),
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
@@ -2434,7 +2452,7 @@ class UniversalTransferEngine:
             lineage.emit_preflight_completed(
                 run_id=job_id, passed=True,
                 readiness_score=pf.get("readiness_score", 100) if pf else 100,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
             )
             lineage.emit_lineage(
                 run_id=job_id,
@@ -2465,7 +2483,7 @@ class UniversalTransferEngine:
                 ddl_executed=ddl_log,
                 columns=columns,
                 reconciliation=recon,
-                validation_plan=pf.get("validation_plan") if pf else {},
+                validation_plan=_validation_plan_for_result(pf),
                 payload_shape=pf.get("payload_shape") if pf else {},
                 contract_id=contract_id,
                 explanation=explanation,

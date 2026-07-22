@@ -7,15 +7,19 @@ import {
   applyDestTypeChange,
   applyStructPolicyChange,
   applyTransformChange,
+  approveMappingsHonestly,
   buildPreflightMappings,
   canWidenMapping,
+  countApproveEligible,
   editableFromPipelineMappings,
   engineTransformToUi,
+  inferLogicalFromSample,
   mappingHealthSummary,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
 } from "./mapping.js";
+import { typeFamily } from "./typeDisplay.js";
 
 describe("transform SSOT round-trip", () => {
   it("preserves phone/currency/integer engine transforms through Map edit", () => {
@@ -179,9 +183,94 @@ describe("STRUCT Map policy", () => {
     assert.equal(child?.structDerived, true);
     assert.equal(child?.structParent, "addr");
     assert.equal(child?.sample, "Austin");
+    assert.equal(child?.inferredType, "VARCHAR");
+    const tags = next.find((m) => m.source === "addr_tags");
+    assert.equal(tags?.inferredType, "ARRAY");
 
     const back = applyStructPolicyChange(next, 0, "store_as_json");
     assert.equal(back.length, 1);
     assert.equal(back[0].structPolicy, "store_as_json");
+  });
+
+  it("deep flatten promotes nested geo_lat", () => {
+    const base: EditableMapping[] = [{
+      source: "addr",
+      target: "addr",
+      confidence: 0.9,
+      approved: false,
+      inferredType: "JSON",
+      destType: "JSONB",
+      sample: '{"city":"Austin","geo":{"lat":30,"lon":-97}}',
+      structPolicy: "store_as_json",
+      transform: "parse_json",
+    }];
+    const next = applyStructPolicyChange(base, 0, "flatten_deep");
+    const sources = next.map((m) => m.source);
+    assert.ok(sources.includes("addr_city"));
+    assert.ok(sources.includes("addr_geo_lat"));
+    assert.ok(sources.includes("addr_geo_lon"));
+  });
+
+  it("array explode synthesizes _elem child", () => {
+    const base: EditableMapping[] = [{
+      source: "tags",
+      target: "tags",
+      confidence: 0.9,
+      approved: false,
+      inferredType: "ARRAY",
+      destType: "JSONB",
+      sample: '["a","b"]',
+      structPolicy: "store_as_json",
+      transform: "parse_json",
+    }];
+    const next = applyStructPolicyChange(base, 0, "explode_rows");
+    assert.equal(next[0].structPolicy, "explode_rows");
+    assert.ok(next.some((m) => m.source === "tags_elem" && m.structDerived));
+  });
+});
+
+describe("Approve honesty + type badges", () => {
+  it("does not auto-approve specialty or flatten rows", () => {
+    const rows: EditableMapping[] = [
+      { source: "a", target: "a", confidence: 0.99, approved: false, inferredType: "VARCHAR" },
+      {
+        source: "emb",
+        target: "emb",
+        confidence: 0.99,
+        approved: false,
+        inferredType: "VECTOR(8)",
+        transform: "identity_specialty",
+        requiresReview: true,
+      },
+      {
+        source: "addr_city",
+        target: "addr_city",
+        confidence: 0.8,
+        approved: false,
+        inferredType: "VARCHAR",
+        structDerived: true,
+        structParent: "addr",
+        requiresReview: true,
+      },
+    ];
+    const next = approveMappingsHonestly(rows);
+    assert.equal(next[0].approved, true);
+    assert.equal(next[1].approved, false);
+    assert.equal(next[2].approved, false);
+    assert.equal(countApproveEligible(rows), 1);
+  });
+
+  it("infers child types from samples", () => {
+    assert.equal(inferLogicalFromSample("42"), "INTEGER");
+    assert.equal(inferLogicalFromSample("true"), "BOOLEAN");
+    assert.equal(inferLogicalFromSample("2024-01-15T10:00:00Z"), "TIMESTAMPTZ");
+    assert.equal(inferLogicalFromSample("[1,2]"), "ARRAY");
+  });
+
+  it("classifies NUMBER(p,s) badges correctly", () => {
+    assert.equal(typeFamily("NUMBER(38,0)"), "int");
+    assert.equal(typeFamily("NUMBER(38,10)"), "decimal");
+    assert.equal(typeFamily("VECTOR(768)"), "binary");
+    assert.equal(typeFamily("TIMESTAMPTZ"), "temporal");
   });
 });

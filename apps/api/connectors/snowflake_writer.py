@@ -87,7 +87,10 @@ def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
 
 
 def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
-    """True if value can be stored in Snowflake NUMBER(precision, scale)."""
+    """True if value can be stored in Snowflake NUMBER(precision, scale).
+
+    Scale overflow is fail-closed (quarantine) — never silently quantize/round.
+    """
     if value is None:
         return True
     try:
@@ -95,13 +98,9 @@ def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
         if not d.is_finite():
             return False
         int_digits, value_scale = _decimal_scale_and_int_digits(d)
+        # Do not silently round fractional digits into an existing NUMBER(p,s).
         if value_scale > scale:
-            quant = Decimal(1).scaleb(-scale) if scale else Decimal(1)
-            try:
-                q = d.quantize(quant)
-            except (InvalidOperation, Overflow):
-                return False
-            int_digits, value_scale = _decimal_scale_and_int_digits(q)
+            return False
         max_int = max(0, precision - scale)
         return int_digits <= max_int and value_scale <= scale
     except (InvalidOperation, Overflow, ValueError, TypeError):

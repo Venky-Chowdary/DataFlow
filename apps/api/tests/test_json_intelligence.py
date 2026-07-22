@@ -100,3 +100,43 @@ def test_store_as_json_is_noop():
     row = {"addr": '{"city":"Austin"}'}
     out = apply_struct_policies_to_row(row, {"addr": STRUCT_POLICY_STORE_AS_JSON})
     assert out == row
+
+
+def test_flatten_deep_promotes_nested_keys():
+    from services.json_intelligence import STRUCT_POLICY_FLATTEN_DEEP
+
+    sample = '{"city":"Austin","geo":{"lat":30,"lon":-97}}'
+    flat = flatten_struct_field(sample, parent_key="addr", max_depth=2)
+    assert flat["addr_city"] == "Austin"
+    assert flat["addr_geo_lat"] == 30
+    assert flat["addr_geo_lon"] == -97
+    # Parent blob retained.
+    assert "addr" in flat
+
+    headers = ["id", "addr"]
+    rows = [["1", sample]]
+    mappings = [
+        {"source": "id", "target": "id"},
+        {"source": "addr", "target": "addr", "struct_policy": STRUCT_POLICY_FLATTEN_DEEP},
+    ]
+    new_headers, new_rows = materialize_struct_policies(headers, rows, mappings)
+    assert "addr_geo_lat" in new_headers
+    assert new_rows[0][new_headers.index("addr_geo_lat")] in (30, "30")
+
+
+def test_explode_rows_duplicates_parent():
+    from services.json_intelligence import ARRAY_POLICY_EXPLODE
+
+    headers = ["id", "tags"]
+    rows = [["1", '["a","b","c"]']]
+    mappings = [
+        {"source": "id", "target": "id"},
+        {"source": "tags", "target": "tags", "struct_policy": ARRAY_POLICY_EXPLODE},
+    ]
+    new_headers, new_rows = materialize_struct_policies(headers, rows, mappings)
+    assert len(new_rows) == 3
+    assert "tags_elem" in new_headers
+    elems = [r[new_headers.index("tags_elem")] for r in new_rows]
+    assert elems == ["a", "b", "c"]
+    # Parent array blob retained on every exploded row.
+    assert all(r[new_headers.index("tags")] == '["a","b","c"]' for r in new_rows)

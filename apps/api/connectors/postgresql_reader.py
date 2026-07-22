@@ -25,7 +25,7 @@ def _ensure_psycopg2() -> None:
 
 
 def _cell(value: Any) -> str:
-    return cell_to_string(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 

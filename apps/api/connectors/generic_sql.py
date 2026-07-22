@@ -571,7 +571,22 @@ def _logical_type_from_sa(col_type: Any) -> str:
     if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
         return "integer"
 
-    if isinstance(col_type, (sa.Numeric, sa.Float, sa.Double, sa.REAL)):
+    # IEEE floats must stay FLOAT — never collapse into DECIMAL/NUMBER.
+    if isinstance(col_type, (sa.Float, sa.Double, sa.REAL)):
+        return "float"
+    if any(tok in repr_ for tok in ("float", "double", "real", "binary_float", "binary_double")):
+        if "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
+            return "float"
+
+    if isinstance(col_type, (sa.Numeric,)):
+        precision = getattr(col_type, "precision", None)
+        scale = getattr(col_type, "scale", None)
+        if precision is not None and scale is not None:
+            if int(scale) == 0:
+                return "integer"
+            return f"DECIMAL({int(precision)},{int(scale)})"
+        if precision is not None:
+            return f"DECIMAL({int(precision)})"
         return "decimal"
 
     if isinstance(col_type, (sa.DateTime,)):
@@ -595,7 +610,11 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "uuid"
     if any(x in repr_ for x in ("binary", "blob", "bytea", "varbinary", "image", "raw")):
         return "binary"
-    if any(x in repr_ for x in ("numeric", "decimal", "number", "double", "float", "real", "money", "smallmoney")):
+    # FLOAT before DECIMAL — "float" must not fall into the numeric/decimal bucket.
+    if any(x in repr_ for x in ("binary_float", "binary_double", "float", "double", "real")):
+        if not any(x in repr_ for x in ("numeric", "decimal", "number(", "money")):
+            return "float"
+    if any(x in repr_ for x in ("numeric", "decimal", "number", "money", "smallmoney")):
         return "decimal"
     if any(x in repr_ for x in ("int", "serial", "smallint", "tinyint", "bigint")):
         return "integer"
@@ -640,6 +659,9 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         if dialect_name == "postgresql":
             return sa.Numeric()
         return _maybe_nullable(sa.Numeric(38, 15))
+    if t == "float":
+        # Approximate IEEE float — never rewrite to fixed-point Numeric.
+        return _maybe_nullable(sa.Double())
     if t == "boolean":
         return _maybe_nullable(sa.Boolean())
     if t == "date":
@@ -983,7 +1005,7 @@ def _infer_logical_from_samples(values: list[Any], field_name: str = "") -> str 
             "VARCHAR": "string",
             "TEXT": "string",
         }
-        samples = [cell_to_string(v) if v is not None else "" for v in values]
+        samples = [cell_to_string(v, preserve_sql_null=True) for v in values]
         return mapped.get(str(infer_column(samples, field_name=field_name)["logical_type"]))
     except Exception:
         return None
@@ -1204,7 +1226,7 @@ def _read_table_raw(
         sql += f" LIMIT {limit}"
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
-    rows = [[cell_to_string(value) for value in row] for row in result.fetchall()]
+    rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in result.fetchall()]
     return headers, rows
 
 
@@ -1275,7 +1297,7 @@ def read_table_batch(
 
                 fetched = conn.execute(stmt).fetchall()
                 headers = [c.name for c in selected_cols]
-                rows = [[cell_to_string(value) for value in row] for row in fetched]
+                rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in fetched]
 
                 if known_total_rows is not None:
                     total = known_total_rows
@@ -1355,7 +1377,7 @@ def read_table_cursor_batch(
 
             fetched = conn.execute(stmt).fetchall()
             headers = [c.name for c in selected_cols]
-            rows = [[cell_to_string(value) for value in row] for row in fetched]
+            rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in fetched]
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:

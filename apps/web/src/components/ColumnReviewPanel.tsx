@@ -3,17 +3,23 @@ import { FilterTabs } from "./ui/FilterTabs";
 import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ARRAY_POLICIES,
   MAPPING_TRANSFORMS,
   STRUCT_POLICIES,
   applyDestTypeChange,
   applyStructPolicyChange,
   applyTransformChange,
+  approveMappingHonestly,
+  approveMappingsHonestly,
   canWidenMapping,
+  countApproveEligible,
   flagExistingEnumBooleanConflict,
+  isArrayLogicalType,
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
   isSpecialtyLogicalType,
   isStructLogicalType,
+  pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
   type MappingTransform,
@@ -181,44 +187,16 @@ export function ColumnReviewPanel({
   };
 
   const approveAll = () => {
-    onChange(
-      mappings.map((m) => {
-        if (isExistingEnumBooleanConflict(m)) {
-          // Physical BOOLEAN stays — do not approve; operator must remap/ALTER.
-          return flagExistingEnumBooleanConflict(m);
-        }
-        if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
-          return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
-        }
-        if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) {
-          // Specialty identity stays reviewable — Approve-all must not hide VECTOR/INTERVAL risk.
-          return {
-            ...m,
-            approved: false,
-            requiresReview: true,
-            transform: m.transform === "none" ? "identity_specialty" : m.transform,
-          };
-        }
-        if (m.structPolicy === "flatten_top_level_keys" || m.structDerived) {
-          return { ...m, approved: false, requiresReview: true };
-        }
-        return { ...m, approved: true };
-      }),
-    );
+    onChange(approveMappingsHonestly(mappings));
   };
 
   const approveOne = (index: number) => {
     const m = mappings[index];
-    if (m && isExistingEnumBooleanConflict(m)) {
-      updateMapping(index, flagExistingEnumBooleanConflict(m));
-      return;
-    }
-    if (m && isEnumToBooleanConflict(m)) {
-      updateMapping(index, { ...widenMappingToVarchar(m), approved: true, requiresReview: false });
-      return;
-    }
-    updateMapping(index, { approved: true });
+    if (!m) return;
+    updateMapping(index, approveMappingHonestly(m));
   };
+
+  const eligibleApproveCount = countApproveEligible(mappings);
 
   const focusIssues = () => {
     setFilter("review");
@@ -315,9 +293,14 @@ export function ColumnReviewPanel({
               {rowCount != null && ` · ${rowCount.toLocaleString()} rows`}
             </p>
           </div>
-          {needsReview.length > 0 && (
-            <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={approveAll}>
-              <DtIcon name="check" size={14} /> Approve all {needsReview.length} flagged
+          {eligibleApproveCount > 0 && compact && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-primary df2-btn-sm"
+              onClick={approveAll}
+              title="Approves eligible rows only — specialty identity, STRUCT flatten, and existing DDL conflicts stay for review"
+            >
+              <DtIcon name="check" size={14} /> Approve eligible ({eligibleApproveCount})
             </button>
           )}
         </div>
@@ -447,9 +430,14 @@ export function ColumnReviewPanel({
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
               </button>
             )}
-            {needsReview.length > 0 && (
-              <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={approveAll}>
-                <DtIcon name="check" size={14} /> Approve all {needsReview.length}
+            {eligibleApproveCount > 0 && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-primary df2-btn-sm"
+                onClick={approveAll}
+                title="Approves eligible rows only — specialty / flatten / existing DDL conflicts stay for review"
+              >
+                <DtIcon name="check" size={14} /> Approve eligible ({eligibleApproveCount})
               </button>
             )}
           </div>
@@ -555,20 +543,67 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
-                      {m.existsInDestination && (
-                        <span className="df2-col-badge-exists df2-col-badge-new">exists</span>
-                      )}
-                      {!m.existsInDestination && destColumnSet.size > 0 && (
-                        <span className="df2-col-badge-new">new</span>
-                      )}
-                      {(isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) && (
-                        <span
-                          className="df2-col-badge-new"
-                          title="VECTOR / INTERVAL / GEOGRAPHY travel as identity — dimensions/SRID are not rewritten"
+                      {(isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || (m.structPolicy && !isArrayLogicalType(m.inferredType) && !isArrayLogicalType(m.destType))) && !m.structDerived && (
+                        <select
+                          className="df2-input df2-select df2-column-struct-policy"
+                          value={m.structPolicy ?? "store_as_json"}
+                          onChange={(e) =>
+                            onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
+                          }
+                          aria-label={`STRUCT policy for ${m.source}`}
+                          title={STRUCT_POLICIES.find((p) => p.id === (m.structPolicy ?? "store_as_json"))?.detail}
                         >
-                          identity
-                        </span>
+                          {STRUCT_POLICIES.map((p) => (
+                            <option key={p.id} value={p.id}>{p.label}</option>
+                          ))}
+                        </select>
                       )}
+                      {(isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows") && !m.structDerived && (
+                        <select
+                          className="df2-input df2-select df2-column-struct-policy"
+                          value={m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"}
+                          onChange={(e) =>
+                            onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
+                          }
+                          aria-label={`ARRAY policy for ${m.source}`}
+                          title={ARRAY_POLICIES.find((p) => p.id === (m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"))?.detail}
+                        >
+                          {ARRAY_POLICIES.map((p) => (
+                            <option key={p.id} value={p.id}>{p.label}</option>
+                          ))}
+                        </select>
+                      )}
+                      <div className="df2-column-dest-badges">
+                        {m.existsInDestination && (
+                          <span className="df2-col-badge-exists">exists</span>
+                        )}
+                        {!m.existsInDestination && destColumnSet.size > 0 && (
+                          <span className="df2-col-badge-new">new</span>
+                        )}
+                        {(isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) && (
+                          <span
+                            className="df2-col-badge-specialty"
+                            title="VECTOR / INTERVAL / GEOGRAPHY travel as identity — dimensions/SRID are not rewritten"
+                          >
+                            identity
+                          </span>
+                        )}
+                        {(m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep") && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title={m.structPolicy === "flatten_deep" ? "Deep flatten (depth≤2)" : "Top-level keys promoted; nested objects stay on parent blob"}>
+                            {m.structPolicy === "flatten_deep" ? "deep flatten" : "flatten"}
+                          </span>
+                        )}
+                        {m.structPolicy === "explode_rows" && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title="Array row explode (capped)">
+                            explode
+                          </span>
+                        )}
+                        {m.structDerived && m.structParent && (
+                          <span className="df2-col-badge-struct" title={`Promoted from ${m.structParent} flatten`}>
+                            from {m.structParent}
+                          </span>
+                        )}
+                      </div>
                       {isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"
@@ -612,24 +647,12 @@ export function ColumnReviewPanel({
                             <option key={t.id} value={t.id}>{t.label}</option>
                           ))}
                         </select>
-                        {(isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || m.structPolicy) && !m.structDerived && (
-                          <select
-                            className="df2-input df2-select df2-column-struct-policy"
-                            value={m.structPolicy ?? "store_as_json"}
-                            onChange={(e) =>
-                              onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
-                            }
-                            aria-label={`STRUCT policy for ${m.source}`}
-                            title={STRUCT_POLICIES.find((p) => p.id === (m.structPolicy ?? "store_as_json"))?.detail}
+                        {pipelineTransformChip(m.engineTransform) && (
+                          <span
+                            className="df2-col-badge-pipeline"
+                            title={`Pipeline semantic transform '${pipelineTransformChip(m.engineTransform)}' — preserved on Validate/Execute unless you change the transform select`}
                           >
-                            {STRUCT_POLICIES.map((p) => (
-                              <option key={p.id} value={p.id}>{p.label}</option>
-                            ))}
-                          </select>
-                        )}
-                        {m.structDerived && m.structParent && (
-                          <span className="df2-col-badge-new" title={`Promoted from ${m.structParent} flatten`}>
-                            from {m.structParent}
+                            pipeline: {pipelineTransformChip(m.engineTransform)}
                           </span>
                         )}
                       </div>

@@ -34,7 +34,7 @@ def _bootstrap(host: str, port: int, connection_string: str) -> str:
     return f"{h}:{p}"
 
 
-def _producer(cfg: dict[str, Any]):
+def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
     try:
         from kafka import KafkaProducer  # type: ignore
     except ImportError as exc:
@@ -42,14 +42,22 @@ def _producer(cfg: dict[str, Any]):
             "kafka-python is not installed. Install kafka-python to enable Kafka destinations."
         ) from exc
 
+    from connectors.confluent_schema_registry import encode_confluent_json
+
     bootstrap = _bootstrap(
         str(cfg.get("host") or ""),
         int(cfg.get("port") or 9092),
         str(cfg.get("connection_string") or ""),
     )
+
+    def _serialize_value(v: Any) -> bytes:
+        if schema_id is not None and schema_id > 0:
+            return encode_confluent_json(schema_id, v)
+        return json.dumps(v, default=json_default).encode("utf-8")
+
     kwargs: dict[str, Any] = {
         "bootstrap_servers": bootstrap.split(","),
-        "value_serializer": lambda v: json.dumps(v, default=json_default).encode("utf-8"),
+        "value_serializer": _serialize_value,
         "key_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
         "acks": "all",
         "retries": 3,
@@ -65,27 +73,6 @@ def _producer(cfg: dict[str, Any]):
         if kwargs["security_protocol"] == "SASL_SSL":
             kwargs["ssl_context"] = ssl.create_default_context()
     return KafkaProducer(**kwargs)
-
-
-def _maybe_register_schema(registry_url: str, subject: str, schema_str: str) -> int | None:
-    """Best-effort Confluent Schema Registry register (JSON schema). Returns schema id."""
-    if not registry_url:
-        return None
-    try:
-        import requests
-
-        url = registry_url.rstrip("/") + f"/subjects/{subject}/versions"
-        resp = requests.post(
-            url,
-            json={"schemaType": "JSON", "schema": schema_str},
-            headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
-            timeout=15,
-        )
-        if resp.status_code in {200, 201}:
-            return int(resp.json().get("id") or 0) or None
-    except Exception:
-        return None
-    return None
 
 
 def test_kafka(
@@ -174,26 +161,42 @@ def write_mapped_rows(
         or str(_kwargs.get("registry_url") or "")
         or (connection_string if "http" in (connection_string or "") else "")
     )
+    registered_schema_id: int | None = None
     if registry.startswith("http"):
+        from connectors.confluent_schema_registry import SchemaRegistryError, register_json_schema
+
         schema_obj = {
             "type": "object",
             "properties": {c: {"type": "string"} for c in target_cols},
         }
-        _maybe_register_schema(registry, f"{topic}-value", json.dumps(schema_obj))
+        try:
+            registered_schema_id = register_json_schema(
+                registry, f"{topic}-value", json.dumps(schema_obj)
+            )
+        except SchemaRegistryError as exc:
+            return WriteResult(
+                ok=False, rows_written=0, table_name=topic, target_schema="",
+                checksum="", chunks_completed=0,
+                error=str(exc),
+                driver="kafka",
+            )
 
     try:
-        producer = _producer({
-            "host": host,
-            "port": port or 9092,
-            "connection_string": connection_string if "http" not in (connection_string or "") else "",
-            "username": username,
-            "password": password or api_key,
-            "api_key": api_key,
-            "schema": schema or ("SASL_SSL" if ssl else ""),
-            "database": database if database and database.upper() in {
-                "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
-            } else "PLAIN",
-        })
+        producer = _producer(
+            {
+                "host": host,
+                "port": port or 9092,
+                "connection_string": connection_string if "http" not in (connection_string or "") else "",
+                "username": username,
+                "password": password or api_key,
+                "api_key": api_key,
+                "schema": schema or ("SASL_SSL" if ssl else ""),
+                "database": database if database and database.upper() in {
+                    "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
+                } else "PLAIN",
+            },
+            schema_id=registered_schema_id,
+        )
     except Exception as exc:
         return WriteResult(
             ok=False, rows_written=0, table_name=topic, target_schema="",

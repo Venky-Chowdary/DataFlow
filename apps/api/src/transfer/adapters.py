@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from .connector_registry import run_probe
 from .models import EndpointConfig
-from .type_mapper import ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 
 def resolve_dest_table(dest_type: str, destination: EndpointConfig, fallback_name: str = "import") -> str:
@@ -437,6 +437,7 @@ def _introspect_table_schema(
         table=table,
         catalog_type=cfg.get("type", ""),
         auth_source=cfg.get("auth_source", ""),
+        api_key=cfg.get("api_key", ""),
     )
     if info.get("ok") and info.get("columns"):
         return {c["name"]: c["inferred_type"] for c in info["columns"]}
@@ -827,7 +828,7 @@ def write_destination_database(
     error_policy = transform_error_policy_for_validation_mode(validation_mode)
 
     headers, data_rows = records_to_matrix(records, columns)
-    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
@@ -898,8 +899,15 @@ def write_destination_database(
         if db_type == "redshift":
             common["port"] = cfg["port"] or 5439
         for col in columns:
-            ddl_log.append(f"PG COLUMN {col} {ddl_type('postgresql', schema.get(col, 'string'))}")
-        result = write_mapped_rows(**common, write_mode=write_mode, conflict_columns=conflict_columns or [])
+            ddl_log.append(
+                f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"
+            )
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            engine=db_type,
+        )
         if not result.ok:
             raise RuntimeError(result.error or f"{db_type} write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}")

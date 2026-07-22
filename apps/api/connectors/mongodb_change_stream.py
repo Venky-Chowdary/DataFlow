@@ -37,9 +37,14 @@ def _database_name(cfg: dict[str, Any]) -> str:
 def _doc_to_record(doc: dict[str, Any], columns: list[str] | None) -> dict[str, Any]:
     if "_id" in doc:
         doc["_id"] = str(doc["_id"])
-    if columns:
-        return {c: _serialize(doc.get(c)) for c in columns}
-    return {k: _serialize(v) for k, v in doc.items()}
+    if not columns:
+        return {k: _serialize(v) for k, v in doc.items()}
+    # Known columns first, then any sparse extras — never silent-drop mid-stream fields.
+    out = {c: _serialize(doc.get(c)) for c in columns}
+    for k, v in doc.items():
+        if k not in out:
+            out[k] = _serialize(v)
+    return out
 
 
 class MongodbChangeStreamCdc:
@@ -169,7 +174,7 @@ class MongodbChangeStreamCdc:
         value = doc.get(self.primary_key)
         if value is None and "documentKey" in doc:
             value = doc["documentKey"].get(self.primary_key)
-        return cell_to_string(value) if value is not None else ""
+        return cell_to_string(value, preserve_sql_null=True) if value is not None else ""
 
     def _full_doc(self, change: dict[str, Any]) -> dict[str, Any] | None:
         return change.get("fullDocument") or change.get("documentKey")

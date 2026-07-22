@@ -135,7 +135,7 @@ def read_table_batch(
                 f"SELECT {col_sql} FROM {table_ref} LIMIT {int(limit)} OFFSET {int(offset)}"
             )
             headers = [desc[0] for desc in cur.description]
-            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
@@ -195,7 +195,7 @@ def read_table_cursor_batch(
                     (limit,),
                 )
             headers = [desc[0] for desc in cur.description]
-            rows = [[cell_to_string(v) for v in row] for row in cur.fetchall()]
+            rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in cur.fetchall()]
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
     finally:
         conn.close()

@@ -38,6 +38,14 @@ def test_decimal_precision_propagated_not_truncated():
     assert ddl_type("mysql", "NUMBER(38,18)") == "DECIMAL(38,18)"
     assert ddl_type("snowflake", "DECIMAL(28,12)") == "NUMBER(28,12)"
     assert ddl_type("sqlserver", "NUMERIC(20,8)") == "DECIMAL(20,8)"
+    # PostgreSQL / BigQuery must keep source (p,s) — never bare NUMERIC / BIGNUMERIC.
+    assert ddl_type("postgresql", "DECIMAL(12,4)") == "NUMERIC(12,4)"
+    assert ddl_type("postgresql", "NUMERIC(18,2)") == "NUMERIC(18,2)"
+    assert ddl_type("bigquery", "DECIMAL(20,6)") == "BIGNUMERIC(20,6)"
+    from services.type_system import ddl_carrier_type
+
+    assert ddl_carrier_type("DECIMAL(12,4)") == "DECIMAL(12,4)"
+    assert ddl_carrier_type("numeric(12,4)") == "DECIMAL(12,4)"
     # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True
@@ -71,3 +79,18 @@ def test_vector_dimension_propagated_never_invented():
     assert vector_dim_unknown_for_native("VECTOR", "postgresql") is True
     assert vector_dim_unknown_for_native("VECTOR(768)", "postgresql") is False
     assert vector_dim_unknown_for_native("VECTOR", "mysql") is False
+
+
+def test_ddl_float_is_not_rewritten_to_fixed_point():
+    from services.type_system import is_lossy_coercion
+
+    assert normalize_logical_type("FLOAT") == "float"
+    assert normalize_logical_type("DOUBLE PRECISION") == "float"
+    assert ddl_type("postgresql", "FLOAT") == "DOUBLE PRECISION"
+    assert ddl_type("snowflake", "FLOAT") == "FLOAT"
+    assert ddl_type("bigquery", "DOUBLE") == "FLOAT64"
+    assert "NUMBER(38,10)" not in ddl_type("snowflake", "FLOAT")
+    assert is_lossy_coercion("float", "integer") is True
+    assert is_lossy_coercion("integer", "float") is False
+    assert is_lossy_coercion("float", "decimal") is True
+    assert is_lossy_coercion("float", "string") is False

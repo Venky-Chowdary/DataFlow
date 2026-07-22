@@ -637,7 +637,18 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "q3",
         title: "Can I self-host?",
-        body: "Enterprise plans support air-gapped and self-hosted deployment with the same Transfer Studio engine.",
+        body:
+          "Yes. Run the same Transfer Studio engine in your VPC with Docker Compose (or your orchestrator). " +
+          "Air-gapped installs load offline images and use your Postgres/object store — no DataFlow SaaS egress required. " +
+          "SaaS multi-tenant and customer-VPC self-host are both supported; AWS Private Link is not first-class yet (use VPN/peering you control).",
+      },
+      {
+        id: "q3b",
+        title: "Will data be lost moving over the internet?",
+        body:
+          "Transfers use connector TLS (database SSL, HTTPS object stores, rediss). " +
+          "Bytes pass through the DataFlow worker (source → worker → destination) with preflight gates, quarantine instead of silent drops, and post-load checksum reconciliation. " +
+          "Empty string and SQL NULL stay distinct. We do not claim zero-copy or bank-attested Private Link — ask for the Security posture report in Workspace settings.",
       },
       {
         id: "q4",

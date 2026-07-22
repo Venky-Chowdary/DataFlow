@@ -122,7 +122,6 @@ def test_postgresql_to_mysql():
         destination=_mysql_dest(dst_table),
         sync_mode="full_refresh_overwrite",
         stream_contracts=[{"name": "data", "sync_mode": "full_refresh_overwrite", "primary_key": "id", "selected": True}],
-        skip_preflight=True,
     )
     _run(request)
 
@@ -144,7 +143,6 @@ def test_mysql_to_postgresql():
         destination=_pg_dest(dst_table),
         sync_mode="full_refresh_overwrite",
         stream_contracts=[{"name": "data", "sync_mode": "full_refresh_overwrite", "primary_key": "id", "selected": True}],
-        skip_preflight=True,
     )
     _run(request)
 
@@ -168,7 +166,6 @@ def test_postgresql_to_sqlite():
             destination=_sqlite_dest(path, dst_table),
             sync_mode="full_refresh_overwrite",
             stream_contracts=[{"name": "data", "sync_mode": "full_refresh_overwrite", "primary_key": "id", "selected": True}],
-            skip_preflight=True,
         )
         _run(request)
     finally:
@@ -196,7 +193,6 @@ def test_sqlite_to_postgresql():
             destination=_pg_dest(dst_table),
             sync_mode="full_refresh_overwrite",
             stream_contracts=[{"name": "data", "sync_mode": "full_refresh_overwrite", "primary_key": "id", "selected": True}],
-            skip_preflight=True,
         )
         _run(request)
     finally:

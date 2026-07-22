@@ -79,12 +79,14 @@ import {
   type StreamSchemaPreview,
 } from "../lib/sourceStreams";
 import {
+  approveMappingsHonestly,
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
+  uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
   type EditableMapping,
@@ -726,8 +728,9 @@ export function TransferPage({
       mappings: columnMappings.map((m) => ({
         source: m.source,
         target: m.target,
-        transform: m.transform || undefined,
+        transform: uiTransformToEngine(m.transform, m.engineTransform),
         target_type: m.destType || undefined,
+        struct_policy: m.structPolicy,
       })),
       column_types: (currentSourceSchema || {}) as Record<string, string>,
       sample_size: 25,
@@ -2368,23 +2371,11 @@ export function TransferPage({
   };
 
   const approveAllMappings = () => {
-    setColumnMappings((prev) =>
-      prev.map((m) => {
-        if (isEnumToBooleanConflict(m)) {
-          return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
-        }
-        return { ...m, approved: true };
-      }),
-    );
+    setColumnMappings((prev) => approveMappingsHonestly(prev));
   };
 
   const approveAllAndPreflight = async () => {
-    const approved = columnMappings.map((m) => {
-      if (isEnumToBooleanConflict(m)) {
-        return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
-      }
-      return { ...m, approved: true };
-    });
+    const approved = approveMappingsHonestly(columnMappings);
     setColumnMappings(approved);
     setStep(STEP_VALIDATE);
     await executePreflight(approved);
@@ -3511,17 +3502,7 @@ export function TransferPage({
     }
     setSavingContract(true);
     try {
-      const mappings = columnMappings.map((m) => ({
-        source: m.source,
-        target: m.target,
-        confidence: m.confidence,
-        transform: m.transform && m.transform !== "none" ? m.transform : undefined,
-        source_type: m.inferredType || currentSourceSchema[m.source],
-        target_type: m.destType || m.inferredType || currentSourceSchema[m.source],
-        struct_policy: m.structPolicy,
-        struct_derived: m.structDerived || undefined,
-        struct_parent: m.structParent,
-      }));
+      const mappings = buildPreflightMappings([], columnMappings);
       const name =
         `${sourceLabel || "source"} → ${mapDestRouteLabel || "destination"}`.slice(0, 180)
         || `contract-${Date.now()}`;

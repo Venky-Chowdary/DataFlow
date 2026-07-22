@@ -25,7 +25,8 @@ ENGINE_TO_UI: dict[str, str] = {
     "json": "parse_json",
     "binary": "binary",
     "hash_pii": "hash_pii",
-    "mask_pii": "mask_pii",
+    # Studio has no separate mask control — align with FE hash_pii.
+    "mask_pii": "hash_pii",
     "strip_controls": "strip_controls",
     "normalize_unicode": "strip_controls",
     "phone": "phone",

@@ -151,8 +151,8 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
     "kafka": ConnectorModules(
         probe=("connectors.kafka_writer", "test_kafka"),
-        reader=None,
-        reader_fn="",
+        reader="connectors.kafka_reader",
+        reader_fn="read_topic_batch",
         writer="connectors.kafka_writer",
     ),
     "stripe": ConnectorModules(

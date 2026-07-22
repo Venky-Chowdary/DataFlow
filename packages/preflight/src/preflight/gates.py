@@ -184,6 +184,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
             f"{m.target} ({target.inferred_type})"
         )
+        # Surface scale / vector annotations so operators see the real risk.
+        if pair and len(pair) == 2 and "[" in str(pair[1]):
+            note = str(pair[1]).split("[", 1)[-1].rstrip("]")
+            if note:
+                label = f"{label} — {note}"
 
         # With sampled values we only hard-block when a real value cannot be
         # coerced. A declared-type mismatch whose values all coerce cleanly (or
@@ -590,6 +595,11 @@ def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str 
     if err:
         return None, err
     if result is None:
+        # apply_transform maps explicit NULL sentinels → None. Keep the sentinel
+        # on the G8 wire so identity fingerprint does not collapse NULL into "".
+        lowered = str(value or "").strip().lower()
+        if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
+            return str(value).strip(), None
         return "", None
     return str(result), None
 

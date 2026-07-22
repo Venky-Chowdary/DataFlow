@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.base import ReadBatch
+from connectors.header_union import union_attribute_keys
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -88,7 +89,8 @@ def _connection_string(cfg: dict[str, Any]) -> str:
 
 
 def _serialize(value: Any) -> str:
-    return cell_to_string(value)
+    # BSON null must stay distinct from missing/empty string on SQL sinks.
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def read_collection_batch(
@@ -122,13 +124,15 @@ def read_collection_batch(
 
     docs = expand_mongo_documents(docs, cfg=cfg)
 
-    if columns:
-        headers = columns
-    else:
-        keys: set[str] = set()
-        for doc in docs:
-            keys.update(doc.keys())
-        headers = sorted(keys)
+    page_keys: list[str] = []
+    seen: set[str] = set()
+    for doc in docs:
+        for k in doc.keys():
+            if k not in seen:
+                seen.add(k)
+                page_keys.append(k)
+    # Always union — sparse fields mid-collection must not vanish when columns frozen.
+    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
 
     rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
@@ -180,13 +184,14 @@ def read_collection_cursor_batch(
 
     docs = expand_mongo_documents(docs, cfg=cfg)
 
-    if columns:
-        headers = columns
-    else:
-        keys: set[str] = set()
-        for doc in docs:
-            keys.update(doc.keys())
-        headers = sorted(keys)
+    page_keys: list[str] = []
+    seen: set[str] = set()
+    for doc in docs:
+        for k in doc.keys():
+            if k not in seen:
+                seen.add(k)
+                page_keys.append(k)
+    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
 
     rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
     return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)

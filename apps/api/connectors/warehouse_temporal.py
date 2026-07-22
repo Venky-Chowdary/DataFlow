@@ -35,6 +35,7 @@ _BQ_TEMPORAL = frozenset({
     "TIME",
     "DATETIME",
     "TIMESTAMP",
+    "INTERVAL",
 })
 
 
@@ -79,6 +80,10 @@ def format_bigquery_bind(value: Any, bq_type: str) -> Any:
     ddl = bigquery_temporal_ddl(bq_type)
     if not ddl:
         return value
+    if ddl == "INTERVAL":
+        from services.value_serializer import format_bigquery_interval
+
+        return format_bigquery_interval(value)
     coerced = coerce_sql_temporal(value, ddl)
     if isinstance(coerced, datetime):
         if ddl == "DATE":
@@ -112,6 +117,16 @@ def wire_check_warehouse(value: Any, ddl_type: str, *, engine: str) -> dict[str,
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
     if eng in {"bigquery"} and base not in _BQ_TEMPORAL and not is_temporal_ddl(ddl_type):
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
+
+    # BigQuery INTERVAL is not a calendar temporal — normalize via dedicated formatter.
+    if eng == "bigquery" and base == "INTERVAL":
+        wire = format_bigquery_bind(value, ddl_type)
+        return {
+            "ok": True,
+            "wire_value": wire if isinstance(wire, str) else (str(wire) if wire is not None else None),
+            "reason": "Will normalize to BigQuery INTERVAL Y-M D H:M:S form" if wire != value else "",
+            "needs_normalize": isinstance(value, str) and wire != value.strip(),
+        }
 
     # Reuse shared parse; then check warehouse-specific wire form.
     check = wire_check_temporal(value, ddl_type if base != "TIMESTAMP_NTZ" else "TIMESTAMP")

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from connectors.base import ReadBatch
+from connectors.header_union import union_attribute_keys
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -70,13 +71,14 @@ def read_index_batch(
         resp = client.search(index=index, body=body)
         hits = resp.get("hits", {}).get("hits") or []
         records = [h.get("_source") or {} for h in hits]
-        if columns:
-            headers = columns
-        else:
-            keys: set[str] = set()
-            for rec in records:
-                keys.update(rec.keys())
-            headers = sorted(keys)
+        page_keys: list[str] = []
+        seen: set[str] = set()
+        for rec in records:
+            for k in rec.keys():
+                if k not in seen:
+                    seen.add(k)
+                    page_keys.append(k)
+        headers = union_attribute_keys(columns, page_keys) if columns else page_keys
         rows = [[_cell(r.get(h)) for h in headers] for r in records]
         next_after = hits[-1].get("sort") if hits else None
         batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)

@@ -40,6 +40,7 @@ class Checkpoint:
     dynamodb_cursor: dict | None = None
     es_search_after: list | None = None
     redis_scan_state: Any = None
+    kafka_cursor: dict | None = None
     # Last destination checksum for cross-check on resume
     checksum: str = ""
     # Write mode and conflict columns used for idempotent writes
@@ -71,6 +72,7 @@ class Checkpoint:
             "dynamodb_cursor": self.dynamodb_cursor,
             "es_search_after": self.es_search_after,
             "redis_scan_state": self.redis_scan_state,
+            "kafka_cursor": self.kafka_cursor,
             "checksum": self.checksum,
             "write_mode": self.write_mode,
             "conflict_columns": self.conflict_columns,

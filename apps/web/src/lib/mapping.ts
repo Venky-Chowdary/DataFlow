@@ -97,7 +97,11 @@ const STRICT_BOOL_TOKENS = new Set([
   "true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off",
 ]);
 
-export type StructPolicy = "store_as_json" | "flatten_top_level_keys";
+export type StructPolicy =
+  | "store_as_json"
+  | "flatten_top_level_keys"
+  | "flatten_deep"
+  | "explode_rows";
 
 export const STRUCT_POLICIES: { id: StructPolicy; label: string; detail: string }[] = [
   {
@@ -110,10 +114,33 @@ export const STRUCT_POLICIES: { id: StructPolicy; label: string; detail: string 
     label: "Flatten keys",
     detail: "Promote top-level scalar/array keys to columns; nested objects stay on the parent blob",
   },
+  {
+    id: "flatten_deep",
+    label: "Deep flatten",
+    detail: "Promote nested keys up to depth 2 (capped); parent JSON blob is always kept",
+  },
 ];
 
+export const ARRAY_POLICIES: { id: StructPolicy; label: string; detail: string }[] = [
+  {
+    id: "store_as_json",
+    label: "Serialize JSON",
+    detail: "Keep ARRAY as one JSON/list column — no row explosion",
+  },
+  {
+    id: "explode_rows",
+    label: "Explode rows",
+    detail: "Duplicate parent row per array element (capped at 256) — parent array kept",
+  },
+];
+
+const FLATTEN_POLICIES = new Set<StructPolicy>(["flatten_top_level_keys", "flatten_deep"]);
+
 const STRUCT_TYPE_RE = /\b(json|jsonb|struct|map|object|variant|document|record)\b/i;
+const ARRAY_TYPE_RE = /\b(array|list|repeated)\b/i;
 const SPECIALTY_TYPE_RE = /\b(vector|interval|geography|geometry|geopoint|geojson)\b/i;
+/** Engine transforms with no first-class UI cast — surface as a pipeline chip. */
+const PIPELINE_ONLY_ENGINE = new Set(["url", "iban", "postal", "uuid", "trim_id"]);
 
 
 /** UI MappingTransform → engine transform id (aligned with transform_resolver.UI_TO_ENGINE). */
@@ -184,7 +211,97 @@ export function isSpecialtyLogicalType(type?: string): boolean {
 
 /** True when the column is a STRUCT/JSON object candidate for Map policy. */
 export function isStructLogicalType(type?: string): boolean {
-  return Boolean(type && STRUCT_TYPE_RE.test(type));
+  return Boolean(type && STRUCT_TYPE_RE.test(type) && !isArrayLogicalType(type));
+}
+
+/** True when the column is an ARRAY / list (serialize — no key flatten). */
+export function isArrayLogicalType(type?: string): boolean {
+  return Boolean(type && ARRAY_TYPE_RE.test(type));
+}
+
+/** Engine-only semantic transforms that Map shows as a chip when UI select is None. */
+export function pipelineTransformChip(engine?: string): string | null {
+  const e = (engine || "").trim().toLowerCase();
+  if (!e || e === "none" || e === "identity") return null;
+  if (PIPELINE_ONLY_ENGINE.has(e)) return e;
+  // Visible UI mapping already covers this engine id.
+  if (engineTransformToUi(e) !== "none") return null;
+  return e;
+}
+
+/**
+ * Infer a coarse logical type from one sample — used for STRUCT flatten children
+ * so we do not invent VARCHAR for every promoted key.
+ */
+export function inferLogicalFromSample(sample?: string): string {
+  if (!sample) return "VARCHAR";
+  const s = sample.trim();
+  if (!s) return "VARCHAR";
+  if (/^(true|false)$/i.test(s)) return "BOOLEAN";
+  if (/^[+-]?\d+$/.test(s)) {
+    try {
+      const n = BigInt(s);
+      if (n > BigInt("9223372036854775807") || n < BigInt("-9223372036854775808")) return "VARCHAR";
+    } catch {
+      return "VARCHAR";
+    }
+    return "INTEGER";
+  }
+  if (/^[+-]?\d+\.\d+(?:[eE][+-]?\d+)?$/.test(s)) return "DECIMAL";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return "DATE";
+  if (/^\d{4}-\d{2}-\d{2}[T ]/.test(s)) {
+    return /Z|[+-]\d{2}:?\d{2}$/i.test(s) ? "TIMESTAMPTZ" : "TIMESTAMP";
+  }
+  if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+    return s.startsWith("[") ? "ARRAY" : "JSON";
+  }
+  if (s.length > 255) return "TEXT";
+  return "VARCHAR";
+}
+
+/** True when Approve-all must leave this row for operator review. */
+export function mappingRequiresManualApproval(m: EditableMapping): boolean {
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
+  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
+  if (m.transform === "identity_specialty") return true;
+  if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) return true;
+  return false;
+}
+
+/**
+ * Single honesty path for Approve / Approve-all (Map panel + Validate CTA).
+ * Never auto-approves specialty identity, STRUCT flatten children, or existing DDL conflicts.
+ */
+export function approveMappingHonestly(m: EditableMapping): EditableMapping {
+  if (isExistingEnumBooleanConflict(m)) {
+    return flagExistingEnumBooleanConflict(m);
+  }
+  if (isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
+    return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
+  }
+  if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType) || m.transform === "identity_specialty") {
+    return {
+      ...m,
+      approved: false,
+      requiresReview: true,
+      transform: m.transform === "none" || !m.transform ? "identity_specialty" : m.transform,
+    };
+  }
+  if (m.structPolicy === "flatten_top_level_keys" || m.structPolicy === "flatten_deep" || m.structPolicy === "explode_rows" || m.structDerived) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  return { ...m, approved: true, requiresReview: false };
+}
+
+export function approveMappingsHonestly(mappings: EditableMapping[]): EditableMapping[] {
+  return mappings.map(approveMappingHonestly);
+}
+
+export function countApproveEligible(mappings: EditableMapping[]): number {
+  return mappings.filter((m) => !m.approved && !mappingRequiresManualApproval(m)).length;
 }
 
 /** Top-level promotable keys from a JSON object sample (mirrors backend). */
@@ -210,11 +327,51 @@ export function topLevelKeysFromSample(sample?: string, maxKeys = 32): string[] 
   }
 }
 
+/** Deep-promotable leaf paths (depth≤2) for flatten_deep — mirrors backend caps. */
+export function deepKeysFromSample(sample?: string, maxKeys = 64): string[] {
+  if (!sample) return [];
+  const trimmed = sample.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    const keys: string[] = [];
+    const walk = (obj: Record<string, unknown>, prefix: string, depth: number) => {
+      for (const [key, value] of Object.entries(obj)) {
+        const name = String(key).trim();
+        if (!name) continue;
+        const path = prefix ? `${prefix}_${name}` : name;
+        if (value !== null && typeof value === "object" && !Array.isArray(value) && depth < 2) {
+          walk(value as Record<string, unknown>, path, depth + 1);
+        } else {
+          keys.push(path);
+        }
+        if (keys.length >= maxKeys) return;
+      }
+    };
+    walk(parsed as Record<string, unknown>, "", 1);
+    return keys;
+  } catch {
+    return [];
+  }
+}
+
 function childSampleFromParent(sample: string | undefined, key: string): string | undefined {
   if (!sample) return undefined;
   try {
     const parsed = JSON.parse(sample.trim()) as Record<string, unknown>;
     if (!parsed || typeof parsed !== "object") return undefined;
+    // Support deep path keys like geo_lat from flatten_deep.
+    if (key.includes("_") && !(key in parsed)) {
+      const parts = key.split("_");
+      let cur: unknown = parsed;
+      for (const part of parts) {
+        if (!cur || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+        cur = (cur as Record<string, unknown>)[part];
+      }
+      if (cur == null) return undefined;
+      return typeof cur === "string" ? cur : JSON.stringify(cur);
+    }
     const v = parsed[key];
     if (v == null) return undefined;
     return typeof v === "string" ? v : JSON.stringify(v);
@@ -224,8 +381,9 @@ function childSampleFromParent(sample: string | undefined, key: string): string 
 }
 
 /**
- * Apply STRUCT Map policy. Flatten synthesizes ``parent_key`` child mappings;
- * store_as_json removes prior derived children. Parent blob is always kept.
+ * Apply STRUCT/ARRAY Map policy. Flatten synthesizes ``parent_key`` child mappings;
+ * explode_rows synthesizes ``parent_elem``; store_as_json removes prior derived children.
+ * Parent blob is always kept.
  */
 export function applyStructPolicyChange(
   mappings: EditableMapping[],
@@ -240,15 +398,22 @@ export function applyStructPolicyChange(
   const parentIdx = withoutDerived.findIndex((m) => m.source === parent.source && !m.structDerived);
   if (parentIdx < 0) return mappings;
 
+  const flattenish = FLATTEN_POLICIES.has(policy);
+  const exploding = policy === "explode_rows";
   const nextParent: EditableMapping = {
     ...withoutDerived[parentIdx],
     structPolicy: policy,
     approved: false,
-    requiresReview: policy === "flatten_top_level_keys" ? true : withoutDerived[parentIdx].requiresReview,
-    reason:
-      policy === "flatten_top_level_keys"
-        ? "STRUCT flatten — top-level keys promoted; nested objects stay on parent JSON"
-        : "STRUCT stored as JSON/VARIANT blob",
+    requiresReview: flattenish || exploding ? true : withoutDerived[parentIdx].requiresReview,
+    reason: exploding
+      ? "ARRAY explode — one output row per element (capped); parent array kept"
+      : policy === "flatten_deep"
+        ? "STRUCT deep flatten — nested keys promoted (depth≤2); parent JSON kept"
+        : policy === "flatten_top_level_keys"
+          ? "STRUCT flatten — top-level keys promoted; nested objects stay on parent JSON"
+          : isArrayLogicalType(parent.inferredType) || isArrayLogicalType(parent.destType)
+            ? "ARRAY serialized as JSON/list"
+            : "STRUCT stored as JSON/VARIANT blob",
     transform:
       withoutDerived[parentIdx].transform === "none" || !withoutDerived[parentIdx].transform
         ? "parse_json"
@@ -261,15 +426,41 @@ export function applyStructPolicyChange(
   const next = [...withoutDerived];
   next[parentIdx] = nextParent;
 
-  if (policy !== "flatten_top_level_keys") {
+  if (!flattenish && !exploding) {
     return next;
   }
 
-  const keys = topLevelKeysFromSample(parent.sample);
+  if (exploding) {
+    const elemSource = `${parent.source}_elem`;
+    if (!next.some((m) => m.source === elemSource)) {
+      next.splice(parentIdx + 1, 0, {
+        source: elemSource,
+        target: normalizeMappingTarget(elemSource),
+        confidence: Math.min(parent.confidence, 0.85),
+        inferredType: "VARCHAR",
+        destType: "VARCHAR",
+        approved: false,
+        requiresReview: true,
+        reason: `Exploded element from ${parent.source}`,
+        transform: "none",
+        structDerived: true,
+        structParent: parent.source,
+      });
+    }
+    return next;
+  }
+
+  const keys =
+    policy === "flatten_deep"
+      ? deepKeysFromSample(parent.sample)
+      : topLevelKeysFromSample(parent.sample);
   if (!keys.length) {
     next[parentIdx] = {
       ...nextParent,
-      reason: "STRUCT flatten requested — no promotable top-level keys in sample (nested objects stay on blob)",
+      reason:
+        policy === "flatten_deep"
+          ? "STRUCT deep flatten requested — no promotable keys in sample"
+          : "STRUCT flatten requested — no promotable top-level keys in sample (nested objects stay on blob)",
     };
     return next;
   }
@@ -280,20 +471,24 @@ export function applyStructPolicyChange(
     const source = `${parent.source}_${key}`;
     if (existingSources.has(source)) continue;
     const sample = childSampleFromParent(parent.sample, key);
+    const childType = inferLogicalFromSample(sample);
+    const specialty = isSpecialtyLogicalType(childType);
+    const structish = isStructLogicalType(childType) || isArrayLogicalType(childType);
     children.push({
       source,
       target: normalizeMappingTarget(source),
       confidence: Math.min(parent.confidence, 0.85),
-      inferredType: "VARCHAR",
-      destType: "VARCHAR",
+      inferredType: childType,
+      destType: childType,
       sample,
       approved: false,
       requiresReview: true,
-      reason: `Flattened from ${parent.source}.${key}`,
-      transform: "none",
+      reason: `Flattened from ${parent.source}.${key} (${childType})`,
+      transform: specialty ? "identity_specialty" : structish ? "parse_json" : "none",
+      engineTransform: structish ? "json" : undefined,
       structDerived: true,
       structParent: parent.source,
-      structPolicy: undefined,
+      structPolicy: isStructLogicalType(childType) ? "store_as_json" : undefined,
     });
     existingSources.add(source);
   }
@@ -444,23 +639,32 @@ export function mappingsFromAnalysis(
     const inferred = col.semantic_type || col.inferred_type || "string";
     const specialty = isSpecialtyLogicalType(inferred);
     const structish = isStructLogicalType(inferred);
+    const arrayish = isArrayLogicalType(inferred);
     return {
       source: col.column_name,
       target,
       confidence: conf,
       inferredType: inferred,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: conf >= 0.9 && !col.is_pii && !specialty,
+      approved: conf >= 0.9 && !col.is_pii && !specialty && !structish && !arrayish,
       isPii: col.is_pii,
       reason: specialty
         ? `${inferred} — identity payload (no invented cast/dim)`
         : structish
-          ? "STRUCT/JSON — choose JSON blob or flatten top-level keys"
-          : (col.semantic_type || col.inferred_type || "Semantic match"),
-      transform: col.is_pii ? "hash_pii" : specialty ? "identity_specialty" : structish ? "parse_json" : "none",
-      engineTransform: structish ? "json" : undefined,
-      requiresReview: specialty || structish || undefined,
-      structPolicy: structish ? "store_as_json" : undefined,
+          ? "STRUCT/JSON — choose JSON blob, flatten keys, or deep flatten"
+          : arrayish
+            ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
+            : (col.semantic_type || col.inferred_type || "Semantic match"),
+      transform: col.is_pii
+        ? "hash_pii"
+        : specialty
+          ? "identity_specialty"
+          : structish || arrayish
+            ? "parse_json"
+            : "none",
+      engineTransform: structish || arrayish ? "json" : undefined,
+      requiresReview: specialty || structish || arrayish || undefined,
+      structPolicy: structish || arrayish ? "store_as_json" : undefined,
     };
   });
 }
@@ -579,6 +783,7 @@ export function editableFromPipelineMappings(
     const destType = liveDestType || m.target_type || m.source_type;
     const specialty = isSpecialtyLogicalType(sourceType) || isSpecialtyLogicalType(destType);
     const structish = isStructLogicalType(sourceType) || isStructLogicalType(destType);
+    const arrayish = isArrayLogicalType(sourceType) || isArrayLogicalType(destType);
     const engineTf = (m.transform || "").trim();
     let uiTf: MappingTransform = m.is_pii
       ? "hash_pii"
@@ -586,11 +791,16 @@ export function editableFromPipelineMappings(
         ? "identity_specialty"
         : engineTransformToUi(engineTf);
     const structPolicy =
-      m.struct_policy === "flatten_top_level_keys" || m.struct_policy === "store_as_json"
+      m.struct_policy === "flatten_top_level_keys" ||
+      m.struct_policy === "flatten_deep" ||
+      m.struct_policy === "explode_rows" ||
+      m.struct_policy === "store_as_json"
         ? m.struct_policy
         : structish
           ? "store_as_json"
-          : undefined;
+          : arrayish
+            ? "store_as_json"
+            : undefined;
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -598,22 +808,24 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: !requiresReview && !specialty && !structish && (conf >= threshold || identityMatch),
+      approved: !requiresReview && !specialty && !structish && !arrayish && (conf >= threshold || identityMatch),
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
         : structish && !m.reasoning
-          ? "STRUCT/JSON — choose JSON blob or flatten top-level keys"
-          : m.reasoning,
+          ? "STRUCT/JSON — choose JSON blob, flatten keys, or deep flatten"
+          : arrayish && !m.reasoning
+            ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
+            : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish,
+      requiresReview: requiresReview || specialty || structish || arrayish,
       scoreGap: m.score_gap,
-      transform: uiTf === "none" && structish ? "parse_json" : uiTf,
-      engineTransform: engineTf || (structish ? "json" : undefined),
+      transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
+      engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
       semanticRole: m.semantic_role,
       createNew: Boolean(m.create_new) || m.assignment_strategy === "create_compatible_new",
       assignmentStrategy: m.assignment_strategy,
-      structPolicy,
+      structPolicy: structPolicy ?? (arrayish ? "store_as_json" : undefined),
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
     };

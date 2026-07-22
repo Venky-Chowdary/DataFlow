@@ -48,13 +48,53 @@ from connectors.writer_common import (
 from services.type_system import ddl_type
 
 
+def uses_pg_on_conflict_upsert(engine: str) -> bool:
+    """Redshift rejects ``ON CONFLICT`` — never emit it for redshift engines."""
+    return (engine or "postgresql").lower() not in {"redshift", "amazon_redshift", "redshift_serverless"}
+
+
+def _redshift_delete_by_keys(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[tuple] | list[list],
+) -> None:
+    """Delete rows matching conflict keys before insert (Redshift upsert path)."""
+    conflict_idxs = [target_cols.index(c) for c in conflict_cols]
+    for row in batch:
+        predicates = []
+        values: list[Any] = []
+        for col, idx in zip(conflict_cols, conflict_idxs):
+            val = row[idx] if idx < len(row) else None
+            if val is None:
+                predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
+            else:
+                predicates.append(sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder()))
+                values.append(val)
+        where = sql_mod.SQL(" AND ").join(predicates)
+        cursor.execute(
+            sql_mod.SQL("DELETE FROM {}.{} WHERE {}").format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                where,
+            ),
+            values,
+        )
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "psycopg2"
 
 
-def pg_type(inferred: str) -> str:
-    return ddl_type("postgresql", inferred)
+def pg_type(inferred: str, engine: str = "postgresql") -> str:
+    """Map logical type to Postgres or Redshift DDL (never invent Redshift JSONB)."""
+    db = "redshift" if (engine or "").lower() == "redshift" else "postgresql"
+    return ddl_type(db, inferred)
 
 
 def _copy_text_value(value: Any) -> str:
@@ -189,7 +229,8 @@ def write_mapped_rows(
 
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
-    target_types = [pg_type(t) for t in logical_types]
+    engine = str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql").lower()
+    target_types = [pg_type(t, engine=engine) for t in logical_types]
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
     policy = transform_error_policy(error_policy)
 
@@ -293,7 +334,12 @@ def write_mapped_rows(
 
     def _build_insert():
         placeholders = sql.SQL(", ").join(sql.Placeholder() * len(target_cols))
-        if write_mode == "upsert" and conflict_columns:
+        # Redshift: no ON CONFLICT — plain INSERT after delete-by-key (see chunk loop).
+        if (
+            write_mode == "upsert"
+            and conflict_columns
+            and uses_pg_on_conflict_upsert(engine)
+        ):
             conflict = [c for c in conflict_columns if c in target_cols]
             if conflict:
                 update_cols = [c for c in target_cols if c not in conflict]
@@ -392,7 +438,7 @@ def write_mapped_rows(
                         )
                     )
 
-        if write_mode == "upsert" and conflict_columns:
+        if write_mode == "upsert" and conflict_columns and uses_pg_on_conflict_upsert(engine):
             conflict_cols = [c for c in conflict_columns if c in target_cols]
             if conflict_cols:
                 index_name = sanitize_identifier(
@@ -442,6 +488,15 @@ def write_mapped_rows(
                     _reconnect()
 
             insert = None if use_copy else _build_insert()
+            redshift_upsert_cols = (
+                [c for c in (conflict_columns or []) if c in target_cols]
+                if (
+                    write_mode == "upsert"
+                    and conflict_columns
+                    and not uses_pg_on_conflict_upsert(engine)
+                )
+                else []
+            )
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size
@@ -466,6 +521,16 @@ def write_mapped_rows(
                         if use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
+                            if redshift_upsert_cols:
+                                _redshift_delete_by_keys(
+                                    cur,
+                                    sql,
+                                    schema=schema,
+                                    table_name=table_name,
+                                    target_cols=target_cols,
+                                    conflict_cols=redshift_upsert_cols,
+                                    batch=batch,
+                                )
                             cur.executemany(insert, batch)
                         if use_ledger:
                             mark_postgres_chunk_committed(
@@ -489,6 +554,16 @@ def write_mapped_rows(
                                 insert = _build_insert()
                             for row_i, row in enumerate(batch):
                                 try:
+                                    if redshift_upsert_cols:
+                                        _redshift_delete_by_keys(
+                                            cur,
+                                            sql,
+                                            schema=schema,
+                                            table_name=table_name,
+                                            target_cols=target_cols,
+                                            conflict_cols=redshift_upsert_cols,
+                                            batch=[row],
+                                        )
                                     cur.execute(insert, row)
                                     conn.commit()
                                     chunk_written += 1

@@ -576,6 +576,24 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "mfa_required": tenant.mfa_required if tenant else False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         "tls_version": "1.3",
+        "deployment": {
+            "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
+            "saas_multi_tenant": "Workspace isolation + optional DATAFLOW_REQUIRE_WORKSPACE hard gate",
+            "customer_vpc_self_host": "Docker Compose / container deploy in customer VPC — same Transfer Studio engine",
+            "air_gapped": "Supported via offline image load; customer supplies Postgres/object store; no DataFlow SaaS egress required",
+            "private_link": "not_first_class",
+            "data_plane": (
+                "Transfer bytes move source→DataFlow worker→destination over connector TLS "
+                "(sslmode/rediss/https). Control plane API should sit behind HTTPS. "
+                "DataFlow does not claim zero-copy bypass of the worker for DB→DB migrations."
+            ),
+            "data_loss_controls": [
+                "preflight_gates_g1_g9",
+                "quarantine_not_silent_drop",
+                "post_load_reconciliation_checksum",
+                "sql_null_vs_empty_preserved",
+            ],
+        },
         "private_networking": {
             "vpc_peering": False,
             "private_link": False,
@@ -635,6 +653,12 @@ async def get_security_report(request: Request):
         f"- IP allowlisting: {'enabled' if posture['ip_allowlist_enabled'] else 'disabled'}",
         f"- MFA required for admins: {'yes' if posture['mfa_required'] else 'no'}",
         f"- Session timeout: {posture['session_timeout_hours']} hours",
+        "",
+        "## Deployment & data path",
+        f"- Models: {', '.join((posture.get('deployment') or {}).get('models') or [])}",
+        f"- Data plane: {(posture.get('deployment') or {}).get('data_plane', '')}",
+        f"- Loss controls: {', '.join((posture.get('deployment') or {}).get('data_loss_controls') or [])}",
+        f"- Private Link: {(posture.get('private_networking') or {}).get('status', 'unknown')}",
         "",
         "## Key management",
         f"- BYOK configured: {'yes' if posture['byok']['configured'] else 'no'}",

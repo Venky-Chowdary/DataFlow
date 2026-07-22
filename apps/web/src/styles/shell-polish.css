@@ -3084,6 +3084,79 @@ textarea.df2-pilot-composer textarea {
   margin-top: 4px;
 }
 
+.df2-column-dest-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  max-width: 100%;
+}
+
+.df2-col-badge-specialty,
+.df2-col-badge-struct,
+.df2-col-badge-pipeline,
+.df2-col-badge-exists,
+.df2-col-badge-new {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-col-badge-specialty {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+
+.df2-col-badge-struct {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.df2-col-badge-pipeline {
+  display: inline-flex;
+  margin-top: 4px;
+  background: #f8fafc;
+  color: #475569;
+  border: 1px dashed #cbd5e1;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.df2-col-badge-exists {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+}
+
+.df2-column-destination-cell .df2-column-cell-content {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.df2-column-transform-cell .df2-column-cell-content {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
 .df2-result-next {
   display: flex;
   gap: 8px;

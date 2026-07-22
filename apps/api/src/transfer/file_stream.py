@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import EndpointConfig
-from .type_mapper import ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
@@ -334,7 +334,8 @@ def peek_file_source(
 
     if file_type in ("jsonl", "ndjson"):
         sample_objs: list[dict] = []
-        columns: set[str] = set()
+        # Ordered union across the *entire* file — keys after sample window must not vanish.
+        columns: dict[str, None] = {}
         total = 0
         with _text_reader(content) as reader_file:
             for line in reader_file:
@@ -342,14 +343,20 @@ def peek_file_source(
                 if not line:
                     continue
                 total += 1
-                if len(sample_objs) < 100:
+                try:
                     obj = json.loads(line)
-                    if isinstance(obj, dict):
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    for k in obj.keys():
+                        name = str(k).strip()
+                        if name and name not in columns:
+                            columns[name] = None
+                    if len(sample_objs) < 100:
                         sample_objs.append(obj)
-                        columns.update(obj.keys())
         if total == 0:
             raise ValueError("JSONL file is empty")
-        headers = sorted(columns)
+        headers = list(columns.keys())
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, total, sample_objs[:100]
 
@@ -402,9 +409,9 @@ def peek_file_source(
                     if not isinstance(obj, dict):
                         continue
                     total += 1
+                    columns.update(obj.keys())
                     if len(sample_objs) < 100:
                         sample_objs.append(obj)
-                        columns.update(obj.keys())
         else:
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
@@ -413,8 +420,9 @@ def peek_file_source(
             records = load_json_records(bytes(raw))
             total = len(records)
             sample_objs = records[:100]
-            for obj in sample_objs:
-                columns.update(obj.keys())
+            for obj in records:
+                if isinstance(obj, dict):
+                    columns.update(obj.keys())
         if total == 0:
             raise ValueError(
                 "JSON file has no object rows. Use an array of objects "
@@ -619,7 +627,7 @@ def stream_file_to_database(
 
     batch_iter = _batch_iterator_for_type(file_type, content, batch_size)
 
-    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     try:

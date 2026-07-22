@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .models import EndpointConfig
-from .type_mapper import ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -110,6 +110,7 @@ def _read_batch_impl(
     known_total_rows: int | None = None,
     es_search_after: list | None = None,
     redis_scan_state=None,
+    kafka_cursor: dict | None = None,
 ):
     if src_type == "postgresql" or src_type == "redshift":
         from connectors.postgresql_reader import (
@@ -311,6 +312,18 @@ def _read_batch_impl(
             cfg=cfg, pattern=pattern, limit=limit,
             known_total_rows=known_total_rows, scan_state=redis_scan_state,
         )
+    if src_type == "kafka":
+        from connectors.kafka_reader import read_topic_batch
+
+        return read_topic_batch(
+            cfg=cfg,
+            topic=table,
+            columns=columns,
+            offset=offset,
+            limit=limit,
+            known_total_rows=known_total_rows,
+            kafka_cursor=kafka_cursor,
+        )
     if src_type == "sqlite":
         from connectors.sqlite_reader import read_table_batch
 
@@ -472,6 +485,7 @@ def _write_batch(
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
             job_id=job_id,
+            engine=dest_type,
             write_batch_key=build_write_batch_key(
                 table_name=table_name, file_batch_idx=chunk_idx
             ),
@@ -1008,6 +1022,47 @@ def stream_database_transfer(
     if not columns:
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 
+    # Schemaless sources — absorb sparse attrs discovered mid-transfer so they
+    # are never silently dropped from destination writes (Dynamo/Mongo/ES/Redis).
+    def _absorb_schemaless_discovered_attrs(batch) -> None:
+        nonlocal columns, mappings, column_types, schema, backfill_new_fields, target_cols
+        from connectors.header_union import SCHEMALESS_SOURCE_TYPES, union_attribute_keys
+
+        if src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
+            return
+
+        known = set(columns)
+        new_headers = [h for h in batch.headers if h and h not in known]
+        if not new_headers and set(batch.headers).issubset(known):
+            return
+        columns = union_attribute_keys(columns, batch.headers)
+        mapped_sources = {str(m.get("source") or "") for m in mappings}
+        meta = getattr(batch, "meta", None) or {}
+        native_types = meta.get("native_types") if isinstance(meta, dict) else {}
+        if not isinstance(native_types, dict):
+            native_types = {}
+        for h in new_headers:
+            lt = str(native_types.get(h) or schema.get(h) or "VARCHAR")
+            schema[h] = lt
+            column_types[h] = ddl_carrier_type(lt)
+            if h not in mapped_sources:
+                mappings.append({
+                    "source": h,
+                    "target": h,
+                    "confidence": 0.9,
+                    # Force ADD COLUMN on SQL dests when attrs appear after CREATE.
+                    "create_new": True,
+                    "assignment_strategy": "create_compatible_new",
+                })
+                mapped_sources.add(h)
+                ddl_log.append(
+                    f"{dest_type.upper()} COLUMN {h} {ddl_type(dest_type, schema.get(h, 'string'))} "
+                    f"(discovered mid-transfer from {src_type} — no silent drop)"
+                )
+        if new_headers:
+            backfill_new_fields = True
+            target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+
     if not schema:
         if src_type in ("s3", "gcs", "adls"):
             try:
@@ -1018,14 +1073,39 @@ def stream_database_transfer(
                 schema = {c: "string" for c in columns}
         elif src_type == "redis":
             schema = {c: "string" for c in columns}
+        elif src_type == "kafka":
+            # Prefer probe native_types / sample inference over all-TEXT fiction.
+            probe_meta = getattr(probe, "meta", None) or {}
+            native = probe_meta.get("native_types") or {}
+            if native:
+                schema = {c: native.get(c, "TEXT") for c in columns}
+            else:
+                try:
+                    from services.file_parser import FileParser
+
+                    sample_recs = [
+                        dict(zip(columns, row)) for row in (probe.rows or [])[:50]
+                    ]
+                    inferred = FileParser.infer_schema(sample_recs) if sample_recs else {}
+                    schema = {c: inferred.get(c, "TEXT") for c in columns}
+                except Exception:
+                    schema = {c: "TEXT" for c in columns}
         else:
             schema = _introspect_table_schema(src_type, src_cfg, table, columns)
             if not schema:
                 schema = {c: "string" for c in columns}
 
-    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in columns}
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
+    if src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
+        backfill_new_fields = True
+        probe_meta = getattr(probe, "meta", None) or {}
+        for name, lt in (probe_meta.get("native_types") or {}).items():
+            if name in schema and schema[name] in {"string", "VARCHAR", "TEXT", "S"}:
+                schema[name] = str(lt)
+                column_types[name] = ddl_carrier_type(str(lt))
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
 
     total_rows = probe.total_rows
@@ -1051,7 +1131,7 @@ def stream_database_transfer(
         completed_chunks = chunk_idx
     remaining_rows = max(0, (total_rows or 0) - rows_accounted_for)
     remaining_chunks = (remaining_rows + chunk_size - 1) // chunk_size if remaining_rows else 0
-    if not total_rows and ddb_cursor:
+    if not total_rows and (ddb_cursor or (src_type == "kafka" and probe.rows)):
         remaining_chunks = max(remaining_chunks, 1)
     chunks = max(1, completed_chunks + (1 if chunk_idx == 0 and resume_offset == 0 else 0) + remaining_chunks)
     dest_table = resolve_dest_table(dest_type, destination, table)
@@ -1079,10 +1159,13 @@ def stream_database_transfer(
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
     es_search_after = checkpoint.es_search_after or (ddb_cursor if src_type == "elasticsearch" else None)
     redis_scan_state = checkpoint.redis_scan_state or (ddb_cursor if src_type == "redis" else None)
+    # Preserve probe continuation tokens when checkpoint has none (fresh job).
+    probe_continuation = ddb_cursor
     keyset_col = checkpoint.cursor_column or (columns[0] if columns and not incremental else "")
     keyset_after = checkpoint.cursor_value
     use_keyset = bool(keyset_col) and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
-    ddb_cursor = checkpoint.dynamodb_cursor
+    ddb_cursor = checkpoint.dynamodb_cursor or (probe_continuation if src_type == "dynamodb" else None)
+    kafka_cursor = checkpoint.kafka_cursor or (probe_continuation if src_type == "kafka" else None)
 
     retry = retry_budget or RetryBudget()
 
@@ -1094,7 +1177,7 @@ def stream_database_transfer(
     committed_offset = offset
 
     def _fetch_next_batch(last_batch):
-        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after
+        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor
         if limit > 0 and fetch_offset >= limit:
             return None
         if total_rows is not None and fetch_offset >= total_rows:
@@ -1104,7 +1187,7 @@ def stream_database_transfer(
             if (
                 src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
                 and (incremental or use_keyset)
-            ) or src_type in ("elasticsearch", "redis"):
+            ) or src_type in ("elasticsearch", "redis", "kafka"):
                 return None
         if src_type == "dynamodb":
             if not ddb_cursor:
@@ -1120,6 +1203,23 @@ def stream_database_transfer(
                     database=src_db,
                     dynamodb_cursor=ddb_cursor,
                     dynamodb_total=ddb_total,
+                )
+            )
+            return batch
+        if src_type == "kafka":
+            if kafka_cursor is None and last_batch is not None:
+                return None
+            batch, kafka_cursor = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    kafka_cursor=kafka_cursor,
+                    known_total_rows=total_rows,
                 )
             )
             return batch
@@ -1308,6 +1408,8 @@ def stream_database_transfer(
                 "batch_max": None,
                 "batch_rows": 0,
             }
+        # Absorb sparse schemaless attributes discovered on this page.
+        _absorb_schemaless_discovered_attrs(batch)
         local_warnings: list[str] = []
         # Per-batch data-quality / anomaly gate for database streams.
         if batch_quality_enabled:
@@ -1436,6 +1538,7 @@ def stream_database_transfer(
         checkpoint.es_search_after = es_search_after
         checkpoint.redis_scan_state = redis_scan_state
         checkpoint.dynamodb_cursor = ddb_cursor
+        checkpoint.kafka_cursor = kafka_cursor
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         checkpoint.chunk_total = chunks
@@ -1901,7 +2004,7 @@ def stream_scd2_mirror_transfer(
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]
     target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True)
-    column_types = {c: normalize_inferred(schema.get(c, "string")).upper() for c in schema}
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in schema}
 
     staging = _staging_endpoint(destination, job_id or "")
     staging_qualified = _qualified(staging.table, schema_name)

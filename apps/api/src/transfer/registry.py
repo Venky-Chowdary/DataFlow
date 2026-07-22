@@ -202,6 +202,12 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "postgresql", "database", "s3"),
     ("file", "csv", "database", "s3"),
     ("file", "parquet", "database", "snowflake"),
+    # Duplex stores already RW+introspect — commit SKU proof routes
+    ("database", "postgresql", "database", "dynamodb"),
+    ("database", "postgresql", "database", "elasticsearch"),
+    ("database", "postgresql", "database", "redis"),
+    ("database", "postgresql", "database", "gcs"),
+    ("file", "json", "database", "gcs"),
     # Unlocked enterprise / object / vector destinations
     ("database", "postgresql", "database", "sftp"),
     ("database", "mysql", "database", "adls"),

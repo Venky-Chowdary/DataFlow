@@ -66,7 +66,6 @@ def test_csv_to_postgresql_preserves_decimal_precision():
             "primary_key": "id",
             "selected": True,
         }],
-        skip_preflight=True,
     )
 
     engine = UniversalTransferEngine()
