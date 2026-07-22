@@ -1654,6 +1654,12 @@ th.df2-type-string .df2-type-badge {
   max-height: none;
 }
 
+/* Non-map full dialogs: ensure the body itself can scroll on short viewports. */
+.df2-modal-full:not(.df2-map-dialog) .df2-modal-body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Map expand dialog — table-first layout; size comes from .df2-modal-full. */
 .df2-map-dialog.df2-modal-full {
   display: flex;

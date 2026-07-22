@@ -55,10 +55,19 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
     "g2_destination": {
         "title": "Destination connectivity",
         "category": "hard",
-        "why": "DataFlow can read the source but cannot reach the destination. Writes would fail silently.",
-        "fix": "Check the destination host, port, credentials, and write permissions. For object stores, verify the bucket/container exists and the account can write.",
+        "why": (
+            "DataFlow can read the source but cannot reach the destination with the "
+            "same credentials Connectors → Test uses. Writes would fail."
+        ),
+        "fix": (
+            "Open Connectors, select this destination, click Test. If Test fails, "
+            "fix the connection string or username/password there (one place). "
+            "If Test passes but Validate still fails, re-select the connector in "
+            "Transfer Studio and Re-validate — do not re-enter host/port on Validate."
+        ),
         "examples": [
-            "MongoDB auth failed → use the correct username/password and auth database.",
+            "Saved Redis/Mongo/Postgres connector Test OK → Validate must use that same saved connector id.",
+            "Connection string already includes user/password — leave host/port fields empty; do not duplicate secrets.",
             "Snowflake warehouse suspended → resume the warehouse or choose an active one.",
         ],
     },

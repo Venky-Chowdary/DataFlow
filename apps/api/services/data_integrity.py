@@ -447,9 +447,9 @@ def _check_encoding_anomalies(
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
-    Always blocks at Validate when findings exist — operators must apply
-    ``strip_controls`` (or clean the source) before Run. Columns already mapped
-    with ``strip_controls`` / ``normalize_unicode`` are skipped.
+    Strict/maximum: block at Validate. Balanced: warn + strip_controls path
+    (never silent-pass). Columns already mapped with ``strip_controls`` /
+    ``normalize_unicode`` are skipped.
     """
     sanitized_cols = {
         str(m.get("source") or "").lower()
@@ -502,11 +502,29 @@ def _check_encoding_anomalies(
             break
 
     mode = (validation_mode or "strict").strip().lower()
-    # Control/format characters break Snowflake/PG/MySQL loads — always block at
-    # Validate with an explicit strip_controls fix path (never discover at Run).
-    del mode
-    blocks = bool(findings)
+    # Strict/maximum: always block — control chars break Snowflake/PG/MySQL loads.
+    # Balanced: surface findings as warnings + strip_controls fix path so a single
+    # U+200B in legacy data does not hard-stop Validate; never silent-pass.
     issue_payload: list[Any] = findings[:12] if findings else []
+    if mode == "balanced" and findings:
+        return {
+            "check": "encoding_anomalies",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [
+                (
+                    f"{f.get('column')}: {f.get('message')} — apply strip_controls "
+                    "or quarantine before Run"
+                )
+                for f in issue_payload
+            ],
+            "values_checked": checked,
+            "affected_columns": sorted({f["column"] for f in findings}),
+            "suggested_transform": "strip_controls",
+            "encoding_findings": issue_payload,
+        }
+    blocks = bool(findings)
     return {
         "check": "encoding_anomalies",
         "passed": not blocks,
@@ -516,6 +534,7 @@ def _check_encoding_anomalies(
         "values_checked": checked,
         "affected_columns": sorted({f["column"] for f in findings}),
         "suggested_transform": "strip_controls" if findings else None,
+        "encoding_findings": issue_payload,
     }
 
 

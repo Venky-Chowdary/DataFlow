@@ -32,6 +32,19 @@ def test_apply_date_resolves_unambiguous_day_month_order():
     assert val2 == "2024-12-31"
 
 
+def test_apply_date_fails_closed_on_ambiguous_mdy_dmy():
+    """05/06/2024 is May 6 (US) or June 5 (EU) — never silently pick MDY."""
+    val, err = apply_transform("05/06/2024", "date")
+    assert val is None
+    assert err and "Invalid date" in err
+    val2, err2 = apply_transform("05/06/2024", "datetime")
+    assert val2 is None
+    assert err2
+    # Equal day/month is unambiguous either locale.
+    val3, err3 = apply_transform("05/05/2024", "date")
+    assert err3 is None
+    assert val3 == "2024-05-05"
+
 def test_apply_json_and_boolean():
     val, err = apply_transform('{"b": 2, "a": 1}', "json")
     assert err is None

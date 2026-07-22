@@ -6792,7 +6792,8 @@
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
-  overflow: hidden;
+  /* Default: body scrolls. Map dialog overrides to overflow:hidden + child scroll. */
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
@@ -6890,6 +6891,7 @@
 .df2-drawer-overlay {
   position: fixed;
   inset: 0;
+  /* Under modal so Edit-connection Dialog stacks above connector detail drawers. */
   z-index: calc(var(--df-z-modal, 1000) - 10);
   display: flex;
   align-items: stretch;

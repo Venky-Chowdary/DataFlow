@@ -143,3 +143,11 @@ def test_normalize_cell_preserves_booleans_and_text():
     assert normalize_cell(False) == "0"
     assert normalize_cell("hello") == "hello"
     assert normalize_cell(None) == ""
+    # Status enums must not collide with true/false (false 100% fidelity).
+    assert normalize_cell("active") == "active"
+    assert normalize_cell("enabled") == "enabled"
+    assert normalize_cell("inactive") == "inactive"
+    assert normalize_cell("disabled") == "disabled"
+    assert normalize_cell("true") == "1"
+    assert normalize_cell("yes") == "1"
+    assert normalize_cell("false") == "0"

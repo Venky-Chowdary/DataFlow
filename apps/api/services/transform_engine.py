@@ -185,8 +185,9 @@ def _detect_dayfirst(text: str) -> bool | None:
 
     Looks at the first two numeric fields of slash/dash/dot-delimited dates.
     A value like 31/12/2024 or 31.12.2024 is unambiguously day-first;
-    12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 we keep
-    the default (month-first) to stay compatible with existing data.
+    12/31/2024 or 12-31-24 is month-first.  When both fields are <= 12 and
+    unequal, locale is ambiguous — callers must fail closed (no silent MDY).
+    When both fields are equal (05/05/2024) either locale yields the same date.
     """
     m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text)
     if not m:
@@ -196,8 +197,16 @@ def _detect_dayfirst(text: str) -> bool | None:
         return True
     if second > 12:
         return False
+    if first == second:
+        return False  # same calendar date either way — prefer month-first patterns
     return None
 
+
+def _is_ambiguous_mdy_dmy(text: str) -> bool:
+    """True when slash/dash/dot date could be either MDY or DMY with different results."""
+    return _detect_dayfirst(text) is None and bool(
+        re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text.strip())
+    )
 
 def _reorder_date_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
     """Move the most likely day/month ordering patterns to the front.
@@ -241,6 +250,9 @@ def _parse_datetime(value: str) -> str | None:
     text = value.strip()
     if not _DATE_LIKE_RE.search(text):
         return None
+    # Fail closed on ambiguous MDY/DMY — silent US-default corrupts EU dates.
+    if _is_ambiguous_mdy_dmy(text):
+        return None
     if _EPOCH_MS_RE.match(text):
         ms = int(text)
         return _to_utc_z(datetime.fromtimestamp(ms / 1000, tz=timezone.utc))
@@ -274,6 +286,9 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
         return None
     if text.lower() in NULL_SENTINELS:
         return None
+    # Fail closed when 05/06/2024 could be May 6 or June 5 depending on locale.
+    if _is_ambiguous_mdy_dmy(text):
+        return None
     # Plain YYYYMMDD integer
     if re.match(r"^\d{8}$", text):
         try:
@@ -289,7 +304,6 @@ def _parse_date(value: str, *, with_time: bool = False) -> str | None:
         except ValueError:
             continue
     return None
-
 
 def _normalize_numeric_text(value: str) -> str:
     """Normalize unicode spaces, currency markers, accounting negatives, and percent signs."""
@@ -453,14 +467,6 @@ def _parse_integer(value: str) -> int | None:
         return int(dec)
     except (Overflow, ValueError, InvalidOperation):
         return None
-
-
-# Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are
-# status *enums* in real datasets (Mongo sessions, CRM, auth) — treating them
-# as booleans caused new Snowflake tables to CREATE status BOOLEAN, then
-# hard-fail on values like "invalidated".
-_STRICT_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
-_STRICT_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
 
 
 # Strict boolean tokens only. Words like "active"/"inactive"/"enabled" are

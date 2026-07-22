@@ -370,28 +370,66 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
     if not transform:
         return value
     t = str(transform).lower().strip()
+    if t in {"none", "identity", "passthrough"}:
+        return value
     if t in {"upper", "uppercase"}:
         return value.upper()
     if t in {"lower", "lowercase"}:
         return value.lower()
     if t in {"trim", "strip", "string", "varchar", "text"}:
         return value.strip()
-    if t in {"integer", "int", "number", "decimal", "float", "double", "numeric"}:
+    if t in {"strip_controls", "normalize_unicode"}:
+        # Deterministic warehouse-safe cleanup — comparable after strip.
+        return "".join(ch for ch in value if ch == "\t" or ch == "\n" or ch == "\r" or ord(ch) >= 32)
+    if t in {"integer", "int", "number", "decimal", "float", "double", "numeric", "currency", "percentage"}:
         try:
-            if "." in value or "e" in value.lower():
-                return str(float(value))
-            return str(int(value))
+            cleaned = value.replace(",", "").replace("$", "").replace("€", "").replace("%", "").strip()
+            if "." in cleaned or "e" in cleaned.lower():
+                return str(float(cleaned))
+            return str(int(cleaned))
         except Exception:
             return value
     if t in {"boolean", "bool"}:
         return "true" if value and value.lower() not in {"false", "0", "", "no", "off"} else "false"
     if t in {"date", "datetime", "timestamp", "time", "iso8601"}:
         return value
+    if t in {"json", "parse_json", "to_json"}:
+        # Structural identity for Mongo→VARIANT — keep canonical compact form.
+        try:
+            parsed = json.loads(value) if value.strip().startswith(("{", "[")) else value
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(parsed, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        except Exception:
+            pass
+        return value
     # Non-deterministic / one-way transforms break reconciliation previews.
     if t in {"uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
         return None
     # For other deterministic string-preserving transforms, keep the value as-is.
     return value
+
+
+_NON_DETERMINISTIC = {
+    "uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
+}
+
+
+def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str | None, str | None]:
+    """Prefer the real write-path transform so G8 matches coerce/quarantine behavior."""
+    try:
+        from services.transform_engine import apply_transform
+    except Exception:
+        out = _dry_run_transform(value, transform)
+        if out is None:
+            return None, "non_deterministic_transform"
+        return out, None
+    t = (transform or "none").strip() or "none"
+    result, err = apply_transform(value, t)
+    if err:
+        return None, err
+    if result is None:
+        return "", None
+    return str(result), None
 
 
 def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
@@ -407,16 +445,42 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         )
 
     source_count = len(sample_rows)
-    has_transform = any(m.transform for m in ctx.plan.mappings)
+    nondeterministic = [
+        m.target
+        for m in ctx.plan.mappings
+        if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC
+    ]
 
+    transform_errors: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
-    for row in sample_rows:
+    for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
         for m in ctx.plan.mappings:
             raw = row.get(m.source, "")
-            transformed = _dry_run_transform(str(raw) if raw is not None else "", m.transform)
-            mapped[m.target] = transformed
+            raw_s = "" if raw is None else str(raw)
+            if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC:
+                mapped[m.target] = None
+                continue
+            transformed, err = _apply_write_path_transform(raw_s, m.transform)
+            if err:
+                transform_errors.append(f"row {row_idx} {m.source}→{m.target}: {err}")
+                mapped[m.target] = None
+            else:
+                mapped[m.target] = transformed
         mapped_rows.append(mapped)
+
+    if transform_errors:
+        return _block(
+            GateId.G8_RECONCILIATION,
+            _block_message("Dry-run reconciliation failed — transform errors", transform_errors),
+            start,
+            {
+                "errors": transform_errors[:20],
+                "source_rows": source_count,
+                "preview_only": True,
+                "note": "Write-path transform failed on sample — fix mapping before Run",
+            },
+        )
 
     # Detect a likely primary key on the target side and verify uniqueness.
     pk_target = None
@@ -429,7 +493,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     if pk_target:
         seen: set[str] = set()
         for row in mapped_rows:
-            val = str(row.get(pk_target, ""))
+            val = str(row.get(pk_target, "") or "")
             if val and val in seen:
                 duplicates += 1
             seen.add(val)
@@ -442,37 +506,68 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             {"duplicate_keys": duplicates, "target_rows": len(mapped_rows)},
         )
 
-    # When no non-trivial transforms are applied, the source and target value
-    # streams should be identical.  Compare values along the mapping, ignoring
-    # source column names so renames, unmapped columns, and null/'' values do not
-    # produce false mismatches.
-    if not has_transform:
+    # Fingerprint: raw source cells vs write-path transformed values (not transform↔transform).
+    if not nondeterministic:
+        try:
+            from services.reconciliation import normalize_cell
+        except Exception:
+            def normalize_cell(v: Any) -> str:  # type: ignore[misc]
+                return "" if v is None else str(v)
 
-        def _norm(value: Any) -> str:
-            return "" if value is None else str(value)
-
-        def _value_fingerprint(rows: list[dict[str, Any]], key_attr: str) -> str:
-            payload: list[list[str]] = []
-            for row in rows:
-                values = [_norm(row.get(getattr(m, key_attr))) for m in ctx.plan.mappings]
-                payload.append(values)
-            return hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode("utf-8")).hexdigest()
-
-        source_hash = _value_fingerprint(sample_rows, "source")
-        target_hash = _value_fingerprint(mapped_rows, "target")
-        if source_hash != target_hash:
+        mismatches: list[str] = []
+        for row_idx, row in enumerate(sample_rows, start=1):
+            for m in ctx.plan.mappings:
+                tname = str(m.transform or "").lower().strip()
+                # Identity / rename-only: raw must equal transformed after normalize.
+                if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
+                    raw = row.get(m.source, "")
+                    got = mapped_rows[row_idx - 1].get(m.target)
+                    if normalize_cell(raw) != normalize_cell(got):
+                        mismatches.append(
+                            f"row {row_idx} {m.source}→{m.target}: identity transform altered value"
+                        )
+                # Lossy declared pairs: value change is expected only when transform
+                # is intentional (date truncate, etc.) — surface as detail, not auto-block
+                # when transform is explicit; block when transform missing but types lossy.
+        if mismatches:
             return _block(
                 GateId.G8_RECONCILIATION,
-                "Dry-run reconciliation mismatch — source and target fingerprints differ",
+                "Dry-run reconciliation mismatch — identity mapping altered sample values",
                 start,
-                {"source_rows": source_count, "target_rows": len(mapped_rows)},
+                {
+                    "issues": mismatches[:20],
+                    "source_rows": source_count,
+                    "target_rows": len(mapped_rows),
+                    "preview_only": True,
+                    "note": "Sample fingerprint — not live Gate-8 destination checksum",
+                },
             )
+
+        return _pass(
+            GateId.G8_RECONCILIATION,
+            f"Dry-run reconciliation passed — {source_count} row(s) (write-path sample)",
+            start,
+            {
+                "source_rows": source_count,
+                "target_rows": len(mapped_rows),
+                "preview_only": True,
+                "note": "Pre-write write-path sample check — live Gate-8 checksum runs after load",
+            },
+        )
 
     return _pass(
         GateId.G8_RECONCILIATION,
-        f"Dry-run reconciliation passed — {source_count} row(s)",
+        (
+            f"Dry-run reconciliation skipped fingerprint for non-deterministic "
+            f"transform(s) on {', '.join(nondeterministic[:5])} — PK uniqueness checked"
+        ),
         start,
-        {"source_rows": source_count, "target_rows": len(mapped_rows)},
+        {
+            "source_rows": source_count,
+            "target_rows": len(mapped_rows),
+            "skipped_fingerprint_targets": nondeterministic[:12],
+            "preview_only": True,
+        },
     )
 
 

@@ -1108,7 +1108,7 @@ export function ValidateDashboard({
           </div>
           <p className="df2-vd-cell-preview-hint">
             {isConnectionBlock
-              ? "Destination (or source) authentication failed. Open Connectors, set Auth source (often admin for Railway/Atlas Mongo), click Test until it passes, then Re-validate here. Strip/Quarantine cannot fix credentials."
+              ? "Destination (or source) authentication failed. Open Connectors for this saved connection, click Test until it passes (connection string or username/password — one place only), then return here and Re-validate. Strip/Quarantine cannot fix credentials."
               : isTypeMismatchBlock
               ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
               : showEncodingRemediation

@@ -109,15 +109,11 @@ def _probe_inline_destination(body: PreflightRequest) -> tuple[bool, str]:
 
 
 def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
-    """Live connectivity probe for any saved connector type."""
-    from ..transfer.adapters import _lookup_saved_connector
+    """Live connectivity probe for any saved connector type — same as Connectors Test."""
+    from services.connector_probe import probe_saved_connector
 
-    conn = _lookup_saved_connector(connector_id)
-    if not conn:
-        return False, f"Connector '{connector_id}' not found"
-
-    db_type = (conn.get("type") or "").lower()
-    return run_probe(db_type, conn)
+    ok, msg, _cfg = probe_saved_connector(connector_id)
+    return ok, msg
 
 
 @router.post("/run")

@@ -1131,9 +1131,14 @@ def normalize_cell(value: Any) -> str:
     if not text:
         return ""
     lowered = text.lower()
-    if lowered in {"true", "t", "yes", "y", "on", "enabled", "active", "ok", "aye", "positive", "1"}:
+    # Align with transform_engine strict boolean tokens only. Status enums
+    # ("active"/"enabled"/…) must NOT collide with true/false in checksums —
+    # that falsely claimed 100% fidelity when status strings met bool columns.
+    from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
+
+    if lowered in _STRICT_BOOL_TRUE:
         return "1"
-    if lowered in {"false", "f", "no", "n", "off", "disabled", "inactive", "nope", "negative", "0"}:
+    if lowered in _STRICT_BOOL_FALSE:
         return "0"
     # Numeric fast path: only attempt Decimal normalization for strings that look
     # like numbers, avoiding the expensive exception path for names, emails, codes.

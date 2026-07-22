@@ -13,6 +13,7 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.value_serializer import cell_to_string
+from services.json_intelligence import expand_mongo_documents
 
 from .mongodb_common import _mongo_client
 
@@ -119,6 +120,8 @@ def read_collection_batch(
         if "_id" in doc:
             doc["_id"] = str(doc["_id"])
 
+    docs = expand_mongo_documents(docs, cfg=cfg)
+
     if columns:
         headers = columns
     else:
@@ -174,6 +177,8 @@ def read_collection_cursor_batch(
     for doc in docs:
         if "_id" in doc:
             doc["_id"] = str(doc["_id"])
+
+    docs = expand_mongo_documents(docs, cfg=cfg)
 
     if columns:
         headers = columns

@@ -510,9 +510,11 @@ def run_file_preflight(
 
     # Preflight is a sample-based safety check, not a full table scan.  Cap the
     # sample size so very large file previews or database samples cannot make the
-    # validate step hang.
-    if sample_rows and len(sample_rows) > 500:
-        sample_rows = sample_rows[:500]
+    # validate step hang. Keep in sync with coercion_probe.DEFAULT_SAMPLE_LIMIT.
+    from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
+
+    if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
+        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
@@ -773,18 +775,25 @@ def run_file_preflight(
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:
-    """Live connectivity probe for database destinations (Gate G2)."""
-    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
-    from src.transfer.connector_registry import run_probe
+    """Live connectivity probe for database destinations (Gate G2).
 
+    When a saved ``connector_id`` is set, use the exact same probe as
+    Connectors → Test so Validate never invents different credentials.
+    """
     if endpoint.kind != "database":
         return True, "Non-database destination"
 
+    if getattr(endpoint, "connector_id", None):
+        from services.connector_probe import probe_saved_connector
+
+        ok, msg, _cfg = probe_saved_connector(endpoint.connector_id)
+        return ok, msg
+
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+    from src.transfer.connector_registry import run_probe
+
     cfg = resolve_connector_config(endpoint)
-    # Prefer the saved connector's driver type over any inline format string.
     db_type = (cfg.get("type") or endpoint.format or "").lower()
-    # DynamoDB uses the table name as the database identifier; ensure the
-    # connectivity probe sees the intended destination table.
     if db_type == "dynamodb":
         cfg["table"] = resolve_dest_table(db_type, endpoint)
     return run_probe(db_type, cfg)
@@ -844,41 +853,39 @@ def inspect_destination_for_preflight(
         out["message"] = "File export destination"
         return out
 
-    from src.transfer.adapters import _lookup_saved_connector
     from src.transfer.models import EndpointConfig
 
     if connector_id:
-        conn = _lookup_saved_connector(connector_id)
-        if not conn:
-            out["message"] = f"Connector '{connector_id}' not found"
-            return out
-        # Saved connector type is authoritative; inline form values only fill
-        # fields the user may have overridden in the current step.
-        db_type = (conn.get("type") or dest_type or "mongodb").lower()
-        out["db_type"] = db_type
-        from services.dialect_profiles import normalize_schema
+        # CRITICAL: Validate G2 must use the same decrypted secrets as Connectors Test.
+        # Never rebuild an EndpointConfig from empty Studio form fields (password /
+        # connection_string omitted when connector_id is set) — that path defaulted
+        # host→localhost and produced "auth failed" while Test still passed.
+        from services.connector_probe import (
+            endpoint_from_saved_connector,
+            probe_saved_connector,
+        )
 
-        endpoint = EndpointConfig(
-            kind="database",
-            format=db_type,
-            connector_id=connector_id,
-            host=dest_host or "",
-            port=int(dest_port or 0),
-            database=dest_database or "",
-            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
+        ok, msg, cfg = probe_saved_connector(connector_id)
+        db_type = (cfg.get("type") or dest_type or "").lower()
+        out["db_type"] = db_type
+        if not ok:
+            out["connected"] = False
+            out["message"] = msg or "Destination unreachable"
+            return out
+
+        endpoint = endpoint_from_saved_connector(
+            connector_id,
             table=dest_table or "",
             collection=dest_collection or dest_table or "",
-            username=dest_username or "",
-            password=dest_password or "",
-            connection_string=dest_connection_string or "",
-            warehouse=dest_warehouse or "",
-            ssl=False,
-            auth_source=dest_auth_source or "",
-            auth_mode=dest_auth_mode or "",
-            auth_role=dest_auth_role or "",
-            api_key=dest_api_key or "",
-            service_account=dest_service_account or "",
+            schema=dest_schema or "",
+            database=dest_database or "",
         )
+        if not endpoint:
+            out["message"] = f"Connector '{connector_id}' not found"
+            return out
+        # Prefer operator-chosen auth_source override from Studio when present.
+        if dest_auth_source:
+            endpoint.auth_source = dest_auth_source
     elif dest_host or dest_connection_string:
         db_type = (dest_type or "mongodb").lower()
         out["db_type"] = db_type
@@ -910,8 +917,18 @@ def inspect_destination_for_preflight(
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
     info = introspect_endpoint(endpoint)
-    out["connected"] = bool(info.get("connected"))
-    out["message"] = info.get("message", "")
+    # Connectivity already proven via probe_saved_connector when connector_id set;
+    # trust that over a second introspect failure (schema-only hiccups).
+    if connector_id and out.get("db_type"):
+        out["connected"] = True
+        if not info.get("connected"):
+            # Schema introspect failed but ping passed — keep connected, surface note.
+            out["message"] = info.get("message") or msg or "Connected"
+        else:
+            out["message"] = info.get("message") or msg or "Connected"
+    else:
+        out["connected"] = bool(info.get("connected"))
+        out["message"] = info.get("message", "")
     schema = info.get("schema") or {}
     cols = info.get("columns") or list(schema.keys())
     out["columns"] = cols

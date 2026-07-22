@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
 DOT_PATH = re.compile(r"^[a-zA-Z_][\w.]*\.\w+")
 JSON_PREFIX = re.compile(r"^[\[{]")
+
+# Cap expanded nested keys so sparse Mongo docs cannot explode column counts.
+MAX_FLATTENED_KEYS = 128
+DEFAULT_FLATTEN_DEPTH = 2
 
 
 def _looks_like_json(value: Any) -> bool:
@@ -68,3 +73,68 @@ def flatten_column_recommendations(
         })
 
     return out[:12]
+
+
+def flatten_document(
+    doc: dict[str, Any],
+    *,
+    sep: str = "_",
+    max_depth: int = DEFAULT_FLATTEN_DEPTH,
+    keep_parent: bool = True,
+) -> dict[str, Any]:
+    """Expand nested dicts into ``parent_child`` columns for SQL / warehouse maps.
+
+    Parent objects are kept (serialized later to VARIANT/JSON) so nothing is
+    lost; leaf scalars are promoted so Map can bind ``address_city`` etc.
+    Arrays stay on the parent key as JSON — no row explosion.
+    """
+    if not isinstance(doc, dict):
+        return {}
+    out: dict[str, Any] = dict(doc) if keep_parent else {}
+    added = 0
+
+    def _walk(obj: dict[str, Any], prefix: str, depth: int) -> None:
+        nonlocal added
+        for key, value in obj.items():
+            if added >= MAX_FLATTENED_KEYS:
+                return
+            name = f"{prefix}{sep}{key}" if prefix else str(key)
+            if isinstance(value, dict) and depth < max_depth:
+                if keep_parent and name not in out:
+                    out[name] = value
+                _walk(value, name, depth + 1)
+            elif isinstance(value, list):
+                if name not in out:
+                    out[name] = value
+                    added += 1
+            else:
+                if name not in out or out.get(name) is None:
+                    out[name] = value
+                    added += 1
+
+    for key, value in doc.items():
+        if isinstance(value, dict):
+            _walk(value, str(key), 1)
+        elif added >= MAX_FLATTENED_KEYS:
+            break
+
+    return out
+
+
+def mongo_flatten_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    """Operator / env switch — default on so Mongo→SQL maps nested leaves."""
+    if cfg is not None and "flatten_nested" in cfg:
+        return bool(cfg.get("flatten_nested"))
+    env = (os.environ.get("DATAFLOW_MONGO_FLATTEN_NESTED") or "1").strip().lower()
+    return env not in {"0", "false", "no", "off"}
+
+
+def expand_mongo_documents(
+    docs: list[dict[str, Any]],
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Apply nested expansion when enabled; otherwise return docs unchanged."""
+    if not docs or not mongo_flatten_enabled(cfg):
+        return docs
+    return [flatten_document(doc) for doc in docs]

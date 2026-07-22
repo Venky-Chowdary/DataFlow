@@ -321,7 +321,13 @@ def resolve_connector_config(
     if endpoint.connector_id:
         cfg["connector_id"] = endpoint.connector_id
     # Apply driver defaults for fields that are still missing.
-    cfg["host"] = cfg["host"] or "localhost"
+    # Never invent localhost when a connection string already carries host/auth —
+    # that caused Validate to AUTH against the wrong endpoint while Connectors Test
+    # still passed via the URI.
+    if not (cfg.get("connection_string") or "").strip():
+        cfg["host"] = cfg["host"] or "localhost"
+    else:
+        cfg["host"] = cfg.get("host") or ""
     cfg["port"] = cfg["port"] or default_port
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.

@@ -821,52 +821,77 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
 
 
 _STRUCTURAL_TYPES = {"OBJECT", "ARRAY", "JSON"}
+_TEXTUAL_TYPES = {"TEXT", "VARCHAR"}
+_MONGO_TYPE_ORDER = {
+    "TEXT": 0,
+    "VARCHAR": 0,
+    "BOOLEAN": 1,
+    "INTEGER": 2,
+    "DECIMAL": 3,
+    "DATE": 4,
+    "UUID": 5,
+    "TIMESTAMP": 6,
+    "BINARY": 7,
+    "ARRAY": 8,
+    "OBJECT": 9,
+    "JSON": 9,
+}
+# Keep a typed inference when ≥85% of non-null samples agree (Airbyte-class
+# majority vote). Below that, TEXT is safer than a false INTEGER/DATE.
+_MONGO_TYPED_MAJORITY = 0.85
 
 
 def _widen_mongodb_type(current: str, observed: str) -> str:
     """Widen inferred type across sampled documents; prefer more specific type.
 
-    TEXT is the least informative. DECIMAL absorbs INTEGER, TIMESTAMP absorbs DATE,
-    UUID/BINARY/OBJECT are retained when observed.
-
-    Nested documents / arrays (OBJECT / ARRAY / JSON) are semi-structured and
-    "sticky": a later scalar, text, or null observation does NOT flatten them to
-    TEXT. This keeps schemaless nested fields queryable at columnar destinations
-    (Snowflake VARIANT, BigQuery JSON, Redshift SUPER) instead of landing as
-    JSON-in-VARCHAR. The write path losslessly wraps any bare scalar as JSON so
-    those mixed values still load without data loss.
-
-    Any other observed/current TEXT/VARCHAR value still demotes a column to TEXT
-    so that mixed scalar fields (e.g. a referral code that is sometimes a date
-    string and sometimes a hex token) do not force a strict date/number type.
+    Prefer :func:`_finalize_mongodb_type` with per-type counts for accuracy.
+    This pairwise helper remains for incremental callers.
     """
-    # Null/unknown observations are neutral — never demote a known type.
     if not observed:
         return current
     if not current:
         return observed
-    # Semi-structured wins over scalars/text so nested docs/arrays stay queryable.
     if current in _STRUCTURAL_TYPES or observed in _STRUCTURAL_TYPES:
         if current in _STRUCTURAL_TYPES and observed in _STRUCTURAL_TYPES:
             return current if current == observed else "JSON"
         return current if current in _STRUCTURAL_TYPES else observed
-    if current in {"TEXT", "VARCHAR"} or observed in {"TEXT", "VARCHAR"}:
+    if current in _TEXTUAL_TYPES or observed in _TEXTUAL_TYPES:
         return "TEXT"
-    order = {
-        "TEXT": 0,
-        "VARCHAR": 0,
-        "BOOLEAN": 1,
-        "INTEGER": 2,
-        "DECIMAL": 3,
-        "DATE": 4,
-        "UUID": 5,
-        "TIMESTAMP": 6,
-        "BINARY": 7,
-        "ARRAY": 8,
-        "OBJECT": 9,
-        "JSON": 9,
-    }
-    return observed if order.get(observed, 0) > order.get(current, 0) else current
+    return observed if _MONGO_TYPE_ORDER.get(observed, 0) > _MONGO_TYPE_ORDER.get(current, 0) else current
+
+
+def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
+    """Majority-vote Mongo field type — one TEXT sentinel must not demote 49 ints."""
+    counts = {str(k).upper(): int(v) for k, v in (type_counts or {}).items() if v and k}
+    total = sum(counts.values())
+    if total <= 0:
+        return "TEXT"
+
+    structural = {k: counts[k] for k in _STRUCTURAL_TYPES if counts.get(k, 0) > 0}
+    if structural:
+        # Sticky: any nested observation keeps a semi-structured type.
+        if "OBJECT" in structural and "ARRAY" in structural:
+            return "JSON"
+        return max(structural, key=lambda k: (structural[k], _MONGO_TYPE_ORDER.get(k, 0)))
+
+    text_n = counts.get("TEXT", 0) + counts.get("VARCHAR", 0)
+    typed = {k: v for k, v in counts.items() if k not in _TEXTUAL_TYPES}
+    if not typed:
+        return "TEXT"
+
+    # Promote INTEGER+DECIMAL → DECIMAL, DATE+TIMESTAMP → TIMESTAMP.
+    if "DECIMAL" in typed and "INTEGER" in typed:
+        typed["DECIMAL"] = typed.get("DECIMAL", 0) + typed.pop("INTEGER", 0)
+    if "TIMESTAMP" in typed and "DATE" in typed:
+        typed["TIMESTAMP"] = typed.get("TIMESTAMP", 0) + typed.pop("DATE", 0)
+
+    best = max(typed, key=lambda k: (typed[k], _MONGO_TYPE_ORDER.get(k, 0)))
+    typed_share = sum(typed.values()) / total
+    if typed_share >= _MONGO_TYPED_MAJORITY:
+        return best
+    if text_n / total >= (1.0 - _MONGO_TYPED_MAJORITY):
+        return "TEXT"
+    return best
 
 
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
@@ -893,7 +918,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         target = table or (tables[0] if tables else None)
         columns: dict[str, dict[str, Any]] = {}
         if target:
-            for doc in db[target].find().limit(50):
+            for doc in db[target].find().limit(100):
                 if "_id" in doc:
                     doc["_id"] = str(doc["_id"])
                 for key, val in doc.items():
@@ -902,31 +927,35 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     if key not in columns:
                         columns[key] = {
                             "name": key,
-                            "inferred_type": inferred,
+                            "inferred_type": inferred or "TEXT",
                             "nullable": val is None,
                             "samples": [sample_text] if sample_text else [],
+                            "type_counts": {},
                         }
                     else:
-                        columns[key]["inferred_type"] = _widen_mongodb_type(
-                            columns[key]["inferred_type"], inferred
-                        )
                         if val is None:
                             columns[key]["nullable"] = True
-                        # Samples feed the mapper so hex/ObjectId _id cannot score
-                        # onto an existing Snowflake NUMBER(38,0) `id` column.
                         samples = columns[key].setdefault("samples", [])
                         if sample_text and len(samples) < 8 and sample_text not in samples:
                             samples.append(sample_text)
+                    if inferred and val is not None:
+                        tc = columns[key].setdefault("type_counts", {})
+                        tc[inferred] = int(tc.get(inferred, 0)) + 1
         client.close()
-        # A field that was null in every sampled document has no observed type;
-        # fall back to TEXT so the column is still created.
         for col in columns.values():
-            if not col.get("inferred_type"):
+            counts = col.pop("type_counts", {}) or {}
+            if counts:
+                col["inferred_type"] = _finalize_mongodb_type(counts)
+            elif not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
-            # Re-infer from the collected sample set so mixed docs stay honest
-            # (e.g. sha256 hex stays VARCHAR, not INTEGER-by-name).
+            # Re-infer from samples only when majority vote stayed textual / weak —
+            # never overwrite a high-confidence sticky numeric/date/structural type.
             samples = [s for s in (col.get("samples") or []) if str(s).strip()]
-            if len(samples) >= 2:
+            if (
+                len(samples) >= 2
+                and col["inferred_type"] not in _STRUCTURAL_TYPES
+                and col["inferred_type"] in _TEXTUAL_TYPES
+            ):
                 try:
                     from services.schema_inference import infer_column
 
@@ -934,15 +963,12 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     logical = str(intel.get("logical_type") or col["inferred_type"])
                     if logical == "VARCHAR":
                         logical = "TEXT"
-                    # Never narrow a sticky OBJECT/ARRAY with scalar-only re-infer.
-                    if col["inferred_type"] not in _STRUCTURAL_TYPES:
-                        col["inferred_type"] = logical
+                    col["inferred_type"] = logical
                 except Exception:
                     logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
-
 
 def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table") or kwargs.get("database")

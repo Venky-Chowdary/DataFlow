@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
+import { lockBodyScroll } from "../../lib/bodyScrollLock";
 
 export type DrawerSize = "md" | "lg" | "xl" | "full";
 
@@ -61,12 +62,11 @@ export function Drawer({
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    const unlock = lockBodyScroll();
     const t = window.requestAnimationFrame(() => panelRef.current?.focus());
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
+      unlock();
       window.cancelAnimationFrame(t);
     };
   }, [open, onClose]);

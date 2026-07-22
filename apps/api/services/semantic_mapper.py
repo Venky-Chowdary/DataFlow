@@ -33,6 +33,26 @@ def _load_ml_baseline():
     return None
 
 
+def _calibrated_confidence(
+    score: float,
+    *,
+    score_gap: float,
+    requires_review: bool,
+    hard_cap: float = 0.99,
+) -> float:
+    """Keep near-tie mappings below auto-approve thresholds.
+
+    G4 / Studio auto-approve uses ~0.85 in strict mode. A near-tie with
+    confidence 0.93 would pass the gate despite ``requires_review``. Cap
+    review rows at 0.84 and scale by gap so operators must confirm.
+    """
+    conf = min(float(score), hard_cap)
+    if requires_review:
+        # gap 0.00 → 0.70, gap 0.07 → ~0.805, never above 0.84
+        conf = min(conf, round(0.70 + max(score_gap, 0.0) * 1.5, 3), 0.84)
+    return round(conf, 3)
+
+
 ABBREVIATIONS: dict[str, str] = {
     # Amounts and quantities
     "amt": "amount",
@@ -1196,19 +1216,23 @@ def map_columns(
         alternatives = _alternatives(source, target_columns, pair_scores)
         winner = alternatives[0]["confidence"] if alternatives else score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+        score_gap = round(max(winner - runner_up, 0.0), 3)
+        requires_review = score_gap < 0.08 and not reason.startswith("Exact")
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
             {
                 "source": source,
                 "target": target,
-                "confidence": round(min(score, 0.99), 3),
+                "confidence": _calibrated_confidence(
+                    score, score_gap=score_gap, requires_review=requires_review,
+                ),
                 "reasoning": reason,
                 "user_override": False,
                 "assignment_strategy": "optimal_bipartite_hungarian",
                 "alternatives": alternatives,
-                "score_gap": round(max(winner - runner_up, 0.0), 3),
-                "requires_review": (winner - runner_up) < 0.08 and not reason.startswith("Exact"),
+                "score_gap": score_gap,
+                "requires_review": requires_review,
             }
         )
 
@@ -1256,11 +1280,18 @@ def map_columns(
                 assigned_sources.add(source)
                 winner = alternatives[0]["confidence"] if alternatives else near_score
                 runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+                score_gap = round(max(winner - runner_up, 0.0), 3)
+                requires_review = near_ratio < 0.85
                 mappings.append(
                     {
                         "source": source,
                         "target": near_tgt,
-                        "confidence": round(min(near_score, 0.97), 3),
+                        "confidence": _calibrated_confidence(
+                            near_score,
+                            score_gap=score_gap,
+                            requires_review=requires_review,
+                            hard_cap=0.97,
+                        ),
                         "reasoning": (
                             f"Near-form match to existing destination "
                             f"(similarity={near_ratio:.2f}); prefer over inventing a column"
@@ -1268,8 +1299,8 @@ def map_columns(
                         "user_override": False,
                         "assignment_strategy": "near_form_existing",
                         "alternatives": alternatives,
-                        "score_gap": round(max(winner - runner_up, 0.0), 3),
-                        "requires_review": near_ratio < 0.85,
+                        "score_gap": score_gap,
+                        "requires_review": requires_review,
                     }
                 )
                 continue
@@ -1338,17 +1369,23 @@ def map_columns(
             used_targets.add(best_target)
         winner = alternatives[0]["confidence"] if alternatives else best_score
         runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
+        score_gap = round(max(winner - runner_up, 0.0), 3)
+        requires_review = score_gap < 0.08 and not best_reason.startswith("Exact")
         mappings.append(
             {
                 "source": source,
                 "target": best_target,
-                "confidence": round(min(max(best_score, 0.55), 0.99), 3),
+                "confidence": _calibrated_confidence(
+                    max(best_score, 0.55),
+                    score_gap=score_gap,
+                    requires_review=requires_review,
+                ),
                 "reasoning": best_reason,
                 "user_override": False,
                 "assignment_strategy": "fallback_best_available",
                 "alternatives": alternatives,
-                "score_gap": round(max(winner - runner_up, 0.0), 3),
-                "requires_review": (winner - runner_up) < 0.08 and not best_reason.startswith("Exact"),
+                "score_gap": score_gap,
+                "requires_review": requires_review,
             }
         )
 
