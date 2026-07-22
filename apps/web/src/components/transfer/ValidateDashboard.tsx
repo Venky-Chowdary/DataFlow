@@ -78,6 +78,17 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   if (Array.isArray(issues)) {
     return issues.map((e) => (typeof e === "string" ? e : String((e as { message?: string })?.message ?? e))).filter(Boolean).slice(0, 12);
   }
+  // Privilege probe honesty on G2
+  const probe = details.privilege_probe;
+  if (probe && typeof probe === "object") {
+    const p = probe as Record<string, unknown>;
+    const lines: string[] = [];
+    if (p.method) lines.push(`Probe: ${String(p.method)}`);
+    if (p.status) lines.push(`Privilege status: ${String(p.status)}`);
+    if (p.engine) lines.push(`Engine: ${String(p.engine)}`);
+    if (p.detail && String(p.status) !== "ok") lines.push(String(p.detail));
+    if (lines.length) return lines.slice(0, 8);
+  }
   // G4 / G6 structured detail keys that are not named "issues"
   const extras: string[] = [];
   for (const key of ["low_confidence", "ambiguous_mappings", "unmapped", "sample_duplicates", "encoding_issues"] as const) {
@@ -96,6 +107,34 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   return extras.filter(Boolean).slice(0, 12);
 }
 
+type PrivilegeProbeMeta = {
+  status?: string;
+  method?: string;
+  engine?: string;
+  detail?: string;
+  can_write?: boolean | null;
+  can_create_table?: boolean | null;
+};
+
+function privilegeProbeFromDetails(details?: Record<string, unknown> | null): PrivilegeProbeMeta | null {
+  const raw = details?.privilege_probe;
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  return {
+    status: p.status != null ? String(p.status) : undefined,
+    method: p.method != null ? String(p.method) : undefined,
+    engine: p.engine != null ? String(p.engine) : undefined,
+    detail: p.detail != null ? String(p.detail) : undefined,
+    can_write: typeof p.can_write === "boolean" ? p.can_write : p.can_write == null ? null : Boolean(p.can_write),
+    can_create_table:
+      typeof p.can_create_table === "boolean"
+        ? p.can_create_table
+        : p.can_create_table == null
+          ? null
+          : Boolean(p.can_create_table),
+  };
+}
+
 const STATUS_LABEL: Record<string, string> = {
   pass: "Passed",
   block: "Blocked",
@@ -112,12 +151,12 @@ interface ValidateDashboardProps {
   validationMode?: string;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
-  /** Apply strip_controls across mappings and re-run preflight. */
-  onStripControlChars?: () => void | Promise<void>;
+  /** Apply strip_controls across mappings and re-run preflight. Returns what changed. */
+  onStripControlChars?: () => void | Promise<RemediationOpResult | void>;
   /** True when text mappings already carry strip_controls (Execute will sanitize). */
   stripControlsApplied?: boolean;
-  /** Soften to quarantine-friendly posture and re-run. */
-  onQuarantineAndRerun?: () => void | Promise<void>;
+  /** Soften to quarantine-friendly posture, strip, and re-run. Returns what changed. */
+  onQuarantineAndRerun?: () => void | Promise<RemediationOpResult | void>;
   /** Cell-level will-quarantine / will-coerce preview from sample rows. */
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced column mappings. */
@@ -147,6 +186,20 @@ interface ValidateDashboardProps {
   /** Clear seed after the drawer has opened (or failed). */
   onSeedRepairConsumed?: () => void;
 }
+
+/** Plain-language report of what a Validate remediation button just did. */
+export type RemediationOpResult = {
+  kind: "strip_controls" | "quarantine_strip";
+  /** Human title for the log. */
+  title: string;
+  /** Ordered steps the operator can read (what / why / next). */
+  steps: string[];
+  /** Columns that received strip_controls (source → target). */
+  columnsChanged: string[];
+  /** Encoding columns that triggered the remediation. */
+  columnsFlagged?: string[];
+  validationMode?: string;
+};
 
 function extractBadDataIssues(preflight: PreflightResult | null): BadDataIssue[] {
   if (!preflight) return [];
@@ -469,10 +522,11 @@ export function ValidateDashboard({
   const [assistExpanded, setAssistExpanded] = useState(true);
   const [copiedRunId, setCopiedRunId] = useState(false);
   const [remediationLog, setRemediationLog] = useState<
-    Array<{ at: string; action: string; detail: string; outcome: string }>
+    Array<{ at: string; action: string; detail: string; outcome: string; steps?: string[] }>
   >([]);
   const pendingVerifyRef = useRef(false);
   const verifiedRunRef = useRef<string | null>(null);
+  const lastOpRef = useRef<RemediationOpResult | null>(null);
   const badDataIssues = useMemo(() => extractBadDataIssues(preflight), [preflight]);
   const hasEncodingIssue = badDataIssues.length > 0;
   const runId = preflight?.run_id;
@@ -512,24 +566,49 @@ export function ValidateDashboard({
         /invalid (decimal|integer|boolean)|cannot be cast|does not safely become|lossy type/i.test(b.message),
       ),
     );
+  const isPrivilegeBlock = Boolean(
+    preflight?.blockers.some((b) => {
+      const probe = privilegeProbeFromDetails(b.details);
+      return (
+        (b.id === "g2_destination" || /g2_destination/i.test(b.id || ""))
+        && (probe?.status === "denied"
+          || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(b.message || ""))
+      );
+    })
+    || preflight?.gates.some((g) => {
+      if (g.id !== "g2_destination" || g.status !== "block") return false;
+      const probe = privilegeProbeFromDetails(g.details);
+      return probe?.status === "denied"
+        || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(g.message || "");
+    }),
+  );
   const isConnectionBlock = Boolean(
-    preflight?.blockers.some((b) =>
-      /g2_destination|g1_source/i.test(b.id || "")
-      || /authentication failed|destination error|source error|not reachable|connection refused|credential/i.test(b.message || ""),
-    )
-    || preflight?.gates.some((g) =>
-      (g.id === "g2_destination" || g.id === "g1_source")
-      && g.status === "block",
+    !isPrivilegeBlock && (
+      preflight?.blockers.some((b) =>
+        /g1_source/i.test(b.id || "")
+        || /authentication failed|destination error|source error|not reachable|connection refused|credential/i.test(b.message || ""),
+      )
+      || preflight?.gates.some((g) =>
+        (g.id === "g1_source")
+        && g.status === "block",
+      )
+      || preflight?.gates.some((g) =>
+        g.id === "g2_destination"
+        && g.status === "block"
+        && !privilegeProbeFromDetails(g.details)?.status
+        && /not reachable|destination error|authentication|connection refused/i.test(g.message || ""),
+      )
     ),
   );
 
-  const pushRemediation = (action: string, detail: string, outcome: string) => {
+  const pushRemediation = (action: string, detail: string, outcome: string, steps?: string[]) => {
     setRemediationLog((prev) => [
       {
         at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
         action,
         detail,
         outcome,
+        steps,
       },
       ...prev,
     ].slice(0, 8));
@@ -538,7 +617,7 @@ export function ValidateDashboard({
     preflight?.blockers.some((b) => /format-control|replacement character|encoding/i.test(b.message))
     || preflight?.gates.some((g) => g.status === "block" && /format-control|replacement|encoding/i.test(g.message)),
   );
-  const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && (hasEncodingIssue || encodingBlocks);
+  const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
 
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
@@ -605,14 +684,34 @@ export function ValidateDashboard({
     pendingVerifyRef.current = false;
     const dry = preflight.gates?.find((g) => /dry_run|integrity/i.test(g.id));
     const cleared = Boolean(preflight.passed || dry?.status === "pass");
-    const outcome = cleared ? "Verified OK" : "Still blocked — remap columns on Map";
+    const outcome = cleared ? "Verified OK — ready to Execute" : "Still blocked — remap columns on Map";
+    const op = lastOpRef.current;
+    const resultSteps: string[] = [];
+    if (op?.steps?.length) {
+      resultSteps.push(...op.steps);
+    }
+    if (cleared) {
+      resultSteps.push(
+        `Re-validation: ${preflight.passed_count ?? 0}/${preflight.total_gates ?? 0} gates passed.`,
+        op?.kind === "strip_controls" || op?.kind === "quarantine_strip"
+          ? "Jobs quarantine stays empty unless cells still fail during Execute — Strip cleaned them before write."
+          : "Execute is unlocked when all gates pass.",
+      );
+    } else {
+      resultSteps.push(
+        `Still blocked: ${dry?.message || "see Validation rules"}.`,
+        "Quarantine/Strip cannot fix wrong column type mappings — use Map.",
+      );
+    }
     const detail = cleared
-      ? "Dry-run / integrity now passes — Execute unlocks when all gates pass."
-      : `Dry-run still blocked: ${dry?.message || "see Validation rules"}. Quarantine cannot fix wrong type mappings.`;
+      ? (op
+        ? `${op.title} succeeded. ${op.columnsChanged.length} mapping(s) now use strip_controls.`
+        : "Dry-run / integrity now passes — Execute unlocks when all gates pass.")
+      : `Dry-run still blocked: ${dry?.message || "see Validation rules"}.`;
     setRemediationLog((prev) => {
       const next = prev.map((row, idx) =>
         idx === 0 && /waiting for re-validation/i.test(row.outcome)
-          ? { ...row, detail, outcome }
+          ? { ...row, detail, outcome, steps: resultSteps }
           : row,
       );
       if (next[0]?.outcome === outcome && /waiting for re-validation/i.test(prev[0]?.outcome || "")) {
@@ -624,11 +723,12 @@ export function ValidateDashboard({
           action: "Re-validation result",
           detail,
           outcome,
+          steps: resultSteps,
         },
         ...next,
       ].slice(0, 8);
     });
-  }, [preflight?.run_id, preflight?.passed, preflight?.passed_count, preflight?.gates, running]);
+  }, [preflight, running]);
 
   const copyRunId = async () => {
     if (!runId) return;
@@ -741,41 +841,79 @@ export function ValidateDashboard({
   const statusForGate = (
     meta: GateMeta,
     index: number,
-  ): { status: string; message: string; issues: string[]; durationMs?: number } => {
+  ): { status: string; message: string; issues: string[]; durationMs?: number; privilegeProbe: PrivilegeProbeMeta | null } => {
     const gate = gateByKey.get(meta.key) ?? gateByKey.get(meta.key.replace(/^g\d+_/, ""));
     if (running) {
       return {
         status: "pending",
         message: "Queued — engine returns all gate results when the pass finishes",
         issues: [],
+        privilegeProbe: null,
       };
     }
     if (gate) {
       const revealed = index < revealCount;
       if (!revealed && revealCount < (preflight?.gates?.length ?? 0)) {
-        return { status: "pending", message: "Result ready — revealing…", issues: [] };
+        return { status: "pending", message: "Result ready — revealing…", issues: [], privilegeProbe: null };
+      }
+      const privilegeProbe = privilegeProbeFromDetails(gate.details);
+      const issues = gate.status === "block" ? issueTextsFromDetails(gate.details) : [];
+      // On pass, still surface probe method/status as non-blocking issues for G2 honesty.
+      if (gate.status === "pass" && privilegeProbe?.method && meta.key === "g2_destination") {
+        const soft: string[] = [`Probe: ${privilegeProbe.method}`];
+        if (privilegeProbe.status === "unavailable" && privilegeProbe.detail) {
+          soft.push(privilegeProbe.detail);
+        }
+        return {
+          status: gate.status,
+          message: gate.message,
+          issues: soft,
+          durationMs: gate.duration_ms,
+          privilegeProbe,
+        };
       }
       return {
         status: gate.status,
         message: gate.message,
-        issues: gate.status === "block" ? issueTextsFromDetails(gate.details) : [],
+        issues,
         durationMs: gate.duration_ms,
+        privilegeProbe,
       };
     }
-    return { status: "pending", message: "Awaiting validation run.", issues: [] };
+    return { status: "pending", message: "Awaiting validation run.", issues: [], privilegeProbe: null };
   };
 
   const runStrip = async () => {
     if (!onStripControlChars) return;
     setRemediating(true);
     pendingVerifyRef.current = true;
-    pushRemediation(
-      "Strip control characters",
-      "Applied strip_controls on text mappings and re-running validation (removes U+200B / format-control chars before Snowflake write).",
-      "Applied — waiting for re-validation",
-    );
+    const flagged = badDataIssues.map((i) => i.column).filter(Boolean);
     try {
-      await onStripControlChars();
+      const result = await onStripControlChars();
+      if (result) {
+        lastOpRef.current = result;
+        pushRemediation(
+          result.title,
+          result.columnsChanged.length
+            ? `Updated ${result.columnsChanged.length} mapping(s): ${result.columnsChanged.slice(0, 12).join(", ")}${result.columnsChanged.length > 12 ? "…" : ""}.`
+            : "No text mappings needed strip_controls (typed casts left unchanged).",
+          "Applied — waiting for re-validation",
+          result.steps,
+        );
+      } else {
+        pushRemediation(
+          "Strip control characters",
+          flagged.length
+            ? `Removing format-control chars from flagged columns: ${flagged.slice(0, 8).join(", ")}${flagged.length > 8 ? "…" : ""}.`
+            : "Applied strip_controls on text mappings and re-running validation.",
+          "Applied — waiting for re-validation",
+          [
+            "Set transform = strip_controls on non-typed mappings.",
+            "Re-run Validate with the updated mappings.",
+            "Jobs quarantine only if cells still fail at write after Strip.",
+          ],
+        );
+      }
       setBadDataOpen(false);
     } finally {
       setRemediating(false);
@@ -786,13 +924,37 @@ export function ValidateDashboard({
     if (!onQuarantineAndRerun) return;
     setRemediating(true);
     pendingVerifyRef.current = true;
-    pushRemediation(
-      "Quarantine + strip controls",
-      "Balanced validation + strip_controls. After Run, quarantined rows appear on the job (Inspect Quarantine) and can be exported as CSV — they are never silently dropped.",
-      "Applied — waiting for re-validation",
-    );
+    const flagged = badDataIssues.map((i) => i.column).filter(Boolean);
     try {
-      await onQuarantineAndRerun();
+      const result = await onQuarantineAndRerun();
+      if (result) {
+        lastOpRef.current = result;
+        pushRemediation(
+          result.title,
+          [
+            result.validationMode ? `Mode: ${result.validationMode}.` : null,
+            result.columnsChanged.length
+              ? `${result.columnsChanged.length} mapping(s) updated: ${result.columnsChanged.slice(0, 12).join(", ")}${result.columnsChanged.length > 12 ? "…" : ""}.`
+              : "No strip_controls changes (typed casts left as-is).",
+          ].filter(Boolean).join(" "),
+          "Applied — waiting for re-validation",
+          result.steps,
+        );
+      } else {
+        // Handler navigated to Map (type mismatch) — no strip applied.
+        pendingVerifyRef.current = false;
+        pushRemediation(
+          "Quarantine + strip controls",
+          flagged.length
+            ? `Could not auto-fix flagged columns (${flagged.slice(0, 6).join(", ")}). Remap types on Map instead.`
+            : "Blocked by a type/mapping issue — quarantine cannot change column types. Open Map to remap.",
+          "Redirected to Map",
+          [
+            "Quarantine/Strip only sanitize encoding (U+200B / control chars).",
+            "Wrong target types (e.g. text → NUMBER) must be remapped on Map, then Validate again.",
+          ],
+        );
+      }
       setBadDataOpen(false);
     } finally {
       setRemediating(false);
@@ -852,6 +1014,15 @@ export function ValidateDashboard({
         action.to_type ? `Type → ${action.to_type}` : null,
       ].filter(Boolean).join(" · ") || "AI suggested fix applied to mappings.",
       "Applied — re-running validation",
+      [
+        `Action: ${action.kind.replace(/_/g, " ")}.`,
+        action.column || action.target
+          ? `Scope: ${[action.column, action.target].filter(Boolean).join(" → ")}.`
+          : "Scope: matching Studio mappings.",
+        action.to_type ? `Set destination type to ${action.to_type}.` : null,
+        action.transform ? `Set transform to ${action.transform}.` : null,
+        "Re-validate after apply — Execute unlocks only when gates pass.",
+      ].filter(Boolean) as string[],
     );
     onApplyAction?.(action);
   };
@@ -989,6 +1160,30 @@ export function ValidateDashboard({
         <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
           <div className="df2-vd-chip-row">
+            {isPrivilegeBlock && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-check_connection"
+                disabled={remediating}
+                onClick={() => {
+                  window.location.hash = "#/connectors";
+                }}
+              >
+                <DtIcon name="shield" size={13} />
+                Grant write privilege
+              </button>
+            )}
+            {isPrivilegeBlock && onRunPreflight && (
+              <button
+                type="button"
+                className="df2-vd-chip kind-rerun"
+                disabled={remediating || running}
+                onClick={() => void onRunPreflight()}
+              >
+                <DtIcon name="activity" size={13} />
+                Re-validate after grant
+              </button>
+            )}
             {isConnectionBlock && (
               <button
                 type="button"
@@ -1101,7 +1296,9 @@ export function ValidateDashboard({
             )}
           </div>
           <p className="df2-vd-cell-preview-hint">
-            {isConnectionBlock
+            {isPrivilegeBlock
+              ? "Write privilege is denied (or CREATE is missing). Grant the privilege named in the G2 gate (INSERT/CREATE, ACL, IAM, index/write) on the destination — then Re-validate. Re-testing connector login alone will not fix a privilege deny."
+              : isConnectionBlock
               ? "Destination (or source) authentication failed. Open Connectors for this saved connection, click Test until it passes (connection string or username/password — one place only), then return here and Re-validate. Strip/Quarantine cannot fix credentials."
               : isTypeMismatchBlock
               ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
@@ -1126,6 +1323,13 @@ export function ValidateDashboard({
                 <div>
                   <strong>{entry.action}</strong>
                   <p>{entry.detail}</p>
+                  {entry.steps && entry.steps.length > 0 && (
+                    <ul className="df2-vd-remediation-steps">
+                      {entry.steps.map((step, si) => (
+                        <li key={si}>{step}</li>
+                      ))}
+                    </ul>
+                  )}
                   <em>{entry.outcome}</em>
                 </div>
               </li>
@@ -1412,7 +1616,16 @@ export function ValidateDashboard({
                 </div>
               )}
 
-              {explain && (
+              {explain && preflight?.passed && /validation blocked|integrity failed/i.test(explain.summary || "") && (
+                <div className="df2-vd-assist-body">
+                  <p className="df2-vd-assist-clean">
+                    Gates are green after remediation. The prior “blocked” explanation was from before Strip / Quarantine —
+                    click Re-analyze for an updated summary. ISO→DATETIME notes are bind normalizations (0 failed), not blockers.
+                  </p>
+                </div>
+              )}
+
+              {explain && !(preflight?.passed && /validation blocked|integrity failed/i.test(explain.summary || "")) && (
                 <div className="df2-vd-assist-body">
                   <div className="df2-vd-assist-meta">
                     <span className={`df2-vd-provider provider-${explain.assistant_provider === "deterministic" ? "det" : "llm"}`}>
@@ -1588,7 +1801,7 @@ export function ValidateDashboard({
         </div>
         <div className="df2-vd-rules-grid">
           {displayGates.map((meta, index) => {
-            const { status, message, issues, durationMs } = statusForGate(meta, index);
+            const { status, message, issues, durationMs, privilegeProbe } = statusForGate(meta, index);
             return (
               <article key={`${meta.key}-${index}`} className={`df2-vd-rule status-${status}`}>
                 <div className="df2-vd-rule-top">
@@ -1603,6 +1816,19 @@ export function ValidateDashboard({
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
                 <p className="df2-vd-rule-desc">{meta.rule}</p>
                 {status !== "pending" && message && <p className="df2-vd-rule-msg">{message}</p>}
+                {status !== "pending" && privilegeProbe && (privilegeProbe.method || privilegeProbe.status) && (
+                  <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
+                    {privilegeProbe.status && (
+                      <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>
+                    )}
+                    {privilegeProbe.method && (
+                      <span className="df2-vd-priv-method">{privilegeProbe.method}</span>
+                    )}
+                    {privilegeProbe.engine && (
+                      <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>
+                    )}
+                  </div>
+                )}
                 {status !== "pending" && durationMs != null && durationMs > 0 && (
                   <p className="df2-vd-rule-dur">Engine time {formatDuration(durationMs)}</p>
                 )}

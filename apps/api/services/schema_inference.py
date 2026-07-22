@@ -321,6 +321,7 @@ def safe_ddl_logical_type(
     *,
     field_name: str | None = None,
     source_type: str | None = None,
+    honor_explicit: bool = False,
 ) -> str:
     """For new-table DDL: never emit a tight type samples cannot all coerce to.
 
@@ -328,6 +329,11 @@ def safe_ddl_logical_type(
     is canonicalized to a logical type first. Without that, identity mappings that
     already projected ``ddl_type(dest, TIMESTAMP)`` were treated as unknown and
     wrongly widened to VARCHAR — CREATE TABLE then stored ISO strings as TEXT.
+
+    When ``honor_explicit`` is True (operator set ``target_type`` on the mapping),
+    never *tighten* TEXT/VARCHAR into DECIMAL/BOOLEAN/… — only widen if samples
+    cannot fit the chosen type. Explicit TEXT is how operators keep high-precision
+    money / opaque payloads lossless.
     """
     from services.type_system import normalize_logical_type
 
@@ -348,6 +354,9 @@ def safe_ddl_logical_type(
         "json": "JSON",
         "array": "JSON",
         "binary": "BINARY",
+        "interval": "INTERVAL",
+        "geography": "GEOGRAPHY",
+        "vector": "VECTOR",
     }
     canonical = _NORM_TO_LOGICAL.get(normalize_logical_type(proposed_u))
     if canonical:
@@ -357,6 +366,13 @@ def safe_ddl_logical_type(
         if proposed_u == "BOOLEAN" and source_type and str(source_type).upper() in {"VARCHAR", "TEXT", "STRING"}:
             return "VARCHAR"
         return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
+    # Explicit operator target_type: keep TEXT/VARCHAR as-is; only widen on misfit.
+    if honor_explicit:
+        if proposed_u in {"VARCHAR", "TEXT"}:
+            return proposed_u
+        if samples_fit_logical_type(samples, proposed_u, field_name=field_name):
+            return proposed_u if proposed_u in LOGICAL_TYPES else "VARCHAR"
+        return infer_type(samples, field_name=field_name)
     # Loose text proposals: upgrade when every sample coerces to a tighter type.
     # Without this, CREATE TABLE stays VARCHAR and writers skip type transforms
     # (e.g. "true"/"false"/"1" never become BOOLEAN).

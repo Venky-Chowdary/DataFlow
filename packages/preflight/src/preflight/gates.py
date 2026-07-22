@@ -50,13 +50,51 @@ def gate_g1_source(ctx: PreflightContext) -> GateResult:
 def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest = ctx.plan.destination
+    probe = dict(dest.privilege_probe or {}) if isinstance(getattr(dest, "privilege_probe", None), dict) else {}
+    details = {"privilege_probe": probe} if probe else {}
+
     if dest.error:
-        return _block(GateId.G2_DESTINATION, f"Destination error: {dest.error}", start)
+        return _block(GateId.G2_DESTINATION, f"Destination error: {dest.error}", start, details)
     if not dest.connected:
-        return _block(GateId.G2_DESTINATION, "Destination not reachable", start)
+        return _block(GateId.G2_DESTINATION, "Destination not reachable", start, details)
     if not dest.can_write:
-        return _block(GateId.G2_DESTINATION, "Insufficient write permissions", start)
-    return _pass(GateId.G2_DESTINATION, "Destination reachable with write access", start)
+        # Prefer probe.detail (engine-specific privilege) over generic SQL wording.
+        if probe.get("detail") and probe.get("status") == "denied":
+            return _block(GateId.G2_DESTINATION, str(probe["detail"]), start, details)
+        if not dest.table_exists and not dest.can_create_table:
+            return _block(
+                GateId.G2_DESTINATION,
+                "Insufficient privileges to CREATE the destination table "
+                "(connected, but schema CREATE / CREATE privilege denied)",
+                start,
+                details,
+            )
+        return _block(
+            GateId.G2_DESTINATION,
+            "Insufficient write permissions "
+            "(connected, but INSERT privilege denied on the destination table)",
+            start,
+            details,
+        )
+
+    create_note = ""
+    if not dest.table_exists and dest.can_create_table:
+        create_note = "; CREATE table allowed"
+    elif dest.table_exists:
+        create_note = "; target table exists"
+
+    method = str(probe.get("method") or "").strip()
+    status = str(probe.get("status") or "").strip()
+    if status == "unavailable" and probe.get("detail"):
+        msg = (
+            f"Destination reachable with write access{create_note} "
+            f"(privilege catalog unavailable — {probe['detail']})"
+        )
+    elif method:
+        msg = f"Destination writable via {method}{create_note}"
+    else:
+        msg = f"Destination reachable with write access{create_note}"
+    return _pass(GateId.G2_DESTINATION, msg, start, details)
 
 
 def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
@@ -73,11 +111,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         return _pass(GateId.G3_SCHEMA_CONTRACT, "Schemaless destination — no DDL type contract to validate", start)
 
     try:
-        from services.type_system import decimal_scale_would_truncate, is_lossy_coercion, normalize_logical_type
+        from services.type_system import (
+            decimal_scale_would_truncate,
+            is_lossy_coercion,
+            normalize_logical_type,
+            vector_dim_mismatch,
+            vector_dim_unknown_for_native,
+        )
     except ImportError:
         is_lossy_coercion = None
         decimal_scale_would_truncate = None
         normalize_logical_type = None
+        vector_dim_mismatch = None
+        vector_dim_unknown_for_native = None
 
     # Value-aware report (host-injected). When sample rows exist we can predict
     # the *real* write outcome per value instead of guessing from declared types.
@@ -114,6 +160,23 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         ):
             lossy = True
             pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [scale truncates]")
+        # Embedding width drift / unknown native VECTOR dims — never invent 1536.
+        if (
+            not lossy
+            and vector_dim_mismatch
+            and vector_dim_mismatch(source_col.inferred_type, target.inferred_type)
+        ):
+            lossy = True
+            pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [vector dim mismatch]")
+        if (
+            not lossy
+            and vector_dim_unknown_for_native
+            and normalize_logical_type
+            and vector_dim_unknown_for_native(source_col.inferred_type, dest_kind)
+            and normalize_logical_type(target.inferred_type) == "vector"
+        ):
+            lossy = True
+            pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [vector dim unknown]")
         if not lossy:
             continue
 

@@ -151,3 +151,39 @@ def test_normalize_cell_preserves_booleans_and_text():
     assert normalize_cell("true") == "1"
     assert normalize_cell("yes") == "1"
     assert normalize_cell("false") == "0"
+
+def test_normalize_cell_equates_offset_datetime_to_utc_instant():
+    """Wire may keep +05:30; checksum must match destination UTC datetime objects."""
+    from datetime import datetime, timezone, timedelta
+
+    from services.reconciliation import normalize_cell
+
+    wire = "2024-06-01T12:00:00+05:30"
+    readback = datetime(2024, 6, 1, 2, 30, tzinfo=timezone(timedelta(hours=-4)))
+    assert normalize_cell(wire) == "2024-06-01T06:30:00Z"
+    assert normalize_cell(wire) == normalize_cell(readback)
+    assert normalize_cell("2024-12-31T23:59:59Z") == normalize_cell(
+        datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    )
+
+
+def test_sample_compare_aligns_renamed_primary_key():
+    from services.reconciliation import sample_compare_rows
+
+    source = [{"rec_id": "1", "compensation": "9.50", "active": "true"}]
+    target = [{"id": 1, "pay_amount": "9.5", "is_active": True}]
+    mappings = [
+        {"source": "rec_id", "target": "id", "transform": "integer"},
+        {"source": "compensation", "target": "pay_amount", "transform": "decimal"},
+        {"source": "active", "target": "is_active", "transform": "boolean"},
+    ]
+    result = sample_compare_rows(
+        source,
+        target,
+        mappings,
+        target_columns=["id", "pay_amount", "is_active"],
+        sort_key="id",
+    )
+    assert result["compared"] > 0
+    assert result["passed"] is True
+    assert result["mismatches"] == []

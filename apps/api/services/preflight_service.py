@@ -494,6 +494,8 @@ def run_file_preflight(
     destination_column_types: dict[str, str] | None = None,
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
+    destination_can_write: bool | None = None,
+    privilege_probe: dict[str, Any] | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
     source_table: str = "",
@@ -568,6 +570,7 @@ def run_file_preflight(
         available_staging_bytes = _available_staging_bytes(est_bytes)
 
     dest_can_create = destination_can_create if destination_can_create is not None else destination_connected
+    dest_can_write = destination_can_write if destination_can_write is not None else destination_connected
     dest_table_exists = destination_table_exists if destination_table_exists is not None else False
 
     from services.ddl_compatibility import evaluate_ddl_compatibility
@@ -633,10 +636,11 @@ def run_file_preflight(
             db_type=dest_kind,
             connected=destination_connected,
             can_create_table=dest_can_create,
-            can_write=destination_connected,
+            can_write=dest_can_write,
             target_columns=dest_cols,
             table_exists=dest_table_exists,
             error=destination_error,
+            privilege_probe=privilege_probe,
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -730,6 +734,7 @@ def run_file_preflight(
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
         "coercion_report": ctx.coercion_report(),
+        "privilege_probe": privilege_probe or {},
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
@@ -932,6 +937,7 @@ def inspect_destination_for_preflight(
         ok, msg, cfg = probe_saved_connector(connector_id)
         db_type = (cfg.get("type") or dest_type or "").lower()
         out["db_type"] = db_type
+        out["_saved_cfg"] = cfg
         if not ok:
             out["connected"] = False
             out["message"] = msg or "Destination unreachable"
@@ -1004,6 +1010,112 @@ def inspect_destination_for_preflight(
         names = {o.get("name") for o in info.get("objects", []) if isinstance(o, dict)}
         out["table_exists"] = stream in names
     out["can_create_table"] = out["connected"]
+    out["can_write"] = out["connected"]
+
+    # Enterprise G2: measure write/create via privilege metadata (never CREATE/INSERT probe).
+    if out["connected"]:
+        try:
+            from services.destination_privilege_probe import (
+                probe_destination_privileges,
+                resolve_write_flags,
+            )
+
+            cfg: dict[str, Any] = {}
+            if out.get("_saved_cfg"):
+                cfg = dict(out.pop("_saved_cfg") or {})
+            elif connector_id:
+                from services.connector_probe import probe_saved_connector
+
+                _ok, _msg, cfg = probe_saved_connector(connector_id)
+            else:
+                cfg = {
+                    "host": getattr(endpoint, "host", "") or "",
+                    "port": int(getattr(endpoint, "port", 0) or 0),
+                    "database": getattr(endpoint, "database", "") or "",
+                    "username": getattr(endpoint, "username", "") or "",
+                    "password": getattr(endpoint, "password", "") or "",
+                    "connection_string": getattr(endpoint, "connection_string", "") or "",
+                    "schema": getattr(endpoint, "schema", "") or "",
+                    "type": out.get("db_type") or "",
+                    "warehouse": getattr(endpoint, "warehouse", "") or dest_warehouse or "",
+                    "role": getattr(endpoint, "auth_role", "") or dest_auth_role or "",
+                    "service_account": getattr(endpoint, "service_account", "")
+                    or dest_service_account
+                    or "",
+                    "ssl": bool(getattr(endpoint, "ssl", False)),
+                }
+
+            probe_schema = str(
+                dest_schema
+                or cfg.get("schema")
+                or cfg.get("dataset")
+                or getattr(endpoint, "schema", "")
+                or ""
+            )
+            probe = probe_destination_privileges(
+                out.get("db_type") or cfg.get("type") or "",
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 0),
+                database=str(cfg.get("database") or cfg.get("project_id") or ""),
+                schema=probe_schema,
+                table=str(
+                    dest_table
+                    or dest_collection
+                    or getattr(endpoint, "table", "")
+                    or getattr(endpoint, "collection", "")
+                    or ""
+                ),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                table_exists=bool(out.get("table_exists")),
+                ssl=bool(cfg.get("ssl") or False),
+                warehouse=str(
+                    cfg.get("warehouse") or dest_warehouse or getattr(endpoint, "warehouse", "") or ""
+                ),
+                role=str(
+                    cfg.get("role")
+                    or cfg.get("auth_role")
+                    or dest_auth_role
+                    or getattr(endpoint, "auth_role", "")
+                    or ""
+                ),
+                account=str(cfg.get("account") or cfg.get("host") or ""),
+                project_id=str(
+                    cfg.get("project_id") or cfg.get("database") or ""
+                ),
+                dataset=str(cfg.get("dataset") or probe_schema),
+                service_account=str(
+                    cfg.get("service_account")
+                    or dest_service_account
+                    or getattr(endpoint, "service_account", "")
+                    or ""
+                ),
+                location=str(cfg.get("location") or ""),
+                auth_source=str(
+                    cfg.get("auth_source")
+                    or dest_auth_source
+                    or getattr(endpoint, "auth_source", "")
+                    or ""
+                ),
+                api_key=str(cfg.get("api_key") or getattr(endpoint, "api_key", "") or ""),
+            )
+            can_write, can_create, priv_meta = resolve_write_flags(True, probe)
+            out["can_write"] = can_write
+            out["can_create_table"] = can_create
+            out["privilege_probe"] = priv_meta
+            if probe.status == "denied" and probe.detail:
+                # Surface explicit deny in message without wiping connectivity success.
+                out["message"] = probe.detail
+            elif probe.status == "unavailable" and probe.detail:
+                out["privilege_probe_warning"] = probe.detail
+        except Exception as exc:  # noqa: BLE001
+            out["privilege_probe"] = {
+                "status": "unavailable",
+                "detail": str(exc),
+                "can_write": None,
+                "can_create_table": None,
+            }
 
     # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
     resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()

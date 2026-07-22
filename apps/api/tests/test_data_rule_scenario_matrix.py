@@ -514,6 +514,65 @@ def build_scenarios() -> list[Scenario]:
                     )
                 )
 
+    # ── 21. Universal type / schema rules (all logicals × dest dialects) ─────
+    type_cases_pass = (
+        "bit1_boolean",
+        "bitn_binary",
+        "uint64_decimal",
+        "specialty_ddl",
+        "explicit_text_honor",
+        "tz_checksum_instant",
+        "json_key_order",
+        "vector_dim_propagate",
+        "vector_no_invented_dim",
+    )
+    for dest in all_dests:
+        fam = _family(dest)
+        for mode in MODES:
+            for case in type_cases_pass:
+                out.append(
+                    Scenario(
+                        id=f"types.{case}.{dest}.{mode}",
+                        rule_class="universal_types",
+                        dest=dest,
+                        dest_family=fam,
+                        mode=mode,
+                        expect="pass",
+                        note="Canonical type_system + checksum fidelity across schemas",
+                        runner="type_system",
+                    )
+                )
+            # Fixed-scale engines detect DECIMAL scale overflow; uncapped (PG/SQLite)
+            # and schemaless have no truncate contract → pass (N/A).
+            scale_capped = {
+                "mysql", "sqlserver", "oracle", "snowflake", "bigquery", "redshift",
+            }
+            out.append(
+                Scenario(
+                    id=f"types.decimal_scale_truncate.{dest}.{mode}",
+                    rule_class="universal_types",
+                    dest=dest,
+                    dest_family=fam,
+                    mode=mode,
+                    expect="block" if dest in scale_capped else "pass",
+                    note="DECIMAL scale overflow is fail-closed on fixed-scale engines",
+                    runner="type_system",
+                )
+            )
+            # VECTOR dim mismatch is a source↔target contract (independent of dest family).
+            out.append(
+                Scenario(
+                    id=f"types.vector_dim_mismatch.{dest}.{mode}",
+                    rule_class="universal_types",
+                    dest=dest,
+                    dest_family=fam,
+                    mode=mode,
+                    expect="block",
+                    note="VECTOR(768) → VECTOR(1536) must fail closed",
+                    runner="type_system",
+                )
+            )
+
     # Expand variants to push catalog ≥2000 without live I/O.
     expanded: list[Scenario] = list(out)
     variants = ("leading_space", "empty_sibling", "unicode_nfc", "trail_ws", "dup_row", "mixed_case", "null_token")
@@ -1026,6 +1085,154 @@ def _run_remediation(sc: Scenario) -> dict[str, Any]:
     }
 
 
+def _run_type_system(sc: Scenario) -> dict[str, Any]:
+    """Offline universal type / checksum rules — no live connectors."""
+    from datetime import datetime, timedelta, timezone
+
+    from connectors.writer_common import resolve_target_columns
+    from services.reconciliation import normalize_cell
+    from services.schema_inference import safe_ddl_logical_type
+    from services.type_system import (
+        LOGICAL_ARRAY,
+        LOGICAL_BINARY,
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_DECIMAL,
+        LOGICAL_GEOGRAPHY,
+        LOGICAL_INTEGER,
+        LOGICAL_INTERVAL,
+        LOGICAL_JSON,
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_TIME,
+        LOGICAL_UUID,
+        LOGICAL_VECTOR,
+        ddl_type,
+        decimal_scale_would_truncate,
+        normalize_logical_type,
+        parse_vector_dimension,
+        vector_dim_mismatch,
+    )
+
+    all_logicals = [
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_INTEGER,
+        LOGICAL_DECIMAL,
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_TIME,
+        LOGICAL_UUID,
+        LOGICAL_JSON,
+        LOGICAL_ARRAY,
+        LOGICAL_BINARY,
+        LOGICAL_INTERVAL,
+        LOGICAL_GEOGRAPHY,
+        LOGICAL_VECTOR,
+    ]
+
+    case = sc.id.split(".")[1]
+    detail: dict[str, Any] = {"case": case, "dest": sc.dest}
+
+    if case == "bit1_boolean":
+        ok = (
+            normalize_logical_type("BIT") == "boolean"
+            and normalize_logical_type("BIT(1)") == "boolean"
+            and normalize_logical_type("TINYINT(1)") == "boolean"
+        )
+    elif case == "bitn_binary":
+        ok = (
+            normalize_logical_type("BIT(8)") == "binary"
+            and normalize_logical_type("BIT VARYING") == "binary"
+            and normalize_logical_type("VARBIT") == "binary"
+        )
+    elif case == "uint64_decimal":
+        ok = normalize_logical_type("BIGINT UNSIGNED") == "decimal"
+        ok = ok and normalize_logical_type("UINT64") == "decimal"
+    elif case == "specialty_ddl":
+        missing: list[str] = []
+        for logical in all_logicals:
+            try:
+                ddl = ddl_type(sc.dest, logical)
+            except Exception as exc:  # noqa: BLE001
+                missing.append(f"{logical}:{exc}")
+                continue
+            if not ddl or not str(ddl).strip():
+                missing.append(str(logical))
+        ok = not missing
+        detail["missing"] = missing
+    elif case == "explicit_text_honor":
+        samples = ["12345678901234567890.12345", "0.00000000015"]
+        kept = safe_ddl_logical_type(
+            "TEXT",
+            samples,
+            field_name="compensation",
+            source_type="DECIMAL",
+            honor_explicit=True,
+        )
+        cols, types = resolve_target_columns(
+            [{"source": "compensation", "target": "pay_amount", "target_type": "TEXT"}],
+            {"compensation": "DECIMAL"},
+            preserve_case=True,
+            sample_values_by_source={"compensation": samples},
+            table_exists=False,
+        )
+        ok = kept == "TEXT" and types == ["TEXT"] and cols == ["pay_amount"]
+        detail["kept"] = kept
+        detail["types"] = types
+    elif case == "decimal_scale_truncate":
+        # Second arg is destination engine id. Scale 200 exceeds every fixed-scale cap.
+        would = decimal_scale_would_truncate("NUMBER(38,200)", sc.dest)
+        if sc.expect == "block":
+            ok = bool(would)
+        else:
+            # Uncapped / schemaless: gate must not invent a false truncate signal.
+            ok = not bool(would)
+        detail["would_truncate"] = would
+    elif case == "tz_checksum_instant":
+        wire = "2024-06-01T12:00:00+05:30"
+        readback = datetime(2024, 6, 1, 2, 30, tzinfo=timezone(timedelta(hours=-4)))
+        ok = normalize_cell(wire) == normalize_cell(readback) == "2024-06-01T06:30:00Z"
+        detail["wire"] = normalize_cell(wire)
+    elif case == "json_key_order":
+        a = '{"tier":"gold","tags":["a","b"]}'
+        b = {"tags": ["a", "b"], "tier": "gold"}
+        ok = normalize_cell(a) == normalize_cell(b)
+    elif case == "vector_dim_propagate":
+        # Parametric VECTOR dims must flow on native engines; sinks stay sinks.
+        if sc.dest == "postgresql":
+            ok = ddl_type(sc.dest, "VECTOR(1536)") == "vector(1536)"
+        elif sc.dest == "snowflake":
+            ok = ddl_type(sc.dest, "VECTOR(768)") == "VECTOR(FLOAT, 768)"
+        else:
+            # Non-parametric sinks must still accept VECTOR without inventing dims.
+            emitted = ddl_type(sc.dest, "VECTOR(768)")
+            ok = bool(emitted) and "1536" not in str(emitted)
+        ok = ok and parse_vector_dimension("VECTOR(FLOAT, 1024)") == 1024
+        detail["emitted"] = ddl_type(sc.dest, "VECTOR(768)")
+    elif case == "vector_no_invented_dim":
+        bare = ddl_type(sc.dest, "VECTOR")
+        ok = "1536" not in str(bare)
+        if sc.dest in {"postgresql", "snowflake"}:
+            # Native engines without a declared dim → lossless text, not VECTOR(…).
+            ok = ok and "(" not in str(bare)
+        detail["bare"] = bare
+    elif case == "vector_dim_mismatch":
+        mismatched = vector_dim_mismatch("VECTOR(768)", "VECTOR(FLOAT, 1536)")
+        aligned = not vector_dim_mismatch("VECTOR(768)", "VECTOR(FLOAT, 768)")
+        if sc.expect == "block":
+            ok = bool(mismatched) and aligned
+        else:
+            ok = not mismatched
+        detail["mismatched"] = mismatched
+    else:
+        return {"ok": False, "error": f"unknown type case {case}"}
+
+    return {"ok": ok, **detail}
+
+
 def _evaluate(sc: Scenario) -> dict[str, Any]:
     if sc.runner == "transform_unit":
         return _run_transform_unit(sc)
@@ -1039,6 +1246,8 @@ def _evaluate(sc: Scenario) -> dict[str, Any]:
         return _run_sync_identity(sc)
     if sc.runner == "remediation":
         return _run_remediation(sc)
+    if sc.runner == "type_system":
+        return _run_type_system(sc)
 
     if sc.runner == "write_audit":
         passed, issues, warnings = _run_write_audit(sc)
@@ -1128,6 +1337,14 @@ def test_scenario_catalog_scale_and_write_proof():
         "encoding.zwsp.snowflake.balanced",
         "ddl.schemaless_no_sql_rules.redis.strict",
         "preflight.schemaless_drift_noise.mongodb.strict",
+        "types.bit1_boolean.postgresql.strict",
+        "types.specialty_ddl.snowflake.strict",
+        "types.explicit_text_honor.mysql.strict",
+        "types.decimal_scale_truncate.mysql.strict",
+        "types.tz_checksum_instant.postgresql.strict",
+        "types.vector_dim_propagate.snowflake.strict",
+        "types.vector_no_invented_dim.postgresql.strict",
+        "types.vector_dim_mismatch.mysql.strict",
         "align.validate_write_pk.redis.strict",
         "coercion.varchar_to_number_clean.snowflake.strict",
         "coercion.varchar_to_number_dirty.postgresql.strict",

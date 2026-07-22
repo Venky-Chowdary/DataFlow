@@ -5300,6 +5300,22 @@ th.df2-type-string .df2-type-badge {
   color: #15803d;
   font-size: 11px;
 }
+.df2-vd-remediation-steps {
+  list-style: disc;
+  margin: 4px 0 6px;
+  padding-left: 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.df2-vd-remediation-log .df2-vd-remediation-steps li {
+  display: list-item;
+  grid-template-columns: none;
+  gap: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #475569;
+}
 
 /* Cell quarantine / coerce preview */
 .df2-vd-cell-preview {
@@ -5774,6 +5790,41 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-rule.status-block .df2-vd-rule-msg {
   color: #b91c1c;
   font-weight: 600;
+}
+.df2-vd-priv-probe {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+.df2-vd-priv-chip {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #475569;
+}
+.df2-vd-priv-probe.status-ok .df2-vd-priv-chip {
+  background: #dcfce7;
+  color: #166534;
+}
+.df2-vd-priv-probe.status-denied .df2-vd-priv-chip {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.df2-vd-priv-probe.status-unavailable .df2-vd-priv-chip {
+  background: #fef3c7;
+  color: #92400e;
+}
+.df2-vd-priv-method,
+.df2-vd-priv-engine {
+  font-size: 11px;
+  color: #64748b;
+  font-family: var(--df2-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 .df2-vd-rule-issues,
 .df2-vd-blocker-issues {

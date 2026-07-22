@@ -57,22 +57,27 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
     },
     "g2_destination": {
-        "title": "Destination connectivity",
+        "title": "Destination write access",
         "category": "hard",
         "why": (
-            "DataFlow can read the source but cannot reach the destination with the "
-            "same credentials Connectors → Test uses. Writes would fail."
+            "DataFlow can connect but cannot prove write privileges on the destination "
+            "(INSERT/CREATE, index/write, SET, produce, PutObject). Writes would fail or "
+            "silently skip. Privilege probes never mutate operator data."
         ),
         "fix": (
-            "Open Connectors, select this destination, click Test. If Test fails, "
-            "fix the connection string or username/password there (one place). "
-            "If Test passes but Validate still fails, re-select the connector in "
-            "Transfer Studio and Re-validate — do not re-enter host/port on Validate."
+            "If the gate message names a missing privilege (INSERT, CREATE, ACL, IAM), "
+            "grant that privilege to the connector user/role — do not only re-test connectivity. "
+            "Open Connectors → Test to confirm login still works, then Re-validate. "
+            "If the message says privilege catalog unavailable, the engine could not read "
+            "grants (common on managed Kafka/S3 Object Ownership); connectivity is used as "
+            "a soft fallback — confirm IAM/ACL manually before Execute."
         ),
         "examples": [
-            "Saved Redis/Mongo/Postgres connector Test OK → Validate must use that same saved connector id.",
-            "Connection string already includes user/password — leave host/port fields empty; do not duplicate secrets.",
-            "Snowflake warehouse suspended → resume the warehouse or choose an active one.",
+            "PostgreSQL: GRANT INSERT, UPDATE ON TABLE … TO role; GRANT CREATE ON SCHEMA …",
+            "Snowflake: GRANT INSERT ON TABLE … / GRANT CREATE TABLE ON SCHEMA … TO ROLE …",
+            "MongoDB: grant insert/update (or readWrite) on the target database/collection.",
+            "Redis ACL: +@write ~prefix:*  |  Elasticsearch: index/create_index privileges.",
+            "S3: s3:PutObject on the bucket/prefix (GetBucketAcl may be unavailable under BucketOwnerEnforced).",
         ],
     },
     "g3_schema_contract": {

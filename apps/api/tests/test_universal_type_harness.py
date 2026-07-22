@@ -168,7 +168,12 @@ def test_lossy_coercion_matrix_hard_rules():
 def test_specialty_native_ddl_and_lossless_sinks():
     assert ddl_type("postgresql", "INTERVAL") == "INTERVAL"
     assert ddl_type("postgresql", "GEOMETRY") == "GEOMETRY"
-    assert ddl_type("postgresql", "VECTOR") == "VECTOR"
+    # Bare VECTOR has no dimension — never invent 1536; sink to lossless text.
+    assert ddl_type("postgresql", "VECTOR") == "TEXT"
+    assert ddl_type("postgresql", "VECTOR(1536)") == "vector(1536)"
+    assert ddl_type("snowflake", "VECTOR(768)") == "VECTOR(FLOAT, 768)"
+    assert ddl_type("snowflake", "VECTOR") == "VARCHAR"
+    assert ddl_type("snowflake", "VECTOR(FLOAT, 1024)") == "VECTOR(FLOAT, 1024)"
     assert ddl_type("bigquery", "GEOGRAPHY") == "GEOGRAPHY"
     assert ddl_type("sqlserver", "GEOGRAPHY") == "GEOGRAPHY"
     # Engines without native interval keep lossless text — never invent a fake cast

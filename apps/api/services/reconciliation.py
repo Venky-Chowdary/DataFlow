@@ -1165,11 +1165,31 @@ def normalize_cell(value: Any) -> str:
     ):
         dtm = _parse_datetime(text)
         if dtm:
-            return dtm
+            # Wire may keep source offsets (instant + offset fidelity), but
+            # checksums compare instants: fold every parseable datetime to UTC Z
+            # so write-time ISO strings match destination datetime read-back.
+            return _checksum_datetime_utc_z(dtm)
         dt = _parse_date(text)
         if dt:
             return f"{dt}T00:00:00Z"
     return text
+
+
+def _checksum_datetime_utc_z(iso_text: str) -> str:
+    """Canonical UTC-Z form for checksum equality (offsets → same instant)."""
+    text = (iso_text or "").strip()
+    if not text:
+        return ""
+    try:
+        iso = text[:-1] + "+00:00" if text.endswith("Z") else text
+        obj = _datetime.fromisoformat(iso)
+        if obj.tzinfo is None:
+            obj = obj.replace(tzinfo=timezone.utc)
+        else:
+            obj = obj.astimezone(timezone.utc)
+        return obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return text
 
 
 def _canonicalize_number(value: Any) -> str | None:
@@ -1278,6 +1298,17 @@ def sample_compare_rows(
         return None
 
     target_dicts = [d for d in (_as_dict(t) for t in target_rows) if d is not None]
+
+    # sort_key is a *target* column (e.g. id). Source rows may still use the
+    # pre-map name (rec_id → id) — resolve via mappings so key alignment works.
+    source_sort_key = sort_key
+    if sort_key and mappings:
+        sk = sort_key.lower()
+        for m in mappings:
+            if str(m.get("target") or "").lower() == sk and m.get("source"):
+                source_sort_key = str(m["source"])
+                break
+
     target_by_key: dict[str, dict[str, Any]] = {}
     if sort_key:
         for d in target_dicts:
@@ -1295,13 +1326,18 @@ def sample_compare_rows(
             converted = raw
         return normalize_cell(converted)
 
-    def _row_key(rec: Any) -> Any:
+    def _row_key(rec: Any, *, source_side: bool = False) -> Any:
         if isinstance(rec, dict):
-            val = rec.get(sort_key) if sort_key else None
+            key = source_sort_key if source_side else sort_key
+            val = rec.get(key) if key else None
+            if val is None and source_side and sort_key and sort_key != source_sort_key:
+                val = rec.get(sort_key)
             return val or (rec.get(target_columns[0]) if target_columns else None)
         return rec
 
-    source_sorted = sorted(source_records, key=lambda r: _row_key(r) or 0)[:sample_size]
+    source_sorted = sorted(
+        source_records, key=lambda r: _row_key(r, source_side=True) or 0
+    )[:sample_size]
 
     mismatches: list[dict[str, str]] = []
     compared = 0
@@ -1309,7 +1345,9 @@ def sample_compare_rows(
 
     for idx, src in enumerate(source_sorted):
         if sort_key and target_by_key:
-            key = normalize_cell(src.get(sort_key))
+            key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
+            if not key and sort_key:
+                key = normalize_cell(src.get(sort_key))
             tgt = target_by_key.get(key) if key else None
         else:
             tgt = target_fallback[idx] if idx < len(target_fallback) else None

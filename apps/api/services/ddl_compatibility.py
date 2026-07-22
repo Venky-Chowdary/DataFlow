@@ -6,7 +6,12 @@ import re
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
-from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
+from services.type_system import (
+    ddl_type,
+    is_lossy_coercion,
+    normalize_logical_type,
+    vector_dim_mismatch,
+)
 
 _VARCHAR_WIDTH = re.compile(r"(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)", re.I)
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric|number)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", re.I)
@@ -218,6 +223,11 @@ def evaluate_ddl_compatibility(
                 "or remap onto an existing column"
             )
             continue
+
+        if not schemaless and tgt_type and vector_dim_mismatch(src_type, tgt_type):
+            issues.append(
+                f"Vector dimension mismatch: {src} ({src_type}) → {tgt} ({tgt_type})"
+            )
 
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
             # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are

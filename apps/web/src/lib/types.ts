@@ -507,6 +507,15 @@ export interface PreflightResult {
   run_id?: string;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[] } }[];
+  /** Top-level privilege probe from destination inspect (also on g2_destination.details). */
+  privilege_probe?: {
+    status?: string;
+    method?: string;
+    engine?: string;
+    detail?: string;
+    can_write?: boolean | null;
+    can_create_table?: boolean | null;
+  };
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;

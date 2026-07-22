@@ -189,6 +189,8 @@ async def run_preflight(body: PreflightRequest):
         destination_column_types=dest_column_types,
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
+        destination_can_write=dest_meta.get("can_write"),
+        privilege_probe=dest_meta.get("privilege_probe"),
         destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
         source_table="",
         destination_table=(body.dest_table or body.dest_collection or ""),

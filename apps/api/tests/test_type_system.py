@@ -42,3 +42,32 @@ def test_decimal_precision_propagated_not_truncated():
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True
     assert decimal_scale_would_truncate("NUMBER(38,18)", "mysql") is False
+
+
+def test_vector_dimension_propagated_never_invented():
+    """VECTOR dims flow like DECIMAL(p,s); bare VECTOR must not invent 1536."""
+    from services.type_system import (
+        normalize_logical_type,
+        parse_vector_dimension,
+        vector_dim_mismatch,
+        vector_dim_unknown_for_native,
+    )
+
+    assert normalize_logical_type("VECTOR(FLOAT, 768)") == "vector"
+    assert parse_vector_dimension("VECTOR(1536)") == 1536
+    assert parse_vector_dimension("VECTOR(FLOAT, 768)") == 768
+    assert parse_vector_dimension("HALFVEC(384)") == 384
+    assert parse_vector_dimension("VECTOR") is None
+
+    assert ddl_type("postgresql", "VECTOR(1536)") == "vector(1536)"
+    assert ddl_type("snowflake", "HALFVEC(768)") == "VECTOR(FLOAT, 768)"
+    # No invented default dimension on either native engine.
+    assert ddl_type("postgresql", "VECTOR") == "TEXT"
+    assert ddl_type("snowflake", "VECTOR") == "VARCHAR"
+    assert "1536" not in ddl_type("snowflake", "VECTOR")
+
+    assert vector_dim_mismatch("VECTOR(768)", "VECTOR(FLOAT, 1536)") is True
+    assert vector_dim_mismatch("VECTOR(768)", "VECTOR(FLOAT, 768)") is False
+    assert vector_dim_unknown_for_native("VECTOR", "postgresql") is True
+    assert vector_dim_unknown_for_native("VECTOR(768)", "postgresql") is False
+    assert vector_dim_unknown_for_native("VECTOR", "mysql") is False

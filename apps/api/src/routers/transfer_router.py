@@ -608,9 +608,13 @@ async def execute_transfer_json(
         mappings=request_obj.mappings,
     )
     if body.plan_id and str(body.plan_id).strip():
-        from services.transfer_plan_service import build_run_payload
+        from services.transfer_plan_service import merge_plan_into_run
         try:
-            payload = build_run_payload(str(body.plan_id).strip())
+            payload = merge_plan_into_run(
+                str(body.plan_id).strip(),
+                request_mappings=list(request_obj.mappings or []),
+                request_column_types=dict(request_obj.column_types or {}),
+            )
             if not request_obj.mappings:
                 request_obj.mappings = payload.get("mappings") or []
                 request_obj.column_types = payload.get("column_types") or {}
@@ -887,12 +891,27 @@ async def run_universal_transfer(
     plan_payload = None
 
     if plan_id and plan_id.strip():
-        from services.transfer_plan_service import build_run_payload
+        from services.transfer_plan_service import merge_plan_into_run
 
+        # Parse request mappings first so an empty draft plan can recover from Studio state.
+        form_mappings: list = []
+        if mappings_json.strip():
+            try:
+                import json as _json
+                parsed_early = _json.loads(mappings_json)
+                if isinstance(parsed_early, list):
+                    form_mappings = parsed_early
+                    request_obj.mappings = parsed_early
+            except Exception:
+                pass
         try:
-            payload = build_run_payload(plan_id.strip())
+            payload = merge_plan_into_run(
+                plan_id.strip(),
+                request_mappings=form_mappings,
+                request_column_types=dict(request_obj.column_types or {}),
+            )
             plan_payload = payload
-            if not mappings_json.strip():
+            if not form_mappings:
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
@@ -912,7 +931,7 @@ async def run_universal_transfer(
                     request_obj.stream_contracts = plan_contracts
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-    if mappings_json.strip():
+    if mappings_json.strip() and not (plan_id and plan_id.strip()):
         try:
             import json as _json
             parsed = _json.loads(mappings_json)
@@ -920,6 +939,9 @@ async def run_universal_transfer(
                 request_obj.mappings = parsed
         except Exception:
             pass
+    elif mappings_json.strip() and plan_id and plan_id.strip():
+        # Form mappings already applied above; keep explicit form wins.
+        pass
     if form_validation_mode:
         request_obj.validation_mode = form_validation_mode
     if form_sync_mode:

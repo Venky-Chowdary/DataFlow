@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import re
 from typing import Any
 
 from services.value_serializer import json_default
@@ -322,48 +323,10 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             tables = [r[0] for r in cur.fetchall()]
 
             columns: list[dict] = []
-            if table:
-                cur.execute(
-                    """
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s
-                    ORDER BY ordinal_position
-                    """,
-                    (schema, table),
-                )
-                for name, dtype, nullable in cur.fetchall():
-                    columns.append(
-                        {
-                            "name": name,
-                            "inferred_type": _pg_to_logical(dtype),
-                            "nullable": nullable == "YES",
-                            "data_type": dtype,
-                        }
-                    )
-                if table:
-                    columns = _refine_columns_by_samples(conn, columns, table, schema)
-            elif tables:
-                cur.execute(
-                    """
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s
-                    ORDER BY ordinal_position
-                    """,
-                    (schema, tables[0]),
-                )
-                for name, dtype, nullable in cur.fetchall():
-                    columns.append(
-                        {
-                            "name": name,
-                            "inferred_type": _pg_to_logical(dtype),
-                            "nullable": nullable == "YES",
-                            "data_type": dtype,
-                        }
-                    )
-                if tables:
-                    columns = _refine_columns_by_samples(conn, columns, tables[0], schema)
+            target = table or (tables[0] if tables else None)
+            if target:
+                columns = _pg_fetch_columns(cur, schema, target)
+                columns = _refine_columns_by_samples(conn, columns, target, schema)
         conn.close()
         return {"ok": True, "tables": tables, "columns": columns, "schema": schema}
     except ImportError:
@@ -712,18 +675,71 @@ def _bq_to_logical(dtype: str) -> str:
     return "TEXT"
 
 
-def _pg_to_logical(dtype: str) -> str:
-    """Map PostgreSQL information_schema.data_type values to DataFlow logical types.
+_PG_COLUMN_SQL = """
+SELECT a.attname AS column_name,
+       format_type(a.atttypid, a.atttypmod) AS data_type,
+       CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = %s
+  AND c.relname = %s
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY a.attnum
+"""
 
-    Uses a precise lookup table so that `interval`, `point`, `geometry`, etc.
-    are not incorrectly matched as integers by substring search.
+
+def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
+    """Read column metadata via ``format_type`` so typmod (vector dim, decimal p,s) survives."""
+    cur.execute(_PG_COLUMN_SQL, (schema, table))
+    columns: list[dict] = []
+    for name, dtype, nullable in cur.fetchall():
+        columns.append(
+            {
+                "name": name,
+                "inferred_type": _pg_to_logical(str(dtype or "")),
+                "nullable": str(nullable).upper() == "YES",
+                "data_type": dtype,
+            }
+        )
+    return columns
+
+
+def _pg_to_logical(dtype: str) -> str:
+    """Map PostgreSQL ``format_type`` / data_type strings to DataFlow logical carriers.
+
+    Parametric types keep their dimensions in the type string (DECIMAL(p,s),
+    VECTOR(n)) so ``ddl_type`` can propagate them — same contract as DECIMAL.
+    INTERVAL / GEOGRAPHY / VECTOR are first-class; they must not collapse to TEXT.
     """
-    d = dtype.lower().strip()
+    raw = (dtype or "").strip()
+    d = raw.lower()
+
+    # DECIMAL / NUMERIC with typmod — preserve (p,s) for transfer fidelity.
+    m = re.match(r"^(numeric|decimal)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
+    if m:
+        if m.group(3) is not None:
+            return f"DECIMAL({m.group(2)},{m.group(3)})"
+        return f"DECIMAL({m.group(2)})"
+
+    # pgvector / halfvec — preserve dimension.
+    m = re.match(r"^(vector|halfvec|sparsevec)\s*\(\s*(\d+)\s*\)$", d)
+    if m:
+        return f"VECTOR({m.group(2)})"
+    if d in {"vector", "halfvec", "sparsevec"}:
+        return "VECTOR"
+
+    if d == "interval" or d.startswith("interval "):
+        return "INTERVAL"
+    if d in {"geometry", "geography"} or d.startswith("geometry(") or d.startswith("geography("):
+        return "GEOGRAPHY"
+
     if d in ("integer", "smallint", "bigint", "serial", "bigserial",
              "smallserial", "oid", "xid", "cid", "tid"):
         return "INTEGER"
     if d in ("numeric", "decimal", "real", "double precision", "double",
-             "float", "float4", "float8"):
+             "float", "float4", "float8", "money"):
         return "DECIMAL"
     if d == "boolean":
         return "BOOLEAN"
@@ -731,31 +747,49 @@ def _pg_to_logical(dtype: str) -> str:
         return "DATE"
     if "timestamp" in d:
         return "TIMESTAMP"
-    if d == "time" or "time with" in d or "time without" in d:
+    if d == "time" or d.startswith("time with") or d.startswith("time without"):
         return "TIME"
     if d == "uuid":
         return "UUID"
     if d == "bytea":
         return "BINARY"
-    if d == "json" or d == "jsonb" or "array" in d:
+    if d in {"json", "jsonb"} or d.endswith("[]") or " array" in d:
         return "JSON"
+    if d.startswith("bit(") or d == "bit" or d.startswith("bit varying") or d == "varbit":
+        # BIT(1) → boolean via type_system; BIT(n>1) → binary.
+        return raw.upper() if "(" in d else "BIT"
     if d in ("xml", "tsvector", "tsquery", "text", "character varying",
-             "varchar", "character", "char", "name", "interval", "point",
-             "line", "lseg", "box", "path", "polygon", "circle", "geometry",
-             "geography", "inet", "cidr", "macaddr", "macaddr8", "money",
-             "bit", "bit varying", "varbit", "hstore", "pg_lsn",
+             "varchar", "character", "char", "name", "point",
+             "line", "lseg", "box", "path", "polygon", "circle",
+             "inet", "cidr", "macaddr", "macaddr8", "hstore", "pg_lsn",
              "txid_snapshot", "pg_snapshot", "user-defined"):
+        return "TEXT"
+    # character varying(n) / character(n)
+    if d.startswith("character varying") or d.startswith("varchar") or d.startswith("character("):
         return "TEXT"
     return "TEXT"
 
 
 def _mysql_to_logical(dtype: str) -> str:
-    d = (dtype or "").lower()
+    """Map MySQL ``column_type`` to logical carriers, preserving DECIMAL(p,s)."""
+    raw = (dtype or "").strip()
+    d = raw.lower()
     if "tinyint(1)" in d:
         return "BOOLEAN"
+    # Preserve DECIMAL(p,s) / NUMERIC(p,s) from column_type for ddl_type propagation.
+    m = re.match(r"^(decimal|numeric)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)", d)
+    if m:
+        if m.group(3) is not None:
+            return f"DECIMAL({m.group(2)},{m.group(3)})"
+        return f"DECIMAL({m.group(2)})"
+    if d.startswith("decimal") or d.startswith("numeric"):
+        return "DECIMAL"
+    if any(tok in d for tok in ("geometry", "point", "polygon", "linestring", "multipoint",
+                                  "multipolygon", "multilinestring", "geomcollection")):
+        return "GEOGRAPHY"
     if "int" in d:
         return "INTEGER"
-    if "numeric" in d or "decimal" in d or "double" in d or "float" in d or "real" in d:
+    if "double" in d or "float" in d or "real" in d:
         return "DECIMAL"
     if "bool" in d:
         return "BOOLEAN"
@@ -763,7 +797,7 @@ def _mysql_to_logical(dtype: str) -> str:
         return "DATE"
     if "timestamp" in d or "datetime" in d:
         return "TIMESTAMP"
-    if "time" in d:
+    if d.startswith("time"):
         return "TIME"
     if "json" in d:
         return "JSON"
@@ -775,9 +809,25 @@ def _mysql_to_logical(dtype: str) -> str:
 
 
 def _sf_to_logical(dtype: str) -> str:
-    d = dtype.upper()
-    if "NUMBER" in d or "INT" in d:
-        return "INTEGER" if ",0" in d else "DECIMAL"
+    """Map Snowflake data types, preserving VECTOR(FLOAT, n) and NUMBER(p,s)."""
+    raw = (dtype or "").strip()
+    d = raw.upper()
+    if "VECTOR" in d:
+        return raw  # keep VECTOR(FLOAT, n) carrier
+    if "GEOGRAPHY" in d or "GEOMETRY" in d:
+        return "GEOGRAPHY"
+    if "INTERVAL" in d:
+        return "INTERVAL"
+    # NUMBER(38,0) → INTEGER; other NUMBER/DECIMAL keep DECIMAL(p,s) when present.
+    m = re.match(r"^(NUMBER|DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
+    if m:
+        if m.group(3) is not None and int(m.group(3)) == 0:
+            return "INTEGER"
+        if m.group(3) is not None:
+            return f"DECIMAL({m.group(2)},{m.group(3)})"
+        return f"DECIMAL({m.group(2)})"
+    if "NUMBER" in d or "DECIMAL" in d or "NUMERIC" in d or "INT" in d:
+        return "INTEGER" if ",0" in d.replace(" ", "") else "DECIMAL"
     if "BOOLEAN" in d:
         return "BOOLEAN"
     if d == "DATE":

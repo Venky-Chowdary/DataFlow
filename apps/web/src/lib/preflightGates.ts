@@ -14,7 +14,7 @@ export interface GateCatalogEntry {
 
 export const GATE_CATALOG: GateCatalogEntry[] = [
   { id: "g1_source", label: "Source readable", icon: "database", rule: "Source endpoint connects and rows can be read." },
-  { id: "g2_destination", label: "Destination reachable", icon: "server", rule: "Destination accepts a connection and is writable." },
+  { id: "g2_destination", label: "Destination write access", icon: "server", rule: "Destination is reachable and privilege metadata proves write/create (or soft-falls back when the catalog is unavailable)." },
   {
     id: "g3_schema_contract",
     label: "Schema contract",

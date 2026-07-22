@@ -521,11 +521,16 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
 
 # Native specialty DDL where the engine supports the type; otherwise lossless text.
 # Applied after base maps so every destination has interval/geography/vector keys.
+#
+# VECTOR entries here are *non-parametric sinks* (ARRAY/TEXT/SUPER). Engines that
+# require an explicit dimension (PostgreSQL pgvector, Snowflake VECTOR) are
+# resolved in ``_vector_ddl_for_dest`` — never invent a default like 1536.
 _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
     "postgresql": {
         LOGICAL_INTERVAL: "INTERVAL",
         LOGICAL_GEOGRAPHY: "GEOMETRY",
-        LOGICAL_VECTOR: "VECTOR",
+        # Dimensional form emitted by _vector_ddl_for_dest; bare VECTOR → TEXT.
+        LOGICAL_VECTOR: "TEXT",
     },
     "mysql": {
         LOGICAL_INTERVAL: "TEXT",
@@ -545,7 +550,8 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
     "snowflake": {
         LOGICAL_INTERVAL: "VARCHAR",
         LOGICAL_GEOGRAPHY: "GEOGRAPHY",
-        LOGICAL_VECTOR: "VECTOR(FLOAT, 1536)",
+        # Dimensional form emitted by _vector_ddl_for_dest; bare VECTOR → VARCHAR.
+        LOGICAL_VECTOR: "VARCHAR",
     },
     "bigquery": {
         LOGICAL_INTERVAL: "STRING",
@@ -694,6 +700,73 @@ def parse_numeric_precision_scale(inferred: str | None) -> tuple[int | None, int
     return precision, scale
 
 
+# Engines that emit a true vector DDL type only when dimension is known.
+_VECTOR_PARAM_TEMPLATES: Final[dict[str, str]] = {
+    "postgresql": "vector({n})",
+    "snowflake": "VECTOR(FLOAT, {n})",
+}
+
+# Platform upper bounds for declared vector dimensions (fail closed → text).
+_VECTOR_DIM_CAPS: Final[dict[str, int]] = {
+    "postgresql": 16000,  # pgvector practical upper bound
+    "snowflake": 4096,
+}
+
+
+def parse_vector_dimension(inferred: str | None) -> int | None:
+    """Extract embedding dimension from VECTOR / HALFVEC type strings.
+
+    Accepted carriers (same spirit as DECIMAL(p,s) — params live in the type string):
+
+    * ``VECTOR(1536)`` / ``vector(1536)`` / ``HALFVEC(768)``
+    * ``VECTOR(FLOAT, 1536)`` / ``VECTOR(INT, 768)`` (Snowflake-style)
+    """
+    raw = (inferred or "").strip()
+    if not raw:
+        return None
+    # VECTOR(FLOAT, n) / VECTOR(INT, n)
+    m = re.match(
+        r"^(?:half)?vec(?:tor)?\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*(\d+)\s*\)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m:
+        dim = int(m.group(1))
+        return dim if dim > 0 else None
+    # VECTOR(n) / HALFVEC(n) / SPARSEVEC(n)
+    m = re.match(
+        r"^(?:half|sparse)?vec(?:tor)?\s*\(\s*(\d+)\s*\)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m:
+        dim = int(m.group(1))
+        return dim if dim > 0 else None
+    return None
+
+
+def _vector_ddl_for_dest(db: str, inferred: str | None) -> str:
+    """Emit destination VECTOR DDL with source dimension when the engine needs it.
+
+    Never invents a default dimension (historically Snowflake used 1536). When the
+    dimension is unknown or exceeds the platform cap, fall back to the destination
+    lossless text sink — CREATE TABLE must not invent a wrong embedding width.
+    """
+    fallback = DDL_TYPES.get(db, {}).get(LOGICAL_VECTOR, DEFAULT_DDL.get(db, "TEXT"))
+    template = _VECTOR_PARAM_TEMPLATES.get(db)
+    if not template:
+        return fallback
+
+    dim = parse_vector_dimension(inferred)
+    if dim is None:
+        return DEFAULT_DDL.get(db, "TEXT")
+
+    cap = _VECTOR_DIM_CAPS.get(db, 65535)
+    if dim > cap:
+        return DEFAULT_DDL.get(db, "TEXT")
+    return template.format(n=dim)
+
+
 def normalize_logical_type(inferred: str | None) -> str:
     """Return a canonical logical type for parser, DB, and warehouse types."""
     raw = (inferred or "").strip()
@@ -716,6 +789,16 @@ def normalize_logical_type(inferred: str | None) -> str:
         # MySQL TINYINT(1) is the conventional boolean display width.
         if base == "tinyint" and p1 == 1:
             return LOGICAL_BOOLEAN
+        if base in {"vector", "halfvec", "sparsevec"}:
+            return LOGICAL_VECTOR
+
+    # Snowflake-style VECTOR(FLOAT, n) — first param is element type, not digits.
+    if re.match(
+        r"^(?:half|sparse)?vec(?:tor)?\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*\d+\s*\)$",
+        raw,
+        re.IGNORECASE,
+    ):
+        return LOGICAL_VECTOR
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
     key = key.replace("_", " ")
@@ -760,6 +843,24 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     return template.format(p=out_p, s=out_s)
 
 
+def _normalize_dest_db(db_type: str | None) -> str:
+    """Canonical destination engine id for DDL / cap lookups."""
+    db = (db_type or "").strip().lower()
+    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
+        return "databricks"
+    if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
+        return "iceberg"
+    if db in {"opensearch", "amazon_elasticsearch", "elastic_cloud"}:
+        return "elasticsearch"
+    if db in {"amazon_dynamodb"}:
+        return "dynamodb"
+    if db in {"redis-kv", "redis_kv"}:
+        return "redis"
+    if db in {"ch", "clickhouse_cloud"}:
+        return "clickhouse"
+    return db
+
+
 def ddl_type(db_type: str, inferred: str | None) -> str:
     """Map a logical source type to a destination-native DDL type.
 
@@ -767,34 +868,24 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     scale are propagated within destination caps. Scale that exceeds the
     destination platform falls back to a lossless text type — never silent
     truncation of fractional digits.
+
+    For VECTOR sources with ``VECTOR(n)`` / ``VECTOR(FLOAT, n)``, dimension is
+    propagated on engines that require it (PostgreSQL pgvector, Snowflake).
+    Missing or oversized dimensions fall back to lossless text — never invent
+    a default width such as 1536.
     """
-    db = (db_type or "").strip().lower()
-    # Alias lakehouse / Delta SKUs onto Databricks Spark SQL DDL.
-    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
-        db = "databricks"
-    if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
-        db = "iceberg"
-    if db in {"opensearch", "amazon_elasticsearch", "elastic_cloud"}:
-        db = "elasticsearch"
-    if db in {"amazon_dynamodb"}:
-        db = "dynamodb"
-    if db in {"redis-kv", "redis_kv"}:
-        db = "redis"
-    if db in {"ch", "clickhouse_cloud"}:
-        db = "clickhouse"
+    db = _normalize_dest_db(db_type)
     logical = normalize_logical_type(inferred)
     if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:
         return _decimal_ddl_for_dest(db, inferred)
+    if logical == LOGICAL_VECTOR:
+        return _vector_ddl_for_dest(db, inferred)
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
 
 
 def decimal_scale_would_truncate(source_type: str | None, dest_db_type: str | None) -> bool:
     """True when mapping source DECIMAL(p,s) onto dest would truncate scale."""
-    db = (dest_db_type or "").strip().lower()
-    if db in {"spark", "delta", "delta_lake", "databricks_sql", "unity_catalog"}:
-        db = "databricks"
-    if db in {"apache_iceberg", "iceberg_rest", "nessie"}:
-        db = "iceberg"
+    db = _normalize_dest_db(dest_db_type)
     if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
         return False
     if db not in _DECIMAL_CAPS:
@@ -803,6 +894,39 @@ def decimal_scale_would_truncate(source_type: str | None, dest_db_type: str | No
     if scale is None:
         return False
     return scale > _DECIMAL_CAPS[db][1]
+
+
+def vector_dim_mismatch(source_type: str | None, target_type: str | None) -> bool:
+    """True when both sides declare a vector dimension and they differ.
+
+    Used by G3 / DDL compatibility to fail closed on embedding-width drift
+    (e.g. ``VECTOR(768)`` → ``VECTOR(FLOAT, 1536)``). Unknown dims on either
+    side return False — that case is handled by ``ddl_type`` falling back to
+    text rather than inventing a width.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_VECTOR:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_VECTOR:
+        return False
+    src_dim = parse_vector_dimension(source_type)
+    tgt_dim = parse_vector_dimension(target_type)
+    if src_dim is None or tgt_dim is None:
+        return False
+    return src_dim != tgt_dim
+
+
+def vector_dim_unknown_for_native(source_type: str | None, dest_db_type: str | None) -> bool:
+    """True when dest requires a VECTOR dim but the source type does not declare one.
+
+    Maps that would CREATE a native vector column without a known width are
+    unsafe — operators must supply ``VECTOR(n)`` (or accept the text sink).
+    """
+    db = _normalize_dest_db(dest_db_type)
+    if db not in _VECTOR_PARAM_TEMPLATES:
+        return False
+    if normalize_logical_type(source_type) != LOGICAL_VECTOR:
+        return False
+    return parse_vector_dimension(source_type) is None
 
 
 def is_structural_type(inferred: str | None) -> bool:

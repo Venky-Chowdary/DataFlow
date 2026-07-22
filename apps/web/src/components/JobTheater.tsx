@@ -1116,6 +1116,12 @@ export function JobTheaterView({
           <div>
             <strong>Success</strong>
             <p>{job.message || `${processed.toLocaleString()} rows transferred successfully`}</p>
+            {droppedRows === 0 && coercedNullRows === 0 && (
+              <p className="df2-theater-v3-alert-note">
+                No write-time quarantine — every sampled cell fit after Validate remediations
+                (e.g. Strip controls). Inspect Quarantine only lists rows rejected during Execute.
+              </p>
+            )}
           </div>
         </div>
       )}

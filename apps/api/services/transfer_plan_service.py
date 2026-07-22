@@ -215,6 +215,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_column_types=live_target_schema,
         destination_table_exists=dest_meta.get("table_exists"),
         destination_can_create=dest_meta.get("can_create_table"),
+        destination_can_write=dest_meta.get("can_write"),
+        privilege_probe=dest_meta.get("privilege_probe"),
         destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
@@ -267,7 +269,14 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         raise ValueError(f"Plan '{plan_id}' not found")
     rev = plan.active_revision()
     if not rev:
-        raise ValueError("Plan has no mappings")
+        raise ValueError(
+            "Plan has no mapping revision — open Map / Validate so mappings are "
+            "synced before Execute (empty draft plans cannot run)"
+        )
+    if not rev.mappings:
+        raise ValueError(
+            "Plan mapping revision is empty — re-run Map or Validate to sync column mappings"
+        )
     if plan.status not in {"approved", "preflight_passed", "mapped"}:
         raise ValueError(f"Plan status '{plan.status}' is not runnable — approve after preflight")
 
@@ -295,6 +304,65 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         "destination": plan.destination,
         "column_types": plan.source_schema,
         "policies": plan.policies,
+    }
+
+
+def merge_plan_into_run(
+    plan_id: str,
+    *,
+    request_mappings: list[dict[str, Any]] | None = None,
+    request_column_types: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load plan policies/mappings for Execute without failing a Studio race.
+
+    Map can fire-and-forget create an empty draft plan; Validate may then pass via
+    direct preflight while ``persistedPlanId`` still points at that empty draft.
+    When the request already carries mappings, recover by syncing them onto the
+    plan instead of hard-failing with "Plan has no mappings".
+    """
+    plan = get_plan(plan_id)
+    if not plan:
+        raise ValueError(f"Plan '{plan_id}' not found")
+
+    rev = plan.active_revision()
+    if rev and rev.mappings:
+        return build_run_payload(plan_id)
+
+    maps = list(request_mappings or [])
+    if not maps:
+        raise ValueError(
+            "Plan has no mapping revision — open Map / Validate so mappings are "
+            "synced before Execute (empty draft plans cannot run)"
+        )
+
+    # Persist Studio mappings onto the empty draft. sync → status "mapped" (runnable).
+    synced = sync_plan_mappings(plan_id, maps)
+    if synced and synced.active_revision() and synced.active_revision().mappings:
+        return build_run_payload(plan_id)
+
+    from services.mapping_proof import mapping_proof_or_build
+
+    dest = plan.destination or {}
+    src = plan.source or {}
+    proof = mapping_proof_or_build(
+        maps,
+        target_columns=plan.target_columns,
+        destination_db_type=str(dest.get("format") or dest.get("type") or ""),
+        source_kind=str(src.get("kind") or ""),
+        dest_kind=str(dest.get("kind") or ""),
+        sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
+    )
+    return {
+        "plan_id": plan_id,
+        "mapping_version": 0,
+        "mapping_hash": "",
+        "mappings": maps,
+        "mapping_proof": proof,
+        "source": plan.source,
+        "destination": plan.destination,
+        "column_types": request_column_types or plan.source_schema,
+        "policies": plan.policies,
+        "recovered_from_request_mappings": True,
     }
 
 

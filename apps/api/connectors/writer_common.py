@@ -570,6 +570,7 @@ def resolve_target_columns(
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
         if tgt not in target_cols:
             target_cols.append(tgt)
+            explicit_target = bool(m.get("target_type"))
             proposed = (
                 m.get("target_type")
                 or (dest_types or {}).get(tgt)
@@ -583,6 +584,7 @@ def resolve_target_columns(
                     samples.get(src),
                     field_name=src,
                     source_type=str(src_type) if src_type else None,
+                    honor_explicit=explicit_target,
                 )
             target_types.append(str(proposed))
     return target_cols, target_types

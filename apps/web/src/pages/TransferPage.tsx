@@ -19,7 +19,7 @@ import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdv
 import { Button } from "../components/ui/Button";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
-import { ValidateDashboard } from "../components/transfer/ValidateDashboard";
+import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
 import {
@@ -63,7 +63,7 @@ import {
   defaultSchemaForDriver,
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
-import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType } from "../lib/connectorTypes";
+import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
   SCHEMA_POLICIES,
   SYNC_MODES,
@@ -565,6 +565,8 @@ export function TransferPage({
         const dbs = (caps.destination_databases as string[] | undefined) ?? [];
         const exports = (caps.destination_file_formats as string[] | undefined) ?? [];
         const drivers = (caps.transfer_live_drivers as string[] | undefined) ?? [];
+        // Reinforce catalog SSOT (app boot also loads; Transfer page refreshes lists).
+        setTransferLiveDrivers(drivers.length ? drivers : [...sources, ...dbs]);
         if (sources.length || drivers.length) {
           setLiveSourceTypes([...new Set([...sources, ...drivers])]);
         }
@@ -1069,12 +1071,10 @@ export function TransferPage({
             destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
             sync_mode: syncMode,
           });
-          void ensurePersistedPlan(undefined, {
-            source_columns: sourceCols,
-            source_schema: sourceSchema,
-            target_columns: targetCols,
-            target_schema: targetSchema,
-          });
+          // Do NOT create an empty draft plan here. Fire-and-forget create races
+          // Validate (which may sync a good plan) and leaves Execute pointing at a
+          // draft with zero revisions → "Plan has no mappings". Plan persistence
+          // happens on Validate via ensurePersistedPlan + syncTransferPlanMappings.
         }
         const mapped = editableFromPipelineMappings(
           result.mappings ?? [],
@@ -2406,7 +2406,7 @@ export function TransferPage({
     normalize_unicode: "strip_controls",
   };
 
-  const stripControlCharsAndRerun = async (modeOverride?: ValidationMode) => {
+  const stripControlCharsAndRerun = async (modeOverride?: ValidationMode): Promise<RemediationOpResult> => {
     const typed = new Set<MappingTransform>([
       "cast_number",
       "cast_boolean",
@@ -2414,24 +2414,40 @@ export function TransferPage({
       "parse_json",
       "hash_pii",
     ]);
-    let applied = 0;
+    const changed: string[] = [];
     const next = columnMappings.map((m) => {
       if (m.transform && typed.has(m.transform)) {
         return { ...m, approved: true };
       }
-      applied += 1;
+      const label = m.target ? `${m.source} → ${m.target}` : m.source;
+      changed.push(label);
       return { ...m, transform: "strip_controls" as MappingTransform, approved: true };
     });
+    const mode = modeOverride ?? validationMode;
     setColumnMappings(next);
     toast({
       title: "Strip controls applied",
-      message: `Applied strip_controls to ${applied} text mapping${applied === 1 ? "" : "s"}. Re-running validation…`,
+      message: `Applied strip_controls to ${changed.length} text mapping${changed.length === 1 ? "" : "s"}. Re-running validation…`,
       tone: "success",
     });
-    await executePreflight(next, modeOverride ?? validationMode);
+    await executePreflight(next, mode);
+    return {
+      kind: "strip_controls",
+      title: "Strip control characters",
+      columnsChanged: changed,
+      validationMode: mode,
+      steps: [
+        `Applied strip_controls to ${changed.length} mapping(s); left typed casts (number/date/boolean/json/hash) unchanged.`,
+        changed.length
+          ? `Columns: ${changed.slice(0, 20).join(", ")}${changed.length > 20 ? ` (+${changed.length - 20} more)` : ""}.`
+          : "No text mappings required strip_controls.",
+        `Re-ran Validate in ${mode} mode.`,
+        "At Execute, cleaned values are written. Jobs quarantine only lists cells that still fail after Strip.",
+      ],
+    };
   };
 
-  const quarantineAndRerun = async () => {
+  const quarantineAndRerun = async (): Promise<RemediationOpResult | void> => {
     // Wrong column maps (status → boolean date flag) cannot be fixed by
     // quarantine/strip — send the operator back to Map with a clear reason.
     const dry = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
@@ -2459,10 +2475,24 @@ export function TransferPage({
     setValidationMode("balanced");
     toast({
       title: "Quarantine + strip controls",
-      message: "Applying strip_controls and balanced validation so format-control characters are sanitized before run…",
+      message:
+        "Applying strip_controls and balanced validation so format-control characters are sanitized before run. "
+        + "Jobs will only list quarantined rows if cells still fail at write — a clean Strip often means 0 quarantined.",
       tone: "info",
     });
-    await stripControlCharsAndRerun("balanced");
+    const stripResult = await stripControlCharsAndRerun("balanced");
+    return {
+      kind: "quarantine_strip",
+      title: "Quarantine + strip controls",
+      columnsChanged: stripResult.columnsChanged,
+      columnsFlagged: stripResult.columnsFlagged,
+      validationMode: "balanced",
+      steps: [
+        "Switched validation mode to balanced (quarantine-friendly posture).",
+        ...stripResult.steps,
+        "If Strip clears encoding issues, Jobs correctly shows 0 quarantined after a successful run.",
+      ],
+    };
   };
 
   /** Map an AI `suggested_action` onto the real Studio controls. */
@@ -2999,6 +3029,26 @@ export function TransferPage({
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
+      // Belt-and-suspenders: sync Studio mappings onto the plan before Execute so
+      // an empty draft (Map race) cannot block a green Validate with "no mappings".
+      let runPlanId = persistedPlanId ?? undefined;
+      if (runPlanId && transferMappings?.length) {
+        try {
+          await syncTransferPlanMappings(runPlanId, transferMappings);
+        } catch {
+          // If sync fails, still send mappings_json; backend merge_plan_into_run recovers.
+        }
+      } else if (!runPlanId && transferMappings?.length) {
+        const created = await ensurePersistedPlan();
+        if (created) {
+          try {
+            await syncTransferPlanMappings(created, transferMappings);
+            runPlanId = created;
+          } catch {
+            runPlanId = created;
+          }
+        }
+      }
       setRunStartupProgress(24);
       setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
@@ -3094,7 +3144,7 @@ export function TransferPage({
               ? { allow_append_only: true }
               : undefined,
         streamContracts,
-        planId: persistedPlanId ?? undefined,
+        planId: runPlanId,
         priorityColumn: priorityColumn || undefined,
         priorityDirection,
         limit: rowLimit > 0 ? rowLimit : undefined,
