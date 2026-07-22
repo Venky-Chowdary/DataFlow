@@ -633,40 +633,68 @@ def _logical_type_from_sa(col_type: Any) -> str:
 
 
 def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
-    """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine."""
-    t = (logical or "string").lower().strip()
+    """Map a DataFlow logical type to a SQLAlchemy type that compiles for the engine.
+
+    Accepts carriers like ``DECIMAL(12,4)`` / ``NUMERIC(38,10)`` — bare
+    ``t == "decimal"`` matching used to fall through to TEXT and strip scale
+    (SQL Server / Oracle / DuckDB greenfield fidelity bug).
+    """
+    from services.type_system import (
+        LOGICAL_ARRAY,
+        LOGICAL_BINARY,
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        LOGICAL_JSON,
+        LOGICAL_TIME,
+        LOGICAL_UUID,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    raw = (logical or "string").strip()
+    t = normalize_logical_type(raw)
 
     def _maybe_nullable(sa_type: Any) -> Any:
         if dialect_name == "clickhouse" and ChNullable is not None:
             return ChNullable(sa_type)
         return sa_type
 
-    if t == "integer":
+    if t == LOGICAL_INTEGER:
         return _maybe_nullable(sa.BigInteger())
-    if t == "decimal":
+    if t == LOGICAL_DECIMAL:
+        precision, scale = parse_numeric_precision_scale(raw)
         if db_type == "risingwave":
             return sa.Numeric()
         # QuestDB lacks true DECIMAL — DOUBLE is the platform limit (documented).
         if db_type == "questdb":
             return sa.Double()
-        # DuckDB has DECIMAL(p,s) — never coerce through float64 (silent precision loss).
+        # Preserve source DECIMAL(p,s) when present — never invent TEXT.
+        if precision is not None:
+            out_scale = 0 if scale is None else int(scale)
+            if db_type == "presto":
+                return sa.DECIMAL(int(precision), out_scale)
+            return _maybe_nullable(sa.Numeric(int(precision), out_scale))
+        # Bare DECIMAL — engine defaults (never coerce through float64).
         if db_type == "duckdb":
             return sa.Numeric(38, 15)
         if db_type == "presto":
             return sa.DECIMAL(38, 15)
-        # PostgreSQL-wire engines (Citus, Materialize, CrateDB, etc.) store
-        # arbitrary-scale NUMERIC without padding, so avoid fixed scale.
+        # PostgreSQL-wire engines store arbitrary-scale NUMERIC without padding.
         if dialect_name == "postgresql":
             return sa.Numeric()
         return _maybe_nullable(sa.Numeric(38, 15))
-    if t == "float":
+    if t == LOGICAL_FLOAT:
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
         return _maybe_nullable(sa.Double())
-    if t == "boolean":
+    if t == LOGICAL_BOOLEAN:
         return _maybe_nullable(sa.Boolean())
-    if t == "date":
+    if t == LOGICAL_DATE:
         return _maybe_nullable(sa.Date())
-    if t in ("datetime", "timestamp"):
+    if t == LOGICAL_DATETIME:
         if db_type == "questdb":
             return sa.DateTime()
         # Preserve timezone metadata when the target dialect supports it.
@@ -676,14 +704,18 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return TrinoTimestamp(precision=3, timezone=True)
         if db_type == "presto":
             return sa.TIMESTAMP()
+        # SQL Server DATETIME2 is timezone-naive; Oracle TIMESTAMP WITH TIME ZONE
+        # keeps aware UTC (matches historical generic_sql bind contract).
+        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql"}:
+            return _maybe_nullable(sa.DateTime())
         return sa.DateTime(timezone=True)
-    if t == "time":
+    if t == LOGICAL_TIME:
         # ClickHouse, QuestDB and Presto (PyHive) do not bind Python time objects
         # reliably; store as string in these engines.
         if dialect_name == "clickhouse" or db_type in ("clickhouse", "questdb", "presto"):
             return _maybe_nullable(sa.String())
         return _maybe_nullable(sa.Time())
-    if t == "uuid":
+    if t == LOGICAL_UUID:
         if db_type == "questdb":
             return sa.Text()
         if db_type == "risingwave":
@@ -695,13 +727,13 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         if dialect_name == "postgresql":
             return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
-    if t in ("json", "array"):
+    if t in (LOGICAL_JSON, LOGICAL_ARRAY):
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto", "duckdb"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
         return sa.JSON()
-    if t == "binary":
+    if t == LOGICAL_BINARY:
         if db_type in ("clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         return sa.LargeBinary()
@@ -725,9 +757,18 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
     if value is None:
         return None
 
-    t = (logical or "string").lower().strip()
+    from services.type_system import (
+        LOGICAL_ARRAY,
+        LOGICAL_BINARY,
+        LOGICAL_DECIMAL,
+        LOGICAL_INTEGER,
+        LOGICAL_JSON,
+        normalize_logical_type,
+    )
 
-    if t in ("json", "array"):
+    t = normalize_logical_type(logical)
+
+    if t in (LOGICAL_JSON, LOGICAL_ARRAY):
         if isinstance(value, str):
             try:
                 parsed = json.loads(value)
@@ -745,7 +786,7 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
             return value
         return value
 
-    if t == "binary":
+    if t == LOGICAL_BINARY:
         if isinstance(value, bytes):
             if _is_string_type(sa_type):
                 try:
@@ -801,28 +842,29 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return tm
             return value
 
-        # DATETIME / TIMESTAMP
+        # DATETIME / TIMESTAMP — SQL Server DATETIME2 is naive UTC wall clock;
+        # Oracle / PG keep aware UTC.
+        use_naive = (
+            db_type in {"questdb", "sqlserver", "mssql"}
+            or dialect_name == "mssql"
+        )
         if isinstance(coerced, datetime):
-            if db_type == "questdb":
-                return _naive_utc(coerced)
-            return _ensure_utc(coerced)
+            return _naive_utc(coerced) if use_naive else _ensure_utc(coerced)
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
             dt = datetime.combine(coerced, time())
-            if db_type == "questdb":
-                return _naive_utc(dt)
-            return _ensure_utc(dt)
+            return _naive_utc(dt) if use_naive else _ensure_utc(dt)
         return value
 
-    if t == "decimal":
+    if t == LOGICAL_DECIMAL:
         if isinstance(value, Decimal):
             return value
         if isinstance(value, (int, float)):
-            return Decimal(value)
+            return Decimal(str(value))
         if isinstance(value, str):
             return Decimal(value)
         return value
 
-    if t == "integer":
+    if t == LOGICAL_INTEGER:
         if isinstance(value, int):
             return value
         if isinstance(value, (float, Decimal)):
@@ -834,7 +876,7 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return value
         return value
 
-    # integer, decimal, boolean, uuid, string/text are already bound-friendly
+    # boolean, uuid, string/text are already bound-friendly
     return value
 
 

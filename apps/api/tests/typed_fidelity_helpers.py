@@ -124,6 +124,105 @@ def dynamo_endpoint(table: str) -> EndpointConfig:
     )
 
 
+def sqlite_endpoint(db_path: str, table: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="sqlite",
+        database=str(db_path),
+        table=table,
+    )
+
+
+def redis_endpoint(prefix: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="redis",
+        host="localhost",
+        port=6379,
+        database="0",
+        table=prefix,
+    )
+
+
+def sqlserver_endpoint(table: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="sqlserver",
+        host="localhost",
+        port=1433,
+        database="dataflow",
+        username="sa",
+        password="DataFlow_CDC_2022!",
+        schema="dbo",
+        table=table,
+    )
+
+
+def redshift_endpoint(table: str, *, port: int = 5432) -> EndpointConfig:
+    """Redshift writer path against local PG stand-in (honest label in asserts)."""
+    return EndpointConfig(
+        kind="database",
+        format="redshift",
+        host="localhost",
+        port=port,
+        database="dataflow",
+        username="dataflow",
+        password="dataflow",
+        schema="public",
+        table=table,
+    )
+
+
+def bigquery_endpoint(table: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="bigquery",
+        host="localhost",
+        port=9050,
+        connection_string="http://localhost:9050",
+        database="dataflow-test",
+        schema="dataflow",
+        table=table,
+    )
+
+
+def oracle_endpoint(table: str) -> EndpointConfig:
+    import os
+
+    return EndpointConfig(
+        kind="database",
+        format="oracle",
+        host=os.getenv("DATAFLOW_ORACLE_HOST", "localhost"),
+        port=int(os.getenv("DATAFLOW_ORACLE_PORT", "1521")),
+        database=os.getenv("DATAFLOW_ORACLE_SERVICE")
+        or os.getenv("DATAFLOW_ORACLE_DATABASE", "ORCLPDB1"),
+        username=os.getenv("DATAFLOW_ORACLE_USER", "dataflow"),
+        password=os.getenv("DATAFLOW_ORACLE_PASSWORD", "dataflow"),
+        schema=os.getenv("DATAFLOW_ORACLE_SCHEMA")
+        or os.getenv("DATAFLOW_ORACLE_USER", "dataflow"),
+        table=table,
+    )
+
+
+def duckdb_endpoint(db_path: str, table: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="duckdb",
+        database=str(db_path),
+        table=table,
+    )
+
+
+def require_oracle_env() -> None:
+    import os
+
+    import pytest
+
+    if os.getenv("DATAFLOW_ORACLE_ENABLE", "").strip() not in {"1", "true", "yes"}:
+        pytest.skip("Oracle typed e2e requires DATAFLOW_ORACLE_ENABLE=1")
+    require_ports(int(os.getenv("DATAFLOW_ORACLE_PORT", "1521")), host=os.getenv("DATAFLOW_ORACLE_HOST", "localhost"))
+
+
 def seed_postgresql_typed(table: str) -> None:
     """Native PG types: NUMERIC vs DOUBLE PRECISION, NULL vs '', timestamptz, bool."""
     import psycopg2
@@ -331,6 +430,87 @@ def drop_pg_table(table: str) -> None:
     conn.close()
 
 
+def drop_mysql_table(table: str) -> None:
+    import pymysql
+
+    conn = pymysql.connect(
+        host="localhost",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    with conn.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+    conn.close()
+
+
+def read_mysql_row(table: str, row_id: int = 1) -> dict[str, Any]:
+    import pymysql
+
+    cols = ", ".join(f"`{c}`" for c in FIDELITY_COLUMNS)
+    conn = pymysql.connect(
+        host="localhost",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {cols} FROM `{table}` WHERE `id` = %s",
+                (row_id,),
+            )
+            row = cur.fetchone()
+            assert row is not None, f"no row id={row_id} in {table}"
+            out = dict(zip(FIDELITY_COLUMNS, row))
+            cur.execute(
+                """
+                SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table,),
+            )
+            out["_mysql_types"] = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    finally:
+        conn.close()
+    return out
+
+
+def assert_mysql_typed_fidelity(table: str) -> None:
+    """Native MySQL types + values — catches ISO-Z DATETIME 1292 class bugs."""
+    row = read_mysql_row(table, 1)
+    types = row.pop("_mysql_types")
+
+    assert row["id"] == 1
+    assert isinstance(row["amt_dec"], Decimal), type(row["amt_dec"])
+    assert row["amt_dec"] == Decimal("10.5000"), row["amt_dec"]
+    assert abs(float(row["amt_float"]) - 1500.0) < 1e-9
+    assert row["note_null"] is None, f"NULL became {row['note_null']!r}"
+    assert row["note_empty"] == "", f"empty string became {row['note_empty']!r}"
+
+    ts = row["ts_utc"]
+    assert isinstance(ts, datetime), ts
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    assert ts == datetime(2024, 12, 31, 23, 59, 59), ts
+
+    assert row["flag"] in (True, 1)
+
+    dec_meta = types.get("amt_dec") or ("", "")
+    assert "decimal" in (dec_meta[0] or "").lower(), types.get("amt_dec")
+    float_meta = types.get("amt_float") or ("", "")
+    assert (float_meta[0] or "").lower() in {"double", "float", "real"}, types.get(
+        "amt_float"
+    )
+    ts_meta = types.get("ts_utc") or ("", "")
+    assert (ts_meta[0] or "").lower() in {"datetime", "timestamp"}, types.get("ts_utc")
+
+
 def fidelity_stream_contract(name: str = "fidelity") -> list[dict]:
     return [
         {
@@ -496,3 +676,249 @@ def assert_lossy_float_decimal_surfaced(result: TransferResult) -> None:
         f"got plan keys={list(plan.keys())} error={result.error!r} "
         f"gates={[g.get('id') for g in (plan.get('gates') or [])][:8]}"
     )
+
+
+def assert_redis_typed_fidelity(prefix: str) -> None:
+    """JSON wire honesty — Redis has no SQL DDL; prove NULL≠'' and decimal fidelity."""
+    import json
+
+    import redis
+
+    client = redis.Redis(host="localhost", port=6379, db=0, socket_timeout=5, decode_responses=True)
+    try:
+        keys = list(client.scan_iter(match=f"{prefix}:*", count=200))
+        assert len(keys) >= 2, f"expected redis keys under {prefix}:*, got {keys}"
+        doc = None
+        for key in keys:
+            candidate = json.loads(client.get(key) or "null")
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("id") in (1, "1"):
+                doc = candidate
+                break
+        assert doc is not None, f"no doc with id=1 under {prefix}:* keys={keys}"
+    finally:
+        client.close()
+
+    assert doc.get("note_null") is None, f"NULL became {doc.get('note_null')!r}"
+    assert doc.get("note_empty") == "", f"empty string became {doc.get('note_empty')!r}"
+    # Decimal must not collapse through float64 into something like 10.499999…
+    dec = doc.get("amt_dec")
+    assert Decimal(str(dec)) == Decimal("10.5000") or Decimal(str(dec)) == Decimal("10.5"), dec
+    assert abs(float(doc.get("amt_float")) - 1500.0) < 1e-6
+    ts = str(doc.get("ts_utc") or "")
+    assert "2024-12-31" in ts, ts
+    assert doc.get("flag") in (True, "true", 1, "1")
+
+
+def assert_redshift_standin_typed_fidelity(table: str) -> None:
+    """PG stand-in with redshift DDL branch — TIMESTAMP not TIMESTAMPTZ."""
+    assert_pg_typed_fidelity(table, expect_float_ddl=True, expect_decimal_scale=True)
+    row = read_pg_row(table, 1)
+    types = row.pop("_pg_types")
+    ts_ddl = (types.get("ts_utc") or "").lower()
+    # Redshift DDL map uses TIMESTAMP (no TZ). Stand-in must not invent timestamptz.
+    assert "timestamp" in ts_ddl, types.get("ts_utc")
+    assert "timestamptz" not in ts_ddl and "with time zone" not in ts_ddl, (
+        f"redshift stand-in used PG timestamptz: {types.get('ts_utc')}"
+    )
+
+
+def drop_sqlserver_table(table: str) -> None:
+    import pymssql
+
+    conn = pymssql.connect(
+        server="localhost",
+        port=1433,
+        user="sa",
+        password="DataFlow_CDC_2022!",
+        database="dataflow",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"IF OBJECT_ID('dbo.[{table}]', 'U') IS NOT NULL DROP TABLE dbo.[{table}]")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
+    """Prefer pymssql; fall back to pyodbc."""
+    cols = ", ".join(f"[{c}]" for c in FIDELITY_COLUMNS)
+    try:
+        import pymssql
+
+        conn = pymssql.connect(
+            server="localhost",
+            port=1433,
+            user="sa",
+            password="DataFlow_CDC_2022!",
+            database="dataflow",
+        )
+        try:
+            with conn.cursor(as_dict=True) as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM dbo.[{table}] WHERE [id] = %s",
+                    (row_id,),
+                )
+                row = cur.fetchone()
+                assert row is not None, f"no row id={row_id} in {table}"
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = %s
+                    """,
+                    (table,),
+                )
+                meta = {r["COLUMN_NAME"]: r for r in cur.fetchall()}
+        finally:
+            conn.close()
+        out = {c: row[c] for c in FIDELITY_COLUMNS}
+        out["_mssql_types"] = meta
+        return out
+    except ImportError:
+        import pyodbc
+
+        conn = pyodbc.connect(
+            "DRIVER={ODBC Driver 17 for SQL Server};"
+            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=DataFlow_CDC_2022!;"
+            "TrustServerCertificate=yes;"
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT {cols} FROM dbo.[{table}] WHERE [id] = ?", row_id)
+            values = cur.fetchone()
+            assert values is not None
+            out = dict(zip(FIDELITY_COLUMNS, values))
+            cur.execute(
+                """
+                SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = ?
+                """,
+                table,
+            )
+            meta = {r[0]: {"COLUMN_NAME": r[0], "DATA_TYPE": r[1],
+                           "NUMERIC_PRECISION": r[2], "NUMERIC_SCALE": r[3]}
+                    for r in cur.fetchall()}
+            out["_mssql_types"] = meta
+            return out
+        finally:
+            conn.close()
+
+
+def assert_sqlserver_typed_fidelity(table: str) -> None:
+    row = read_sqlserver_row(table, 1)
+    types = row.pop("_mssql_types")
+
+    assert row["id"] == 1
+    assert Decimal(str(row["amt_dec"])) == Decimal("10.5000"), row["amt_dec"]
+    assert abs(float(row["amt_float"]) - 1500.0) < 1e-6
+    assert row["note_null"] is None, f"NULL became {row['note_null']!r}"
+    assert row["note_empty"] == "", f"empty string became {row['note_empty']!r}"
+    ts = row["ts_utc"]
+    assert isinstance(ts, datetime), ts
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    assert ts.replace(microsecond=0) == datetime(2024, 12, 31, 23, 59, 59)
+    assert row["flag"] in (True, 1)
+
+    dec = types.get("amt_dec") or {}
+    assert (dec.get("DATA_TYPE") or "").lower() in {"decimal", "numeric"}, dec
+    # Prefer preserved scale 4 when carrier DECIMAL(12,4) survived CREATE.
+    scale = dec.get("NUMERIC_SCALE")
+    if scale is not None:
+        assert int(scale) == 4, f"DECIMAL scale stripped: {dec}"
+    float_t = (types.get("amt_float") or {}).get("DATA_TYPE", "").lower()
+    assert float_t in {"float", "real"}, types.get("amt_float")
+    ts_t = (types.get("ts_utc") or {}).get("DATA_TYPE", "").lower()
+    assert ts_t in {"datetime2", "datetime", "datetimeoffset"}, types.get("ts_utc")
+
+
+def assert_duckdb_typed_fidelity(db_path: str, table: str) -> None:
+    import duckdb
+
+    con = duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            f'SELECT id, amt_dec, amt_float, note_null, note_empty, ts_utc, flag '
+            f'FROM "{table}" WHERE id = 1'
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1
+        assert Decimal(str(row[1])) == Decimal("10.5000"), row[1]
+        assert abs(float(row[2]) - 1500.0) < 1e-9
+        assert row[3] is None, f"NULL became {row[3]!r}"
+        assert row[4] == ""
+        meta = con.execute(
+            f"SELECT column_name, data_type FROM information_schema.columns "
+            f"WHERE table_name = '{table}'"
+        ).fetchall()
+        types = {r[0]: r[1] for r in meta}
+    finally:
+        con.close()
+    dec_t = (types.get("amt_dec") or "").upper()
+    assert "DECIMAL" in dec_t or "NUMERIC" in dec_t, types.get("amt_dec")
+    # Prefer (12,4) when carrier preserved.
+    if "(" in dec_t:
+        assert "12,4" in dec_t.replace(" ", "") or "12, 4" in dec_t, types.get("amt_dec")
+    float_t = (types.get("amt_float") or "").upper()
+    assert any(x in float_t for x in ("DOUBLE", "FLOAT", "REAL")), types.get("amt_float")
+
+
+def assert_bigquery_typed_fidelity(table: str) -> None:
+    from google.cloud import bigquery
+    from google.auth.credentials import AnonymousCredentials
+
+    client = bigquery.Client(
+        project="dataflow-test",
+        credentials=AnonymousCredentials(),
+        client_options={"api_endpoint": "http://localhost:9050"},
+    )
+    full = f"dataflow-test.dataflow.{table}"
+    tbl = client.get_table(full)
+    field_types = {f.name: f.field_type for f in tbl.schema}
+    rows = list(client.list_rows(tbl, max_results=10))
+    row = next(r for r in rows if int(r.get("id")) == 1)
+
+    assert Decimal(str(row.get("amt_dec"))) == Decimal("10.5000") or Decimal(
+        str(row.get("amt_dec"))
+    ) == Decimal("10.5"), row.get("amt_dec")
+    assert abs(float(row.get("amt_float")) - 1500.0) < 1e-6
+    assert row.get("note_null") is None, row.get("note_null")
+    assert row.get("note_empty") == ""
+    assert field_types.get("amt_float") in {"FLOAT64", "FLOAT"}, field_types
+    assert field_types.get("amt_dec") in {"BIGNUMERIC", "NUMERIC"}, field_types
+    # Prefer fixed-point for DECIMAL source.
+    assert field_types.get("amt_dec") != "FLOAT64", (
+        f"DECIMAL collapsed to FLOAT64: {field_types}"
+    )
+    assert field_types.get("ts_utc") in {"TIMESTAMP", "DATETIME"}, field_types
+
+
+def require_sqlserver_drivers() -> None:
+    import pytest
+
+    try:
+        import pymssql  # noqa: F401
+        return
+    except ImportError:
+        pass
+    try:
+        import pyodbc  # noqa: F401
+        return
+    except ImportError:
+        pytest.skip("Neither pymssql nor pyodbc installed for SQL Server typed e2e")
+
+
+def cleanup_redis_prefix(prefix: str) -> None:
+    import redis
+
+    client = redis.Redis(host="localhost", port=6379, db=0, socket_timeout=5)
+    try:
+        keys = list(client.scan_iter(match=f"{prefix}:*", count=100))
+        if keys:
+            client.delete(*keys)
+    finally:
+        client.close()
