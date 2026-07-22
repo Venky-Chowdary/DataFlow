@@ -53,6 +53,47 @@ def mysql_type(inferred: str) -> str:
     return ddl_type("mysql", inferred)
 
 
+def _fetch_mysql_column_types(cursor: Any, table_name: str) -> dict[str, str]:
+    """Return physical ``COLUMN_TYPE`` for an existing table (empty if missing)."""
+    try:
+        cursor.execute(
+            "SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+            (table_name,),
+        )
+        return {str(name): str(ctype or "") for name, ctype in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
+def _apply_physical_temporal_types(
+    target_cols: list[str],
+    target_types: list[str],
+    physical: dict[str, str],
+) -> list[str]:
+    """Prefer live MySQL column types for temporal coercion.
+
+    Mapping/schema may label a TIMESTAMP source as TEXT after cell serialize, while
+    the destination column is DATETIME — without this, ISO ``…T…Z`` literals hit
+    MySQL 1292 Incorrect datetime value.
+    """
+    from connectors.sql_temporal import is_temporal_ddl, sql_base_type
+
+    if not physical:
+        return target_types
+    out = list(target_types)
+    for i, col in enumerate(target_cols):
+        phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
+        if not phys:
+            continue
+        base = sql_base_type(phys)
+        if is_temporal_ddl(base) or base in {
+            "DATETIME", "TIMESTAMP", "DATE", "TIME", "YEAR",
+        }:
+            out[i] = phys
+    return out
+
+
 def _to_mysql_value(value: Any, source_type: str) -> Any:
     """Normalize transform-engine values to forms pymysql/MySQL can bind."""
     if value is None:
@@ -243,10 +284,6 @@ def write_mapped_rows(
     else:
         insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"
 
-    converted_rows = [
-        tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-        for row in mapped_rows
-    ]
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
     job_id = str(_kwargs.get("job_id") or "").strip()
     write_batch_key = str(_kwargs.get("write_batch_key") or "").strip() or build_write_batch_key(
@@ -255,6 +292,7 @@ def write_mapped_rows(
     )
     use_ledger = bool(job_id)
     conn = None
+    converted_rows: list[tuple] = []
 
     def _reconnect():
         nonlocal conn, cur
@@ -267,6 +305,7 @@ def write_mapped_rows(
         cur = conn.cursor()
 
     def _run_setup(cursor) -> None:
+        nonlocal target_types, converted_rows
         if use_ledger:
             ensure_mysql_write_ledger(cursor)
         if create_table:
@@ -295,6 +334,14 @@ def write_mapped_rows(
                     cursor.execute(
                         f"ALTER TABLE {table_q} ADD COLUMN {quote_sql_identifier(col, '`')} {typ}"
                     )
+
+        # Bind using physical types so ISO Z never hits a DATETIME column as TEXT.
+        physical = _fetch_mysql_column_types(cursor, table_name)
+        target_types = _apply_physical_temporal_types(target_cols, target_types, physical)
+        converted_rows = [
+            tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
+            for row in mapped_rows
+        ]
         conn.commit()
 
     try:
@@ -323,6 +370,13 @@ def write_mapped_rows(
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
+
+            # Defensive: if setup skipped conversion somehow, coerce with mapping types.
+            if not converted_rows and mapped_rows:
+                converted_rows = [
+                    tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
+                    for row in mapped_rows
+                ]
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size

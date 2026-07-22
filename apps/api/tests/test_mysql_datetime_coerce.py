@@ -29,6 +29,30 @@ def test_iso_z_datetime_coerced_for_datetime6():
     assert got == datetime(2024, 8, 9, 1, 58, 42)
 
 
+def test_physical_datetime_overrides_text_mapping_type():
+    """Existing MySQL DATETIME column must win over a TEXT mapping label."""
+    from connectors.mysql_writer import _apply_physical_temporal_types, _to_mysql_value
+
+    types = _apply_physical_temporal_types(
+        ["last_updated"],
+        ["TEXT"],
+        {"last_updated": "datetime"},
+    )
+    assert types[0].lower().startswith("datetime")
+    got = _to_mysql_value("2026-07-04T06:57:37Z", types[0])
+    assert got == datetime(2026, 7, 4, 6, 57, 37)
+
+
+def test_humanize_mysql_1292_datetime_has_mapped_remediation():
+    from services.error_handling import humanize_transfer_failure
+
+    msg = "(1292, \"Incorrect datetime value: '2026-07-04T06:57:37Z' for column 'last_updated' at row 1\")"
+    explained = humanize_transfer_failure(msg)
+    assert explained["code"] == "mysql_incorrect_datetime"
+    assert "No mapped remediation" not in (explained.get("fix") or "")
+    assert "ISO" in (explained.get("fix") or "") or "DATETIME" in (explained.get("fix") or "")
+
+
 def test_iso_offset_datetime_normalized_to_utc_naive():
     got = _to_mysql_value("2024-08-09T03:58:42+02:00", "DATETIME(6)")
     assert got == datetime(2024, 8, 9, 1, 58, 42)
