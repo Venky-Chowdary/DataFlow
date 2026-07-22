@@ -92,21 +92,43 @@ def classify_schema_change(
     added = sorted(new_names - old_names)
     dropped = sorted(old_names - new_names)
 
-    # Heuristic rename: one drop + one add with compatible types → rename (breaking).
+    # Heuristic rename: match dropped↔added by compatible (non-narrowing) types.
+    # Single-pair keeps the classic path; multi-column uses greedy type matching
+    # so N renames are not misclassified as N drops + N adds (false breaking).
     renamed_pairs: list[tuple[str, str]] = []
-    if len(dropped) == 1 and len(added) == 1:
-        d, a = dropped[0], added[0]
-        if not _is_type_narrow(old_cols[d], new_cols[a]):
-            renamed_pairs.append((d, a))
-            breaking.append({
-                "kind": "rename",
-                "column": d,
-                "to": a,
-                "old_type": old_cols[d],
-                "new_type": new_cols[a],
-            })
-            dropped = []
-            added = []
+    if dropped and added:
+        remaining_dropped = list(dropped)
+        remaining_added = list(added)
+        # Prefer exact logical-type matches, then any non-narrow pair.
+        for prefer_exact in (True, False):
+            for d in list(remaining_dropped):
+                best: str | None = None
+                for a in remaining_added:
+                    if _is_type_narrow(old_cols[d], new_cols[a]):
+                        continue
+                    same = normalize_logical_type(old_cols[d]) == normalize_logical_type(
+                        new_cols[a]
+                    )
+                    if prefer_exact and not same:
+                        continue
+                    if not prefer_exact and same:
+                        continue
+                    best = a
+                    break
+                if best is None:
+                    continue
+                renamed_pairs.append((d, best))
+                breaking.append({
+                    "kind": "rename",
+                    "column": d,
+                    "to": best,
+                    "old_type": old_cols[d],
+                    "new_type": new_cols[best],
+                })
+                remaining_dropped.remove(d)
+                remaining_added.remove(best)
+        dropped = remaining_dropped
+        added = remaining_added
 
     for col in dropped:
         breaking.append({"kind": "drop", "column": col, "old_type": old_cols[col]})

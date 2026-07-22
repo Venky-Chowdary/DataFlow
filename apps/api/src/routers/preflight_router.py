@@ -208,6 +208,7 @@ async def run_preflight(body: PreflightRequest):
             validation_mode=body.validation_mode,
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
+            source_columns=body.columns,
         ),
         validation_mode=body.validation_mode,
     )

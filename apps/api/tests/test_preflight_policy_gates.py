@@ -82,3 +82,38 @@ def test_backfill_still_blocks_under_type_locked():
     assert g10["status"] == "block"
     assert "conflicts with schema policy" in str(g10["details"])
 
+
+def test_cdc_cursor_typo_blocks_against_live_source_columns():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "update_att",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at", "amount"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Cursor field not in source schema" in str(g9["details"])
+
+
+def test_cdc_cursor_and_pk_pass_when_present_in_source_columns():
+    gates = run_transfer_policy_gates(
+        sync_mode="incremental_deduped",
+        schema_policy="propagate_columns",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at", "amount"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "pass"
+

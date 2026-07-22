@@ -252,28 +252,6 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     if isinstance(dry_meta, dict):
         details.update(dry_meta)
 
-    # Layer the data integrity audit into G5 so it runs without creating a 9th gate.
-    integrity = gate_g9_data_integrity(ctx)
-    encoding_issues = list(integrity.details.get("encoding_issues") or [])
-    if encoding_issues:
-        details["encoding_issues"] = encoding_issues
-        details["issues"] = encoding_issues
-    if integrity.status == GateStatus.BLOCK:
-        integrity_issues = integrity.details.get("issues", []) or []
-        details["errors"].extend(integrity_issues)
-        details["integrity_checks_failed"] = integrity.details.get("checks_failed", 0)
-        details["issue_texts"] = [_issue_text(i) for i in details["errors"][:20]]
-        return _block(
-            GateId.G5_DRY_RUN,
-            _block_message("Dry-run / integrity failed", details["errors"]),
-            start,
-            details,
-        )
-    if integrity.status == GateStatus.PASS:
-        details["integrity_checks_passed"] = integrity.details.get("checks_passed", 0)
-        if integrity.details.get("warnings"):
-            details["warnings"] = list(integrity.details.get("warnings") or [])
-
     if not passed:
         details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
         return _block(
@@ -285,7 +263,7 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     return _pass(
         GateId.G5_DRY_RUN,
         (
-            f"Sample transform dry-run and integrity checks passed"
+            "Sample transform dry-run passed"
             + (
                 f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
                 if details.get("sample_rows_scanned")
@@ -549,6 +527,7 @@ PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G3_SCHEMA_CONTRACT, gate_g3_schema_contract),
     (GateId.G4_MAPPING_CONFIDENCE, gate_g4_mapping_confidence),
     (GateId.G5_DRY_RUN, gate_g5_dry_run),
+    (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
     (GateId.G6_TARGET_DDL, gate_g6_target_ddl),
     (GateId.G7_CAPACITY, gate_g7_capacity),
     (GateId.G8_RECONCILIATION, gate_g8_reconciliation),

@@ -224,7 +224,9 @@ def _check_financial_precision(
                 result = Decimal(str(converted))
                 if original != 0 and result != 0:
                     ratio = abs(result / original)
-                    if ratio < 0.01 or ratio > 100:
+                    # Catch cents↔units (~100x) and similar scale bugs; 10x is the
+                    # industry-safe floor (Airbyte/Fivetran-class precision guards).
+                    if ratio < 0.1 or ratio > 10:
                         issues.append(
                             f"{src}: magnitude shift {raw!r} → {converted} (ratio {ratio:.4f})"
                         )

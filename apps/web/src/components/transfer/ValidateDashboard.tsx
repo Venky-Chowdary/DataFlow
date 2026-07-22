@@ -28,7 +28,8 @@ const GATE_META: GateMeta[] = [
   { key: "g2_destination", label: "Destination reachable", icon: "server", rule: "Destination accepts a connection and is writable." },
   { key: "g3_schema_contract", label: "Schema contract", icon: "layers", rule: "Source and target schemas are compatible." },
   { key: "g4_mapping_confidence", label: "Column mappings", icon: "sparkle", rule: "Every column maps above the confidence threshold." },
-  { key: "g5_dry_run", label: "Dry-run / integrity", icon: "code", rule: "Sample rows pass transforms and integrity checks cleanly." },
+  { key: "g5_dry_run", label: "Sample dry-run", icon: "code", rule: "Sample rows pass the same transforms writers use." },
+  { key: "g9_data_integrity", label: "Data integrity", icon: "shield", rule: "Encoding, required nulls, duplicates, and financial precision." },
   { key: "g6_target_ddl", label: "Target DDL", icon: "scan", rule: "Any required CREATE / ALTER statements are valid." },
   { key: "g7_capacity", label: "Staging capacity", icon: "trend", rule: "Destination has headroom for the row volume." },
   { key: "g8_reconciliation", label: "Reconciliation", icon: "activity", rule: "Post-transfer checksums are compared source ↔ target." },
@@ -46,7 +47,6 @@ function metaForGate(id: string): GateMeta {
     g4_mapping: "g4_mapping_confidence",
     g5_transform: "g5_dry_run",
     g6_ddl: "g6_target_ddl",
-    g9_data_integrity: "g5_dry_run",
   };
   const mapped = aliases[id];
   if (mapped) {

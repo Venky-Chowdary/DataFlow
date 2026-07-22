@@ -8,7 +8,8 @@ const GATE_LABELS: Record<string, string> = {
   g2_destination: "Destination reachable",
   g3_schema_contract: "Schema contract",
   g4_mapping_confidence: "Column mappings",
-  g5_dry_run: "Dry-run / integrity",
+  g5_dry_run: "Sample dry-run",
+  g9_data_integrity: "Data integrity",
   g6_target_ddl: "Target DDL",
   g7_capacity: "Staging capacity",
   g8_reconciliation: "Reconciliation (post-transfer)",
@@ -18,9 +19,8 @@ const GATE_LABELS: Record<string, string> = {
   // legacy aliases
   g3_schema: "Schema contract",
   g4_mapping: "Column mappings",
-  g5_transform: "Dry-run / integrity",
+  g5_transform: "Sample dry-run",
   g6_ddl: "Target DDL",
-  g9_data_integrity: "Dry-run / integrity",
 };
 
 const CORE_GATE_ORDER = [
@@ -29,6 +29,7 @@ const CORE_GATE_ORDER = [
   "g3_schema_contract",
   "g4_mapping_confidence",
   "g5_dry_run",
+  "g9_data_integrity",
   "g6_target_ddl",
   "g7_capacity",
   "g8_reconciliation",

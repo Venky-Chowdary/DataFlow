@@ -191,6 +191,24 @@ def test_classify_rename_as_breaking():
     assert any(c["kind"] == "rename" for c in report["breaking"])
 
 
+def test_classify_multi_column_renames_not_as_drops_and_adds():
+    old = {
+        "columns": {"cust_id": "INTEGER", "full_name": "VARCHAR", "amt": "DECIMAL"},
+        "nullable": {"cust_id": False, "full_name": True, "amt": True},
+        "primary_key": ["cust_id"],
+    }
+    new = {
+        "columns": {"customer_id": "INTEGER", "name": "VARCHAR", "amount": "DECIMAL"},
+        "nullable": {"customer_id": False, "name": True, "amount": True},
+        "primary_key": ["customer_id"],
+    }
+    report = classify_schema_change(old, new)
+    kinds = [c["kind"] for c in report["breaking"]]
+    assert kinds.count("rename") == 3
+    assert "drop" not in kinds
+    assert "add_column" not in {c["kind"] for c in report["additive"]}
+
+
 def test_classify_add_not_null_is_breaking():
     old = {"columns": {"id": "INTEGER"}, "nullable": {"id": False}, "primary_key": ["id"]}
     new = {

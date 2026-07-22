@@ -204,6 +204,7 @@ def run_transfer_policy_gates(
     validation_mode: str = "strict",
     stream_contracts: list[dict[str, Any]] | None = None,
     backfill_new_fields: bool = False,
+    source_columns: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
@@ -224,12 +225,39 @@ def run_transfer_policy_gates(
         if requires_primary_key and not (c.get("primary_key") or c.get("primary_keys"))
     ]
 
+    # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
+    source_col_set = {str(c).strip().lower() for c in (source_columns or []) if str(c).strip()}
+    unknown_cursor: list[str] = []
+    unknown_pk: list[str] = []
+    if source_col_set:
+        for c in contracts:
+            stream = c.get("name") or c.get("stream") or "stream"
+            if requires_cursor:
+                cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
+                if cursor and cursor.lower() not in source_col_set:
+                    unknown_cursor.append(f"{stream}.{cursor}")
+            if requires_primary_key:
+                raw_pk = c.get("primary_key") or c.get("primary_keys") or []
+                pk_fields = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk or [])
+                for pk in pk_fields:
+                    name = str(pk).strip()
+                    if name and name.lower() not in source_col_set:
+                        unknown_pk.append(f"{stream}.{name}")
+
     gates: list[dict[str, Any]] = []
     sync_issues: list[str] = []
     if missing_cursor:
         sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if missing_primary_key:
         sync_issues.append(f"Missing primary key for {', '.join(missing_primary_key[:5])}")
+    if unknown_cursor:
+        sync_issues.append(
+            f"Cursor field not in source schema: {', '.join(unknown_cursor[:5])}"
+        )
+    if unknown_pk:
+        sync_issues.append(
+            f"Primary key not in source schema: {', '.join(unknown_pk[:5])}"
+        )
 
     if sync_issues:
         gates.append({
@@ -473,8 +501,10 @@ def run_file_preflight(
     source_filename: str = "",
     schema_policy: str = "manual_review",
     backfill_new_fields: bool = False,
+    stored_source_fp: str = "",
+    stored_target_fp: str = "",
 ) -> dict[str, Any]:
-    """Run 9 preflight gates for a file-based transfer."""
+    """Run preflight gates for file/DB Studio transfers (G1–G8 + integrity)."""
     if row_count <= 0 and sample_rows:
         row_count = len(sample_rows)
 
@@ -568,6 +598,8 @@ def run_file_preflight(
         mappings=mappings,
         destination_db_type=destination_db_type,
         sample_rows=sample_rows,
+        stored_source_fp=stored_source_fp or "",
+        stored_target_fp=stored_target_fp or "",
     )
     if drift.get("drift_detected"):
         for issue in drift.get("issues", []):
@@ -619,10 +651,10 @@ def run_file_preflight(
     )
 
     ctx = FilePreflightContext(plan, sample_rows)
-    # Fail fast only once both source and destination are known to be connected.
-    # When either side is not yet connected we want every reachable gate to run
-    # (and be reported) so source-only or destination-only problems are visible.
-    engine = PreflightEngine(fail_fast=source_connected and destination_connected)
+    # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
+    # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
+    # refuses to move rows when any blocker remains (passed=False).
+    engine = PreflightEngine(fail_fast=False)
     result = engine.run(ctx)
 
     from services.preflight_proof_bundle import build_preflight_proof_bundle

@@ -218,6 +218,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
+        stored_source_fp=rev.source_schema_hash or "",
+        stored_target_fp=rev.target_schema_hash or "",
     )
     pf = apply_policy_gates(
         pf,
@@ -227,6 +229,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             validation_mode=validation_mode,
             stream_contracts=policies.get("stream_contracts"),
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
+            source_columns=plan.source_columns,
         ),
         validation_mode=validation_mode,
         destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
