@@ -32,10 +32,11 @@ const GATE_META: GateMeta[] = [
   { key: "g9_data_integrity", label: "Data integrity", icon: "shield", rule: "Encoding, required nulls, duplicates, and financial precision." },
   { key: "g6_target_ddl", label: "Target DDL", icon: "scan", rule: "Any required CREATE / ALTER statements are valid." },
   { key: "g7_capacity", label: "Staging capacity", icon: "trend", rule: "Destination has headroom for the row volume." },
-  { key: "g8_reconciliation", label: "Reconciliation", icon: "activity", rule: "Post-transfer checksums are compared source ↔ target." },
+  { key: "g8_reconciliation", label: "Sample reconciliation", icon: "activity", rule: "Pre-write sample: identity mappings keep values; identity-key uniqueness holds. Post-load checksum runs after Execute." },
   { key: "g9_sync_contract", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
   { key: "g10_schema_policy", label: "Schema change policy", icon: "gate", rule: "Detected drift is allowed by the schema policy." },
   { key: "g11_validation_posture", label: "Validation posture", icon: "lock", rule: "Overall posture meets the selected validation mode." },
+  { key: "schema_drift", label: "Schema drift", icon: "alert", rule: "Live source/destination schema no longer matches the saved mapping contract." },
 ];
 
 function metaForGate(id: string): GateMeta {
@@ -61,8 +62,19 @@ function metaForGate(id: string): GateMeta {
   };
 }
 
-/** Core engine gates (G1–G8). Extra policy gates may appear after the run. */
-const CORE_GATE_META = GATE_META.filter((g) => /^g[1-8]_/.test(g.key));
+/** Core engine gates shown while Validate is pending / running. */
+const CORE_ENGINE_KEYS = new Set([
+  "g1_source",
+  "g2_destination",
+  "g3_schema_contract",
+  "g4_mapping_confidence",
+  "g5_dry_run",
+  "g9_data_integrity",
+  "g6_target_ddl",
+  "g7_capacity",
+  "g8_reconciliation",
+]);
+const CORE_GATE_META = GATE_META.filter((g) => CORE_ENGINE_KEYS.has(g.key));
 
 function formatDuration(ms: number | undefined): string {
   if (ms == null || Number.isNaN(ms)) return "";
@@ -99,7 +111,22 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   if (Array.isArray(issues)) {
     return issues.map((e) => (typeof e === "string" ? e : String((e as { message?: string })?.message ?? e))).filter(Boolean).slice(0, 12);
   }
-  return [];
+  // G4 / G6 structured detail keys that are not named "issues"
+  const extras: string[] = [];
+  for (const key of ["low_confidence", "ambiguous_mappings", "unmapped", "sample_duplicates", "encoding_issues"] as const) {
+    const arr = details[key];
+    if (!Array.isArray(arr)) continue;
+    for (const item of arr.slice(0, 6)) {
+      if (typeof item === "string") extras.push(item);
+      else if (item && typeof item === "object") {
+        const row = item as Record<string, unknown>;
+        const src = String(row.source ?? row.column ?? row.field ?? "");
+        const msg = String(row.message ?? row.reason ?? row.target ?? JSON.stringify(item));
+        extras.push(src ? `${src}: ${msg}` : msg);
+      }
+    }
+  }
+  return extras.filter(Boolean).slice(0, 12);
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -1220,7 +1247,7 @@ export function ValidateDashboard({
                   <DtIcon name="gate" size={14} /> Run preflight
                 </button>
               )}
-              {onStripControlChars && (
+              {onStripControlChars && showEncodingRemediation && (
                 <button
                   type="button"
                   className="df2-btn df2-btn-sm df2-btn-ghost"
@@ -1230,7 +1257,7 @@ export function ValidateDashboard({
                   <DtIcon name="layers" size={14} /> Strip controls &amp; re-run
                 </button>
               )}
-              {onQuarantineAndRerun && (
+              {onQuarantineAndRerun && showEncodingRemediation && (
                 <button
                   type="button"
                   className="df2-btn df2-btn-sm df2-btn-ghost"

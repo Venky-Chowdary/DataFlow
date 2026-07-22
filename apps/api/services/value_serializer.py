@@ -254,6 +254,7 @@ def cell_to_string(value: Any) -> str:
             sanitize_json_value(value),
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
             default=json_default,
             allow_nan=False,
         )

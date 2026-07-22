@@ -141,18 +141,27 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # coerce): downgrade the declared-type mismatch to a warning.
             warnings.append(label)
         else:
-            # No samples to inspect — keep the conservative declared-type check.
-            issues.append(label)
+            # No samples — strict/maximum fail-closed on declared lossy pairs;
+            # balanced warns so operators can proceed after acknowledging risk.
+            mode = (ctx.plan.validation_mode or "strict").strip().lower()
+            if mode in {"balanced", "review"}:
+                warnings.append(label + " (declared; no samples — balanced warn)")
+            else:
+                issues.append(label)
 
     if issues:
-        # Critical write hazards always block Validate — balanced mode may soften
-        # *declared* mismatches that samples prove safe (those land in warnings),
-        # but anything that would fail at Run must stop here with a fix path.
+        # Sample-proven or strict declared write hazards always block Validate.
         return _block(
             GateId.G3_SCHEMA_CONTRACT,
             f"{len(issues)} type coercion issue(s)",
             start,
-            {"issues": issues, "issues_detail": issues_detail, "warnings": warnings},
+            {
+                "issues": issues,
+                "issues_detail": issues_detail,
+                "warnings": warnings,
+                "rule_id": "g3_schema_contract.lossy_coercion",
+                "remediation_kind": "change_target_type",
+            },
         )
     if warnings:
         return _pass(
@@ -275,6 +284,18 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     )
 
 
+_DRIFT_DDL_NOISE = (
+    "schema changed since last mapping revision",
+    "source schema changed",
+    "destination schema changed",
+)
+
+
+def _is_drift_noise_issue(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _DRIFT_DDL_NOISE)
+
+
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     if not ctx.plan.destination.connected:
@@ -285,52 +306,117 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             details={"reason": ctx.plan.destination.error or "not_connected"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
-    if not ctx.plan.ddl_compatible:
-        return _block(
-            GateId.G6_TARGET_DDL,
-            "Target DDL incompatible",
-            start,
-            {"issues": ctx.plan.ddl_issues},
-        )
 
-    # Schemaless destinations (MongoDB/DynamoDB/Redis) only have a hard uniqueness
-    # contract on `_id`; other `*_id` fields are foreign keys and may repeat.
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     schemaless = dest_kind in SCHEMALESS_DESTS
-    source_cols = [c.name for c in ctx.plan.source.columns]
-    tgt_by_src = {m.source: m.target for m in ctx.plan.mappings}
-    pk = None
-    if schemaless:
-        for src, tgt in tgt_by_src.items():
-            if tgt == "_id":
-                pk = src
-                break
-        if not pk:
-            pk = next((c for c in source_cols if c.lower() == "_id"), None)
-    else:
-        for src, tgt in tgt_by_src.items():
-            if tgt.lower() in {"id", "_id"}:
-                pk = src
-                break
-        if not pk:
-            for c in source_cols:
-                if c.lower() in {"id", "_id"}:
-                    pk = c
-                    break
-        if not pk:
-            pk = next((c for c in source_cols if c.lower().endswith("_id")), None)
+    # Host apps must never fold fingerprint drift into DDL. Scrub defensively so
+    # a stale process cannot block Redis/Mongo/Dynamo as "Target DDL incompatible".
+    raw_issues = [str(i) for i in (ctx.plan.ddl_issues or [])]
+    ddl_issues = [i for i in raw_issues if not _is_drift_noise_issue(i)]
+    scrubbed = len(raw_issues) - len(ddl_issues)
 
-    pk_targets: list[str] = []
-    if pk:
-        pk_targets.append(tgt_by_src.get(pk, pk))
-    for col_group in [pk_targets] if pk_targets else []:
-        dupes = ctx.probe_unique_constraint(col_group)
+    if schemaless:
+        # Document stores have no CREATE/ALTER contract. Only identity-key
+        # uniqueness in the sample can fail this gate.
+        source_cols = [c.name for c in ctx.plan.source.columns]
+        pk_src = pk_tgt = None
+        try:
+            from services.primary_key import resolve_identity_key
+
+            pk_src, pk_tgt = resolve_identity_key(
+                mappings=ctx.plan.mappings,
+                source_columns=source_cols,
+                dest_kind=dest_kind,
+                validation_mode=ctx.plan.validation_mode,
+                purpose="uniqueness",
+            )
+        except Exception:
+            for m in ctx.plan.mappings:
+                if m.target.lower() == "_id":
+                    pk_src, pk_tgt = m.source, m.target
+                    break
+        if pk_tgt:
+            dupes = ctx.probe_unique_constraint([pk_tgt])
+            if dupes:
+                return _block(
+                    GateId.G6_TARGET_DDL,
+                    f"UNIQUE constraint would fail on {pk_tgt} — {len(dupes)} duplicate group(s)",
+                    start,
+                    {
+                        "sample_duplicates": dupes[:5],
+                        "primary_key": {"source": pk_src, "target": pk_tgt},
+                        "rule_id": "g6_target_ddl.unique",
+                        "remediation_kind": "fix_source_keys",
+                    },
+                )
+        return _pass(
+            GateId.G6_TARGET_DDL,
+            "Schemaless destination — no DDL contract (identity key checked)",
+            start,
+            {
+                "schemaless": True,
+                "scrubbed_drift_issues": scrubbed,
+                "primary_key": {"source": pk_src, "target": pk_tgt},
+            },
+        )
+
+    if ddl_issues:
+        head = ddl_issues[0]
+        msg = head if len(ddl_issues) <= 1 else f"{head} (+{len(ddl_issues) - 1} more)"
+        return _block(
+            GateId.G6_TARGET_DDL,
+            msg,
+            start,
+            {
+                "issues": ddl_issues,
+                "rule_id": "g6_target_ddl.incompatible",
+                "remediation_kind": "fix_ddl",
+                "scrubbed_drift_issues": scrubbed,
+            },
+        )
+
+    # ddl_compatible=False with only drift noise (or empty issues) is a host bug —
+    # do not block Execute on a false DDL signal.
+    if not ctx.plan.ddl_compatible and not ddl_issues:
+        return _pass(
+            GateId.G6_TARGET_DDL,
+            "Target DDL compatible (ignored empty/drift-only incompatibility flag)",
+            start,
+            {"scrubbed_drift_issues": scrubbed, "host_flag_ignored": True},
+        )
+
+    # Canonical identity key uniqueness probe for SQL destinations.
+    source_cols = [c.name for c in ctx.plan.source.columns]
+    try:
+        from services.primary_key import resolve_identity_key
+
+        pk_src, pk_tgt = resolve_identity_key(
+            mappings=ctx.plan.mappings,
+            source_columns=source_cols,
+            dest_kind=dest_kind,
+            validation_mode=ctx.plan.validation_mode,
+            purpose="uniqueness",
+        )
+    except Exception:
+        pk_src, pk_tgt = None, None
+        for m in ctx.plan.mappings:
+            if m.target.lower() in {"id", "_id"}:
+                pk_src, pk_tgt = m.source, m.target
+                break
+
+    if pk_tgt:
+        dupes = ctx.probe_unique_constraint([pk_tgt])
         if dupes:
             return _block(
                 GateId.G6_TARGET_DDL,
-                f"UNIQUE constraint would fail — {len(dupes)} duplicate group(s)",
+                f"UNIQUE constraint would fail on {pk_tgt} — {len(dupes)} duplicate group(s)",
                 start,
-                {"sample_duplicates": dupes[:5]},
+                {
+                    "sample_duplicates": dupes[:5],
+                    "primary_key": {"source": pk_src, "target": pk_tgt},
+                    "rule_id": "g6_target_ddl.unique",
+                    "remediation_kind": "fix_source_keys",
+                },
             )
     return _pass(GateId.G6_TARGET_DDL, "Target DDL compatible", start)
 
@@ -451,13 +537,25 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC
     ]
 
+    def _serialize_for_write(value: Any) -> str:
+        # Match readers/writers: lists/dicts become compact JSON, not Python repr.
+        # Studio samples often keep native arrays; str([...]) falsely fails identity.
+        if value is None:
+            return ""
+        try:
+            from services.value_serializer import cell_to_string
+
+            return cell_to_string(value)
+        except Exception:
+            return str(value)
+
     transform_errors: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
         for m in ctx.plan.mappings:
             raw = row.get(m.source, "")
-            raw_s = "" if raw is None else str(raw)
+            raw_s = _serialize_for_write(raw)
             if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC:
                 mapped[m.target] = None
                 continue
@@ -482,12 +580,21 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             },
         )
 
-    # Detect a likely primary key on the target side and verify uniqueness.
+    # Canonical identity key (same helper as G6/G9) — never invent ``user_id`` PK.
     pk_target = None
-    for m in ctx.plan.mappings:
-        if m.target.lower() in {"id", "_id"} or m.target.lower().endswith("_id"):
-            pk_target = m.target
-            break
+    try:
+        from services.primary_key import resolve_primary_key_target
+
+        pk_target = resolve_primary_key_target(
+            ctx.plan.mappings,
+            ctx.plan.destination.db_type or "",
+            validation_mode=ctx.plan.validation_mode,
+        )
+    except Exception:
+        for m in ctx.plan.mappings:
+            if m.target.lower() in {"id", "_id"}:
+                pk_target = m.target
+                break
 
     duplicates = 0
     if pk_target:
@@ -501,9 +608,15 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     if duplicates:
         return _block(
             GateId.G8_RECONCILIATION,
-            f"Dry-run reconciliation failed — {duplicates} duplicate target key(s)",
+            f"Dry-run reconciliation failed — {duplicates} duplicate target key(s) on {pk_target}",
             start,
-            {"duplicate_keys": duplicates, "target_rows": len(mapped_rows)},
+            {
+                "duplicate_keys": duplicates,
+                "primary_key": pk_target,
+                "target_rows": len(mapped_rows),
+                "rule_id": "g8_reconciliation.duplicate_keys",
+                "remediation_kind": "fix_source_keys",
+            },
         )
 
     # Fingerprint: raw source cells vs write-path transformed values (not transform↔transform).
@@ -539,7 +652,13 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "source_rows": source_count,
                     "target_rows": len(mapped_rows),
                     "preview_only": True,
-                    "note": "Sample fingerprint — not live Gate-8 destination checksum",
+                    "rule_id": "g8_reconciliation.identity_mismatch",
+                    "remediation_kind": "review_mappings",
+                    "note": (
+                        "Pre-write sample fingerprint (not post-load checksum). "
+                        "Align serializer/transform or pick an explicit transform — "
+                        "Strip controls does not fix identity mismatches."
+                    ),
                 },
             )
 

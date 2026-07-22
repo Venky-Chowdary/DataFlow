@@ -571,28 +571,18 @@ def run_integrity_audit(
 
     rows = _rows_from_samples(source_columns, source_samples, sample_rows)
 
-    # Primary-key heuristic: exact canonical key columns (`_id`, `id`, `uuid`,
-    # `pk`, `key`) are always treated as required/unique. In strict/maximum mode
-    # we also treat `*_id` columns as keys so high-assurance transfers enforce
-    # completeness, while balanced/review modes allow sparse foreign keys such as
-    # `user_id` or `account_id` in NoSQL/CRM extracts.
+    # Canonical identity key — same helper as G6/G8. Schemaless → `_id` only;
+    # SQL required-nulls include `*_id` only in strict/maximum.
+    from services.primary_key import resolve_primary_key_source
+
     mode = (validation_mode or "strict").strip().lower()
-    pk = None
-    preferred = ("_id", "id", "uuid", "pk", "key") if dest_kind not in SCHEMALESS_DESTS else ("_id",)
-    for key in preferred:
-        for m in mappings:
-            if (m.get("target") or "").lower() == key:
-                pk = m.get("source")
-                break
-        if not pk:
-            pk = next((c for c in source_columns if c.lower() == key), None)
-        if pk:
-            break
-    if not pk and mode in {"strict", "maximum"}:
-        for col in source_columns:
-            if col.lower().endswith("_id"):
-                pk = col
-                break
+    pk = resolve_primary_key_source(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=mode,
+        purpose="required_nulls",
+    )
 
     checks: list[dict[str, Any]] = []
 

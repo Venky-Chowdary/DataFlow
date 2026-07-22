@@ -603,12 +603,8 @@ def run_file_preflight(
         stored_source_fp=stored_source_fp or "",
         stored_target_fp=stored_target_fp or "",
     )
-    if drift.get("drift_detected"):
-        for issue in drift.get("issues", []):
-            if issue not in ddl_issues:
-                ddl_issues.append(issue)
-        if drift.get("severity") == "breaking":
-            ddl_compatible = False
+    # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
+    # (missing columns, width, types). Drift is a separate contract gate below.
 
     sample_quality: dict[str, Any] = {}
     if sample_rows and columns:
@@ -739,6 +735,7 @@ def run_file_preflight(
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
         ),
     }
+
     # Multi-load intelligence: compare sample to last N loads of this route.
     try:
         from services.data_quality_history import compare_route_to_history
@@ -771,6 +768,73 @@ def run_file_preflight(
             "prior_load_count": 0,
             "warning": f"Load-history compare unavailable: {hist_exc!s}"[:240],
         }
+
+    # Schema drift is its own rule — never masquerade as Target DDL.
+    # Schemaless destinations have no destination DDL fingerprint to enforce;
+    # fingerprint churn is informational only (operators remapped / create-new).
+    # SQL destinations: hard-block only when policy is pause_on_change.
+    if drift.get("severity") == "breaking" and drift.get("issues"):
+        policy = (schema_policy or "manual_review").strip().lower()
+        if schemaless:
+            out.setdefault("warnings", []).append({
+                "id": "schema_drift",
+                "message": (
+                    "Mapping/schema fingerprint changed on a schemaless destination — "
+                    "informational only (no DDL to invalidate)."
+                ),
+                "details": {
+                    "issues": list(drift.get("issues") or []),
+                    "severity": "warning",
+                },
+            })
+        elif policy == "pause_on_change":
+            drift_msg = str(drift["issues"][0])
+            drift_gate = {
+                "id": "schema_drift",
+                "status": "block",
+                "message": drift_msg,
+                "duration_ms": 0,
+                "details": {
+                    "issues": list(drift.get("issues") or []),
+                    "severity": drift.get("severity"),
+                    "source_changed": drift.get("source_changed"),
+                    "target_changed": drift.get("target_changed"),
+                    "rule_id": "schema_drift.breaking",
+                    "remediation_kind": "rerun_mapping",
+                },
+            }
+            out["gates"] = [*out["gates"], drift_gate]
+            drift_blocker = enrich_blockers(
+                [{"id": "schema_drift", "message": drift_msg, "details": drift_gate["details"]}],
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+            )
+            out["blockers"] = [*out["blockers"], *drift_blocker]
+            out["passed"] = False
+            out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+            out["total_gates"] = len(out["gates"])
+            out["readiness_score"] = round(out["passed_count"] / max(out["total_gates"], 1) * 100, 1)
+        else:
+            # manual_review / propagate_*: surface as a non-blocking gate so G10
+            # policy remains the operator control, not a false DDL failure.
+            out["gates"] = [
+                *out["gates"],
+                {
+                    "id": "schema_drift",
+                    "status": "pass",
+                    "message": (
+                        f"Schema fingerprint changed — policy '{policy}' allows continue "
+                        f"(review mapping if needed)"
+                    ),
+                    "duration_ms": 0,
+                    "details": {
+                        "issues": list(drift.get("issues") or []),
+                        "severity": "warning",
+                        "schema_policy": policy,
+                    },
+                },
+            ]
+
     return out
 
 

@@ -92,43 +92,13 @@ def _primary_key_target(
     mappings: list[dict],
     dest_kind: str,
 ) -> str | None:
-    """Return the target column for the most likely primary key.
+    """Return the target column for the identity uniqueness contract.
 
-    For schemaless destinations the target `_id` is the only hard uniqueness
-    contract. For SQL destinations prefer exact `id`/`_id` target, then exact
-    `id`/`_id` source, then the first `*_id` source.
+    Delegates to the canonical helper so G6/G8/G9 never disagree on ``*_id``.
     """
-    tgt_by_src = {str(m.get("source") or ""): str(m.get("target") or "") for m in mappings if m.get("source")}
-    srcs = [str(m.get("source") or "") for m in mappings if m.get("source")]
-    tgts = [str(m.get("target") or "") for m in mappings if m.get("target")]
+    from services.primary_key import resolve_primary_key_target
 
-    if dest_kind in SCHEMALESS_DESTS:
-        for t in tgts:
-            if t.lower() == "_id":
-                return t
-        pk_src = next((s for s in srcs if s.lower() == "_id"), None)
-        if pk_src:
-            return tgt_by_src.get(pk_src, pk_src)
-        return None
-
-    for t in tgts:
-        if t.lower() in {"id", "_id"}:
-            return t
-
-    pk_src = None
-    for s in srcs:
-        if s.lower() in {"id", "_id"}:
-            pk_src = s
-            break
-    if not pk_src:
-        for s in srcs:
-            if s.lower().endswith("_id"):
-                pk_src = s
-                break
-
-    if pk_src:
-        return tgt_by_src.get(pk_src, pk_src)
-    return None
+    return resolve_primary_key_target(mappings, dest_kind)
 
 
 def _duplicate_pk_in_source(

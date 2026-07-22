@@ -2870,7 +2870,11 @@ export function TransferPage({
           dest_kind: destKindMode,
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
-          dest_type: destKindMode === "database" && !connectorId ? destType : undefined,
+          // Always send driver type even with a saved connector — Validate must not
+          // default db_type to postgresql and invent SQL DDL / fingerprint blocks.
+          dest_type: destKindMode === "database"
+            ? (destDriverType || destType || selectedDestConnector?.type || undefined)
+            : undefined,
           dest_host: destKindMode === "database" && !connectorId ? destHost : undefined,
           dest_port: destKindMode === "database" && !connectorId ? destPort : undefined,
           dest_database: destKindMode === "database" && !connectorId ? targetDb : undefined,

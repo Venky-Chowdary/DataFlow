@@ -233,6 +233,10 @@ def detect_schema_drift(
 
     source_changed = bool(stored_source_fp) and not schemas_match(stored_source_fp, source_columns, source_schema)
     target_changed = bool(stored_target_fp and target_columns) and stored_target_fp != live_target_fp
+    # Redis/Mongo/Dynamo have no DDL — target fingerprints are often synthetic from
+    # mapping revisions. Fingerprint churn must not block as "Target DDL incompatible".
+    if schemaless:
+        target_changed = False
 
     mapped_sources = {str(m.get("source")) for m in mappings if m.get("source")}
     mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}

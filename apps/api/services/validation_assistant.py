@@ -184,28 +184,43 @@ def _suggested_actions(
                 "kind": "open_bad_data_fix",
                 "label": "Open Fix bad data dialog",
             })
+    elif "g8_reconciliation" in gate_ids or "identity transform" in blocker_lower or "identity mapping" in blocker_lower:
+        if not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": "Review mappings — identity/fingerprint mismatch (not Strip)",
+            })
     elif any(
         gid in gate_ids or (gid or "").startswith("g5")
         for gid in ("g5_dry_run", "g5_transform", "g9_data_integrity", "dry_run")
-    ) or "dry-run" in blocker_lower or "integrity" in blocker_lower:
-        # Generic G5 without type/encoding signal — still offer Map review,
-        # but do NOT advertise Strip as the primary fix (operators click it
-        # and see the same type block again).
+    ) or "dry-run" in blocker_lower:
+        # Generic dry-run / integrity without encoding — Map review only.
+        # Never open the encoding-centric Bad Data drawer as the default CTA.
         if not _is_type_mismatch_blocker(blocker_text):
-            if not any(a.get("kind") == "open_bad_data_fix" for a in actions):
-                actions.append({
-                    "kind": "open_bad_data_fix",
-                    "label": "Open Fix bad data dialog",
-                })
             if not any(a.get("kind") == "review_mappings" for a in actions):
                 actions.append({
                     "kind": "review_mappings",
                     "label": "Review mappings",
                 })
+            if "integrity" in blocker_lower and not any(a.get("kind") == "open_bad_data_fix" for a in actions):
+                # Only offer Fix bad data when the text still looks integrity-related
+                # but not encoding (e.g. required nulls) — drawer may still help.
+                actions.append({
+                    "kind": "open_bad_data_fix",
+                    "label": "Inspect integrity findings",
+                })
 
     if "g4_mapping_confidence" in gate_ids:
         if not any(a.get("kind") == "review_mappings" for a in actions):
             actions.append({"kind": "review_mappings", "label": "Review and approve low-confidence mappings"})
+    if "g6_target_ddl" in gate_ids:
+        if not any(a.get("kind") == "review_mappings" for a in actions):
+            actions.append({
+                "kind": "review_mappings",
+                "label": "Fix DDL / remap — not an encoding issue (Strip will not help)",
+            })
+        # Never push Fix-bad-data for DDL.
+        actions = [a for a in actions if a.get("kind") not in {"open_bad_data_fix", "normalize_control_chars", "quarantine_and_rerun"}]
     if "schema_drift" in gate_ids:
         actions.append({"kind": "rerun_mapping", "label": "Re-run mapping to accept the new schema"})
     if {"g1_source", "g2_destination"} & gate_ids:
