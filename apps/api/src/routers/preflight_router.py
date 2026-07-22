@@ -35,6 +35,10 @@ class MappingItem(BaseModel):
     create_new: bool = False
     assignment_strategy: str | None = None
     semantic_role: str | None = None
+    # STRUCT/JSON Map choice — write path materializes flatten_top_level_keys.
+    struct_policy: str | None = None
+    struct_derived: bool = False
+    struct_parent: str | None = None
 
 
 class PreflightRequest(BaseModel):

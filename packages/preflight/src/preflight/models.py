@@ -65,6 +65,10 @@ class ColumnMapping:
     reasoning: str = ""
     requires_review: bool = False
     score_gap: float = 1.0
+    # STRUCT/JSON Map policy — optional; gates may surface but write owns materialize.
+    struct_policy: str | None = None
+    struct_derived: bool = False
+    struct_parent: str | None = None
 
 
 @dataclass

@@ -90,6 +90,40 @@ _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _ENUM_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_\-./]{0,63}$")
 
+# WKT geometry — identity payload; no invented SRID/cast.
+_WKT_RE = re.compile(
+    r"^\s*(?:SRID=\d+;)?\s*"
+    r"(MULTI)?(POINT|LINESTRING|POLYGON|GEOMETRYCOLLECTION)\s*"
+    r"(Z|M|ZM)?\s*\(",
+    re.I,
+)
+_GEOJSON_TYPES = frozenset({
+    "Point", "MultiPoint", "LineString", "MultiLineString",
+    "Polygon", "MultiPolygon", "GeometryCollection", "Feature", "FeatureCollection",
+})
+# ISO-8601 durations (P1D, PT15M, P1Y2M3DT4H) — identity INTERVAL.
+# Require at least one numeric component (reject bare "P" / "PT").
+_ISO_INTERVAL_RE = re.compile(
+    r"^P(?=\d|T\d)"
+    r"(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?"
+    r"(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$",
+    re.I,
+)
+_SQL_INTERVAL_RE = re.compile(
+    r"^\d+\s+(?:year|years|month|months|day|days|hour|hours|minute|minutes|second|seconds)"
+    r"(?:\s+\d+\s+(?:year|years|month|months|day|days|hour|hours|minute|minutes|second|seconds))*$",
+    re.I,
+)
+_VECTOR_FIELD_RE = re.compile(
+    r"(?:^|_)(?:embed(?:ding)?|vector|vec|latent|encoding)(?:$|_)",
+    re.I,
+)
+
+# Minimum homogeneous float-array length to treat as VECTOR without a vector-ish name.
+_VECTOR_MIN_DIM_DEFAULT = 8
+# Absolute floor even with a vector-ish name (avoids [lat,lon] → VECTOR(2) by accident).
+_VECTOR_MIN_DIM_NAMED = 3
+
 
 def _is_base64(value: str) -> bool:
     s = value.strip()
@@ -176,6 +210,88 @@ def _looks_like_string_enum(samples: list[str]) -> bool:
     return False
 
 
+def _is_vector_field_name(name: str) -> bool:
+    return bool(_VECTOR_FIELD_RE.search(name or ""))
+
+
+def _parse_vector_array(value: str) -> list[float] | None:
+    """Return float list when value is a homogeneous numeric JSON array; else None."""
+    s = (value or "").strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or len(parsed) < 2:
+        return None
+    out: list[float] = []
+    for item in parsed:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        out.append(float(item))
+    return out
+
+
+def _looks_like_geojson(obj: Any) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    t = obj.get("type")
+    if not isinstance(t, str) or t not in _GEOJSON_TYPES:
+        return False
+    if t in {"Feature", "FeatureCollection"}:
+        return True
+    return "coordinates" in obj or "geometries" in obj
+
+
+def _looks_like_interval(value: str) -> bool:
+    s = (value or "").strip()
+    if not s:
+        return False
+    if _ISO_INTERVAL_RE.match(s) and s.upper() != "P":
+        return True
+    if _SQL_INTERVAL_RE.match(s):
+        return True
+    # Python timedelta wire from cell_to_string: "1 day, 0:00:01" / "0:00:01"
+    if re.fullmatch(r"\d+:\d{2}:\d{2}(?:\.\d+)?", s):
+        # Ambiguous with TIME — only treat as INTERVAL when hours can exceed 23
+        # or when prefixed with day count elsewhere. Keep TIME for HH:MM:SS.
+        parts = s.split(":")
+        try:
+            return int(parts[0]) > 23
+        except ValueError:
+            return False
+    if " day" in s.lower() or " days" in s.lower():
+        return True
+    return False
+
+
+def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | None:
+    """Classify JSON / array / GeoJSON / VECTOR candidates. None → not JSON-shaped."""
+    s = value.strip()
+    if not ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))):
+        return None
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(parsed, dict):
+        if _looks_like_geojson(parsed):
+            return "GEOGRAPHY"
+        return "JSON"
+
+    if isinstance(parsed, list):
+        vec = _parse_vector_array(s)
+        if vec is not None:
+            min_dim = _VECTOR_MIN_DIM_NAMED if _is_vector_field_name(field_name or "") else _VECTOR_MIN_DIM_DEFAULT
+            if len(vec) >= min_dim:
+                # Provisional — infer_column promotes to VECTOR(n) when dims agree.
+                return "VECTOR"
+        return "JSON"
+    return "JSON"
+
+
 def _classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -185,12 +301,15 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if s.lower() in _STATUS_ENUM_TOKENS:
         return "VARCHAR"
 
-    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-        try:
-            json.loads(s)
-            return "JSON"
-        except json.JSONDecodeError:
-            pass
+    # Specialty identity types — detect before generic JSON / string widen.
+    if _WKT_RE.match(s):
+        return "GEOGRAPHY"
+    if _looks_like_interval(s):
+        return "INTERVAL"
+
+    jsonish = _classify_jsonish(s, field_name=field_name)
+    if jsonish:
+        return jsonish
 
     if _UUID_RE.match(s):
         return "UUID"
@@ -457,14 +576,54 @@ def infer_column(
             "BINARY": "binary",
             "TEXT": "text",
             "VARCHAR": "text",
+            "VECTOR": "embedding",
+            "GEOGRAPHY": "geography",
+            "INTERVAL": "duration",
         }.get(inferred, "unknown")
     else:
-        if "TEXT" in counts and max(len(s) for s in non_empty if _classify_value(s, field_name=field_name) == "TEXT") > 255:
+        # Specialty + JSON: prefer specialty when every non-JSON sample agrees
+        # and JSON leftovers are empty arrays / nullish objects only.
+        specialty = types & {"VECTOR", "GEOGRAPHY", "INTERVAL"}
+        if len(specialty) == 1 and types <= specialty | {"JSON", "VARCHAR"}:
+            inferred = next(iter(specialty))
+            role = {
+                "VECTOR": "embedding",
+                "GEOGRAPHY": "geography",
+                "INTERVAL": "duration",
+            }[inferred]
+            notes.append(f"majority specialty {inferred} — identity payload")
+        elif "TEXT" in counts and max(len(s) for s in non_empty if _classify_value(s, field_name=field_name) == "TEXT") > 255:
             inferred = "TEXT"
+            role = "text"
+            notes.append("mixed sample types — widened to lossless text")
         else:
             inferred = "VARCHAR"
-        role = "text"
-        notes.append("mixed sample types — widened to lossless text")
+            role = "text"
+            notes.append("mixed sample types — widened to lossless text")
+
+    # VECTOR: promote to VECTOR(n) only when every sample agrees on dims — never invent.
+    if inferred == "VECTOR":
+        dims: list[int] = []
+        ok = True
+        for s in non_empty:
+            vec = _parse_vector_array(s)
+            if vec is None:
+                ok = False
+                break
+            dims.append(len(vec))
+        if ok and dims and len(set(dims)) == 1:
+            n = dims[0]
+            inferred = f"VECTOR({n})"
+            role = "embedding"
+            notes.append(f"homogeneous float array → VECTOR({n}) (dims from samples)")
+        else:
+            inferred = "JSON"
+            role = "semi_structured"
+            notes.append("float arrays with disagreeing/invalid dims — JSON (no invented VECTOR dim)")
+
+    # GEOGRAPHY / INTERVAL stay identity — no invented SRID or cast.
+    if inferred in {"GEOGRAPHY", "INTERVAL"}:
+        notes.append(f"{inferred} — identity payload (no invented cast)")
 
     # 0/1 → BOOLEAN only on flag-shaped names
     if (

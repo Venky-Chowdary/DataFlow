@@ -82,6 +82,8 @@ import {
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
+  ENGINE_TO_UI_TRANSFORM,
+  engineTransformToUi,
   isEnumToBooleanConflict,
   widenMappingToVarchar,
   mappingsFromAnalysis,
@@ -2388,31 +2390,19 @@ export function TransferPage({
     await executePreflight(approved);
   };
 
-  /** Reverse of `buildPreflightMappings`' engine-transform map, back to the Studio's UI transforms. */
-  const ENGINE_TO_UI_TRANSFORM: Record<string, MappingTransform> = {
-    trim: "trim",
-    upper: "upper",
-    lower: "lower",
-    datetime: "date_iso",
-    date_iso: "date_iso",
-    hash_pii: "hash_pii",
-    decimal: "cast_number",
-    cast_number: "cast_number",
-    boolean: "cast_boolean",
-    cast_boolean: "cast_boolean",
-    json: "parse_json",
-    parse_json: "parse_json",
-    strip_controls: "strip_controls",
-    normalize_unicode: "strip_controls",
-  };
-
   const stripControlCharsAndRerun = async (modeOverride?: ValidationMode): Promise<RemediationOpResult> => {
     const typed = new Set<MappingTransform>([
       "cast_number",
+      "cast_integer",
       "cast_boolean",
       "date_iso",
+      "time_iso",
       "parse_json",
       "hash_pii",
+      "binary",
+      "currency",
+      "percentage",
+      "identity_specialty",
     ]);
     const changed: string[] = [];
     const next = columnMappings.map((m) => {
@@ -2611,7 +2601,7 @@ export function TransferPage({
         break;
       case "add_transform": {
         const uiTransform = action.transform
-          ? ENGINE_TO_UI_TRANSFORM[action.transform] || (action.transform as MappingTransform)
+          ? (ENGINE_TO_UI_TRANSFORM[action.transform] || engineTransformToUi(action.transform) || (action.transform as MappingTransform))
           : undefined;
         if (!uiTransform) {
           toast({
@@ -3528,6 +3518,9 @@ export function TransferPage({
         transform: m.transform && m.transform !== "none" ? m.transform : undefined,
         source_type: m.inferredType || currentSourceSchema[m.source],
         target_type: m.destType || m.inferredType || currentSourceSchema[m.source],
+        struct_policy: m.structPolicy,
+        struct_derived: m.structDerived || undefined,
+        struct_parent: m.structParent,
       }));
       const name =
         `${sourceLabel || "source"} → ${mapDestRouteLabel || "destination"}`.slice(0, 180)

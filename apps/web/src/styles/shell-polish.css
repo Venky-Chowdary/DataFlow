@@ -3077,6 +3077,13 @@ textarea.df2-pilot-composer textarea {
   padding: 4px 8px;
 }
 
+.df2-column-struct-policy {
+  min-width: 110px;
+  font-size: 11px;
+  padding: 3px 6px;
+  margin-top: 4px;
+}
+
 .df2-result-next {
   display: flex;
   gap: 8px;

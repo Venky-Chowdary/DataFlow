@@ -4,12 +4,20 @@ import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAPPING_TRANSFORMS,
+  STRUCT_POLICIES,
+  applyDestTypeChange,
+  applyStructPolicyChange,
+  applyTransformChange,
+  canWidenMapping,
   flagExistingEnumBooleanConflict,
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
+  isSpecialtyLogicalType,
+  isStructLogicalType,
   widenMappingToVarchar,
   type EditableMapping,
   type MappingTransform,
+  type StructPolicy,
 } from "../lib/mapping";
 import {
   COLUMN_PAGE_SIZES,
@@ -179,8 +187,20 @@ export function ColumnReviewPanel({
           // Physical BOOLEAN stays — do not approve; operator must remap/ALTER.
           return flagExistingEnumBooleanConflict(m);
         }
-        if (isEnumToBooleanConflict(m)) {
+        if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
           return { ...widenMappingToVarchar(m), approved: true, requiresReview: false };
+        }
+        if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) {
+          // Specialty identity stays reviewable — Approve-all must not hide VECTOR/INTERVAL risk.
+          return {
+            ...m,
+            approved: false,
+            requiresReview: true,
+            transform: m.transform === "none" ? "identity_specialty" : m.transform,
+          };
+        }
+        if (m.structPolicy === "flatten_top_level_keys" || m.structDerived) {
+          return { ...m, approved: false, requiresReview: true };
         }
         return { ...m, approved: true };
       }),
@@ -520,10 +540,14 @@ export function ColumnReviewPanel({
                         className="df2-input df2-select df2-column-dest-type-select"
                         value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)}
                         onChange={(e) =>
-                          updateMapping(index, { destType: e.target.value, approved: false })
+                          updateMapping(index, applyDestTypeChange(m, e.target.value))
                         }
                         aria-label={`Destination type for ${m.source}`}
-                        title="Destination logical type"
+                        title={
+                          m.existsInDestination
+                            ? "Existing physical column — changing type here flags ALTER/remap (does not rewrite DDL)"
+                            : "Destination logical type"
+                        }
                       >
                         {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
                           <option key={opt.value} value={opt.value}>
@@ -537,6 +561,14 @@ export function ColumnReviewPanel({
                       {!m.existsInDestination && destColumnSet.size > 0 && (
                         <span className="df2-col-badge-new">new</span>
                       )}
+                      {(isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) && (
+                        <span
+                          className="df2-col-badge-new"
+                          title="VECTOR / INTERVAL / GEOGRAPHY travel as identity — dimensions/SRID are not rewritten"
+                        >
+                          identity
+                        </span>
+                      )}
                       {isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"
@@ -547,7 +579,7 @@ export function ColumnReviewPanel({
                           Remap / ALTER required
                         </button>
                       )}
-                      {isEnumToBooleanConflict(m) && !m.existsInDestination && (
+                      {isEnumToBooleanConflict(m) && canWidenMapping(m) && (
                         <button
                           type="button"
                           className="df2-btn df2-btn-sm df2-btn-ghost"
@@ -571,10 +603,7 @@ export function ColumnReviewPanel({
                           className="df2-input df2-select df2-column-transform"
                           value={m.transform ?? "none"}
                           onChange={(e) =>
-                            updateMapping(index, {
-                              transform: e.target.value as MappingTransform,
-                              approved: false,
-                            })
+                            updateMapping(index, applyTransformChange(m, e.target.value as MappingTransform))
                           }
                           aria-label={`Transform for ${m.source}`}
                           title={MAPPING_TRANSFORMS.find((t) => t.id === (m.transform ?? "none"))?.detail}
@@ -583,6 +612,26 @@ export function ColumnReviewPanel({
                             <option key={t.id} value={t.id}>{t.label}</option>
                           ))}
                         </select>
+                        {(isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || m.structPolicy) && !m.structDerived && (
+                          <select
+                            className="df2-input df2-select df2-column-struct-policy"
+                            value={m.structPolicy ?? "store_as_json"}
+                            onChange={(e) =>
+                              onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
+                            }
+                            aria-label={`STRUCT policy for ${m.source}`}
+                            title={STRUCT_POLICIES.find((p) => p.id === (m.structPolicy ?? "store_as_json"))?.detail}
+                          >
+                            {STRUCT_POLICIES.map((p) => (
+                              <option key={p.id} value={p.id}>{p.label}</option>
+                            ))}
+                          </select>
+                        )}
+                        {m.structDerived && m.structParent && (
+                          <span className="df2-col-badge-new" title={`Promoted from ${m.structParent} flatten`}>
+                            from {m.structParent}
+                          </span>
+                        )}
                       </div>
                     </td>
                   )}

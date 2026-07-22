@@ -65,8 +65,8 @@ export function detectNestedDocumentFields(
         column: col,
         kind: isArray ? "array" : "nested_object",
         detail: isArray
-          ? "Array field — will explode to rows or serialize per destination DDL."
-          : "Embedded JSON object — Compass stores as BSON; DataFlow maps to typed warehouse columns.",
+          ? "Array field — serialize per destination DDL (no silent row explosion)."
+          : "Embedded JSON object — Map chooses JSON blob or flatten top-level keys (nested objects stay on parent).",
         flattenTarget: `${col}_json`,
       });
     }
@@ -121,7 +121,7 @@ export function buildCompetitiveAdvantages(ctx: {
     advantages.unshift({
       id: "json-flatten",
       title: "Nested JSON → typed columns",
-      detail: `${ctx.nestedFieldCount} nested/document field(s) detected. We flatten and coerce for Snowflake, BigQuery, and Postgres — not raw BSON dump.`,
+      detail: `${ctx.nestedFieldCount} nested/document field(s) detected. On Map, choose JSON blob or flatten top-level keys — nested objects stay on the parent (no invented deep explode).`,
       icon: "trend",
     });
   }

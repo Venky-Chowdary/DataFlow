@@ -453,8 +453,12 @@ def build_mapped_rows_with_details(
     preserve_case: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details."""
+    from services.json_intelligence import materialize_struct_policies
+
     column_types = column_types or {}
     policy = transform_error_policy(error_policy)
+    # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
+    headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
     sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}

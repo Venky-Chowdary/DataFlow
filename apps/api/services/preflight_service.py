@@ -558,6 +558,9 @@ def run_file_preflight(
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
             score_gap=float(m.get("score_gap", 1.0)),
+            struct_policy=m.get("struct_policy") or m.get("structPolicy"),
+            struct_derived=bool(m.get("struct_derived") or m.get("structDerived", False)),
+            struct_parent=m.get("struct_parent") or m.get("structParent"),
         )
         for m in mappings
     ]

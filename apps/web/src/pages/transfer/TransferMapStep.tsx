@@ -11,6 +11,7 @@ import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, filterMappings } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
+import { mappingHealthSummary } from "../../lib/mapping";
 
 interface TransferMapStepProps {
   columnMappings: EditableMapping[];
@@ -123,6 +124,11 @@ export function TransferMapStep({
 
   const approvedCount = filterCounts.ready;
 
+  const health = useMemo(
+    () => mappingHealthSummary(columnMappings, confidenceThreshold),
+    [columnMappings, confidenceThreshold],
+  );
+
   const filteredForVisual = useMemo(
     () => filterMappings(columnMappings, {
       search,
@@ -204,6 +210,24 @@ export function TransferMapStep({
           </button>
         </div>
       </div>
+
+      {health.weak && (
+        <div
+          className={`df2-map-health-banner${health.total === 0 || health.unmappedTarget > 0 || health.existingTypeConflict > 0 ? " is-critical" : " is-warn"}`}
+          role="status"
+        >
+          <DtIcon name="alert" size={16} />
+          <div>
+            <strong>{health.headline}</strong>
+            <p>{health.detail}</p>
+            {health.specialtyIdentity > 0 && health.existingTypeConflict === 0 && health.unmappedTarget === 0 && (
+              <p className="df2-map-health-note">
+                Specialty types use identity transforms — Validate will still fail-closed on VECTOR dim mismatch.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {streamNames.length > 1 && (
         <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">

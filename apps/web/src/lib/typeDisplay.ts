@@ -32,6 +32,9 @@ export const LOGICAL_TYPE_OPTIONS: { value: string; label: string; family: TypeF
   { value: "UUID", label: "UUID", family: "uuid" },
   { value: "BINARY", label: "BINARY / bytes", family: "binary" },
   { value: "BYTEA", label: "BYTEA", family: "binary" },
+  { value: "VECTOR", label: "VECTOR — embedding", family: "binary" },
+  { value: "INTERVAL", label: "INTERVAL — duration", family: "temporal" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "json" },
 ];
 
 /** Snowflake-native DDL labels — Map should show what CREATE will actually use. */
@@ -76,6 +79,9 @@ export const POSTGRES_TYPE_OPTIONS: { value: string; label: string; family: Type
   { value: "UUID", label: "UUID", family: "uuid" },
   { value: "JSONB", label: "JSONB", family: "json" },
   { value: "BYTEA", label: "BYTEA", family: "binary" },
+  { value: "VECTOR", label: "VECTOR — pgvector", family: "binary" },
+  { value: "INTERVAL", label: "INTERVAL", family: "temporal" },
+  { value: "GEOGRAPHY", label: "GEOGRAPHY / GEOMETRY", family: "json" },
 ];
 
 export const MYSQL_TYPE_OPTIONS: { value: string; label: string; family: TypeFamily }[] = [
