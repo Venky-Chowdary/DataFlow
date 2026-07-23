@@ -39,13 +39,16 @@ def resolve_identity_key(
     dest_kind: str = "",
     validation_mode: str = "strict",
     purpose: Purpose = "uniqueness",
+    destination_pk_columns: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
     """Return ``(source_column, target_column)`` for the identity key, or ``(None, None)``.
 
     Rules (connector-agnostic):
     * Schemaless (Mongo/Dynamo/Redis): only ``_id`` — other ``*_id`` fields are FKs.
+    * Prefer introspected destination primary-key columns when mapped.
     * SQL uniqueness (G6/G8): exact ``id`` / ``_id`` on target, else source. Never
-      auto-pick ``user_id`` / ``account_id`` — that falsely blocks CRM extracts.
+      auto-pick ``user_id`` / ``account_id`` when several FK-like columns compete.
+    * Sole ``*_id`` only when no dest PK / exact key is available.
     * SQL required-nulls (G9): exact keys always; in ``strict``/``maximum`` also the
       first ``*_id`` source so high-assurance loads still enforce completeness.
     """
@@ -59,6 +62,8 @@ def resolve_identity_key(
                 srcs.append(c)
     tgts = [t for _, t in pairs]
     tgt_by_src = {s: t for s, t in pairs}
+    src_by_tgt = {t: s for s, t in pairs}
+    tgt_lower = {t.lower(): t for t in tgts}
 
     if kind in SCHEMALESS_DESTS:
         for t in tgts:
@@ -69,6 +74,15 @@ def resolve_identity_key(
             if s.lower() == "_id":
                 return s, tgt_by_src.get(s, s)
         return None, None
+
+    # Destination contract wins: first mapped introspected PK column.
+    for pk in destination_pk_columns or []:
+        name = str(pk or "").strip()
+        if not name:
+            continue
+        matched = tgt_lower.get(name.lower())
+        if matched:
+            return src_by_tgt.get(matched, matched), matched
 
     # Prefer exact target names first (destination contract wins).
     exact = _EXACT_SQL_KEYS if purpose == "required_nulls" else ("id", "_id")
@@ -104,6 +118,7 @@ def resolve_primary_key_target(
     dest_kind: str,
     *,
     validation_mode: str = "strict",
+    destination_pk_columns: list[str] | None = None,
 ) -> str | None:
     """Target-side identity column for uniqueness probes (DDL / G8)."""
     _src, tgt = resolve_identity_key(
@@ -111,6 +126,7 @@ def resolve_primary_key_target(
         dest_kind=dest_kind,
         validation_mode=validation_mode,
         purpose="uniqueness",
+        destination_pk_columns=destination_pk_columns,
     )
     return tgt
 

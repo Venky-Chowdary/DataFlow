@@ -260,8 +260,9 @@ def write_mapped_rows(
             update_cols = [c for c in target_cols if c not in conflict]
             if update_cols:
                 if DF_LSN_COL in target_cols:
-                    lsn_q = quote_sql_identifier(DF_LSN_COL, "`")
-                    newer = f"VALUES({lsn_q}) > COALESCE({lsn_q}, '')"
+                    from connectors.writer_common import mysql_lsn_values_newer_sql
+
+                    newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
                     updates = ", ".join(
                         f"{quote_sql_identifier(c, '`')}=IF({newer}, VALUES({quote_sql_identifier(c, '`')}), {quote_sql_identifier(c, '`')})"
                         for c in update_cols

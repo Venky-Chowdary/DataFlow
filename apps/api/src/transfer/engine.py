@@ -465,6 +465,35 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     )
 
 
+def _destination_schema_probe(
+    destination: EndpointConfig,
+    sync_mode: str = "",
+) -> tuple[dict[str, str], bool | None]:
+    """Return (column_types, table_exists).
+
+    ``table_exists`` is independent of whether columns loaded — a listed table
+    with empty column metadata must not be treated as missing / create-new.
+    """
+    if destination.kind != "database":
+        return {}, None
+    if is_overwrite_sync(sync_mode):
+        return {}, None
+    try:
+        from .endpoint_intelligence import introspect_endpoint
+
+        info = introspect_endpoint(destination)
+        schema = dict(info.get("schema") or {})
+        if "table_exists" in info:
+            exists: bool | None = bool(info.get("table_exists"))
+        elif schema:
+            exists = True
+        else:
+            exists = None
+        return schema, exists
+    except Exception:
+        return {}, None
+
+
 def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") -> dict[str, str]:
     """Introspect destination column types for schema-aware preflight and transforms.
 
@@ -472,17 +501,8 @@ def _destination_schema_types(destination: EndpointConfig, sync_mode: str = "") 
     and recreated, so any existing schema is irrelevant and should not influence
     mapping or preflight decisions.
     """
-    if destination.kind != "database":
-        return {}
-    if is_overwrite_sync(sync_mode):
-        return {}
-    try:
-        from .endpoint_intelligence import introspect_endpoint
-
-        info = introspect_endpoint(destination)
-        return dict(info.get("schema") or {})
-    except Exception:
-        return {}
+    schema, _exists = _destination_schema_probe(destination, sync_mode=sync_mode)
+    return schema
 
 
 def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> str:
@@ -860,9 +880,53 @@ def _auto_map(
         if is_overwrite_sync(sync_mode):
             mappings = default_mappings(columns)
         else:
-            target_schema = _destination_schema_types(request.destination, sync_mode=sync_mode)
+            target_schema, dest_exists = _destination_schema_probe(
+                request.destination, sync_mode=sync_mode,
+            )
             if not target_schema:
-                mappings = default_mappings(columns)
+                # Empty columns: only invent identity create-new when the object
+                # is confirmed missing. Existing/unknown → pending via mapper.
+                try:
+                    from services.mapping_pipeline import run_mapping_pipeline
+
+                    source_schemas = [
+                        {
+                            "name": c,
+                            "inferred_type": schema.get(c, "string"),
+                            "samples": [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]],
+                        }
+                        for c in columns
+                    ]
+                    source_samples = {
+                        c: [cell_to_string(r.get(c, "")) for r in (sample_rows or [])[:8]]
+                        for c in columns
+                    }
+                    result = run_mapping_pipeline(
+                        source_columns=columns,
+                        target_columns=[],
+                        source_schemas=source_schemas,
+                        target_schemas=None,
+                        file_format=request.source.format,
+                        confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
+                        source_samples=source_samples,
+                        validation_mode=request.validation_mode,
+                        use_llm=False,
+                        schema_policy=request.schema_policy,
+                        destination_db_type=(request.destination.format or "").lower(),
+                        destination_table_exists=dest_exists,
+                    )
+                    auto = result.get("mappings")
+                    if auto and isinstance(auto, list) and any(m.get("source") for m in auto):
+                        mappings = auto
+                    elif dest_exists is False:
+                        mappings = default_mappings(columns)
+                except Exception as exc:
+                    logger.warning(
+                        "Empty-dest schema map failed: %s; fallback identity only if missing",
+                        exc,
+                    )
+                    if dest_exists is False:
+                        mappings = default_mappings(columns)
             else:
                 # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
                 # unless the source literally contains an _id column or the user supplied a mapping.
@@ -1186,7 +1250,9 @@ class UniversalTransferEngine:
             total_rows = len(records)
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
 
-            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+                request.destination, sync_mode=request.sync_mode,
+            )
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=records[:100], job_id=job_id),
                 column_types=schema,
@@ -1263,7 +1329,7 @@ class UniversalTransferEngine:
                     sample_rows=records[:100],
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=bool(dest_schema_types),
+                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -1784,7 +1850,9 @@ class UniversalTransferEngine:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
-            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+                request.destination, sync_mode=request.sync_mode,
+            )
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
                 column_types=schema,
@@ -1809,7 +1877,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=bool(dest_schema_types),
+                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
@@ -2233,7 +2301,9 @@ class UniversalTransferEngine:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
             mongo.update_job_status(job_id, "running", total_rows=total_rows, records_processed=0)
-            dest_schema_types = _destination_schema_types(request.destination, sync_mode=request.sync_mode)
+            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+                request.destination, sync_mode=request.sync_mode,
+            )
             mappings = _enrich_mappings_with_types(
                 _auto_map(request, columns, schema, sample_rows=sample_rows, job_id=job_id),
                 column_types=schema,
@@ -2258,7 +2328,7 @@ class UniversalTransferEngine:
                     sample_rows=sample_rows,
                     confidence_threshold=confidence_threshold_for_mode(request.validation_mode),
                     destination_column_types=dest_schema_types,
-                    destination_table_exists=bool(dest_schema_types),
+                    destination_table_exists=(dest_table_exists_flag if dest_table_exists_flag is not None else bool(dest_schema_types)),
                     destination_can_create=dest_ok,
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,

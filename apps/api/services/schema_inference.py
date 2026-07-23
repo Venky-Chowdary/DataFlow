@@ -140,6 +140,25 @@ def _is_base64(value: str) -> bool:
     return True
 
 
+def _looks_like_binary_payload(value: str, *, field_name: str | None = None) -> bool:
+    """Promote to BINARY only with name evidence or strong payload evidence.
+
+    Short base64-looking tokens (session ids, opaque keys) must stay VARCHAR —
+    never invent BINARY DDL from a single 12–20 char sample (Airbyte trap).
+    """
+    if not _is_base64(value):
+        return False
+    if _is_binary_field_name(field_name or ""):
+        return True
+    s = value.strip()
+    # Strong evidence without a binary-ish name: longer payload + padding or high entropy.
+    if len(s) < 32:
+        return False
+    if s.endswith("=") or s.endswith("=="):
+        return True
+    return len(set(s)) >= 12
+
+
 # Binary payloads only — not generic "data"/"key"/"token" (those are often IDs/JWTs).
 _BINARY_FIELD_RE = re.compile(
     r"(?:^|_)(?:payload|binary|blob|bytea|bytes|b64|base64|image|audio|video|pdf|"
@@ -314,7 +333,7 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if _UUID_RE.match(s):
         return "UUID"
 
-    if _is_base64(s):
+    if _looks_like_binary_payload(s, field_name=field_name):
         return "BINARY"
 
     boolean_parsed = _parse_boolean(s)

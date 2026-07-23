@@ -27,13 +27,25 @@ def test_build_pinecone_vectors_maps_rows():
             "metadata": {"page": "1", "tags": ["a", "b"]},
         }
     ]
-    vectors = build_pinecone_vectors(rows, dimension=3)
+    vectors, _rejected = build_pinecone_vectors(rows, dimension=3)
     assert len(vectors) == 1
     assert vectors[0]["id"] == "vec-1"
     assert vectors[0]["values"] == [0.1, 0.2, 0.3]
     assert vectors[0]["metadata"]["content"] == "hello"
     assert vectors[0]["metadata"]["page"] == "1"
     assert vectors[0]["metadata"]["tags"] == ["a", "b"]
+
+
+def test_build_pinecone_vectors_rejects_missing_embedding():
+    rows = [
+        {"id": "a", "content": "x", "embedding": [0.1, 0.2, 0.3]},
+        {"id": "b", "content": "y", "embedding": None},
+        {"id": "c", "content": "z", "embedding": [0.1, 0.2]},  # dim mismatch
+    ]
+    vectors, rejected = build_pinecone_vectors(rows, dimension=3)
+    assert len(vectors) == 1
+    assert len(rejected) == 2
+    assert any("missing" in (r.get("reason") or "").lower() or "refuse" in (r.get("reason") or "").lower() for r in rejected)
 
 
 def test_pinecone_probe_requires_host_and_key():

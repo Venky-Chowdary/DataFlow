@@ -37,13 +37,23 @@ def test_build_weaviate_objects_maps_rows():
             "metadata": {"page": "1", "heading": "Intro"},
         }
     ]
-    objects = build_weaviate_objects(rows, class_name="DataflowChunk", dimension=2)
+    objects, _rejected = build_weaviate_objects(rows, class_name="DataflowChunk", dimension=2)
     assert len(objects) == 1
     assert objects[0]["class"] == "DataflowChunk"
     assert objects[0]["properties"]["content"] == "hello"
     assert objects[0]["properties"]["page"] == "1"
     assert objects[0]["vector"] == [0.1, 0.2]
     uuid.UUID(objects[0]["id"])  # must be valid UUID
+
+
+def test_build_weaviate_objects_rejects_missing_embedding():
+    rows = [
+        {"id": "b" * 32, "content": "ok", "embedding": [0.1, 0.2]},
+        {"id": "c" * 32, "content": "bad", "embedding": None},
+    ]
+    objects, rejected = build_weaviate_objects(rows, class_name="DataflowChunk", dimension=2)
+    assert len(objects) == 1
+    assert len(rejected) == 1
 
 
 def test_weaviate_probe_unreachable_fail_closed():

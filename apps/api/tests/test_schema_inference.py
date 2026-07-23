@@ -29,7 +29,8 @@ class TestInferType:
             (["550e8400-e29b-41d4-a716-446655440000"], "UUID"),
             (['{"k":"v"}', '{"a":1}'], "JSON"),
             (["[]", "[1,2]"], "ARRAY"),
-            (["SGVsbG8gV29ybGQ="], "BINARY"),
+            # Short base64-looking tokens stay VARCHAR without binary field evidence.
+            (["SGVsbG8gV29ybGQ="], "VARCHAR"),
             (["a" * 300], "TEXT"),
             (["hello", "world"], "VARCHAR"),
             (["user@test.com"], "VARCHAR"),

@@ -267,6 +267,7 @@ def test_pipeline_returns_mapping_proof():
         source_schemas=[{"name": "id", "inferred_type": "INTEGER", "samples": ["1", "2"]}],
         destination_db_type="snowflake",
         use_llm=False,
+        destination_table_exists=False,
     )
     assert "mapping_proof" in result
     assert result["mapping_proof"]["dest_mode"] == "create_new"

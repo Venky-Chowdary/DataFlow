@@ -16,7 +16,10 @@ from services.cdc_engine import ChangeBatch
 
 @pytest.fixture
 def base_cfg():
-    return {
+    from services.cdc_lease import configure_store, reset_store
+
+    configure_store(backend="memory")
+    yield {
         "host": "localhost",
         "port": 27017,
         "database": "test",
@@ -25,7 +28,10 @@ def base_cfg():
         "auth_source": "",
         "ssl": False,
         "connection_string": "",
+        "cursor_key": "test-mongo-cs-unit",
+        "lease_holder_id": "mongo-unit-test",
     }
+    reset_store()
 
 
 def test_snapshot_reads_collection_batch(base_cfg: dict) -> None:

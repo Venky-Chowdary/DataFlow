@@ -52,6 +52,8 @@ interface ColumnReviewPanelProps {
   destType?: string;
   /** True while destination schema introspection is in flight. */
   destSchemaLoading?: boolean;
+  /** null = unknown; true = table confirmed; false = will create. */
+  destTableExists?: boolean | null;
   showTransforms?: boolean;
   hideTitle?: boolean;
   /** Expand-dialog layout: table-first, no nested preview, fixed scroll height. */
@@ -92,6 +94,7 @@ export function ColumnReviewPanel({
   destinationLabel,
   destType,
   destSchemaLoading = false,
+  destTableExists = null,
   showTransforms = true,
   hideTitle = false,
   presentation = "default",
@@ -452,13 +455,22 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && (
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists !== true && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
               <strong>New destination table</strong>
               {" — identity mapping; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
+            </span>
+          </div>
+        )}
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
+          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Existing destination table</strong>
+              {" — confirmed on the server, but column metadata did not load. Retry Destination/Map before treating this as create-new."}
             </span>
           </div>
         )}

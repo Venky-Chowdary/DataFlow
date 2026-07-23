@@ -34,12 +34,25 @@ def _redis_client(cfg: dict[str, Any]):
 
 
 def _decode(value: Any) -> str:
+    """Decode Redis bytes — binary payloads become a typed base64 envelope."""
     from services.value_serializer import json_default
 
     if value is None:
         return ""
     if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
+        try:
+            text = value.decode("utf-8")
+            # Round-trip check — non-UTF8 or replacement means binary.
+            if text.encode("utf-8") == value and "\ufffd" not in text:
+                return text
+        except UnicodeDecodeError:
+            pass
+        import base64
+
+        return json.dumps(
+            {"_df_redis_binary": True, "encoding": "base64", "data": base64.b64encode(value).decode("ascii")},
+            default=json_default,
+        )
     if isinstance(value, str):
         return value
     return json.dumps(value, default=json_default)

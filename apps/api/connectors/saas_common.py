@@ -103,7 +103,16 @@ def humanize_http_error(exc: Exception, driver: str) -> str:
 def extract_records(records: list[dict[str, Any]]) -> ReadBatch:
     if not records:
         return ReadBatch(headers=[], rows=[], offset=0, total_rows=0)
-    headers = list(records[0].keys())
+    # Union keys across the page — late fields on later records must not vanish.
+    headers: list[str] = []
+    seen: set[str] = set()
+    for rec in records:
+        for key in rec.keys():
+            if key == "attributes":
+                continue
+            if key not in seen:
+                seen.add(key)
+                headers.append(key)
     rows = [
         [cell_to_string(r.get(h), preserve_sql_null=True) for h in headers]
         for r in records

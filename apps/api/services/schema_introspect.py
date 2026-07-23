@@ -378,12 +378,45 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             tables = [r[0] for r in cur.fetchall()]
 
             columns: list[dict] = []
+            resolved_schema = schema
             target = table or (tables[0] if tables else None)
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
-                columns = _refine_columns_by_samples(conn, columns, target, schema)
+                # Table may live outside the requested schema (common when UI
+                # schema is blank / wrong but database+table are correct).
+                if not columns:
+                    cur.execute(
+                        """
+                        SELECT table_schema, table_name
+                        FROM information_schema.tables
+                        WHERE table_type = 'BASE TABLE'
+                          AND lower(table_name) = lower(%s)
+                        ORDER BY CASE
+                          WHEN table_schema = %s THEN 0
+                          WHEN table_schema = 'public' THEN 1
+                          ELSE 2
+                        END
+                        LIMIT 5
+                        """,
+                        (target, schema),
+                    )
+                    for found_schema, found_table in cur.fetchall() or []:
+                        columns = _pg_fetch_columns(cur, found_schema, found_table)
+                        if columns:
+                            resolved_schema = found_schema
+                            target = found_table
+                            break
+                if columns:
+                    columns = _refine_columns_by_samples(
+                        conn, columns, target, resolved_schema
+                    )
         conn.close()
-        return {"ok": True, "tables": tables, "columns": columns, "schema": schema}
+        return {
+            "ok": True,
+            "tables": tables,
+            "columns": columns,
+            "schema": resolved_schema if table else schema,
+        }
     except ImportError:
         return {
             "ok": False,
@@ -586,7 +619,45 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                     """,
                     (schema, target_table),
                 )
-                for name, dtype, nullable in cur.fetchall():
+                col_rows = list(cur.fetchall() or [])
+                if not col_rows:
+                    cur.execute(
+                        """
+                        SELECT table_schema, table_name
+                        FROM information_schema.tables
+                        WHERE table_type = 'BASE TABLE'
+                          AND UPPER(table_name) = UPPER(%s)
+                        ORDER BY CASE
+                          WHEN UPPER(table_schema) = UPPER(%s) THEN 0
+                          WHEN UPPER(table_schema) = 'PUBLIC' THEN 1
+                          ELSE 2
+                        END
+                        LIMIT 5
+                        """,
+                        (str(target_table), schema),
+                    )
+                    for found_schema, found_table in cur.fetchall() or []:
+                        try:
+                            found_table = resolve_or_fold_snowflake_table(
+                                cur, found_schema, str(found_table)
+                            )
+                        except Exception:
+                            pass
+                        cur.execute(
+                            """
+                            SELECT column_name, data_type, is_nullable
+                            FROM information_schema.columns
+                            WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
+                            ORDER BY ordinal_position
+                            """,
+                            (found_schema, found_table),
+                        )
+                        col_rows = list(cur.fetchall() or [])
+                        if col_rows:
+                            schema = found_schema
+                            target_table = found_table
+                            break
+                for name, dtype, nullable in col_rows:
                     columns.append(
                         {
                             "name": name,
@@ -649,7 +720,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             username=kwargs.get("username", ""),
             password=kwargs.get("password", ""),
             connection_string=kwargs.get("connection_string", ""),
-            ssl=kwargs.get("ssl", False),
+            ssl=kwargs.get("ssl", True),
         )
         with conn.cursor() as cur:
             # MySQL has no separate schema layer — database is the namespace.
@@ -702,7 +773,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     (db_name, target),
                 )
                 rows = cur.fetchall()
-                if not rows and target != requested:
+                if not rows:
                     cur.execute(
                         """
                         SELECT column_name, column_type, is_nullable
@@ -713,6 +784,38 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         (db_name, requested or target),
                     )
                     rows = cur.fetchall()
+                # Wrong database in the form is common (UI filled schema as DB).
+                # Search other schemas the account can see before inventing create-new.
+                if not rows:
+                    cur.execute(
+                        """
+                        SELECT table_schema, table_name
+                        FROM information_schema.tables
+                        WHERE table_type = 'BASE TABLE'
+                          AND LOWER(table_name) = LOWER(%s)
+                        ORDER BY CASE
+                          WHEN table_schema = %s THEN 0
+                          ELSE 1
+                        END
+                        LIMIT 5
+                        """,
+                        (requested or target, db_name),
+                    )
+                    for found_db, found_table in cur.fetchall() or []:
+                        cur.execute(
+                            """
+                            SELECT column_name, column_type, is_nullable
+                            FROM information_schema.columns
+                            WHERE table_schema = %s AND table_name = %s
+                            ORDER BY ordinal_position
+                            """,
+                            (found_db, found_table),
+                        )
+                        rows = cur.fetchall()
+                        if rows:
+                            db_name = found_db
+                            target = found_table
+                            break
                 for name, dtype, nullable in rows:
                     columns.append({
                         "name": name,
@@ -741,27 +844,52 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
         client = get_client(project_id=project_id, credentials_path=kwargs.get("connection_string", ""))
         tables = [t.table_id for t in client.list_tables(f"{project_id}.{dataset_id}", max_results=100)]
         columns: list[dict] = []
+        resolved_dataset = dataset_id
         target = table or (tables[0] if tables else None)
         if target:
-            tbl = client.get_table(f"{project_id}.{dataset_id}.{target}")
-            for field in tbl.schema:
-                columns.append({
-                    "name": field.name,
-                    "inferred_type": _bq_to_logical(field.field_type),
-                    "nullable": field.mode != "REQUIRED",
-                })
-        return {"ok": True, "tables": tables, "columns": columns, "schema": dataset_id}
+            try:
+                tbl = client.get_table(f"{project_id}.{dataset_id}.{target}")
+            except Exception:
+                tbl = None
+            if tbl is None and table:
+                # Wrong dataset in the form — scan a bounded set of datasets.
+                try:
+                    datasets = list(client.list_datasets(max_results=25))
+                except Exception:
+                    datasets = []
+                for ds in datasets:
+                    ds_id = getattr(ds, "dataset_id", None) or str(ds)
+                    try:
+                        tbl = client.get_table(f"{project_id}.{ds_id}.{table}")
+                    except Exception:
+                        continue
+                    if tbl is not None:
+                        resolved_dataset = ds_id
+                        target = table
+                        break
+            if tbl is not None:
+                for field in tbl.schema:
+                    columns.append({
+                        "name": field.name,
+                        "inferred_type": _bq_field_to_logical(field),
+                        "nullable": getattr(field, "mode", "NULLABLE") != "REQUIRED",
+                    })
+        return {"ok": True, "tables": tables, "columns": columns, "schema": resolved_dataset}
     except ImportError:
         return {"ok": False, "error": "Install google-cloud-bigquery for schema introspection", "columns": [], "tables": []}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
 
-def _bq_to_logical(dtype: str) -> str:
-    d = dtype.upper()
+def _bq_to_logical(dtype: str, *, precision: int | None = None, scale: int | None = None) -> str:
+    d = (dtype or "").upper()
     if d in ("INT64", "INTEGER"):
         return "INTEGER"
     if d in ("NUMERIC", "BIGNUMERIC"):
+        if precision is not None and scale is not None:
+            return f"DECIMAL({int(precision)},{int(scale)})"
+        if precision is not None:
+            return f"DECIMAL({int(precision)})"
         return "DECIMAL"
     if d in ("FLOAT64", "FLOAT", "DOUBLE"):
         return "FLOAT"
@@ -769,11 +897,56 @@ def _bq_to_logical(dtype: str) -> str:
         return "BOOLEAN"
     if d == "DATE":
         return "DATE"
-    if "TIMESTAMP" in d:
-        return "TIMESTAMP"
+    if d == "TIME":
+        return "TIME"
+    # BigQuery DATETIME is wall-clock NTZ; TIMESTAMP is UTC instant (TZ-aware).
+    if d == "DATETIME":
+        return "TIMESTAMP_NTZ"
+    if d == "TIMESTAMP" or "TIMESTAMP" in d:
+        return "TIMESTAMPTZ"
     if d == "INTERVAL":
         return "INTERVAL"
+    if d == "BYTES":
+        return "BINARY"
+    if d == "JSON":
+        return "JSON"
+    if d == "GEOGRAPHY":
+        return "GEOGRAPHY"
+    if d in ("RECORD", "STRUCT"):
+        return "JSON"
+    if d == "STRING":
+        return "TEXT"
     return "TEXT"
+
+
+def _bq_field_to_logical(field: Any) -> str:
+    """Preserve BigQuery RECORD/ARRAY nesting — never collapse child types to bare JSON."""
+    precision = getattr(field, "precision", None)
+    scale = getattr(field, "scale", None)
+    ftype = str(getattr(field, "field_type", "") or "")
+    mode = str(getattr(field, "mode", "NULLABLE") or "NULLABLE").upper()
+    children = list(getattr(field, "fields", None) or [])
+
+    if ftype.upper() in {"RECORD", "STRUCT"} and children:
+        parts: list[str] = []
+        for child in children:
+            child_mode = str(getattr(child, "mode", "NULLABLE") or "NULLABLE").upper()
+            child_t = _bq_field_to_logical(child)
+            # Avoid double ARRAY<> when child is already REPEATED.
+            if child_mode == "REPEATED" and not child_t.upper().startswith("ARRAY<"):
+                child_t = f"ARRAY<{child_t}>"
+            parts.append(f"{child.name}:{child_t}")
+        base = f"STRUCT<{', '.join(parts)}>"
+    else:
+        base = _bq_to_logical(
+            ftype,
+            precision=precision if isinstance(precision, int) else None,
+            scale=scale if isinstance(scale, int) else None,
+        )
+
+    if mode == "REPEATED" and not base.upper().startswith("ARRAY<"):
+        return f"ARRAY<{base}>"
+    return base
 
 
 _PG_COLUMN_SQL = """
@@ -848,8 +1021,12 @@ def _pg_to_logical(dtype: str) -> str:
         return "BOOLEAN"
     if d == "date":
         return "DATE"
+    # Preserve TZ polarity (Redshift TIMESTAMPTZ shares this mapper).
     if "timestamp" in d:
-        return "TIMESTAMP"
+        if "with time zone" in d or d in {"timestamptz", "timestamp with time zone"}:
+            return "TIMESTAMPTZ"
+        # Explicit NTZ token so ddl_type does not invent TIMESTAMPTZ on PG.
+        return "TIMESTAMP_NTZ"
     if d == "time" or d.startswith("time with") or d.startswith("time without"):
         return "TIME"
     if d == "uuid":
@@ -867,16 +1044,19 @@ def _pg_to_logical(dtype: str) -> str:
         # BIT(1) → boolean via type_system; BIT(n>1) → binary.
         return raw.upper() if "(" in d else "BIT"
     if d in ("xml", "tsvector", "tsquery", "text", "character varying",
-             "varchar", "character", "char", "name", "point",
+             "varchar", "character", "char", "name",
              "line", "lseg", "box", "path", "polygon", "circle",
-             "inet", "cidr", "macaddr", "macaddr8", "hstore", "pg_lsn",
+             "inet", "cidr", "macaddr", "macaddr8", "pg_lsn",
              "txid_snapshot", "pg_snapshot", "user-defined"):
         return "TEXT"
+    if d == "hstore":
+        return "JSON"
+    if d == "point":
+        return "GEOGRAPHY"
     # character varying(n) / character(n)
     if d.startswith("character varying") or d.startswith("varchar") or d.startswith("character("):
         return "TEXT"
     return "TEXT"
-
 
 def _mysql_to_logical(dtype: str) -> str:
     """Map MySQL ``column_type`` to logical carriers, preserving DECIMAL(p,s)."""
@@ -895,6 +1075,12 @@ def _mysql_to_logical(dtype: str) -> str:
     if any(tok in d for tok in ("geometry", "point", "polygon", "linestring", "multipoint",
                                   "multipolygon", "multilinestring", "geomcollection")):
         return "GEOGRAPHY"
+    # BIGINT UNSIGNED exceeds signed 64-bit — DECIMAL carrier (matches type_system CANONICAL).
+    # Must run BEFORE the generic "int" branch ("int" is a substring of "bigint").
+    if "unsigned" in d and "bigint" in d:
+        return "BIGINT UNSIGNED"
+    if d == "year" or d.startswith("year("):
+        return "INTEGER"
     if "int" in d:
         return "INTEGER"
     # IEEE float/double/real — distinct from DECIMAL(p,s).
@@ -904,8 +1090,11 @@ def _mysql_to_logical(dtype: str) -> str:
         return "BOOLEAN"
     if d == "date":
         return "DATE"
-    if "timestamp" in d or "datetime" in d:
-        return "TIMESTAMP"
+    # MySQL TIMESTAMP is session-TZ aware; DATETIME is wall-clock NTZ.
+    if "timestamp" in d and "datetime" not in d:
+        return "TIMESTAMPTZ"
+    if "datetime" in d:
+        return "TIMESTAMP_NTZ"
     if d.startswith("time"):
         return "TIME"
     if "json" in d:
@@ -920,16 +1109,18 @@ def _mysql_to_logical(dtype: str) -> str:
 def _oracle_to_logical(dtype: str) -> str:
     """Map Oracle data_type (+ optional precision/scale) to logical carriers.
 
-    NUMBER(p,0) → INTEGER; NUMBER(p,s) → DECIMAL(p,s); BINARY_FLOAT/DOUBLE → FLOAT.
-    Oracle DATE includes time-of-day → TIMESTAMP (not bare DATE).
+    NUMBER(p,0) → INTEGER when p ≤ 18; else DECIMAL(p,0). NUMBER(p,s) → DECIMAL(p,s).
+    BINARY_FLOAT/DOUBLE → FLOAT. Oracle DATE includes time-of-day → TIMESTAMP.
     """
     raw = (dtype or "").strip()
     d = raw.upper().replace(" ", "")
     # NUMBER(p,s) / FLOAT(p) carriers
     m = re.match(r"^NUMBER\((\d+)(?:,(\d+))?\)$", d)
     if m:
+        from services.type_system import zero_scale_numeric_carrier
+
         if m.group(2) is not None and int(m.group(2)) == 0:
-            return "INTEGER"
+            return zero_scale_numeric_carrier(int(m.group(1)))
         if m.group(2) is not None:
             return f"DECIMAL({m.group(1)},{m.group(2)})"
         return f"DECIMAL({m.group(1)})"
@@ -944,7 +1135,9 @@ def _oracle_to_logical(dtype: str) -> str:
     if d == "DATE":
         return "TIMESTAMP"  # Oracle DATE is datetime
     if "TIMESTAMP" in d:
-        return "TIMESTAMP"
+        if "WITHLOCALTIMEZONE" in d or "WITHTIMEZONE" in d:
+            return "TIMESTAMPTZ"
+        return "TIMESTAMP_NTZ"
     if d.startswith("INTERVAL"):
         return "INTERVAL"
     if d in {"CLOB", "NCLOB", "LONG", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "VARCHAR"}:
@@ -964,8 +1157,10 @@ def _sqlserver_to_logical(dtype: str) -> str:
     d = raw.lower()
     m = re.match(r"^(decimal|numeric)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
     if m:
+        from services.type_system import zero_scale_numeric_carrier
+
         if m.group(3) is not None and int(m.group(3)) == 0:
-            return "INTEGER"
+            return zero_scale_numeric_carrier(int(m.group(2)))
         if m.group(3) is not None:
             return f"DECIMAL({m.group(2)},{m.group(3)})"
         return f"DECIMAL({m.group(2)})"
@@ -983,10 +1178,14 @@ def _sqlserver_to_logical(dtype: str) -> str:
         return "DATE"
     if d == "time" or d.startswith("time("):
         return "TIME"
-    if d in {"datetime", "datetime2", "smalldatetime", "datetimeoffset"} or d.startswith("datetime"):
-        return "TIMESTAMP"
+    if d == "datetimeoffset" or d.startswith("datetimeoffset"):
+        return "TIMESTAMPTZ"
+    if d in {"datetime", "datetime2", "smalldatetime"} or d.startswith("datetime"):
+        return "TIMESTAMP_NTZ"
     if d == "uniqueidentifier":
         return "UUID"
+    if d == "json":
+        return "JSON"
     if d == "xml":
         return "TEXT"
     if d in {"geography", "geometry"}:
@@ -1063,6 +1262,36 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 ),
                 {"owner": owner, "table": table.upper()},
             ).fetchall()
+            if not col_rows:
+                found = conn.execute(
+                    sa.text(
+                        """
+                        SELECT owner, table_name FROM all_tables
+                        WHERE UPPER(table_name) = UPPER(:table)
+                        ORDER BY CASE
+                          WHEN owner = :owner THEN 0
+                          ELSE 1
+                        END
+                        FETCH FIRST 5 ROWS ONLY
+                        """
+                    ),
+                    {"table": table, "owner": owner},
+                ).fetchall()
+                for found_owner, found_table in found or []:
+                    col_rows = conn.execute(
+                        sa.text(
+                            """
+                            SELECT column_name, data_type, data_precision, data_scale, nullable
+                            FROM all_tab_columns
+                            WHERE owner = :owner AND table_name = :table
+                            ORDER BY column_id
+                            """
+                        ),
+                        {"owner": found_owner, "table": found_table},
+                    ).fetchall()
+                    if col_rows:
+                        owner = found_owner
+                        break
             columns: list[dict] = []
             for name, data_type, precision, scale, nullable in col_rows:
                 dtype = str(data_type or "")
@@ -1170,6 +1399,43 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 ),
                 {"schema": schema, "table": table},
             ).fetchall()
+            if not col_rows:
+                found = conn.execute(
+                    sa.text(
+                        """
+                        SELECT TABLE_SCHEMA, TABLE_NAME
+                        FROM INFORMATION_SCHEMA.TABLES
+                        WHERE TABLE_TYPE = 'BASE TABLE'
+                          AND LOWER(TABLE_NAME) = LOWER(:table)
+                        ORDER BY CASE
+                          WHEN TABLE_SCHEMA = :schema THEN 0
+                          WHEN TABLE_SCHEMA = 'dbo' THEN 1
+                          ELSE 2
+                        END
+                        """
+                    ),
+                    {"table": table, "schema": schema},
+                ).fetchall()
+                for found_schema, found_table in found or []:
+                    col_rows = conn.execute(
+                        sa.text(
+                            """
+                            SELECT
+                              c.COLUMN_NAME,
+                              c.DATA_TYPE,
+                              c.NUMERIC_PRECISION,
+                              c.NUMERIC_SCALE,
+                              c.IS_NULLABLE
+                            FROM INFORMATION_SCHEMA.COLUMNS c
+                            WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
+                            ORDER BY c.ORDINAL_POSITION
+                            """
+                        ),
+                        {"schema": found_schema, "table": found_table},
+                    ).fetchall()
+                    if col_rows:
+                        schema = found_schema
+                        break
             columns: list[dict] = []
             for name, data_type, precision, scale, nullable in col_rows:
                 dtype = str(data_type or "")
@@ -1213,11 +1479,22 @@ def _sf_to_logical(dtype: str) -> str:
         return "GEOGRAPHY"
     if "INTERVAL" in d:
         return "INTERVAL"
-    # NUMBER(38,0) → INTEGER; other NUMBER/DECIMAL keep DECIMAL(p,s) when present.
+    # Semi-structured — never collapse to TEXT (Airbyte-class catalog honesty).
+    if d in {"VARIANT", "OBJECT"}:
+        return "JSON"
+    if d == "ARRAY" or d.startswith("ARRAY"):
+        return "ARRAY"
+    if d == "BINARY" or d.startswith("BINARY("):
+        return "BINARY"
+    if d == "TIME" or d.startswith("TIME("):
+        return "TIME"
+    # NUMBER(p,0) → INTEGER when p ≤ 18; else DECIMAL(p,0) (never silent BIGINT overflow).
     m = re.match(r"^(NUMBER|DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
     if m:
+        from services.type_system import zero_scale_numeric_carrier
+
         if m.group(3) is not None and int(m.group(3)) == 0:
-            return "INTEGER"
+            return zero_scale_numeric_carrier(int(m.group(2)))
         if m.group(3) is not None:
             return f"DECIMAL({m.group(2)},{m.group(3)})"
         return f"DECIMAL({m.group(2)})"
@@ -1230,8 +1507,13 @@ def _sf_to_logical(dtype: str) -> str:
         return "BOOLEAN"
     if d == "DATE":
         return "DATE"
+    # Preserve TZ polarity when Snowflake declared it (Map/Validate can warn).
+    if "TIMESTAMP_TZ" in d or "TIMESTAMP_LTZ" in d:
+        return "TIMESTAMPTZ"
+    if "TIMESTAMP_NTZ" in d:
+        return "TIMESTAMP_NTZ"
     if "TIMESTAMP" in d:
-        return "TIMESTAMP"
+        return "TIMESTAMP_NTZ"
     return "TEXT"
 
 
@@ -1373,9 +1655,11 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     inferred = _sample_logical_type(val, key)
                     sample_text = "" if val is None else str(val)
                     if key not in columns:
+                        # Null-first fields stay untyped until a non-null sample
+                        # votes — do not invent TEXT from BSON null alone.
                         columns[key] = {
                             "name": key,
-                            "inferred_type": inferred or "TEXT",
+                            "inferred_type": inferred,
                             "nullable": val is None,
                             "samples": [sample_text] if sample_text else [],
                             "type_counts": {},
@@ -1725,22 +2009,33 @@ def salesforce_field_to_logical(
     precision: int | None = None,
     scale: int | None = None,
 ) -> str:
-    """Map Salesforce describe field type → DataFlow logical carrier."""
+    """Map Salesforce describe field type → DataFlow logical carrier.
+
+    Currency/percent without Describe precision still get honest DECIMAL defaults
+    (never bare DECIMAL that invents warehouse NUMBER). Datetime is UTC → TIMESTAMPTZ.
+    """
     t = (field_type or "string").strip().lower()
     if t in {"boolean"}:
         return "BOOLEAN"
     if t in {"int", "long", "integer"}:
         return "INTEGER"
     if t in {"double", "currency", "percent"}:
-        if precision is not None and scale is not None and int(scale) > 0:
-            return f"DECIMAL({int(precision)},{int(scale)})"
-        if t == "double":
-            return "FLOAT"
-        return "DECIMAL"
+        if precision is not None and scale is not None:
+            p, s = int(precision), int(scale)
+            if s == 0 and p <= 18:
+                return "INTEGER"
+            return f"DECIMAL({p},{s})"
+        if t == "currency":
+            return "DECIMAL(18,2)"
+        if t == "percent":
+            return "DECIMAL(18,2)"
+        return "FLOAT"
     if t == "date":
         return "DATE"
-    if t in {"datetime", "time"}:
-        return "TIMESTAMP" if t == "datetime" else "TIME"
+    if t == "datetime":
+        return "TIMESTAMPTZ"
+    if t == "time":
+        return "TIME"
     if t == "base64":
         return "BINARY"
     if t in {"address", "location", "complexvalue", "json"}:
@@ -1751,18 +2046,45 @@ def salesforce_field_to_logical(
     return "TEXT"
 
 
-def hubspot_property_to_logical(prop_type: str, *, field_type: str = "") -> str:
-    """Map HubSpot property type → DataFlow logical carrier."""
+def hubspot_property_to_logical(
+    prop_type: str,
+    *,
+    field_type: str = "",
+    number_display_hint: str = "",
+    name: str = "",
+) -> str:
+    """Map HubSpot property type → DataFlow logical carrier.
+
+    Uses ``fieldType`` / ``numberDisplayHint`` when present so currency and
+    whole-number properties do not all collapse to bare DECIMAL.
+    """
     t = (prop_type or "string").strip().lower()
     ft = (field_type or "").strip().lower()
+    hint = (number_display_hint or "").strip().lower()
+    n = (name or "").strip().lower()
     if t == "bool" or ft == "booleancheckbox":
         return "BOOLEAN"
     if t == "number":
+        if hint in {"currency"}:
+            return "DECIMAL(18,2)"
+        if hint in {"percentage", "percent"}:
+            return "DECIMAL(18,2)"
+        if hint == "duration":
+            return "INTEGER"
+        if ft in {"calculation_equation", "calculation_score", "calculation_read_time"}:
+            return "FLOAT"
+        if (
+            n.endswith(("_count", "count"))
+            or n.endswith("_num")
+            or n in {"num_employees", "numberofemployees", "hs_object_id"}
+            or n.endswith("numberofemployees")
+        ):
+            return "INTEGER"
         return "DECIMAL"
     if t == "date":
         return "DATE"
     if t == "datetime":
-        return "TIMESTAMP"
+        return "TIMESTAMPTZ"
     if t == "json" or ft in {"html", "calculation_equation"}:
         return "JSON" if t == "json" else "TEXT"
     # string, enumeration, phone_number, …
@@ -1861,6 +2183,8 @@ def _introspect_hubspot(**kwargs: Any) -> dict[str, Any]:
                 "inferred_type": hubspot_property_to_logical(
                     str(p.get("type") or "string"),
                     field_type=str(p.get("fieldType") or ""),
+                    number_display_hint=str(p.get("numberDisplayHint") or ""),
+                    name=str(p.get("name") or ""),
                 ),
                 "nullable": True,
                 "data_type": p.get("type") or "string",

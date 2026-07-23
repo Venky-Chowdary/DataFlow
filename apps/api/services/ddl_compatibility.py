@@ -10,6 +10,7 @@ from services.type_system import (
     ddl_type,
     decimal_scale_would_truncate,
     is_lossy_coercion,
+    is_precision_collapse_coercion,
     normalize_logical_type,
     vector_dim_mismatch,
     vector_dim_unknown_for_native,
@@ -98,6 +99,8 @@ _OVERWRITE_SYNC = {
 def _primary_key_target(
     mappings: list[dict],
     dest_kind: str,
+    *,
+    destination_pk_columns: list[str] | None = None,
 ) -> str | None:
     """Return the target column for the identity uniqueness contract.
 
@@ -105,7 +108,11 @@ def _primary_key_target(
     """
     from services.primary_key import resolve_primary_key_target
 
-    return resolve_primary_key_target(mappings, dest_kind)
+    return resolve_primary_key_target(
+        mappings,
+        dest_kind,
+        destination_pk_columns=destination_pk_columns,
+    )
 
 
 def _duplicate_pk_in_source(
@@ -113,13 +120,16 @@ def _duplicate_pk_in_source(
     mappings: list[dict],
     *,
     dest_kind: str,
+    destination_pk_columns: list[str] | None = None,
 ) -> list[str]:
     if not sample_rows:
         return []
     issues: list[str] = []
     src_by_tgt = {str(m.get("target") or ""): str(m.get("source") or "") for m in mappings if m.get("target")}
 
-    pk_tgt = _primary_key_target(mappings, dest_kind)
+    pk_tgt = _primary_key_target(
+        mappings, dest_kind, destination_pk_columns=destination_pk_columns
+    )
     if not pk_tgt:
         return issues
     src = src_by_tgt.get(pk_tgt, pk_tgt)
@@ -152,6 +162,7 @@ def evaluate_ddl_compatibility(
     schema_policy: str | None = None,
     sync_mode: str | None = None,
     destination_table: str | None = None,
+    destination_pk_columns: list[str] | None = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -249,11 +260,15 @@ def evaluate_ddl_compatibility(
                 f"— scale truncates on {dest_kind}"
             )
         if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type):
-            # Sample-aware: JSON/CSV numeric strings onto warehouse NUMBER are
-            # declared-lossy but write-safe when values coerce. Only hard-block
-            # when samples are missing or fail the write-path transform.
+            # Sample-aware soft-pass only for textual→typed coercions that the
+            # write path can prove. Declared IEEE/precision collapses
+            # (float→decimal, float→integer, decimal→integer) stay hard issues
+            # even when a head sample coerces — body rows can still lose fidelity.
+            src_logical = normalize_logical_type(src_type)
+            tgt_logical = normalize_logical_type(tgt_type)
+            precision_collapse = is_precision_collapse_coercion(src_type, tgt_type)
             sample_ok = False
-            if sample_rows:
+            if sample_rows and not precision_collapse:
                 from services.coercion_probe import samples_coerce_mapping
 
                 sample_ok = samples_coerce_mapping(
@@ -264,8 +279,14 @@ def evaluate_ddl_compatibility(
                 )
             if not sample_ok:
                 note = ""
-                if normalize_logical_type(src_type) == "float" and normalize_logical_type(tgt_type) == "decimal":
-                    note = " — float→decimal (IEEE precision risk)"
+                if src_logical == "float" and tgt_logical == "decimal":
+                    note = " — float→decimal (IEEE precision risk; not soft-passed by samples)"
+                elif src_logical == "float" and tgt_logical == "integer":
+                    note = " — float→integer (fractional truncation risk)"
+                elif src_logical == "decimal" and tgt_logical == "integer":
+                    note = " — decimal→integer (scale truncation risk)"
+                elif src_logical == "datetime" and tgt_logical == "date":
+                    note = " — datetime→date (time-of-day truncation; not soft-passed by samples)"
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
@@ -306,7 +327,14 @@ def evaluate_ddl_compatibility(
                         f"Proposed DDL {inferred_ddl} for {tgt} may truncate values (max {max_len} chars)"
                     )
 
-    issues.extend(_duplicate_pk_in_source(sample_rows, mappings, dest_kind=dest_kind))
+    issues.extend(
+        _duplicate_pk_in_source(
+            sample_rows,
+            mappings,
+            dest_kind=dest_kind,
+            destination_pk_columns=destination_pk_columns,
+        )
+    )
 
     if not schemaless and table_exists and target_schema:
         mapped_targets = {str(m.get("target")).lower() for m in mappings if m.get("target")}

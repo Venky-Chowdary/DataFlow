@@ -107,6 +107,7 @@ import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
+import { findDuplicateKeyRoot } from "../lib/validateIssueGrouping";
 import {
   buildStreamContracts,
   seedStreamFieldsFromCandidates,
@@ -359,6 +360,8 @@ export function TransferPage({
   const [llmMappingUsed, setLlmMappingUsed] = useState(false);
   const [mappingProof, setMappingProof] = useState<import("../components/MappingProofDrawer").MappingProof | null>(null);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [mapFocusSource, setMapFocusSource] = useState<string | null>(null);
+  const [mapIdentityBanner, setMapIdentityBanner] = useState<string | null>(null);
   const [seedRepairProposalId, setSeedRepairProposalId] = useState<string | null>(null);
   const appliedStudioIntentTokenRef = useRef<number | null>(null);
   const [runStartupProgress, setRunStartupProgress] = useState(0);
@@ -368,6 +371,7 @@ export function TransferPage({
   const mappingReviewCount = columnMappings.filter(
     (m) => !m.approved && (m.requiresReview || m.confidence < confidenceThreshold),
   ).length;
+  const duplicateKeyRoot = useMemo(() => findDuplicateKeyRoot(preflight), [preflight]);
 
   const buildSourceSamples = useCallback((): Record<string, string[]> => {
     const rows = (parsed?.data ?? parsed?.sample_data ?? []) as Record<string, unknown>[];
@@ -1059,6 +1063,8 @@ export function TransferPage({
               source_samples: buildSourceSamples(),
               destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
               sync_mode: syncMode,
+              destination_table_exists:
+                destKindMode === "database" ? destTableExists : false,
             });
           }
         } else {
@@ -1075,6 +1081,8 @@ export function TransferPage({
             source_samples: buildSourceSamples(),
             destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
             sync_mode: syncMode,
+            destination_table_exists:
+              destKindMode === "database" ? destTableExists : false,
           });
           // Do NOT create an empty draft plan here. Fire-and-forget create races
           // Validate (which may sync a good plan) and leaves Execute pointing at a
@@ -1123,6 +1131,7 @@ export function TransferPage({
       exportFormat,
       destType,
       syncMode,
+      destTableExists,
     ],
   );
 
@@ -1194,10 +1203,10 @@ export function TransferPage({
   const loadDestinationSchema = async (): Promise<{
     columns: string[];
     schema: Record<string, string>;
-    tableExists: boolean;
+    tableExists: boolean | null;
   }> => {
     if (destKindMode !== "database" || !targetCollection.trim()) {
-      return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+      return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
     }
     const gen = ++destSchemaGenRef.current;
     const tableKey = `${connectorId}|${destType}|${targetDb}|${destSchema}|${targetCollection.trim()}`;
@@ -1210,7 +1219,7 @@ export function TransferPage({
         destination: buildDestinationEndpoint(),
       });
       if (gen !== destSchemaGenRef.current) {
-        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
       }
       const columns = destination.columns ?? [];
       const schema = destination.schema ?? {};
@@ -1227,9 +1236,26 @@ export function TransferPage({
       } else {
         resolvedExists = null;
       }
-      setDestColumns(columns);
-      setDestSchemaMap(schema);
+      // Never wipe a known schema with an empty probe when the table still exists —
+      // that falsely flips Map into "create-new" / identity 93% mode.
+      const keepPrior = columns.length === 0 && resolvedExists !== false;
+      const nextColumns = keepPrior ? destColumns : columns;
+      const nextSchema = keepPrior ? destSchemaMap : schema;
+      setDestColumns(nextColumns);
+      setDestSchemaMap(nextSchema);
       setDestTableExists(resolvedExists);
+      if (keepPrior && resolvedExists === true && destColumns.length === 0) {
+        const metaKey = `meta:${tableKey}`;
+        if (lastNewTableToastRef.current !== metaKey) {
+          lastNewTableToastRef.current = metaKey;
+          toast({
+            title: "Table exists — columns not loaded",
+            message:
+              `${targetCollection.trim()} is on the destination, but column metadata failed. Retry Destination/Map; do not treat this as create-new.`,
+            tone: "warning",
+          });
+        }
+      }
       if (resolvedExists === false && lastNewTableToastRef.current !== tableKey) {
         lastNewTableToastRef.current = tableKey;
         toast({
@@ -1238,10 +1264,14 @@ export function TransferPage({
           tone: "info",
         });
       }
-      return { columns, schema, tableExists: resolvedExists === true };
+      return {
+        columns: nextColumns,
+        schema: nextSchema,
+        tableExists: resolvedExists,
+      };
     } catch (e) {
       if (gen !== destSchemaGenRef.current) {
-        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+        return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists };
       }
       // Keep last-known schema on transient errors so the demo does not blank out.
       // Do not force "table missing" — unknown is safer than a false create promise.
@@ -1251,7 +1281,7 @@ export function TransferPage({
         message: e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.",
         tone: "warning",
       });
-      return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
+      return { columns: destColumns, schema: destSchemaMap, tableExists: null };
     } finally {
       if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
@@ -1259,8 +1289,17 @@ export function TransferPage({
 
   useEffect(() => {
     if (!analysis?.columns.length || step !== STEP_MAP || analyzing) return;
+    // Never invent create-new identity mappings for a database destination unless
+    // the object is confirmed missing. File destinations still use identity map.
+    if (
+      destKindMode === "database"
+      && !destColumns.length
+      && destTableExists !== false
+    ) {
+      return;
+    }
     void applyPipelineMappings(destColumns.length ? destColumns : undefined, destSchemaMap);
-  }, [validationMode, step, destColumns, destSchemaMap, analyzing]);
+  }, [validationMode, step, destColumns, destSchemaMap, destTableExists, destKindMode, analyzing]);
 
   useEffect(() => {
     if (destKindMode !== "database" || !targetCollection.trim()) return;
@@ -2259,31 +2298,49 @@ export function TransferPage({
       bump(8, "Preparing schema context…");
       let freshDestCols = destColumns;
       let freshDestSchema = destSchemaMap;
+      let loadedTableExists: boolean | null = destTableExists;
       if (destKindMode === "database") {
         bump(22, "Loading destination schema…");
         const loaded = await loadDestinationSchema();
         freshDestCols = loaded.columns;
         freshDestSchema = loaded.schema;
+        loadedTableExists = loaded.tableExists;
       }
       bump(42, "Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
-      if (sourceKind === "file" && parsed) {
+      // Only identity create-new when the destination object is confirmed missing.
+      const canCreateNew =
+        destKindMode !== "database" || loadedTableExists === false;
+      const mapTargets =
+        freshDestCols.length > 0
+          ? freshDestCols
+          : canCreateNew
+            ? undefined
+            : null;
+      if (mapTargets === null) {
+        toast({
+          title:
+            loadedTableExists === true
+              ? "Existing table — columns not loaded"
+              : "Destination schema unavailable",
+          message:
+            loadedTableExists === true
+              ? "Destination table is present, but schema metadata failed. Retry Destination/Map before matching columns (do not treat this as create-new)."
+              : "Could not confirm whether the destination table exists. Retry schema load before Map invents create-new fields.",
+          tone: "warning",
+        });
+        mapped = columnMappings;
+      } else if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
           bump(58, "Profiling source columns…");
           await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
         }
         bump(72, "Matching source to destination fields…");
-        mapped = await applyPipelineMappings(
-          freshDestCols.length ? freshDestCols : undefined,
-          freshDestSchema,
-        ) ?? [];
+        mapped = await applyPipelineMappings(mapTargets, freshDestSchema) ?? [];
       } else if (analysis?.columns.length || currentSourceColumns.length) {
         bump(65, "Matching source to destination fields…");
-        mapped = await applyPipelineMappings(
-          freshDestCols.length ? freshDestCols : undefined,
-          freshDestSchema,
-        ) ?? [];
+        mapped = await applyPipelineMappings(mapTargets, freshDestSchema) ?? [];
       } else {
         toast({
           title: "Source schema required",
@@ -2620,7 +2677,7 @@ export function TransferPage({
         const next = columnMappings.map((m) => {
           if (matches(m)) {
             hit = true;
-            return { ...m, transform: uiTransform, approved: true };
+            return { ...m, transform: uiTransform, approved: true, requiresReview: false };
           }
           return m;
         });
@@ -2635,24 +2692,68 @@ export function TransferPage({
         if (hit) void executePreflight(next);
         break;
       }
+      case "map_column": {
+        const dest = action.target;
+        if (!dest) {
+          toast({
+            title: "Missing target column",
+            message: "AI suggested a remap without a destination column. Open Map to pick one.",
+            tone: "warning",
+          });
+          setStep(STEP_MAP);
+          return;
+        }
+        let hit = false;
+        const next = columnMappings.map((m) => {
+          if (!matches(m)) return m;
+          hit = true;
+          return {
+            ...m,
+            target: dest,
+            destType: destSchemaMap[dest] || m.destType,
+            existsInDestination: destColumns.some((c) => c.toLowerCase() === dest.toLowerCase()),
+            approved: true,
+            requiresReview: false,
+            reason: [m.reason, `Remapped → ${dest}`].filter(Boolean).join(" · "),
+          };
+        });
+        setColumnMappings(next);
+        toast({
+          title: hit ? "Column remapped — re-validating" : "Column not found",
+          message: hit
+            ? `Mapped '${action.column ?? "?"}' → '${dest}'. Re-running Validate.`
+            : `Couldn't find '${action.column ?? "?"}' in the current mappings.`,
+          tone: hit ? "success" : "warning",
+        });
+        if (hit) void executePreflight(next);
+        break;
+      }
       case "fix_source_keys":
-        setStep(STEP_MAP);
+        setMapFocusSource(action.column || primaryKeyField || null);
+        setMapIdentityBanner(
+          action.column
+            ? `Duplicate values on ${action.column} blocked Validate.`
+            : "Duplicate identity keys blocked Validate.",
+        );
+        setStep(STEP_DESTINATION);
+        setAdvancedOpen(true);
         toast({
           title: "Duplicate identity keys",
           message:
-            "Approve & apply cannot dedupe source rows. On Map, pick a unique identity column or dedupe the source, then re-run Validate.",
+            "Change the primary key field or sync mode in Destination → Advanced, then return to Validate and Re-run. Map review alone cannot dedupe source rows.",
           tone: "warning",
         });
         break;
       case "review_mappings":
       case "rerun_mapping":
+        if (action.column) setMapFocusSource(action.column);
         setStep(STEP_MAP);
         toast({
           title: "Opened Map step",
           message:
             action.kind === "rerun_mapping"
               ? "Re-run mapping to accept the new schema, then re-run preflight."
-              : "Review identity / mappings, then re-run Validate. Mapping approve alone does not remove source duplicates.",
+              : "Review mappings, then re-run Validate.",
           tone: "info",
         });
         break;
@@ -3718,6 +3819,7 @@ export function TransferPage({
           analysis={analysis}
           destColumns={destColumns}
           destSchemaLoading={destSchemaLoading}
+          destTableExists={destTableExists}
           targetCollection={targetCollection}
           targetDatabase={targetDb}
           destKindMode={destKindMode}
@@ -3796,6 +3898,9 @@ export function TransferPage({
           }}
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToPreflight()}
+          initialFocusSource={mapFocusSource}
+          identityFixBanner={mapIdentityBanner}
+          onIdentityFixConsumed={() => setMapFocusSource(null)}
         />
       )}
 
@@ -4800,7 +4905,25 @@ export function TransferPage({
             )}
             onQuarantineAndRerun={quarantineAndRerun}
             cellPreview={cellPreview}
-            onReviewMappings={() => setStep(STEP_MAP)}
+            onReviewMappings={(opts) => {
+              if (opts?.focusSource) {
+                setMapFocusSource(opts.focusSource);
+                setMapIdentityBanner(
+                  `Validate focused ${opts.focusSource} — confirm this is the right identity column.`,
+                );
+              }
+              setStep(STEP_MAP);
+            }}
+            onOpenIdentitySettings={() => {
+              setStep(STEP_DESTINATION);
+              setAdvancedOpen(true);
+              toast({
+                title: "Identity & sync settings",
+                message:
+                  "Change the primary key field or sync mode here, then return to Validate and Re-run. Mapping approve cannot remove duplicate source rows.",
+                tone: "info",
+              });
+            }}
             onOpenMappingProof={() => setMappingProofOpen(true)}
             mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
@@ -4832,8 +4955,10 @@ export function TransferPage({
                     target: String(hit.destination || existing?.target || src),
                     confidence: existing?.confidence ?? 1,
                     destType: String(nextType),
-                    approved: false,
-                    requiresReview: true,
+                    // Operator already approved the repair proposal — stay on Validate
+                    // and re-run preflight (same path as one-click type/transform fixes).
+                    approved: true,
+                    requiresReview: false,
                     transform: (xf as EditableMapping["transform"]) || existing?.transform,
                     reason: [
                       existing?.reason,
@@ -4842,13 +4967,18 @@ export function TransferPage({
                     sample: existing?.sample,
                     inferredType: existing?.inferredType,
                     isPii: existing?.isPii,
+                    existsInDestination: existing?.existsInDestination,
+                    createNew: existing?.createNew,
+                    assignmentStrategy: existing?.assignmentStrategy,
                   });
                 }
-                return [...bySource.values()];
+                const next = [...bySource.values()];
+                queueMicrotask(() => void executePreflight(next));
+                return next;
               });
               toast({
-                title: "Repair applied to mappings",
-                message: "Re-run Validate to confirm gates pass with the approved fixes.",
+                title: "Repair applied — re-validating",
+                message: "Approved mapping fixes are in place. Re-running Validate to confirm gates pass.",
                 tone: "success",
               });
             }}
@@ -5047,6 +5177,27 @@ export function TransferPage({
           onExecute={() => void executeTransfer()}
           onOpenJobTheater={openJobTheater}
           onSaveAsContract={() => void handleSaveAsContract()}
+          onPrimaryFix={
+            duplicateKeyRoot
+              ? () => {
+                  setStep(STEP_DESTINATION);
+                  setAdvancedOpen(true);
+                  toast({
+                    title: "Identity & sync settings",
+                    message:
+                      "Change the primary key field or sync mode, then return to Validate and Re-run.",
+                    tone: "info",
+                  });
+                }
+              : undefined
+          }
+          primaryFixLabel={
+            duplicateKeyRoot
+              ? duplicateKeyRoot.primaryKey
+                ? `Fix identity (${duplicateKeyRoot.primaryKey})`
+                : "Fix identity / sync mode"
+              : undefined
+          }
         />
       )}
       </div>

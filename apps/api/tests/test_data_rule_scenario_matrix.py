@@ -1194,7 +1194,7 @@ def _run_type_system(sc: Scenario) -> dict[str, Any]:
     elif case == "tz_checksum_instant":
         wire = "2024-06-01T12:00:00+05:30"
         readback = datetime(2024, 6, 1, 2, 30, tzinfo=timezone(timedelta(hours=-4)))
-        ok = normalize_cell(wire) == normalize_cell(readback) == "2024-06-01T06:30:00Z"
+        ok = normalize_cell(wire) == normalize_cell(readback) == "2024-06-01T06:30:00"
         detail["wire"] = normalize_cell(wire)
     elif case == "json_key_order":
         a = '{"tier":"gold","tags":["a","b"]}'

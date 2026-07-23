@@ -1486,7 +1486,7 @@ def stream_database_transfer(
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed, kafka_cursor
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
@@ -1544,6 +1544,18 @@ def stream_database_transfer(
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
         checkpoint_service.save(checkpoint)
+        if src_type == "kafka" and kafka_cursor and src_cfg:
+            try:
+                from connectors.kafka_reader import commit_kafka_offsets
+
+                commit_kafka_offsets(src_cfg, kafka_cursor)
+                # After durable commit, clear pending so a retry does not double-commit.
+                if isinstance(kafka_cursor, dict):
+                    kafka_cursor = {**kafka_cursor, "pending_offsets": [], "committed": True}
+                    checkpoint.kafka_cursor = kafka_cursor
+                    checkpoint_service.save(checkpoint)
+            except Exception:
+                pass
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 

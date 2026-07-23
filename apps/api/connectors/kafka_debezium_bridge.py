@@ -84,11 +84,16 @@ class KafkaDebeziumConsumer:
     """Optional kafka-python consumer. Requires ``kafka-python`` extra.
 
     Config: ``bootstrap_servers``, ``topic``, ``group_id``.
+
+    Offsets are **not** auto-committed. Call ``commit_offsets`` only after the
+    batch has been successfully applied (and preferably checkpointed) so a crash
+    mid-write redelivers — at-least-once, never silent loss (Airbyte trap).
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self._consumer = None
+        self._pending_offsets: dict[tuple[str, int], int] = {}
 
     def connect(self) -> None:
         try:
@@ -103,10 +108,42 @@ class KafkaDebeziumConsumer:
             bootstrap_servers=self.config.get("bootstrap_servers") or "localhost:9092",
             group_id=self.config.get("group_id") or "dataflow-debezium",
             auto_offset_reset=self.config.get("auto_offset_reset") or "earliest",
-            enable_auto_commit=True,
+            enable_auto_commit=False,
             # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
             value_deserializer=lambda b: b if b is not None else b,
         )
+
+    def pending_offsets(self) -> list[dict[str, Any]]:
+        """Return next-offset tokens for the current uncommitted poll batch."""
+        return [
+            {"topic": topic, "partition": partition, "offset": offset}
+            for (topic, partition), offset in sorted(self._pending_offsets.items())
+        ]
+
+    def commit_offsets(self, offsets: list[dict[str, Any]] | None = None) -> None:
+        """Commit offsets after destination apply + checkpoint (at-least-once)."""
+        if self._consumer is None:
+            self.connect()
+        assert self._consumer is not None
+        try:
+            from kafka import TopicPartition, OffsetAndMetadata  # type: ignore
+        except ImportError:
+            return
+        payload = offsets if offsets is not None else self.pending_offsets()
+        if not payload:
+            return
+        meta = {
+            TopicPartition(str(item["topic"]), int(item["partition"])): OffsetAndMetadata(
+                int(item["offset"]), None, -1
+            )
+            for item in payload
+            if item.get("topic") is not None and item.get("partition") is not None
+        }
+        if not meta:
+            return
+        self._consumer.commit(meta)
+        if offsets is None:
+            self._pending_offsets.clear()
 
     def poll_rows(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[dict[str, Any]]:
         """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
@@ -117,8 +154,14 @@ class KafkaDebeziumConsumer:
 
         registry_url = str(self.config.get("schema_registry_url") or "").strip()
         batch = self._consumer.poll(timeout_ms=timeout_ms, max_records=max_records)
-        for _tp, messages in batch.items():
+        for tp, messages in batch.items():
             for msg in messages:
+                # Track next offset to commit after successful apply.
+                key = (msg.topic, int(msg.partition))
+                nxt = int(msg.offset) + 1
+                prev = self._pending_offsets.get(key)
+                if prev is None or nxt > prev:
+                    self._pending_offsets[key] = nxt
                 val = msg.value
                 if not val:
                     continue
@@ -157,3 +200,4 @@ class KafkaDebeziumConsumer:
             except Exception:
                 pass
             self._consumer = None
+            self._pending_offsets.clear()

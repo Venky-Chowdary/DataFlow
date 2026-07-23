@@ -56,7 +56,9 @@ def test_item_to_record_null_map_list_binary_set():
 
 
 def test_infer_logical_from_native():
-    assert infer_logical_from_native(DDB_EXPLICIT_NULL) == "VARCHAR"
+    # Explicit NULL must not invent VARCHAR — skip the vote.
+    assert infer_logical_from_native(DDB_EXPLICIT_NULL) is None
+    assert infer_logical_from_native(None) is None
     assert infer_logical_from_native(Decimal("1.5")) == "DECIMAL"
     assert infer_logical_from_native(Decimal("3")) == "INTEGER"
     assert infer_logical_from_native({"city": "x"}) == "JSON"

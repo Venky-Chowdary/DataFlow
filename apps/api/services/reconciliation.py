@@ -337,21 +337,45 @@ def reconcile(
 
     if source_checksum != target_checksum:
         # When the target legitimately contains extra rows (append/upsert),
-        # whole-table checksums are not comparable; rely on the key-aligned
-        # sample compare already validated above.
+        # whole-table checksums are not comparable; require a key-aligned
+        # sample compare that actually compared rows (fail-closed otherwise).
         if allow_extra_rows and target_rows > expected_rows:
+            compared = int((sample_compare or {}).get("compared") or 0)
+            sample_ok = (
+                bool(sample_compare)
+                and bool(sample_compare.get("passed", False))
+                and compared > 0
+            )
+            if sample_ok:
+                return ReconciliationReport(
+                    passed=True,
+                    source_rows=source_rows,
+                    target_rows=target_rows,
+                    source_checksum=source_checksum,
+                    target_checksum=target_checksum,
+                    message=(
+                        f"Transfer verified by key-aligned sample ({compared} compared; "
+                        f"{target_rows} rows"
+                        + (f", {rejected_rows} rejected" if rejected_rows else "")
+                        + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
+                    ),
+                    rejected_rows=rejected_rows,
+                    sample_compare=sample_compare,
+                )
             return ReconciliationReport(
-                passed=True,
+                passed=False,
                 source_rows=source_rows,
                 target_rows=target_rows,
                 source_checksum=source_checksum,
                 target_checksum=target_checksum,
                 message=(
-                    f"Transfer verified by key-aligned sample ({target_rows} rows"
-                    + (f", {rejected_rows} rejected" if rejected_rows else "")
-                    + f"; {target_rows - expected_rows} pre-existing rows skipped in checksum)"
+                    "Checksum mismatch with extra destination rows: key-aligned "
+                    "sample compare with compared>0 is required (fail-closed; "
+                    "whole-table checksums are not comparable under append/upsert)"
                 ),
                 rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                sample_compare=sample_compare,
             )
         if strict_checksum:
             return ReconciliationReport(
@@ -1104,13 +1128,16 @@ def normalize_cell(value: Any) -> str:
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, _datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        else:
-            value = value.astimezone(timezone.utc)
-        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
+        # sources match NTZ sinks that stored the same UTC components, while
+        # offset-aware values still differ from a different naive wall clock.
+        if value.microsecond:
+            return value.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return value.strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, _date):
-        return _datetime.combine(value, _time.min, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, float):
         return _canonicalize_number(str(value)) or "nan"
     if isinstance(value, int):
@@ -1171,31 +1198,63 @@ def normalize_cell(value: Any) -> str:
     ):
         dtm = _parse_datetime(text)
         if dtm:
-            # Wire may keep source offsets (instant + offset fidelity), but
-            # checksums compare instants: fold every parseable datetime to UTC Z
-            # so write-time ISO strings match destination datetime read-back.
-            return _checksum_datetime_utc_z(dtm)
+            # Fold offsets/Z to UTC wall-clock; keep naive strings as wall-clock.
+            # Do not keep a trailing Z — that falsely fails NTZ sink readback
+            # against TIMESTAMPTZ sources that share the same UTC components.
+            return _checksum_datetime_utc_wall(dtm if isinstance(dtm, str) else str(dtm), original=text)
         dt = _parse_date(text)
         if dt:
-            return f"{dt}T00:00:00Z"
+            return f"{dt}T00:00:00"
     return text
 
 
-def _checksum_datetime_utc_z(iso_text: str) -> str:
-    """Canonical UTC-Z form for checksum equality (offsets → same instant)."""
+def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -> str:
+    """Canonical UTC wall-clock for checksum equality (no Z marker).
+
+    Aware/offset/Z strings fold to UTC components. Naive wall-clock strings
+    stay as-is. That equates TIMESTAMPTZ→DATETIME UTC storage without equating
+    ``12:00+05:30`` (06:30 UTC) to naive ``12:00``.
+    """
     text = (iso_text or "").strip()
     if not text:
         return ""
+    src = (original or text).strip()
+    aware_or_epoch = bool(
+        src.endswith(("Z", "z"))
+        or re.search(r"[+-]\d{2}:?\d{2}\s*$", src)
+    )
+    try:
+        from services.transform_engine import _EPOCH_MS_RE, _EPOCH_S_RE
+
+        aware_or_epoch = aware_or_epoch or bool(
+            _EPOCH_MS_RE.match(src) or _EPOCH_S_RE.match(src)
+        )
+    except Exception:
+        pass
     try:
         iso = text[:-1] + "+00:00" if text.endswith("Z") else text
         obj = _datetime.fromisoformat(iso)
-        if obj.tzinfo is None:
-            obj = obj.replace(tzinfo=timezone.utc)
-        else:
-            obj = obj.astimezone(timezone.utc)
-        return obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if obj.tzinfo is not None or aware_or_epoch:
+            if obj.tzinfo is None:
+                obj = obj.replace(tzinfo=timezone.utc)
+            else:
+                obj = obj.astimezone(timezone.utc)
+            obj = obj.replace(tzinfo=None)
+        if obj.microsecond:
+            return obj.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return obj.strftime("%Y-%m-%dT%H:%M:%S")
     except ValueError:
+        # Fall back: strip invented trailing Z from transform parser.
+        if text.endswith("Z") and not aware_or_epoch:
+            return text[:-1]
+        if text.endswith("Z"):
+            return text[:-1]  # still wall-clock form for checksum
         return text
+
+
+def _checksum_datetime_utc_z(iso_text: str) -> str:
+    """Backward-compatible alias — checksums use wall-clock UTC, not Z."""
+    return _checksum_datetime_utc_wall(iso_text)
 
 
 def _canonicalize_number(value: Any) -> str | None:
@@ -1239,9 +1298,65 @@ def build_reconciliation_proof(
             "sample_compare": {"passed": True, "compared": 0, "mismatches": []},
         }
 
-    key_col = primary_key or "id"
+    key_col = primary_key
+    key_provenance = "explicit" if primary_key else "missing"
+    if not key_col:
+        # Do not invent "id" — positional / guessed identity produces false
+        # high row-fidelity scores (Airbyte-class honesty gap).
+        return {
+            "passed": False,
+            "matched_key_count": 0,
+            "missing_key_count": len(source_records),
+            "extra_key_count": 0,
+            "row_fidelity_score": 0.0,
+            "sample_compare": {
+                "passed": False,
+                "compared": 0,
+                "mismatches": [],
+                "alignment": "unproven_identity",
+            },
+            "identity": {
+                "column": None,
+                "proven": False,
+                "reason": "primary_key required for key-aligned fidelity proof",
+            },
+            "verification_mode": "unproven_identity",
+        }
+
     source_keys = {normalize_cell(row.get(key_col)) for row in source_records if row.get(key_col) is not None}
     target_keys = {normalize_cell(row.get(key_col)) for row in target_records if row.get(key_col) is not None}
+    # Null / blank keys cannot prove uniqueness — fail closed on fidelity claims.
+    source_null_keys = sum(1 for row in source_records if row.get(key_col) is None or normalize_cell(row.get(key_col)) == "")
+    target_null_keys = sum(1 for row in target_records if row.get(key_col) is None or normalize_cell(row.get(key_col)) == "")
+    if source_null_keys or target_null_keys or len(source_keys) < max(1, len(source_records) - source_null_keys):
+        # Duplicate or null identity → positional comparison only, never high confidence.
+        sample_compare = sample_compare_rows(
+            source_records,
+            target_records,
+            mappings,
+            sample_size=sample_size,
+            sort_key=None,
+        )
+        sample_compare = {
+            **sample_compare,
+            "alignment": "positional_only",
+            "identity_warning": "weak or non-unique primary key — fidelity is sample/positional only",
+        }
+        return {
+            "passed": False,
+            "matched_key_count": 0,
+            "missing_key_count": len(source_records),
+            "extra_key_count": 0,
+            "row_fidelity_score": 0.0,
+            "sample_compare": sample_compare,
+            "identity": {
+                "column": key_col,
+                "proven": False,
+                "reason": "null or duplicate identity values — refuse key-aligned proof",
+            },
+            "verification_mode": "positional_only",
+        }
+
     matched_keys = source_keys & target_keys
     missing_keys = source_keys - target_keys
     extra_keys = target_keys - source_keys
@@ -1251,6 +1366,7 @@ def build_reconciliation_proof(
         target_records,
         mappings,
         sample_size=sample_size,
+        sort_key=key_col,
     )
 
     matched_key_count = len(matched_keys)
@@ -1276,6 +1392,8 @@ def build_reconciliation_proof(
         "extra_key_count": extra_key_count,
         "row_fidelity_score": row_fidelity_score,
         "sample_compare": sample_compare,
+        "identity": {"column": key_col, "proven": True, "provenance": key_provenance},
+        "verification_mode": "key_aligned",
     }
 
 

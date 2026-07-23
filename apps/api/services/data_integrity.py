@@ -103,6 +103,15 @@ def _check_coercion_safety(
             continue
         src = str(issue.get("source") or "")
         mapping = next((m for m in mappings if str(m.get("source") or "") == src), None)
+        # Never sample-clear IEEE/precision collapses — head rows can look clean.
+        from services.type_system import is_precision_collapse_coercion
+
+        src_t = str(source_types.get(src) or "")
+        tgt_name = str((mapping or {}).get("target") or "")
+        tgt_t = str(target_types.get(tgt_name) or "")
+        if mapping and is_precision_collapse_coercion(src_t, tgt_t):
+            hardened.append(issue)
+            continue
         if mapping and samples_coerce_mapping(
             mapping,
             source_types=source_types,

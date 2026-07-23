@@ -110,22 +110,39 @@ def build_weaviate_objects(
     *,
     class_name: str,
     dimension: int,
-) -> list[dict[str, Any]]:
-    """Map DataFlow vector rows to Weaviate batch objects (testable, no I/O)."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map DataFlow vector rows to Weaviate batch objects (testable, no I/O).
+
+    Returns ``(objects, rejected)``. Missing embeddings are rejected — never
+    fabricated as zero vectors.
+    """
+    from services.vector_embedding import coerce_embedding
+
     objects: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     for row in vector_rows:
         props = dict(sanitize_json_value(row.get("metadata") or {}) or {})
         props["content"] = row.get("content", "")
         props["source_id"] = cell_to_string(row.get("source_id", ""))
         props["chunk_index"] = int(row.get("chunk_index") or 0)
-        vector = row.get("embedding") or [0.0] * dimension
+        vector, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
+        if err or vector is None:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "embedding",
+                "target": "vector",
+                "value": "",
+                "reason": err or "invalid embedding",
+                "policy": "quarantine",
+            })
+            continue
         objects.append({
             "class": class_name,
             "id": _object_uuid(cell_to_string(row.get("id") or "")),
             "properties": props,
             "vector": sanitize_json_value(vector),
         })
-    return objects
+    return objects, rejected
 
 
 def _ensure_class(
@@ -239,15 +256,42 @@ def write_mapped_rows(
             chunks_completed=0,
         )
 
-    dimension = 384
-    for row in vector_rows:
-        if row.get("embedding"):
-            dimension = len(row["embedding"])
-            break
+    from services.vector_embedding import resolve_embedding_dimension
+
+    dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
+    if dimension is None:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=class_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
+            rejected_details=[{
+                "row": "",
+                "column": "embedding",
+                "target": "vector",
+                "value": "",
+                "reason": dim_err or "no embeddings",
+                "policy": "fail",
+            }],
+        )
 
     key = api_key or password or username or ""
     base_url = _base_url(host, port, ssl, connection_string)
-    objects = build_weaviate_objects(vector_rows, class_name=class_name, dimension=dimension)
+    objects, rejected = build_weaviate_objects(vector_rows, class_name=class_name, dimension=dimension)
+    if not objects and rejected:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=class_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=rejected[0].get("reason") or "all embeddings rejected",
+            rejected_details=rejected,
+        )
 
     inserted = 0
     try:
@@ -280,6 +324,7 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=(inserted + 99) // 100,
             error=str(exc),
+            rejected_details=rejected,
         )
 
     return WriteResult(
@@ -289,4 +334,7 @@ def write_mapped_rows(
         target_schema=schema or "",
         checksum="",
         chunks_completed=(inserted + 99) // 100,
+        rejected_details=rejected,
+        rejected_rows=len(rejected),
+        warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
     )

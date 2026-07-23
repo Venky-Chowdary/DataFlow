@@ -91,9 +91,16 @@ def build_pinecone_vectors(
     vector_rows: list[dict[str, Any]],
     *,
     dimension: int,
-) -> list[dict[str, Any]]:
-    """Map DataFlow vector rows to Pinecone upsert vectors (testable, no I/O)."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map DataFlow vector rows to Pinecone upsert vectors (testable, no I/O).
+
+    Returns ``(vectors, rejected)``. Missing/mismatched embeddings are rejected
+    — never replaced with fabricated zero vectors.
+    """
+    from services.vector_embedding import coerce_embedding
+
     vectors: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     for row in vector_rows:
         meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
         meta["content"] = str(row.get("content") or "")[:40000]
@@ -110,13 +117,23 @@ def build_pinecone_vectors(
                 clean_meta[str(k)] = v
             else:
                 clean_meta[str(k)] = str(v)
-        values = row.get("embedding") or [0.0] * dimension
+        values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
+        if err or values is None:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "embedding",
+                "target": "values",
+                "value": "",
+                "reason": err or "invalid embedding",
+                "policy": "quarantine",
+            })
+            continue
         vectors.append({
             "id": cell_to_string(row.get("id") or ""),
             "values": sanitize_json_value(values),
             "metadata": clean_meta,
         })
-    return vectors
+    return vectors, rejected
 
 
 def write_mapped_rows(
@@ -222,13 +239,40 @@ def write_mapped_rows(
             chunks_completed=0,
         )
 
-    dimension = 384
-    for row in vector_rows:
-        if row.get("embedding"):
-            dimension = len(row["embedding"])
-            break
+    from services.vector_embedding import resolve_embedding_dimension
 
-    vectors = build_pinecone_vectors(vector_rows, dimension=dimension)
+    dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
+    if dimension is None:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=target,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
+            rejected_details=[{
+                "row": "",
+                "column": "embedding",
+                "target": "values",
+                "value": "",
+                "reason": dim_err or "no embeddings",
+                "policy": "fail",
+            }],
+        )
+
+    vectors, rejected = build_pinecone_vectors(vector_rows, dimension=dimension)
+    if not vectors and rejected:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=target,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=rejected[0].get("reason") or "all embeddings rejected",
+            rejected_details=rejected,
+        )
     inserted = 0
     try:
         session = _requests_session()
@@ -269,4 +313,7 @@ def write_mapped_rows(
         target_schema="",
         checksum="",
         chunks_completed=(inserted + 99) // 100,
+        rejected_details=rejected,
+        rejected_rows=len(rejected),
+        warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
     )

@@ -195,6 +195,9 @@ class MapColumnsRequest(BaseModel):
     destination_db_type: str = ""
     sync_mode: str = ""
     schema_policy: str = "manual_review"
+    # None = unknown; True = confirmed on destination; False = will CREATE.
+    # Empty target_columns + True must NOT invent identity create-new.
+    destination_table_exists: Optional[bool] = None
 
 
 @router.get("/capabilities")
@@ -340,6 +343,7 @@ async def map_columns_route(body: MapColumnsRequest):
         destination_db_type=body.destination_db_type or "",
         schema_policy=body.schema_policy or "manual_review",
         sync_mode=body.sync_mode or "",
+        destination_table_exists=body.destination_table_exists,
     )
     nested_fields: list[dict[str, str]] = []
     try:
@@ -359,6 +363,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "llm": result.get("llm", {}),
         "confidence_threshold": threshold,
         "destination_aware": bool(body.target_columns),
+        "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
         "quality_issues": result.get("quality_issues", []),

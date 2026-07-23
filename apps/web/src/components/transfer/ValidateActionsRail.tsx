@@ -18,6 +18,9 @@ interface ValidateActionsRailProps {
   executeBlockedReason?: string;
   /** CDC retention Check control (SQL Server / Oracle). */
   cdcRetentionSlot?: ReactNode;
+  /** Primary remediation for the top blocker (e.g. open identity settings). */
+  onPrimaryFix?: () => void;
+  primaryFixLabel?: string;
   onBack: () => void;
   onRunPreflight: () => void;
   onApproveMappings: () => void;
@@ -37,6 +40,8 @@ export function ValidateActionsRail({
   executeBlocked = false,
   executeBlockedReason,
   cdcRetentionSlot,
+  onPrimaryFix,
+  primaryFixLabel,
   onBack,
   onRunPreflight,
   onApproveMappings,
@@ -160,10 +165,23 @@ export function ValidateActionsRail({
                             <span key={issue} className="df2-validate-rail-issue">{issue}</span>
                           ))
                         )}
-                        {item.fix && <span className="df2-validate-rail-fix">Fix: {item.fix}</span>}
+                        {item.fix && !onPrimaryFix && (
+                          <span className="df2-validate-rail-fix">Fix: {item.fix}</span>
+                        )}
                       </li>
                     ))}
                   </ul>
+                )}
+                {blocked && onPrimaryFix && primaryFixLabel && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    className="df2-validate-rail-primary-fix"
+                    onClick={onPrimaryFix}
+                    leadingIcon={<DtIcon name="settings" size={14} />}
+                  >
+                    {primaryFixLabel}
+                  </Button>
                 )}
                 {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (
                   <div className="df2-validate-rail-review">

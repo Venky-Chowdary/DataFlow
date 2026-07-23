@@ -438,7 +438,13 @@ def _introspect_table_schema(
         password=cfg.get("password", ""),
         schema=schema_from_cfg(db_type, cfg),
         connection_string=cfg.get("connection_string", ""),
-        ssl=cfg.get("ssl", False),
+        # Prefer connector ssl; default True for Postgres-family so managed
+        # hosts (Railway, Neon, etc.) do not fail column probes while the
+        # table-list probe still succeeds — that false-empty schema flipped Map
+        # into dishonest create-new / identity 93% mode.
+        ssl=bool(cfg.get("ssl")) if "ssl" in cfg else (
+            db_type in ("postgresql", "redshift", "mysql", "sqlserver")
+        ),
         warehouse=cfg.get("warehouse", ""),
         table=table,
         catalog_type=cfg.get("type", ""),

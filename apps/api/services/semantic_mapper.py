@@ -1126,6 +1126,7 @@ def map_columns(
     target_schemas: list[dict] | None = None,
     threshold: float = 0.85,
     destination_db_type: str = "",
+    destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
     from services.type_system import ddl_type
@@ -1157,29 +1158,55 @@ def map_columns(
             tgt_types[t] = "VARCHAR"
 
     if not target_columns:
-        # Destination schema is unknown/empty — identity passthrough for create-new.
-        # Types are projected to destination-native DDL when dest family is known so
-        # writers CREATE with accurate types (e.g. MySQL INT → Snowflake NUMBER(38,0)).
+        # Empty targets are NOT automatically create-new. Only invent CREATE when
+        # the destination object is confirmed missing. Existing/unknown + empty
+        # columns = pending schema (shared SQL/warehouse failure mode).
         out: list[dict] = []
+        confirmed_missing = destination_table_exists is False
         for src in source_columns:
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
-            out.append(
-                {
-                    "source": src,
-                    "target": _semantic_form(src),
-                    "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
-                    "reasoning": (
-                        f"New destination table — identity mapping; "
-                        f"types will CREATE on first write as {dest_native}"
-                    ),
-                    "user_override": False,
-                    "source_type": src_type,
-                    "target_type": dest_native,
-                    "assignment_strategy": "identity_passthrough",
-                    "create_new": True,
-                }
-            )
+            if confirmed_missing:
+                out.append(
+                    {
+                        "source": src,
+                        "target": _semantic_form(src),
+                        "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
+                        "reasoning": (
+                            f"New destination table — identity mapping; "
+                            f"types will CREATE on first write as {dest_native}"
+                        ),
+                        "user_override": False,
+                        "source_type": src_type,
+                        "target_type": dest_native,
+                        "assignment_strategy": "identity_passthrough",
+                        "create_new": True,
+                    }
+                )
+            else:
+                exists_note = (
+                    "Destination table exists but column metadata did not load"
+                    if destination_table_exists is True
+                    else "Destination schema unavailable — not treating as create-new"
+                )
+                out.append(
+                    {
+                        "source": src,
+                        "target": _semantic_form(src),
+                        "confidence": 0.55,
+                        "reasoning": (
+                            f"{exists_note}. Retry destination schema load before Map "
+                            f"invents CREATE TABLE / identity passthrough "
+                            f"(projected type {dest_native})."
+                        ),
+                        "user_override": False,
+                        "source_type": src_type,
+                        "target_type": dest_native,
+                        "assignment_strategy": "pending_dest_schema",
+                        "create_new": False,
+                        "requires_review": True,
+                    }
+                )
         return out
 
     idf = _build_idf(source_columns + target_columns)

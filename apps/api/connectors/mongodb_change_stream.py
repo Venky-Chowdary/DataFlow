@@ -89,6 +89,41 @@ class MongodbChangeStreamCdc:
         self._last_signal_poll_at = 0.0
         self._signal_poll_interval_sec = float(cfg.get("signal_poll_interval_sec") or 15)
         self._signal_index_ready = False
+        import os
+
+        from services.cdc_lease import CdcLeaseGuard
+
+        cursor_key = str(cfg.get("cursor_key") or f"mongodb:{self.db_name}:{collection}")
+        holder = str(
+            cfg.get("lease_holder_id") or os.getenv("DATAFLOW_CDC_LEASE_HOLDER") or ""
+        )
+        self._lease = CdcLeaseGuard(
+            cursor_key=cursor_key,
+            resource=f"mongo_cs:{self.db_name}:{collection}",
+            holder_id=holder,
+            job_id=str(cfg.get("job_id") or ""),
+            meta={
+                "engine": "mongodb",
+                "database": self.db_name,
+                "collection": collection,
+            },
+        )
+
+    @property
+    def lease_holder_id(self) -> str:
+        return self._lease.holder_id
+
+    @lease_holder_id.setter
+    def lease_holder_id(self, value: str) -> None:
+        self._lease.holder_id = value
+
+    @property
+    def _lease_acquired(self) -> bool:
+        return self._lease.acquired
+
+    def _acquire_cdc_lease(self) -> None:
+        """Fail-fast if another worker already owns this change-stream cursor."""
+        self._lease.ensure()
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots (_id or configured PK)."""
@@ -124,6 +159,7 @@ class MongodbChangeStreamCdc:
         subsequent poll does not miss events that arrived during the snapshot
         (at-least-once; duplicates possible).
         """
+        self._acquire_cdc_lease()
         start_token: Any = None
         try:
             with self.coll.watch(full_document=self.full_document, max_await_time_ms=100) as stream:
@@ -203,7 +239,11 @@ class MongodbChangeStreamCdc:
             pass
 
     def close(self) -> None:
-        """Release the MongoClient — required under multi-stream / multi-job load."""
+        """Release the CDC lease and MongoClient — required under multi-job load."""
+        try:
+            self._lease.release()
+        except Exception:
+            pass
         try:
             self.client.close()
         except Exception:
@@ -245,6 +285,7 @@ class MongodbChangeStreamCdc:
 
     def poll(self) -> Iterator[ChangeBatch]:
         """Tail the change stream for a bounded window and yield one ChangeBatch."""
+        self._acquire_cdc_lease()
         if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
             yield from self.snapshot()
             return

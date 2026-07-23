@@ -33,10 +33,12 @@ _FICTION_KEYS = frozenset({
 _GENERIC_KEYS = frozenset({"rest_api", "generic_sql", "singer_tap"})
 
 
-def test_fiction_keys_never_transfer_ready():
-    for key in _FICTION_KEYS:
+def test_object_stores_do_not_claim_row_upsert():
+    """S3/GCS/ADLS/MinIO are object overwrite — not row-level upsert/MERGE."""
+    for key in ("s3", "gcs", "adls", "minio"):
         cap = get_connector_capability(key)
-        assert cap.get("transfer_ready") is False, key
+        assert cap.get("supports_upsert") is False, key
+        assert cap.get("supports_merge") is False, key
 
 
 def test_sidecar_transfer_ready_matches_driver_ssot():

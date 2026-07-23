@@ -371,10 +371,14 @@ def peek_file_source(
     if file_type == "parquet":
         import pyarrow.parquet as pq
 
+        from services.arrow_schema import schema_from_arrow
+
         pf = pq.ParquetFile(content) if _is_path(content) else pq.ParquetFile(io.BytesIO(content))
         try:
             total = pf.metadata.num_rows
             headers = [str(c) for c in pf.schema_arrow.names]
+            # Prefer writer schema over pandas sample inference (decimals, TZ, nested).
+            schema = schema_from_arrow(pf.schema_arrow)
             sample: list[dict] = []
             for batch in pf.iter_batches(batch_size=100):
                 batch_df = batch.to_pandas()
@@ -387,7 +391,6 @@ def peek_file_source(
                     break
         finally:
             pf.close()
-        schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
 
     if file_type == "json":

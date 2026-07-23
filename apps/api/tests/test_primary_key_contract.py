@@ -63,6 +63,28 @@ def test_sql_uniqueness_prefers_exact_id_over_star_id():
     assert resolve_primary_key_target(mappings, "snowflake") == "id"
 
 
+def test_sql_uniqueness_prefers_destination_pk_over_sole_star_id():
+    mappings = [
+        {"source": "user_id", "target": "user_id"},
+        {"source": "order_key", "target": "order_key"},
+    ]
+    src, tgt = resolve_identity_key(
+        mappings=mappings,
+        source_columns=["user_id", "order_key"],
+        dest_kind="postgresql",
+        purpose="uniqueness",
+        destination_pk_columns=["order_key"],
+    )
+    assert src == "order_key" and tgt == "order_key"
+    # Without dest PK, sole *_id still wins.
+    src2, tgt2 = resolve_identity_key(
+        mappings=[{"source": "user_id", "target": "user_id"}],
+        dest_kind="postgresql",
+        purpose="uniqueness",
+    )
+    assert src2 == "user_id" and tgt2 == "user_id"
+
+
 def test_required_nulls_strict_may_use_star_id():
     mappings = [{"source": "account_id", "target": "account_id"}]
     pk = resolve_primary_key_source(

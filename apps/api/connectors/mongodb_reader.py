@@ -93,6 +93,21 @@ def _serialize(value: Any) -> str:
     return cell_to_string(value, preserve_sql_null=True)
 
 
+def _project_doc_row(doc: dict[str, Any], headers: list[str]) -> list[str]:
+    """Project a Mongo document onto headers — missing ≠ explicit null."""
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
+    row: list[str] = []
+    for h in headers:
+        if h not in doc:
+            row.append(DF_MISSING_SENTINEL)
+        elif doc[h] is None:
+            row.append(SQL_NULL_SENTINEL)
+        else:
+            row.append(_serialize(doc[h]))
+    return row
+
+
 def read_collection_batch(
     *,
     cfg: dict[str, Any],
@@ -134,7 +149,7 @@ def read_collection_batch(
     # Always union — sparse fields mid-collection must not vanish when columns frozen.
     headers = union_attribute_keys(columns, page_keys) if columns else page_keys
 
-    rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
+    rows = [_project_doc_row(doc, headers) for doc in docs]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
@@ -193,5 +208,5 @@ def read_collection_cursor_batch(
                 page_keys.append(k)
     headers = union_attribute_keys(columns, page_keys) if columns else page_keys
 
-    rows = [[_serialize(doc.get(h)) for h in headers] for doc in docs]
+    rows = [_project_doc_row(doc, headers) for doc in docs]
     return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)

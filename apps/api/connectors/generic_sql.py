@@ -579,17 +579,29 @@ def _logical_type_from_sa(col_type: Any) -> str:
             return "float"
 
     if isinstance(col_type, (sa.Numeric,)):
+        from services.type_system import zero_scale_fits_signed_bigint, zero_scale_numeric_carrier
+
         precision = getattr(col_type, "precision", None)
         scale = getattr(col_type, "scale", None)
         if precision is not None and scale is not None:
             if int(scale) == 0:
-                return "integer"
+                # Wide NUMERIC(38,0) must stay DECIMAL — never signed BIGINT overflow.
+                if zero_scale_fits_signed_bigint(int(precision)):
+                    return "integer"
+                return zero_scale_numeric_carrier(int(precision))
             return f"DECIMAL({int(precision)},{int(scale)})"
         if precision is not None:
             return f"DECIMAL({int(precision)})"
         return "decimal"
 
     if isinstance(col_type, (sa.DateTime,)):
+        # Preserve TIMESTAMPTZ vs NTZ — collapsing both to "datetime" loses TZ polarity
+        # on generic Postgres/Trino/warehouse reflection (Airbyte-class honesty gap).
+        tz = getattr(col_type, "timezone", None)
+        if tz is True:
+            return "timestamptz"
+        if tz is False:
+            return "timestamp_ntz"
         return "datetime"
 
     if isinstance(col_type, (sa.Date,)):
@@ -602,13 +614,23 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "string"
 
     # Fallback text matching for dialect-specific types not captured above
+    # SQL Server specifics BEFORE broad timestamp/datetime matching.
+    if "datetimeoffset" in repr_:
+        return "timestamptz"
+    type_name = getattr(getattr(col_type, "__class__", None), "__name__", "").lower()
+    module = getattr(getattr(col_type, "__class__", None), "__module__", "").lower()
+    if "rowversion" in repr_ or (
+        "mssql" in module and type_name in {"timestamp", "rowversion"}
+    ):
+        # SQL Server TIMESTAMP is rowversion (binary), not a datetime.
+        return "binary"
     if "json" in repr_ or "variant" in repr_ or "super" in repr_:
         return "json"
     if "array" in repr_:
         return "array"
     if "uuid" in repr_ or "guid" in repr_ or "uniqueidentifier" in repr_:
         return "uuid"
-    if any(x in repr_ for x in ("binary", "blob", "bytea", "varbinary", "image", "raw")):
+    if any(x in repr_ for x in ("binary", "blob", "bytea", "varbinary", "image", "raw", "rowversion")):
         return "binary"
     # FLOAT before DECIMAL — "float" must not fall into the numeric/decimal bucket.
     if any(x in repr_ for x in ("binary_float", "binary_double", "float", "double", "real")):
@@ -620,6 +642,8 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "integer"
     if "bool" in repr_ or "bit" in repr_:
         return "boolean"
+    if "datetimeoffset" in repr_:
+        return "timestamptz"
     if "datetime" in repr_ or "timestamp" in repr_:
         return "datetime"
     if "date" in repr_:
@@ -656,12 +680,33 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     )
 
     raw = (logical or "string").strip()
+    raw_lower = raw.lower()
     t = normalize_logical_type(raw)
 
     def _maybe_nullable(sa_type: Any) -> Any:
         if dialect_name == "clickhouse" and ChNullable is not None:
             return ChNullable(sa_type)
         return sa_type
+
+    # TZ polarity from introspection carriers — check before LOGICAL_DATETIME collapse.
+    if (
+        "timestamptz" in raw_lower
+        or "timestamp_tz" in raw_lower
+        or "timestamp with time zone" in raw_lower
+        or raw_lower.endswith(" with time zone")
+    ):
+        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql", "questdb"}:
+            return _maybe_nullable(sa.DateTime())
+        if db_type == "trino" and TrinoTimestamp is not None:
+            return TrinoTimestamp(precision=3, timezone=True)
+        return sa.DateTime(timezone=True)
+    if (
+        "timestamp_ntz" in raw_lower
+        or "timestamp without time zone" in raw_lower
+        or "datetime_ntz" in raw_lower
+        or " without time zone" in raw_lower
+    ):
+        return _maybe_nullable(sa.DateTime())
 
     if t == LOGICAL_INTEGER:
         return _maybe_nullable(sa.BigInteger())
@@ -1063,7 +1108,13 @@ def _sample_raw_table(
     from connectors.sql_identifiers import quote_table_ref
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
-    result = conn.execute(sa.text(f"SELECT * FROM {qualified} LIMIT 200"))
+    dialect_l = (dialect or "ansi").lower()
+    # SQL Server / Sybase reject LIMIT — use TOP.
+    if dialect_l in {"mssql", "sqlserver", "microsoft_sql_server", "azure_sql_database"}:
+        stmt = f"SELECT TOP 200 * FROM {qualified}"
+    else:
+        stmt = f"SELECT * FROM {qualified} LIMIT 200"
+    result = conn.execute(sa.text(stmt))
     headers = list(result.keys())
     rows = result.fetchall()
     return headers, rows
@@ -1510,12 +1561,19 @@ def _upsert_batch(
             if dialect_name == "sqlite":
                 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+                from connectors.writer_common import DF_LSN_COL, sqlite_lsn_update_guard_sql
+
                 stmt = sqlite_insert(table_obj).values(rows)
                 if update_cols:
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=conflict_cols,
-                        set_={c: stmt.excluded[c] for c in update_cols},
-                    )
+                    kwargs: dict[str, Any] = {
+                        "index_elements": conflict_cols,
+                        "set_": {c: stmt.excluded[c] for c in update_cols},
+                    }
+                    if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
+                        kwargs["where"] = sa.text(
+                            sqlite_lsn_update_guard_sql(table_obj.name)
+                        )
+                    stmt = stmt.on_conflict_do_update(**kwargs)
                 else:
                     stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
                 conn.execute(stmt)
@@ -1524,11 +1582,24 @@ def _upsert_batch(
             if dialect_name in ("mysql", "mariadb"):
                 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
+                from connectors.writer_common import DF_LSN_COL, mysql_lsn_values_newer_sql
+
                 stmt = mysql_insert(table_obj).values(rows)
                 if update_cols:
-                    stmt = stmt.on_duplicate_key_update(
-                        {c: stmt.inserted[c] for c in update_cols}
-                    )
+                    if DF_LSN_COL in target_cols and DF_LSN_COL in update_cols:
+                        # Emulate IF(newer, VALUES(c), c) via CASE for each column.
+                        newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
+                        set_map = {
+                            c: sa.text(
+                                f"IF({newer}, VALUES(`{c}`), `{c}`)"
+                            )
+                            for c in update_cols
+                        }
+                        stmt = stmt.on_duplicate_key_update(set_map)
+                    else:
+                        stmt = stmt.on_duplicate_key_update(
+                            {c: stmt.inserted[c] for c in update_cols}
+                        )
                 else:
                     stmt = stmt.prefix_with("IGNORE")
                 conn.execute(stmt)
@@ -1546,8 +1617,31 @@ def _upsert_batch(
         return False
 
     if not _native_upsert():
-        _delete_by_keys(conn, table_obj, rows, conflict_cols)
-        conn.execute(table_obj.insert(), rows)
+        # delete+insert: drop stale CDC rows before deleting so redelivery
+        # cannot regress state when ``_df_lsn`` is present.
+        from connectors.writer_common import DF_LSN_COL, compare_lsn
+
+        apply_rows = rows
+        if DF_LSN_COL in target_cols:
+            filtered: list[dict[str, Any]] = []
+            for row in rows:
+                incoming_lsn = row.get(DF_LSN_COL)
+                try:
+                    key_clause = sa.and_(
+                        *[table_obj.c[c] == row[c] for c in conflict_cols]
+                    )
+                    existing = conn.execute(
+                        sa.select(table_obj.c[DF_LSN_COL]).where(key_clause).limit(1)
+                    ).fetchone()
+                except Exception:
+                    existing = None
+                if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
+                    continue
+                filtered.append(row)
+            apply_rows = filtered
+        if apply_rows:
+            _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
+            conn.execute(table_obj.insert(), apply_rows)
 
 
 def write_mapped_rows(

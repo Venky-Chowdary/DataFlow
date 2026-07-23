@@ -24,6 +24,32 @@ class WriteResult(_WriteResult):
     driver: str = "redis-py"
 
 
+def _resolve_redis_key_id(
+    doc: dict[str, Any],
+    target_cols: list[str],
+    *,
+    conflict_columns: list[str],
+    row_index: int,
+) -> tuple[str | None, str]:
+    """Return (key_id, identity_column) — None key_id means identity missing."""
+    if conflict_columns:
+        parts: list[str] = []
+        for col in conflict_columns:
+            val = doc.get(col)
+            if val is None or str(val).strip() == "":
+                return None, col
+            parts.append(str(val))
+        return "|".join(parts), conflict_columns[0]
+    id_col = next(
+        (c for c in target_cols if c.lower() in {"id", "_id", "pk", "key", "uuid"}),
+        target_cols[0] if target_cols else "id",
+    )
+    key_id = doc.get(id_col)
+    if key_id is None or str(key_id).strip() == "":
+        return str(row_index), id_col
+    return str(key_id), id_col
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -43,6 +69,7 @@ def write_mapped_rows(
     create_table: bool = True,
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
+    conflict_columns: list[str] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     del create_table, backfill_new_fields
@@ -66,13 +93,49 @@ def write_mapped_rows(
         error_policy=policy,
     )
 
+    conflict = [c for c in (conflict_columns or _kwargs.get("conflict_columns") or []) if c in target_cols]
     client = _redis_client(cfg)
     try:
         written = 0
-        id_col = target_cols[0] if target_cols else "id"
         for i, row in enumerate(mapped_rows):
             doc = dict(zip(target_cols, row))
-            key_id = doc.get(id_col) or str(i)
+            key_id, id_col = _resolve_redis_key_id(
+                doc, target_cols, conflict_columns=conflict, row_index=i
+            )
+            if key_id is None:
+                msg = f"Redis identity missing for conflict_columns={conflict}"
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=prefix,
+                        target_schema=f"db{database or 0}",
+                        checksum="",
+                        chunks_completed=0,
+                        error=msg,
+                        warnings=errors[:10],
+                        rejected_rows=len({d["row"] for d in rejected_details}) + 1,
+                        rejected_details=rejected_details[:100]
+                        + [{
+                            "row": i + 1,
+                            "column": id_col,
+                            "target": id_col,
+                            "value": "",
+                            "reason": msg,
+                            "policy": "write_fail",
+                            "chars": [],
+                        }],
+                    )
+                rejected_details.append({
+                    "row": i + 1,
+                    "column": id_col,
+                    "target": id_col,
+                    "value": "",
+                    "reason": msg,
+                    "policy": "write_quarantine",
+                    "chars": [],
+                })
+                continue
             key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
             try:
                 # Pre-sanitize so extreme Decimals never raise mid-dumps.

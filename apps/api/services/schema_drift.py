@@ -268,6 +268,19 @@ def detect_schema_drift(
             tgt_type = ci_get(target_schema, tgt) or "VARCHAR"
             if not (target_schema and is_lossy_coercion(src_type, tgt_type)):
                 continue
+            # Precision collapses stay breaking even when head samples coerce
+            # (same policy as ddl_compatibility — no Airbyte soft-pass loophole).
+            from services.type_system import is_precision_collapse_coercion
+
+            if is_precision_collapse_coercion(src_type, tgt_type):
+                type_mismatches.append({
+                    "source": src,
+                    "target": tgt,
+                    "source_type": src_type.upper(),
+                    "target_type": tgt_type.upper(),
+                    "reason": "precision_collapse",
+                })
+                continue
             # Declared VARCHAR→NUMBER with clean numeric samples is not breaking drift.
             if sample_rows and samples_coerce_mapping(
                 m,

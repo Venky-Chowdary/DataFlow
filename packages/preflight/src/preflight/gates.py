@@ -57,6 +57,21 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
         return _block(GateId.G2_DESTINATION, f"Destination error: {dest.error}", start, details)
     if not dest.connected:
         return _block(GateId.G2_DESTINATION, "Destination not reachable", start, details)
+
+    status = str(probe.get("status") or "").strip()
+    # Create-new cannot trust connectivity-only fallback — fail closed until the
+    # privilege catalog is readable or the target table already exists.
+    if status == "unavailable" and not dest.table_exists:
+        detail = str(probe.get("detail") or "privilege catalog unavailable").strip()
+        return _block(
+            GateId.G2_DESTINATION,
+            "Privilege catalog unavailable for create-new destination — cannot prove "
+            f"CREATE ({detail}). Re-validate when grants are readable, or target an "
+            "existing table.",
+            start,
+            details,
+        )
+
     if not dest.can_write:
         # Prefer probe.detail (engine-specific privilege) over generic SQL wording.
         if probe.get("detail") and probe.get("status") == "denied":
@@ -84,11 +99,11 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
         create_note = "; target table exists"
 
     method = str(probe.get("method") or "").strip()
-    status = str(probe.get("status") or "").strip()
     if status == "unavailable" and probe.get("detail"):
         msg = (
             f"Destination reachable with write access{create_note} "
-            f"(privilege catalog unavailable — {probe['detail']})"
+            f"(privilege catalog unavailable — {probe['detail']}; "
+            "append/upsert to existing table only)"
         )
     elif method:
         msg = f"Destination writable via {method}{create_note}"

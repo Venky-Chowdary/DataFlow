@@ -1193,7 +1193,12 @@ def _run_cdc_single_stream(
     if src_type == "mongodb":
         try:
             cdc: CdcEngine | MongodbChangeStreamCdc | MySqlChangeStreamCdc | PostgreSqlChangeStreamCdc = MongodbChangeStreamCdc(
-                src_cfg,
+                {
+                    **src_cfg,
+                    "job_id": job_id,
+                    "cursor_key": cursor_key,
+                    "lease_holder_id": "",
+                },
                 collection=table_name,
                 primary_key=primary_key,
                 columns=headers,

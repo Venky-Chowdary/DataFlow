@@ -419,6 +419,7 @@ def _probe_postgres_family(
         username=username,
         password=password,
         connection_string=connection_string,
+        ssl=True,
     )
     try:
         with conn.cursor() as cur:
@@ -535,6 +536,7 @@ def _probe_mysql(
         username=username,
         password=password,
         connection_string=connection_string,
+        ssl=True,
     )
     try:
         with conn.cursor() as cur:

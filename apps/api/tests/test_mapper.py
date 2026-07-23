@@ -22,7 +22,7 @@ def test_txn_dt_maps_to_transaction_date():
 
 
 def test_infers_target_when_no_targets():
-    mappings = map_columns(["PAY_AMT"], [])
+    mappings = map_columns(["PAY_AMT"], [], destination_table_exists=False)
     assert mappings[0]["target"] == "payment_amount"
     assert mappings[0]["confidence"] >= 0.72
 

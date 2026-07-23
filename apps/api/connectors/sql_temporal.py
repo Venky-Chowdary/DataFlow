@@ -99,10 +99,16 @@ def parse_sql_date(value: Any) -> date | None:
 def coerce_sql_temporal(value: Any, source_type: str) -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value."""
     base = sql_base_type(source_type)
-    if base in {"TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP WITH TIME ZONE"}:
+    if base in {
+        "TIMESTAMPTZ",
+        "TIMESTAMP_TZ",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        "DATETIMEOFFSET",
+    }:
         parsed = parse_sql_datetime(value, aware_utc=True)
         return parsed if parsed is not None else value
-    if base in {"DATETIME", "TIMESTAMP", "TIMESTAMP_LTZ"}:
+    if base in {"DATETIME", "TIMESTAMP", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "DATETIME2", "SMALLDATETIME"}:
         parsed = parse_sql_datetime(value)
         return parsed if parsed is not None else value
     if base == "DATE":
@@ -177,7 +183,24 @@ def logical_to_temporal_ddl(logical: str) -> str | None:
         return "DATE"
     if t in {"time"}:
         return "TIME"
-    if t in {"datetime", "timestamp", "timestamptz", "timestamp_tz", "timestamp_ltz"}:
+    # Preserve TZ polarity: aware carriers keep UTC tzinfo on bind.
+    if t in {
+        "timestamptz",
+        "timestamp_tz",
+        "timestamp_ltz",
+        "timestamp with time zone",
+        "timestamp with local time zone",
+        "datetimeoffset",
+    }:
+        return "TIMESTAMPTZ"
+    if t in {
+        "datetime",
+        "timestamp",
+        "timestamp_ntz",
+        "timestamp without time zone",
+        "datetime2",
+        "smalldatetime",
+    }:
         return "DATETIME"
     if is_temporal_ddl(logical):
         return sql_base_type(logical)

@@ -18,7 +18,9 @@ export interface RepairProposalDrawerProps {
   onApplied?: (updated: RepairMapping[], proposal: RepairProposal) => void;
   /** Called after reject, audit approve, or continue-without-decide. */
   onDecided?: (proposal: RepairProposal) => void;
-  /** Navigate operator to Map for identity / DDL review (non-mutative proposals). */
+  /** Preferred for duplicate identity keys — Destination Advanced (PK / sync mode). */
+  onOpenIdentitySettings?: () => void;
+  /** Fallback navigate to Map for identity / DDL review (non-mutative proposals). */
   onOpenMap?: () => void;
 }
 
@@ -50,6 +52,7 @@ export function RepairProposalDrawer({
   onClose,
   onApplied,
   onDecided,
+  onOpenIdentitySettings,
   onOpenMap,
 }: RepairProposalDrawerProps) {
   const [busy, setBusy] = useState(false);
@@ -166,17 +169,20 @@ export function RepairProposalDrawer({
           >
             Reject
           </Button>
-          {analysis.duplicateRoot && onOpenMap ? (
+          {analysis.duplicateRoot && (onOpenIdentitySettings || onOpenMap) ? (
             <Button
               variant="primary"
               onClick={() => {
-                onOpenMap();
+                if (onOpenIdentitySettings) onOpenIdentitySettings();
+                else onOpenMap?.();
                 onClose();
               }}
               disabled={busy}
-              leadingIcon={<DtIcon name="layers" size={14} />}
+              leadingIcon={<DtIcon name={onOpenIdentitySettings ? "settings" : "layers"} size={14} />}
             >
-              Open Map — review identity
+              {onOpenIdentitySettings
+                ? "Change primary key or sync mode"
+                : "Open Map — review identity"}
             </Button>
           ) : canApplyMappings ? (
             <Button

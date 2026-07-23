@@ -18,6 +18,8 @@ interface TransferMapStepProps {
   analysis: import("../../lib/types").EnhancedAnalysis | null;
   destColumns: string[];
   destSchemaLoading: boolean;
+  /** null = unknown, true = confirmed on destination, false = will CREATE. */
+  destTableExists?: boolean | null;
   targetCollection: string;
   targetDatabase: string;
   destKindMode: string;
@@ -51,6 +53,11 @@ interface TransferMapStepProps {
   onChangeMappings: (mappings: EditableMapping[]) => void;
   onBack: () => void;
   onContinue: () => void;
+  /** Deep-link from Validate: focus a source column in the mapping table. */
+  initialFocusSource?: string | null;
+  /** Shown when Validate sent the operator here for identity/duplicate-key work. */
+  identityFixBanner?: string | null;
+  onIdentityFixConsumed?: () => void;
 }
 
 const INTELLIGENCE_PAIR_LIMIT = 500;
@@ -62,6 +69,7 @@ export function TransferMapStep({
   analysis,
   destColumns,
   destSchemaLoading,
+  destTableExists = null,
   targetCollection,
   targetDatabase,
   destKindMode,
@@ -88,6 +96,9 @@ export function TransferMapStep({
   onChangeMappings,
   onBack,
   onContinue,
+  initialFocusSource = null,
+  identityFixBanner = null,
+  onIdentityFixConsumed,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("all");
@@ -108,13 +119,24 @@ export function TransferMapStep({
     };
   }, []);
 
+  useEffect(() => {
+    if (!initialFocusSource) return;
+    setFocusSource(initialFocusSource);
+    setSearch(initialFocusSource);
+    setFilter("all");
+    setMapDialogOpen(true);
+    onIdentityFixConsumed?.();
+  }, [initialFocusSource]);
+
   const destDisplayType = destKindMode === "database" ? destType : "file";
   const destPaneSubtitle = destKindMode === "database"
     ? destSchemaLoading
       ? "Loading existing schema from connector…"
       : destColumns.length > 0
         ? `${destColumns.length} existing fields in ${targetDatabase}.${targetCollection}`
-        : `New fields in ${targetDatabase}.${targetCollection}`
+        : destTableExists === true
+          ? `Existing table ${targetDatabase}.${targetCollection} — column metadata pending`
+          : `New fields in ${targetDatabase}.${targetCollection}`
     : destRouteSubtitle;
 
   const filterCounts = useMemo(
@@ -177,7 +199,13 @@ export function TransferMapStep({
             {columnMappings.length} mappings · {approvedCount} ready
             {mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}
             {llmUsed ? " · semantic engine" : ""}
-            {destColumns.length === 0 && !destSchemaLoading ? " · create-new table" : ""}
+            {destColumns.length === 0 && !destSchemaLoading && destTableExists !== true
+              ? " · create-new table"
+              : destColumns.length === 0 && destTableExists === true
+                ? " · existing table (columns pending)"
+                : destColumns.length > 0
+                  ? ` · ${destColumns.length} dest columns`
+                  : ""}
             {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
           </p>
         </div>
@@ -273,6 +301,19 @@ export function TransferMapStep({
       )}
 
       <div className="df2-card-body df2-map-step-body">
+        {identityFixBanner && (
+          <div className="df2-map-identity-banner" role="status">
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Identity fix from Validate</strong>
+              <p>{identityFixBanner}</p>
+              <p className="df2-map-identity-banner-hint">
+                Column mapping alone cannot remove duplicate source rows. Change the primary key or
+                sync mode in Destination → Advanced settings, or dedupe the source, then re-validate.
+              </p>
+            </div>
+          </div>
+        )}
         <div className="df2-map-step-workspace">
           <ColumnReviewPanel
             mappings={columnMappings}
@@ -284,6 +325,7 @@ export function TransferMapStep({
             destinationLabel={destRouteLabel}
             destType={destDisplayType}
             destSchemaLoading={destSchemaLoading}
+            destTableExists={destTableExists}
             compact
             hideTitle
             search={search}
@@ -329,7 +371,9 @@ export function TransferMapStep({
         subtitle={
           destColumns.length > 0
             ? `${columnMappings.length} columns · match existing destination fields — wrong types fail preflight, not silently.`
-            : `${columnMappings.length} columns · create-new destination — fields CREATE on first write (no existing table required).`
+            : destTableExists === true
+              ? `${columnMappings.length} columns · existing destination table (reload columns to match DDL).`
+              : `${columnMappings.length} columns · create-new destination — fields CREATE on first write (no existing table required).`
         }
         ariaLabel="Full mapping table"
         className="df2-map-dialog"
@@ -339,13 +383,22 @@ export function TransferMapStep({
           </button>
         }
       >
-        {destColumns.length === 0 && !destSchemaLoading && (
+        {destColumns.length === 0 && !destSchemaLoading && destTableExists !== true && (
           <div className="df2-map-dialog-banner" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
               <strong>Create-new {destDisplayType || "destination"}</strong>
               {" — "}
               Every source column appears below as a destination field. No existing MongoDB collection or SQL table is required.
+            </span>
+          </div>
+        )}
+        {destColumns.length === 0 && !destSchemaLoading && destTableExists === true && (
+          <div className="df2-map-dialog-banner" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Existing table detected</strong>
+              {" — column metadata is missing. Go back to Destination and re-select the table, then return to Map."}
             </span>
           </div>
         )}
@@ -358,6 +411,7 @@ export function TransferMapStep({
           destinationLabel={destRouteLabel}
           destType={destDisplayType}
           destSchemaLoading={destSchemaLoading}
+          destTableExists={destTableExists}
           presentation="dialog"
           search={search}
           onSearchChange={setSearch}

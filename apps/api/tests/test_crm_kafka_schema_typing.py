@@ -24,8 +24,11 @@ def test_salesforce_field_type_map():
     assert salesforce_field_to_logical("double") == "FLOAT"
     assert salesforce_field_to_logical("currency", precision=18, scale=2) == "DECIMAL(18,2)"
     assert salesforce_field_to_logical("percent", precision=5, scale=2) == "DECIMAL(5,2)"
+    # Bare currency/percent must not invent untyped DECIMAL.
+    assert salesforce_field_to_logical("currency") == "DECIMAL(18,2)"
+    assert salesforce_field_to_logical("percent") == "DECIMAL(18,2)"
     assert salesforce_field_to_logical("date") == "DATE"
-    assert salesforce_field_to_logical("datetime") == "TIMESTAMP"
+    assert salesforce_field_to_logical("datetime") == "TIMESTAMPTZ"
     assert salesforce_field_to_logical("base64") == "BINARY"
     assert salesforce_field_to_logical("address") == "JSON"
     assert salesforce_field_to_logical("id") == "TEXT"
@@ -36,8 +39,13 @@ def test_salesforce_field_type_map():
 def test_hubspot_property_type_map():
     assert hubspot_property_to_logical("bool") == "BOOLEAN"
     assert hubspot_property_to_logical("number") == "DECIMAL"
+    assert hubspot_property_to_logical("number", number_display_hint="currency") == "DECIMAL(18,2)"
+    assert hubspot_property_to_logical("number", name="num_employees") == "INTEGER"
+    assert hubspot_property_to_logical(
+        "number", field_type="calculation_equation"
+    ) == "FLOAT"
     assert hubspot_property_to_logical("date") == "DATE"
-    assert hubspot_property_to_logical("datetime") == "TIMESTAMP"
+    assert hubspot_property_to_logical("datetime") == "TIMESTAMPTZ"
     assert hubspot_property_to_logical("json") == "JSON"
     assert hubspot_property_to_logical("string") == "TEXT"
     assert hubspot_property_to_logical("enumeration") == "TEXT"

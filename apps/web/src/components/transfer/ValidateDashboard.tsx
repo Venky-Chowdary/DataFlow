@@ -166,9 +166,14 @@ interface ValidateDashboardProps {
   /** Soften to quarantine-friendly posture, strip, and re-run. Returns what changed. */
   onQuarantineAndRerun?: () => void | Promise<RemediationOpResult | void>;  /** Cell-level will-quarantine / will-coerce preview from sample rows. */
   cellPreview?: CellPreviewResult | null;
-  /** Jump back to Map so the operator can fix coerced column mappings. */
-  onReviewMappings?: () => void;
-  /** Open Mapping proof drawer — how columns match, confidence evidence, fidelity risks. */
+  /** Jump back to Map so the operator can fix coerced / identity column mappings. */
+  onReviewMappings?: (opts?: { focusSource?: string }) => void;
+  /**
+   * Open Destination → Advanced settings where primary key and sync mode live.
+   * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
+   */
+  onOpenIdentitySettings?: () => void;
+  /** Open Mapping proof drawer — evidence only (Column matches card). */
   onOpenMappingProof?: () => void;
   /** Compact Map proof KPIs for Validate (exact overlaps / risks / mode). */
   mappingProofSummary?: {
@@ -273,12 +278,14 @@ const SEVERITY_LABEL: Record<string, string> = {
 const ACTION_ICON: Record<string, string> = {
   change_target_type: "layers",
   add_transform: "code",
-  review_mappings: "sparkle",
+  map_column: "layers",
+  review_mappings: "layers",
   rerun_mapping: "transfer",
   check_connection: "server",
   normalize_control_chars: "layers",
   quarantine_and_rerun: "shield",
   open_bad_data_fix: "shield",
+  fix_source_keys: "settings",
 };
 
 /** Per-column value-aware coercion table with expandable offending-value rows. */
@@ -538,6 +545,7 @@ export function ValidateDashboard({
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
+  onOpenIdentitySettings,
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
@@ -1051,6 +1059,22 @@ export function ValidateDashboard({
       setBadDataOpen(true);
       return;
     }
+    if (action.kind === "fix_source_keys") {
+      if (onOpenIdentitySettings) {
+        onOpenIdentitySettings();
+        return;
+      }
+      onReviewMappings?.(
+        action.column ? { focusSource: action.column } : undefined,
+      );
+      return;
+    }
+    if (action.kind === "review_mappings" || action.kind === "rerun_mapping") {
+      onReviewMappings?.(
+        action.column ? { focusSource: action.column } : undefined,
+      );
+      return;
+    }
     pendingVerifyRef.current = true;
     pushRemediation(
       action.label || action.kind,
@@ -1220,155 +1244,199 @@ export function ValidateDashboard({
         </div>
       )}
 
-      {/* Context-aware remediation: type mismatches → Remap/Widen; encoding → Strip/Quarantine. */}
+      {/* One root cause → real Button CTAs (no Mapping proof here — evidence lives on Column matches). */}
       {!running && preflight && !preflight.passed && (
         <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
-          <div className="df2-vd-chip-row">
-            {isPrivilegeBlock && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-check_connection"
-                disabled={remediating}
-                onClick={() => {
-                  window.location.hash = "#/connectors";
-                }}
-              >
-                <DtIcon name="shield" size={13} />
-                Grant write privilege
-              </button>
-            )}
-            {isPrivilegeBlock && onRunPreflight && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-rerun"
-                disabled={remediating || running}
-                onClick={() => void onRunPreflight()}
-              >
-                <DtIcon name="activity" size={13} />
-                Re-validate after grant
-              </button>
-            )}            {isConnectionBlock && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-check_connection"
-                disabled={remediating}
-                onClick={() => {
-                  window.location.hash = "#/connectors";
-                }}
-              >
-                <DtIcon name="server" size={13} />
-                Fix connector credentials
-              </button>
-            )}
-            {isConnectionBlock && onRunPreflight && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-rerun"
-                disabled={remediating || running}
-                onClick={() => void onRunPreflight()}
-              >
-                <DtIcon name="activity" size={13} />
-                Re-test &amp; re-validate
-              </button>
-            )}
-            {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
-              <button
-                key={`${col.source}-${col.target}`}
-                type="button"
-                className="df2-vd-chip kind-change_target_type"
-                disabled={remediating || !onApplyAction}
-                onClick={() =>
-                  onApplyAction?.({
-                    kind: "change_target_type",
-                    label: `Remap ${col.source} → VARCHAR`,
-                    column: col.source,
-                    target: col.target,
-                    to_type: "VARCHAR",
-                  })
-                }
-              >
-                <DtIcon name="layers" size={13} />
-                Remap {col.source} → VARCHAR
-              </button>
-            ))}
-            {isTypeMismatchBlock && onReviewMappings && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-review_mappings"
-                onClick={onReviewMappings}
-                disabled={remediating}
-              >
-                <DtIcon name="layers" size={13} />
-                Review mappings
-              </button>
-            )}
-            {showEncodingRemediation && onStripControlChars && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-normalize_control_chars"
-                onClick={() => void runStrip()}
-                disabled={remediating}
-              >
-                <DtIcon name="layers" size={13} />
-                Strip controls &amp; re-run
-              </button>
-            )}
-            {showEncodingRemediation && onQuarantineAndRerun && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-quarantine_and_rerun"
-                onClick={() => void runQuarantine()}
-                disabled={remediating}
-              >
-                <DtIcon name="shield" size={13} />
-                Quarantine &amp; re-run
-              </button>
-            )}
-            {showEncodingRemediation && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-open_bad_data_fix"
-                onClick={() => setBadDataOpen(true)}
-                disabled={remediating}
-              >
-                <DtIcon name="shield" size={13} />
-                Fix bad data…
-              </button>
-            )}
-            {onOpenMappingProof && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-mapping_proof"
-                onClick={onOpenMappingProof}
-                disabled={remediating}
-              >
-                <DtIcon name="sparkle" size={13} />
-                Mapping proof
-              </button>
-            )}
-            {!isTypeMismatchBlock && onReviewMappings && (
-              <button
-                type="button"
-                className="df2-vd-chip kind-review_mappings"
-                onClick={onReviewMappings}
-                disabled={remediating}
-              >
-                <DtIcon name="layers" size={13} />
-                Review mappings
-              </button>
+          <div className="df2-vd-fix-actions">
+            {duplicateRoot ? (
+              <>
+                {onOpenIdentitySettings && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="settings" size={14} />}
+                    onClick={onOpenIdentitySettings}
+                  >
+                    {duplicateRoot.primaryKey
+                      ? `Change primary key (${duplicateRoot.primaryKey}) or sync mode`
+                      : "Change primary key or sync mode"}
+                  </Button>
+                )}
+                {onReviewMappings && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() =>
+                      onReviewMappings(
+                        duplicateRoot.primaryKey
+                          ? { focusSource: duplicateRoot.primaryKey }
+                          : undefined,
+                      )
+                    }
+                  >
+                    {duplicateRoot.primaryKey
+                      ? `Review ${duplicateRoot.primaryKey} on Map`
+                      : "Review identity on Map"}
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={remediating || repairBusy || !preflight}
+                  leadingIcon={<DtIcon name="sparkle" size={14} />}
+                  onClick={() => void proposeDurableRepair()}
+                >
+                  Propose durable repair
+                </Button>
+              </>
+            ) : (
+              <>
+                {isPrivilegeBlock && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="shield" size={14} />}
+                    onClick={() => {
+                      window.location.hash = "#/connectors";
+                    }}
+                  >
+                    Grant write privilege
+                  </Button>
+                )}
+                {isPrivilegeBlock && onRunPreflight && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating || running}
+                    leadingIcon={<DtIcon name="activity" size={14} />}
+                    onClick={() => void onRunPreflight()}
+                  >
+                    Re-validate after grant
+                  </Button>
+                )}
+                {isConnectionBlock && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="server" size={14} />}
+                    onClick={() => {
+                      window.location.hash = "#/connectors";
+                    }}
+                  >
+                    Fix connector credentials
+                  </Button>
+                )}
+                {isConnectionBlock && onRunPreflight && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating || running}
+                    leadingIcon={<DtIcon name="activity" size={14} />}
+                    onClick={() => void onRunPreflight()}
+                  >
+                    Re-test &amp; re-validate
+                  </Button>
+                )}
+                {isTypeMismatchBlock && typeMismatchColumns.slice(0, 4).map((col) => (
+                  <Button
+                    key={`${col.source}-${col.target}`}
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating || !onApplyAction}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() =>
+                      onApplyAction?.({
+                        kind: "change_target_type",
+                        label: `Remap ${col.source} → VARCHAR`,
+                        column: col.source,
+                        target: col.target,
+                        to_type: "VARCHAR",
+                      })
+                    }
+                  >
+                    Remap {col.source} → VARCHAR
+                  </Button>
+                ))}
+                {isTypeMismatchBlock && onReviewMappings && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => onReviewMappings()}
+                  >
+                    Open Map
+                  </Button>
+                )}
+                {showEncodingRemediation && onStripControlChars && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => void runStrip()}
+                  >
+                    Strip controls &amp; re-run
+                  </Button>
+                )}
+                {showEncodingRemediation && onQuarantineAndRerun && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="shield" size={14} />}
+                    onClick={() => void runQuarantine()}
+                  >
+                    Quarantine &amp; re-run
+                  </Button>
+                )}
+                {showEncodingRemediation && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="shield" size={14} />}
+                    onClick={() => setBadDataOpen(true)}
+                  >
+                    Fix bad data…
+                  </Button>
+                )}
+                {!isTypeMismatchBlock
+                  && !showEncodingRemediation
+                  && !isPrivilegeBlock
+                  && !isConnectionBlock
+                  && onReviewMappings && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => onReviewMappings()}
+                  >
+                    Open Map to fix
+                  </Button>
+                )}
+              </>
             )}
           </div>
           <p className="df2-vd-cell-preview-hint">
-            {isPrivilegeBlock
-              ? "Write privilege is denied (or CREATE is missing). Grant the privilege named in the G2 gate (INSERT/CREATE, ACL, IAM, index/write) on the destination — then Re-validate. Re-testing connector login alone will not fix a privilege deny."
+            {duplicateRoot
+              ? `Duplicate values on ${duplicateRoot.primaryKey || "the identity column"} block Execute. Pick a unique primary key or a sync mode that does not require uniqueness, clean the source, then Re-run Validate. Mapping proof is evidence only — it does not remove duplicates.`
+              : isPrivilegeBlock
+              ? "Write privilege is denied (or CREATE is missing). Grant the privilege named in the G2 gate on the destination — then Re-validate."
               : isConnectionBlock
-              ? "Destination (or source) authentication failed. Open Connectors for this saved connection, set Auth source (often admin for Railway/Atlas Mongo), click Test until it passes (connection string or username/password — one place only), then return here and Re-validate. Strip/Quarantine cannot fix credentials."
+              ? "Authentication failed. Fix the connector, Test until it passes, then return here and Re-validate."
               : isTypeMismatchBlock
-              ? "This block is a type mismatch (e.g. text → NUMBER). Remap/Widen to VARCHAR — Strip controls and Quarantine cannot change column types. After Remap, Validate again; Execute unlocks when gates pass."
+              ? "Type mismatch — Remap/Widen below. Strip/Quarantine cannot change column types."
               : showEncodingRemediation
-                ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination after Validate passes (never silent drop)."
-                : "Open Review mappings or Mapping proof. Strip/Quarantine only apply to encoding issues."}
+                ? "Strip controls removes format-control characters, then re-validates. Quarantine keeps unfit cells out of the destination (never silent drop)."
+                : "Use the action above for this root cause, then Re-run Validate."}
           </p>
         </div>
       )}
@@ -1467,40 +1535,37 @@ export function ValidateDashboard({
               ))}
             </ul>
             <div className="df2-vd-cell-preview-actions">
-              {onOpenMappingProof && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
-                  <DtIcon name="sparkle" size={14} /> Mapping proof
-                </button>
-              )}
-              {onReviewMappings && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onReviewMappings}>
-                  <DtIcon name="layers" size={14} /> Review mappings
-                </button>
-              )}
-              {onRunPreflight && !preflight && !running && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={onRunPreflight}>
-                  <DtIcon name="gate" size={14} /> Run preflight
-                </button>
-              )}
               {onStripControlChars && showEncodingRemediation && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-ghost"
+                <Button
+                  size="sm"
+                  variant="secondary"
                   onClick={() => void runStrip()}
                   disabled={remediating}
+                  leadingIcon={<DtIcon name="layers" size={14} />}
                 >
-                  <DtIcon name="layers" size={14} /> Strip controls &amp; re-run
-                </button>
+                  Strip controls &amp; re-run
+                </Button>
               )}
               {onQuarantineAndRerun && showEncodingRemediation && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-ghost"
+                <Button
+                  size="sm"
+                  variant="ghost"
                   onClick={() => void runQuarantine()}
                   disabled={remediating}
+                  leadingIcon={<DtIcon name="shield" size={14} />}
                 >
-                  <DtIcon name="shield" size={14} /> Quarantine &amp; re-check
-                </button>
+                  Quarantine &amp; re-check
+                </Button>
+              )}
+              {onRunPreflight && !preflight && !running && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={onRunPreflight}
+                  leadingIcon={<DtIcon name="gate" size={14} />}
+                >
+                  Run preflight
+                </Button>
               )}
             </div>
           </div>
@@ -1520,9 +1585,14 @@ export function ValidateDashboard({
                 every pair has confidence evidence and fidelity risks
               </span>
             </div>
-            <button type="button" className="df2-btn df2-btn-sm df2-btn-secondary" onClick={onOpenMappingProof}>
-              <DtIcon name="sparkle" size={14} /> Open mapping proof
-            </button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={onOpenMappingProof}
+              leadingIcon={<DtIcon name="sparkle" size={14} />}
+            >
+              Open mapping proof
+            </Button>
           </div>
           <div className="df2-vd-map-proof-kpis">
             <div>
@@ -1872,50 +1942,66 @@ export function ValidateDashboard({
                   {explain.suggested_actions.length > 0 && (
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
-                      <div className="df2-vd-chip-row">
-                        {explain.suggested_actions.map((action, i) => (
-                          <button
+                      <div className="df2-vd-fix-actions">
+                        {explain.suggested_actions
+                          .filter((action) =>
+                            action.kind !== "open_mapping_proof"
+                            && action.kind !== "mapping_proof"
+                            // Identity CTAs already live in Suggested fixes bar + rail.
+                            && !(duplicateRoot && action.kind === "fix_source_keys")
+                          )
+                          .map((action, i) => (
+                          <Button
                             key={`${action.kind}-${action.column ?? ""}-${i}`}
-                            type="button"
-                            className={`df2-vd-chip kind-${action.kind}`}
+                            size="sm"
+                            variant={i === 0 ? "primary" : "secondary"}
                             onClick={() => handleSuggestedAction(action)}
                             disabled={
                               !onApplyAction
                               && action.kind !== "open_bad_data_fix"
                               && action.kind !== "normalize_control_chars"
                               && action.kind !== "quarantine_and_rerun"
+                              && action.kind !== "fix_source_keys"
+                              && action.kind !== "review_mappings"
                             }
                             title={action.label}
+                            leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={14} />}
                           >
-                            <DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={13} />
                             {action.label}
-                          </button>
+                          </Button>
                         ))}
-                        <button
-                          type="button"
-                          className="df2-vd-chip kind-review_mappings"
-                          onClick={() => void proposeDurableRepair()}
-                          disabled={repairBusy || !preflight}
-                          title="Persist a human-gated repair proposal with audit trail"
-                        >
-                          <DtIcon name="sparkle" size={13} />
-                          {repairBusy ? "Proposing…" : "Propose durable repair"}
-                        </button>
+                        {/* Propose lives in Suggested fixes bar for duplicate identity. */}
+                        {!duplicateRoot && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => void proposeDurableRepair()}
+                            disabled={repairBusy || !preflight}
+                            title="Persist a human-gated repair proposal with audit trail"
+                            leadingIcon={<DtIcon name="sparkle" size={14} />}
+                            loading={repairBusy}
+                            loadingLabel="Proposing…"
+                          >
+                            Propose durable repair
+                          </Button>
+                        )}
                       </div>
                     </div>
                   )}
-                  {explain.suggested_actions.length === 0 && !explain.passed && (
+                  {explain.suggested_actions.length === 0 && !explain.passed && !duplicateRoot && (
                     <div className="df2-vd-assist-actions">
-                      <div className="df2-vd-chip-row">
-                        <button
-                          type="button"
-                          className="df2-vd-chip kind-review_mappings"
+                      <div className="df2-vd-fix-actions">
+                        <Button
+                          size="sm"
+                          variant="secondary"
                           onClick={() => void proposeDurableRepair()}
                           disabled={repairBusy || !preflight}
+                          leadingIcon={<DtIcon name="sparkle" size={14} />}
+                          loading={repairBusy}
+                          loadingLabel="Proposing…"
                         >
-                          <DtIcon name="sparkle" size={13} />
-                          {repairBusy ? "Proposing…" : "Propose durable repair"}
-                        </button>
+                          Propose durable repair
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -2093,10 +2179,29 @@ export function ValidateDashboard({
                         ))}
                       </ul>
                     )}
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      {/* Primary CTAs live in Suggested fixes bar + rail — avoid triple duplicate. */}
+                      {onReviewMappings && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          leadingIcon={<DtIcon name="layers" size={14} />}
+                          onClick={() =>
+                            onReviewMappings(
+                              duplicateRoot?.primaryKey
+                                ? { focusSource: duplicateRoot.primaryKey }
+                                : undefined,
+                            )
+                          }
+                        >
+                          {duplicateRoot?.primaryKey
+                            ? `Review ${duplicateRoot.primaryKey} on Map`
+                            : "Review identity on Map"}
+                        </Button>
+                      )}
+                    </div>
                     {item.fix && (
-                      <span className="df2-vd-blocker-fix">
-                        <DtIcon name="check" size={12} /> {item.fix}
-                      </span>
+                      <p className="df2-vd-blocker-fix-note">{item.fix}</p>
                     )}
                     {item.why && <span className="df2-vd-blocker-why">{item.why}</span>}
                   </li>
@@ -2123,17 +2228,18 @@ export function ValidateDashboard({
                       <span className="df2-vd-assist-actions-title">
                         Fix on Validate (remaps off incompatible typed columns)
                       </span>
-                      <div className="df2-vd-chip-row">
+                      <div className="df2-vd-fix-actions">
                         {blockingCols.slice(0, 6).map((col) => (
-                          <button
+                          <Button
                             key={`${col.source}-${col.target}`}
-                            type="button"
-                            className="df2-vd-chip kind-change_target_type"
+                            size="sm"
+                            variant="primary"
                             disabled={!onApplyAction || !col.suggested_target_type}
                             title={
                               col.suggested_fix
                               || `Remap ${col.source} to a ${col.suggested_target_type} column (Widen alone does not ALTER DDL)`
                             }
+                            leadingIcon={<DtIcon name="layers" size={14} />}
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
@@ -2144,31 +2250,28 @@ export function ValidateDashboard({
                               })
                             }
                           >
-                            <DtIcon name="layers" size={13} />
                             Remap {col.source} → {col.suggested_target_type ?? "VARCHAR"}
-                          </button>
+                          </Button>
                         ))}
                       </div>
                     </div>
                   )}
                   {item.fix && (
-                    <span className="df2-vd-blocker-fix">
-                      <DtIcon name="check" size={12} /> {item.fix}
-                    </span>
+                    <p className="df2-vd-blocker-fix-note">{item.fix}</p>
                   )}
                   {item.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{item.why}</span>
                   )}
                   {(encodingBlocks || hasEncodingIssue) && (b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
-                    <div className="df2-vd-blocker-actions">
-                      <button
-                        type="button"
-                        className="df2-vd-chip kind-open_bad_data_fix"
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => setBadDataOpen(true)}
                       >
-                        <DtIcon name="shield" size={13} />
                         Fix bad data…
-                      </button>
+                      </Button>
                     </div>
                   )}
                   {isTypeMismatchBlock && b.id.includes("dry_run") && typeMismatchColumns.length > 0 && (
@@ -2176,13 +2279,14 @@ export function ValidateDashboard({
                       <span className="df2-vd-assist-actions-title">
                         Type mismatch — Remap (Strip/Quarantine will not clear this)
                       </span>
-                      <div className="df2-vd-chip-row">
+                      <div className="df2-vd-fix-actions">
                         {typeMismatchColumns.slice(0, 6).map((col) => (
-                          <button
+                          <Button
                             key={`block-${col.source}-${col.target}`}
-                            type="button"
-                            className="df2-vd-chip kind-change_target_type"
+                            size="sm"
+                            variant="primary"
                             disabled={!onApplyAction}
+                            leadingIcon={<DtIcon name="layers" size={14} />}
                             onClick={() =>
                               onApplyAction?.({
                                 kind: "change_target_type",
@@ -2193,9 +2297,8 @@ export function ValidateDashboard({
                               })
                             }
                           >
-                            <DtIcon name="layers" size={13} />
                             Remap {col.source} → VARCHAR
-                          </button>
+                          </Button>
                         ))}
                       </div>
                     </div>
@@ -2224,14 +2327,21 @@ export function ValidateDashboard({
         proposal={repairProposal}
         mappings={repairMappings}
         onClose={() => setRepairOpen(false)}
-        onOpenMap={onReviewMappings}
+        onOpenIdentitySettings={onOpenIdentitySettings}
+        onOpenMap={() =>
+          onReviewMappings?.(
+            duplicateRoot?.primaryKey
+              ? { focusSource: duplicateRoot.primaryKey }
+              : undefined,
+          )
+        }
         onApplied={(updated) => {
           onRepairMappingsApplied?.(updated);
           pendingVerifyRef.current = true;
           pushRemediation(
             "Repair applied",
             `${updated.length} mapping(s) updated from approved proposal ${repairProposal?.id || ""}`,
-            "Applied — re-run Validate",
+            "Applied — re-running validation",
           );
         }}
         onDecided={(p) => {

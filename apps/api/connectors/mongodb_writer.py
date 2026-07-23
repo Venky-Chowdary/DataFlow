@@ -303,8 +303,13 @@ def write_mapped_rows(
             if not batch:
                 break
 
-            # Convert row tuples to documents
-            docs = [dict(zip(target_cols, row)) for row in batch]
+            # Convert row tuples to documents; omit missing-field sentinels.
+            from services.value_serializer import is_missing_sentinel
+
+            docs = [
+                {k: v for k, v in dict(zip(target_cols, row)).items() if not is_missing_sentinel(v)}
+                for row in batch
+            ]
 
             # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
             from bson.objectid import ObjectId
@@ -321,13 +326,14 @@ def write_mapped_rows(
             if write_mode == "upsert" and conflict_columns:
                 from pymongo import ReplaceOne
 
-                pk = conflict_columns[0]
-                if pk in target_cols:
-                    ops = [
-                        ReplaceOne({pk: doc[pk]}, doc, upsert=True)
-                        for doc in docs
-                        if doc.get(pk) not in (None, "")
-                    ]
+                pk_cols = [c for c in conflict_columns if c in target_cols]
+                if pk_cols:
+                    ops = []
+                    for doc in docs:
+                        filt = {c: doc.get(c) for c in pk_cols}
+                        if any(v in (None, "") for v in filt.values()):
+                            continue
+                        ops.append(ReplaceOne(filt, doc, upsert=True))
                     if ops:
                         coll.bulk_write(ops, ordered=False)
                     written += len(ops)

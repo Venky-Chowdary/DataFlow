@@ -49,6 +49,49 @@ def _logical_to_iceberg_type(logical: str) -> str:
     return ddl_type("iceberg", logical or "string")
 
 
+def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
+    """Map committed Iceberg field type back to a logical carrier for Parquet writes."""
+    if isinstance(iceberg_type, dict):
+        kind = str(iceberg_type.get("type") or "").lower()
+        if kind == "decimal":
+            p = int(iceberg_type.get("precision") or 38)
+            s = int(iceberg_type.get("scale") or 0)
+            return f"DECIMAL({p},{s})"
+        if kind in {"list", "map", "struct"}:
+            return "JSON"
+        return kind or "string"
+    t = str(iceberg_type or "string").lower()
+    mapping = {
+        "string": "string",
+        "long": "integer",
+        "int": "integer",
+        "double": "float",
+        "float": "float",
+        "boolean": "boolean",
+        "date": "date",
+        "timestamptz": "timestamptz",
+        "timestamp": "timestamp_ntz",
+        "binary": "binary",
+        "uuid": "uuid",
+        "time": "time",
+    }
+    return mapping.get(t, t or "string")
+
+
+def _write_types_from_schema(
+    schema_json: dict[str, Any],
+    dest_types: dict[str, str],
+) -> dict[str, str]:
+    """Physical write types must match committed metadata (type_locked honesty)."""
+    out = dict(dest_types)
+    for field in schema_json.get("fields") or []:
+        name = str(field.get("name") or "")
+        if not name:
+            continue
+        out[name] = _iceberg_type_to_logical_carrier(field.get("type"))
+    return out
+
+
 def _load_metadata(meta_path: Path) -> dict[str, Any] | None:
     if not meta_path.exists():
         return None
@@ -100,17 +143,24 @@ def _evolve_schema(
 
 
 def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Load all rows referenced by current metadata data-files (JSONL/Parquet)."""
+    """Load all rows referenced by current metadata data-files (JSONL/Parquet).
+
+    Fail-closed: missing or unreadable referenced files abort the upsert so we
+    never silently drop existing rows (Airbyte/warehouse silent-loss class).
+    """
     if not current_meta:
         return []
     rows: list[dict[str, Any]] = []
     for ref in current_meta.get("data-files") or []:
-        rel = str(ref.get("path") or "")
+        rel = str(ref.get("path") or "").strip()
         if not rel:
-            continue
+            raise ValueError("Iceberg metadata references a data-file with empty path")
         path = table_dir / rel
         if not path.exists():
-            continue
+            raise ValueError(
+                f"Iceberg data-file missing for upsert merge: {rel} "
+                "(refuse silent row loss — repair snapshot or rewrite table)"
+            )
         if rel.endswith(".parquet"):
             try:
                 import pyarrow.parquet as pq
@@ -118,19 +168,30 @@ def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[
                 table = pq.read_table(path)
                 for batch in table.to_pylist():
                     rows.append({c: batch.get(c) for c in columns})
-            except Exception:
-                continue
+            except Exception as exc:
+                raise ValueError(
+                    f"Iceberg Parquet data-file unreadable for upsert merge: {rel}: {exc}"
+                ) from exc
         else:
-            with path.open(encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        continue
-                    rows.append({c: obj.get(c) for c in columns})
+            try:
+                with path.open(encoding="utf-8") as fh:
+                    for line_no, line in enumerate(fh, start=1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception as exc:
+                            raise ValueError(
+                                f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
+                            ) from exc
+                        rows.append({c: obj.get(c) for c in columns})
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError(
+                    f"Iceberg JSONL data-file unreadable for upsert merge: {rel}: {exc}"
+                ) from exc
     return rows
 
 
@@ -170,28 +231,143 @@ def _row_as_dict(columns: list[str], row: Any) -> dict[str, Any]:
     return {c: row[i] if i < len(row) else None for i, c in enumerate(columns)}
 
 
-def _write_data_file(data_dir: Path, columns: list[str], rows: list[Any]) -> tuple[str, int, str]:
-    """Write one data file; returns (relative_path, record_count, checksum)."""
+def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
+    """Map DataFlow logical / Iceberg DDL carrier → pyarrow type (fail-closed decimals)."""
+    from services.type_system import (
+        LOGICAL_BINARY,
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        LOGICAL_TIME,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    raw = (logical or "string").strip()
+    logical_n = normalize_logical_type(raw)
+    if logical_n == LOGICAL_BOOLEAN:
+        return pa.bool_()
+    if logical_n == LOGICAL_INTEGER:
+        return pa.int64()
+    if logical_n == LOGICAL_FLOAT:
+        return pa.float64()
+    if logical_n == LOGICAL_DECIMAL:
+        precision, scale = parse_numeric_precision_scale(raw)
+        p = int(precision) if precision is not None else 38
+        s = int(scale) if scale is not None else 10
+        p = max(1, min(p, 38))
+        s = max(0, min(s, p))
+        return pa.decimal128(p, s)
+    if logical_n == LOGICAL_DATE:
+        return pa.date32()
+    if logical_n == LOGICAL_DATETIME:
+        # Prefer timezone-aware when source declared TIMESTAMPTZ.
+        raw_u = raw.upper().replace("_", " ")
+        if "TIMESTAMPTZ" in raw_u or "WITH TIME ZONE" in raw_u or "TIMESTAMP TZ" in raw_u:
+            return pa.timestamp("us", tz="UTC")
+        return pa.timestamp("us")
+    if logical_n == LOGICAL_TIME:
+        return pa.time64("us")
+    if logical_n == LOGICAL_BINARY:
+        return pa.binary()
+    return pa.string()
+
+
+def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
+    """Coerce a Python cell into the declared Arrow type; raise on hard failure."""
+    from datetime import date, datetime, time
+    from decimal import Decimal, InvalidOperation
+
+    if value is None or value == "":
+        return None
+    if pa.types.is_decimal(arrow_type):
+        try:
+            if isinstance(value, Decimal):
+                return value
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise ValueError(f"cannot cast {value!r} to decimal") from exc
+    if pa.types.is_floating(arrow_type):
+        return float(value)
+    if pa.types.is_integer(arrow_type):
+        return int(value)
+    if pa.types.is_boolean(arrow_type):
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "t", "yes", "y"}:
+            return True
+        if text in {"0", "false", "f", "no", "n"}:
+            return False
+        raise ValueError(f"cannot cast {value!r} to boolean")
+    if pa.types.is_timestamp(arrow_type):
+        if isinstance(value, datetime):
+            return value
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if pa.types.is_date(arrow_type):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(str(value)[:10])
+    if pa.types.is_time(arrow_type):
+        if isinstance(value, time):
+            return value
+        if isinstance(value, datetime):
+            return value.time()
+        return time.fromisoformat(str(value))
+    if pa.types.is_binary(arrow_type):
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        return str(value).encode("utf-8")
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, default=json_default)
+    return str(value)
+
+
+def _write_data_file(
+    data_dir: Path,
+    columns: list[str],
+    rows: list[Any],
+    *,
+    column_types: dict[str, str] | None = None,
+) -> tuple[str, int, str, list[str]]:
+    """Write one data file; returns (relative_path, record_count, checksum, warnings).
+
+    When pyarrow is available, builds an explicit schema from logical types so
+    DECIMAL/TIMESTAMPTZ do not collapse to float64/string via inference.
+    JSONL fallback is surfaced as an explicit degraded-mode warning (never silent).
+    """
     data_dir.mkdir(parents=True, exist_ok=True)
     file_id = uuid.uuid4().hex
     digest = hashlib.sha256()
     dict_rows = [_row_as_dict(columns, r) for r in rows]
+    types = column_types or {}
+    warnings: list[str] = []
 
     # Prefer Parquet when pyarrow is available
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        arrays = {c: [r.get(c) for r in dict_rows] for c in columns}
-        table = pa.table(arrays)
+        arrow_types = [_logical_to_arrow_type(types.get(c, "string"), pa) for c in columns]
+        schema = pa.schema([(c, t) for c, t in zip(columns, arrow_types)])
+        arrays = []
+        for c, at in zip(columns, arrow_types):
+            cells = [_coerce_arrow_cell(r.get(c), at, pa) for r in dict_rows]
+            arrays.append(pa.array(cells, type=at))
+        table = pa.Table.from_arrays(arrays, schema=schema)
         rel = f"data/{file_id}.parquet"
         path = data_dir.parent / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path)
         digest.update(path.read_bytes())
-        return rel, len(dict_rows), digest.hexdigest()[:16]
-    except Exception:
-        pass
+        return rel, len(dict_rows), digest.hexdigest()[:16], warnings
+    except Exception as exc:
+        warnings.append(f"parquet_unavailable_jsonl_fallback: {exc}")
 
     rel = f"data/{file_id}.jsonl"
     path = data_dir.parent / rel
@@ -201,7 +377,7 @@ def _write_data_file(data_dir: Path, columns: list[str], rows: list[Any]) -> tup
             line = json.dumps(row, default=json_default)
             fh.write(line + "\n")
             digest.update(line.encode())
-    return rel, len(dict_rows), digest.hexdigest()[:16]
+    return rel, len(dict_rows), digest.hexdigest()[:16], warnings
 
 
 def test_iceberg(
@@ -309,6 +485,10 @@ def write_mapped_rows(
         current_schema = current_meta.get("schema")
 
     schema_json, evolve_notes = _evolve_schema(current_schema, target_cols, dest_types)
+    # Always write Parquet/JSONL using committed field types — never diverge from
+    # type_locked metadata (incoming dest_types may differ).
+    write_types = _write_types_from_schema(schema_json, dest_types)
+    file_warnings: list[str] = []
     if write_mode in {"overwrite", "replace"} and current_meta:
         # Drop prior data refs; keep schema evolution
         current_meta = None
@@ -318,15 +498,32 @@ def write_mapped_rows(
     if mode in upsert_modes:
         pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
         if not pk_cols:
-            pk_cols = [target_cols[0]] if target_cols else []
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Iceberg upsert/merge requires explicit conflict_columns "
+                    "(record key); refusing to invent PK from the first column"
+                ),
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
         existing_rows = _load_existing_rows(table_dir, target_cols, current_meta)
         incoming = [_row_as_dict(target_cols, r) for r in mapped_rows]
         merged = _merge_upsert_rows(existing_rows, incoming, pk_cols=pk_cols)
-        rel_path, n_written, checksum = _write_data_file(table_dir / "data", target_cols, merged)
+        rel_path, n_written, checksum, file_warnings = _write_data_file(
+            table_dir / "data", target_cols, merged, column_types=write_types
+        )
         operation = "overwrite"  # Iceberg CoW upsert lands as overwrite snapshot
         data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
     else:
-        rel_path, n_written, checksum = _write_data_file(table_dir / "data", target_cols, mapped_rows)
+        rel_path, n_written, checksum, file_warnings = _write_data_file(
+            table_dir / "data", target_cols, mapped_rows, column_types=write_types
+        )
         operation = "overwrite" if mode in {"overwrite", "replace"} else "append"
         data_files = list((current_meta or {}).get("data-files") or []) + [
             {"path": rel_path, "record-count": n_written, "checksum": checksum}
@@ -398,5 +595,6 @@ def write_mapped_rows(
         chunks_completed=1,
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
+        warnings=(list(evolve_notes) + list(file_warnings))[:20],
         driver="iceberg",
     )

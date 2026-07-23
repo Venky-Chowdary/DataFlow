@@ -118,39 +118,80 @@ def read_object(
     if not sobject:
         raise ValueError("Salesforce object/table name required")
 
-    # Prefer Describe-driven field list when available (more honest than FIELDS(ALL)).
-    field_list = "FIELDS(ALL)"
+    names: list[str] = []
+    field_chunks: list[list[str]] = []
+    schema_warnings: list[str] = []
     try:
         described = describe_sobject(cfg, sobject)
         names = [f["name"] for f in described if f.get("name")]
         if names:
-            # Cap SOQL field list to avoid URI limits on huge objects.
-            field_list = ",".join(names[:200])
+            # Chunk Describe fields so wide objects never silently drop columns
+            # past the SOQL URI/field cap (Airbyte-class honesty gap).
+            id_field = "Id" if "Id" in names else ("id" if "id" in names else names[0])
+            others = [n for n in names if n != id_field]
+            # Id + up to 99 fields per query keeps URI size manageable.
+            for i in range(0, max(len(others), 1), 99):
+                chunk = others[i : i + 99]
+                field_chunks.append([id_field] + chunk if chunk or not field_chunks else [id_field])
+            if not others and not field_chunks:
+                field_chunks = [[id_field]]
+            if len(names) > 100:
+                schema_warnings.append(
+                    f"Describe returned {len(names)} fields — fetched via "
+                    f"{len(field_chunks)} SOQL chunk(s) and merged by {id_field}"
+                )
     except Exception as exc:
-        # Auth failures must surface — never silently fall back with a bad token.
         if is_auth_error(exc):
             raise
-        field_list = "FIELDS(ALL)"
+        field_chunks = []
+        schema_warnings.append(f"Describe unavailable ({exc}); using FIELDS(ALL)")
 
-    query = f"SELECT {field_list} FROM {sobject} LIMIT {limit}"
-    if offset:
-        query += f" OFFSET {offset}"
     query_url = f"{url_base}/services/data/{API_VERSION}/query"
-    try:
+    merged: dict[str, dict[str, Any]] = {}
+    total_size = 0
+    id_field = "Id"
+
+    def _run_query(field_list: str) -> list[dict[str, Any]]:
+        nonlocal total_size
+        query = f"SELECT {field_list} FROM {sobject} LIMIT {limit}"
+        if offset:
+            query += f" OFFSET {offset}"
         r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
         r.raise_for_status()
+        data = r.json()
+        total_size = max(total_size, int(data.get("totalSize") or 0))
+        return list(data.get("records") or [])
+
+    try:
+        if field_chunks:
+            for chunk in field_chunks:
+                id_field = chunk[0]
+                records = _run_query(",".join(chunk))
+                for rec in records:
+                    clean = {k: v for k, v in rec.items() if k != "attributes"}
+                    rid = str(clean.get(id_field) or clean.get("Id") or clean.get("id") or "")
+                    if not rid:
+                        # No identity — keep as anonymous row key
+                        rid = f"_anon_{len(merged)}"
+                    if rid not in merged:
+                        merged[rid] = clean
+                    else:
+                        merged[rid].update(clean)
+            records = list(merged.values())
+        else:
+            records = _run_query("FIELDS(ALL)")
     except Exception as exc:
         if "INVALID_FIELD" in str(exc) or "FIELDS(ALL)" in str(exc) or "EXCEEDED_ID_LIMIT" in str(exc):
-            query = f"SELECT Id,Name FROM {sobject} LIMIT {limit}"
-            if offset:
-                query += f" OFFSET {offset}"
-            r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
-            r.raise_for_status()
+            schema_warnings.append(
+                "SOQL field select failed — fell back to Id,Name "
+                "(column coverage may be incomplete; fix Describe/permissions)"
+            )
+            records = _run_query("Id,Name")
         else:
             raise
 
-    data = r.json()
-    records = data.get("records", [])
     batch = extract_records(records)
-    batch.total_rows = data.get("totalSize", len(records))
+    batch.total_rows = total_size or len(records)
+    if schema_warnings:
+        batch.meta = {**(batch.meta or {}), "schema_warnings": schema_warnings}
     return batch

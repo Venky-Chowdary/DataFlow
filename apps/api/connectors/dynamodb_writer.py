@@ -81,6 +81,7 @@ def write_mapped_rows(
     error_policy: str | None = None,
     backfill_new_fields: bool = False,
     endpoint_url: str = "",
+    conflict_columns: list[str] | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     del schema, ssl, backfill_new_fields
@@ -109,7 +110,14 @@ def write_mapped_rows(
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
-        _ensure_table(client, table, target_cols, mappings, logical_types)
+        _ensure_table(
+            client,
+            table,
+            target_cols,
+            mappings,
+            logical_types,
+            conflict_columns=conflict_columns or _kwargs.get("conflict_columns"),
+        )
 
     key_types = _table_key_types(client, table)
 
@@ -181,24 +189,67 @@ def _table_key_types(client, table: str) -> dict[str, str]:
         return {}
 
 
-def _pick_hash_key(target_cols: list[str], mappings: list[dict]) -> str:
-    preferred = {"id", "_id", "pk", "sk", "uuid", "key"}
-    lower_map = {c.lower(): c for c in target_cols}
-    for name in preferred:
-        if name in lower_map:
-            return lower_map[name]
-    for c in target_cols:
-        lc = c.lower()
-        if lc.endswith("_id"):
-            return c
-    for mapping in mappings:
-        target = (mapping.get("target") or "").strip()
-        if target and target.lower() in preferred:
-            return target
-    return target_cols[0] if target_cols else "id"
+def _attr_type_for_logical(logical: str) -> str:
+    upper = (logical or "").upper()
+    if upper.startswith("DECIMAL") or upper in {
+        "INTEGER", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT", "NUMBER",
+    }:
+        return "N"
+    if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
+        return "B"
+    return "S"
 
 
-def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dict], source_types: list[str] | None = None) -> None:
+def _resolve_key_schema(
+    target_cols: list[str],
+    mappings: list[dict],
+    *,
+    conflict_columns: list[str] | None,
+    source_types: list[str] | None,
+) -> list[tuple[str, str, str]]:
+    """Return [(name, KeyType, AttrType), ...] for create-table.
+
+    Prefer explicit conflict_columns (HASH, optional RANGE). Refuse inventing a
+    key from an arbitrary first column when no identity metadata is available.
+    """
+    conflict = [c for c in (conflict_columns or []) if c and c in target_cols]
+    if not conflict:
+        # Legacy soft path only when a clear identity name exists.
+        preferred = {"id", "_id", "pk", "sk", "uuid", "key"}
+        lower_map = {c.lower(): c for c in target_cols}
+        for name in preferred:
+            if name in lower_map:
+                conflict = [lower_map[name]]
+                break
+        if not conflict:
+            for c in target_cols:
+                if c.lower().endswith("_id"):
+                    conflict = [c]
+                    break
+    if not conflict:
+        raise ValueError(
+            "DynamoDB create-table requires conflict_columns (HASH[, RANGE]) "
+            "or a clear identity column (id/_id/*_id); refusing to invent a key "
+            "from the first mapped column"
+        )
+    keys: list[tuple[str, str, str]] = []
+    for i, col in enumerate(conflict[:2]):
+        logical = ""
+        if source_types and col in target_cols:
+            logical = source_types[target_cols.index(col)] or ""
+        keys.append((col, "HASH" if i == 0 else "RANGE", _attr_type_for_logical(logical)))
+    return keys
+
+
+def _ensure_table(
+    client,
+    table: str,
+    target_cols: list[str],
+    mappings: list[dict],
+    source_types: list[str] | None = None,
+    *,
+    conflict_columns: list[str] | None = None,
+) -> None:
     from botocore.exceptions import ClientError
 
     try:
@@ -209,18 +260,24 @@ def _ensure_table(client, table: str, target_cols: list[str], mappings: list[dic
             raise
     if not target_cols:
         raise ValueError(f"DynamoDB table `{table}` does not exist and no columns were provided to create it.")
-    hash_key = _pick_hash_key(target_cols, mappings)
-    attr_type = "S"
-    if source_types and hash_key in target_cols:
-        logical = (source_types[target_cols.index(hash_key)] or "").upper()
-        if logical in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT"}:
-            attr_type = "N"
-        elif logical in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
-            attr_type = "B"
+    key_schema = _resolve_key_schema(
+        target_cols,
+        mappings,
+        conflict_columns=conflict_columns,
+        source_types=source_types,
+    )
+    # Deduplicate attribute definitions (HASH/RANGE may share names only once).
+    attr_defs = []
+    seen: set[str] = set()
+    for name, _kt, at in key_schema:
+        if name in seen:
+            continue
+        seen.add(name)
+        attr_defs.append({"AttributeName": name, "AttributeType": at})
     client.create_table(
         TableName=table,
-        AttributeDefinitions=[{"AttributeName": hash_key, "AttributeType": attr_type}],
-        KeySchema=[{"AttributeName": hash_key, "KeyType": "HASH"}],
+        AttributeDefinitions=attr_defs,
+        KeySchema=[{"AttributeName": name, "KeyType": kt} for name, kt, _at in key_schema],
         BillingMode="PAY_PER_REQUEST",
     )
     waiter = client.get_waiter("table_exists")

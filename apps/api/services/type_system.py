@@ -353,7 +353,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "DECIMAL(38,15)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP",
+        # Ambiguous datetime → TIMESTAMPTZ (matches PG; explicit NTZ stays TIMESTAMP).
+        LOGICAL_DATETIME: "TIMESTAMPTZ",
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "VARCHAR(36)",
         LOGICAL_JSON: "SUPER",
@@ -402,7 +403,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TIME: "STRING",
         LOGICAL_UUID: "STRING",
         LOGICAL_JSON: "STRING",
-        LOGICAL_ARRAY: "STRING",
+        # Native nested — never collapse ARRAY/STRUCT to STRING (fidelity vs Airbyte).
+        LOGICAL_ARRAY: "ARRAY<STRING>",
         LOGICAL_BINARY: "BINARY",
     },
     # Apache Iceberg table schema (writer/catalog native).
@@ -453,7 +455,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_STRING: "text",
         LOGICAL_TEXT: "text",
         LOGICAL_INTEGER: "long",
-        LOGICAL_DECIMAL: "scaled_float",  # fixed-point-ish; never invent float64 for DECIMAL
+        LOGICAL_DECIMAL: "keyword",  # scaled_float requires scaling_factor; writer stores decimal strings
         LOGICAL_FLOAT: "double",
         LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "date",
@@ -476,7 +478,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TIME: "TIME",
         LOGICAL_UUID: "UUID",
         LOGICAL_JSON: "JSON",
-        LOGICAL_ARRAY: "JSON",
+        LOGICAL_ARRAY: "VARCHAR[]",
         LOGICAL_BINARY: "BLOB",
     },
     "clickhouse": {
@@ -490,7 +492,7 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TIME: "String",
         LOGICAL_UUID: "UUID",
         LOGICAL_JSON: "String",
-        LOGICAL_ARRAY: "String",
+        LOGICAL_ARRAY: "Array(String)",
         LOGICAL_BINARY: "String",
     },
     "trino": {
@@ -735,6 +737,26 @@ def parse_numeric_precision_scale(inferred: str | None) -> tuple[int | None, int
     return precision, scale
 
 
+# Signed BIGINT holds at most ~18 decimal digits (2^63-1 ≈ 9.22e18).
+# DECIMAL(p,0) with p > 18 must stay DECIMAL — never collapse to INTEGER/BIGINT
+# (SQL Server NUMERIC(38,0) / Oracle NUMBER(38,0) / Snowflake NUMBER(38,0)).
+SIGNED_BIGINT_SAFE_PRECISION: Final[int] = 18
+
+
+def zero_scale_fits_signed_bigint(precision: int | None) -> bool:
+    """True when DECIMAL(p,0) / NUMBER(p,0) is safely representable as signed BIGINT."""
+    if precision is None:
+        return False
+    return int(precision) <= SIGNED_BIGINT_SAFE_PRECISION
+
+
+def zero_scale_numeric_carrier(precision: int) -> str:
+    """Introspect carrier for zero-scale numerics — preserve wide DECIMAL(p,0)."""
+    if zero_scale_fits_signed_bigint(precision):
+        return "INTEGER"
+    return f"DECIMAL({int(precision)},0)"
+
+
 # Engines that emit a true vector DDL type only when dimension is known.
 _VECTOR_PARAM_TEMPLATES: Final[dict[str, str]] = {
     "postgresql": "vector({n})",
@@ -808,6 +830,15 @@ def normalize_logical_type(inferred: str | None) -> str:
     if not raw:
         return LOGICAL_STRING
 
+    # Nested / complex carriers from Arrow, BigQuery, Spark — keep category.
+    upper = raw.upper()
+    if upper.startswith("ARRAY<") or upper.startswith("LIST<"):
+        return LOGICAL_ARRAY
+    if upper.startswith("STRUCT<") or upper.startswith("RECORD<"):
+        return LOGICAL_JSON
+    if upper.startswith("MAP<"):
+        return LOGICAL_JSON
+
     # Parametric types — preserve precision semantics before stripping ().
     m = re.match(r"^([A-Za-z_ ]+?)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", raw)
     if m:
@@ -816,7 +847,11 @@ def normalize_logical_type(inferred: str | None) -> str:
         scale = m.group(3)
         if base in {"number", "numeric", "decimal", "fixed"}:
             if scale is not None and int(scale) == 0:
-                return LOGICAL_INTEGER
+                # Wide zero-scale decimals (e.g. NUMBER(38,0)) must not become
+                # signed BIGINT — that overflows values Airbyte quietly corrupts.
+                if zero_scale_fits_signed_bigint(p1):
+                    return LOGICAL_INTEGER
+                return LOGICAL_DECIMAL
             return LOGICAL_DECIMAL
         # SQL Server BIT is boolean; PostgreSQL BIT(n>1) / BIT VARYING is a bitstring.
         if base == "bit":
@@ -843,6 +878,150 @@ def normalize_logical_type(inferred: str | None) -> str:
     if key in {"uint64", "uint128", "uint256", "int128", "int256", "hugeint", "uhugeint"}:
         return LOGICAL_DECIMAL
     return CANONICAL_TYPES.get(key, CANONICAL_TYPES.get(key.replace(" ", "_"), LOGICAL_STRING))
+
+
+_NESTED_DDL_ENGINES: Final[frozenset[str]] = frozenset({
+    "databricks",
+    "duckdb",
+    "clickhouse",
+    "iceberg",
+    "bigquery",
+    "trino",
+    "presto",
+})
+
+
+def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
+    """Map a nested leaf logical carrier to destination-native leaf DDL."""
+    leaf = (leaf or "STRING").strip()
+    # Avoid recursion into nested helpers — leafs are scalars.
+    logical = normalize_logical_type(leaf)
+    if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:
+        return _decimal_ddl_for_dest(db, leaf)
+    if logical == LOGICAL_DATETIME:
+        tz_ddl = _datetime_ddl_for_dest(db, leaf)
+        if tz_ddl:
+            return tz_ddl
+    return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
+
+
+def _format_array_ddl(db: str, element_ddl: str) -> str:
+    if db == "duckdb":
+        return f"{element_ddl}[]"
+    if db == "clickhouse":
+        return f"Array({element_ddl})"
+    if db == "iceberg":
+        return f"list<{element_ddl}>"
+    if db in {"trino", "presto"}:
+        return f"array({element_ddl})"
+    # databricks / bigquery / spark
+    return f"ARRAY<{element_ddl}>"
+
+
+def _format_struct_ddl(db: str, fields: list[tuple[str, str]]) -> str:
+    if db == "duckdb":
+        inner = ", ".join(f"{n} {t}" for n, t in fields)
+        return f"STRUCT({inner})"
+    if db == "clickhouse":
+        inner = ", ".join(t for _, t in fields)
+        return f"Tuple({inner})"
+    if db == "iceberg":
+        inner = ", ".join(f"{n}: {t}" for n, t in fields)
+        return f"struct<{inner}>"
+    if db in {"trino", "presto"}:
+        inner = ", ".join(f"{n} {t}" for n, t in fields)
+        return f"row({inner})"
+    inner = ", ".join(f"{n}:{t}" for n, t in fields)
+    return f"STRUCT<{inner}>"
+
+
+def _nested_ddl_for_dest(db: str, inferred: str | None) -> str | None:
+    """Emit native ARRAY/STRUCT/MAP DDL when source declares nested carriers.
+
+    Engines without nested support return None so callers fall back to base maps
+    (JSON/SUPER/TEXT) — never invent a STRUCT on PostgreSQL.
+    """
+    if db not in _NESTED_DDL_ENGINES:
+        return None
+    raw = (inferred or "").strip()
+    if not raw:
+        return None
+    upper = raw.upper()
+
+    if (upper.startswith("ARRAY<") or upper.startswith("LIST<")) and raw.endswith(">"):
+        inner = raw[raw.index("<") + 1 : -1].strip()
+        if not inner:
+            return DDL_TYPES.get(db, {}).get(LOGICAL_ARRAY, DEFAULT_DDL.get(db, "TEXT"))
+        # Nested ARRAY/STRUCT inside element — recurse.
+        nested_inner = _nested_ddl_for_dest(db, inner)
+        element = nested_inner if nested_inner else _leaf_ddl_for_nested(db, inner)
+        return _format_array_ddl(db, element)
+
+    if (upper.startswith("STRUCT<") or upper.startswith("RECORD<")) and raw.endswith(">"):
+        body = raw[raw.index("<") + 1 : -1].strip()
+        fields: list[tuple[str, str]] = []
+        # Split on commas not inside nested <...>
+        depth = 0
+        buf = ""
+        parts: list[str] = []
+        for ch in body:
+            if ch == "<":
+                depth += 1
+                buf += ch
+            elif ch == ">":
+                depth = max(0, depth - 1)
+                buf += ch
+            elif ch == "," and depth == 0:
+                parts.append(buf.strip())
+                buf = ""
+            else:
+                buf += ch
+        if buf.strip():
+            parts.append(buf.strip())
+        for part in parts:
+            if ":" in part:
+                name, typ = part.split(":", 1)
+            elif " " in part:
+                name, typ = part.split(None, 1)
+            else:
+                continue
+            name = name.strip()
+            typ = typ.strip()
+            nested_t = _nested_ddl_for_dest(db, typ)
+            fields.append((name, nested_t if nested_t else _leaf_ddl_for_nested(db, typ)))
+        if not fields:
+            return DDL_TYPES.get(db, {}).get(LOGICAL_JSON, DEFAULT_DDL.get(db, "TEXT"))
+        return _format_struct_ddl(db, fields)
+
+    if upper.startswith("MAP<") and raw.endswith(">"):
+        body = raw[4:-1].strip()
+        depth = 0
+        split_at = -1
+        for i, ch in enumerate(body):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth = max(0, depth - 1)
+            elif ch == "," and depth == 0:
+                split_at = i
+                break
+        if split_at < 0:
+            return DDL_TYPES.get(db, {}).get(LOGICAL_JSON, DEFAULT_DDL.get(db, "TEXT"))
+        key_t = body[:split_at].strip()
+        val_t = body[split_at + 1 :].strip()
+        key_ddl = _nested_ddl_for_dest(db, key_t) or _leaf_ddl_for_nested(db, key_t)
+        val_ddl = _nested_ddl_for_dest(db, val_t) or _leaf_ddl_for_nested(db, val_t)
+        if db == "duckdb":
+            return f"MAP({key_ddl}, {val_ddl})"
+        if db == "clickhouse":
+            return f"Map({key_ddl}, {val_ddl})"
+        if db in {"trino", "presto"}:
+            return f"map({key_ddl}, {val_ddl})"
+        if db == "iceberg":
+            return f"map<{key_ddl}, {val_ddl}>"
+        return f"MAP<{key_ddl},{val_ddl}>"
+
+    return None
 
 
 def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
@@ -891,6 +1070,10 @@ def ddl_carrier_type(inferred: str | None) -> str:
     raw = (inferred or "").strip()
     if not raw:
         return "VARCHAR"
+    upper = raw.upper()
+    # Preserve nested carriers for Map / preflight (do not collapse to JSON/ARRAY).
+    if upper.startswith(("ARRAY<", "LIST<", "STRUCT<", "RECORD<", "MAP<")):
+        return raw
     logical = normalize_logical_type(raw)
     if logical == LOGICAL_DECIMAL:
         precision, scale = parse_numeric_precision_scale(raw)
@@ -913,6 +1096,30 @@ def ddl_carrier_type(inferred: str | None) -> str:
     if logical == LOGICAL_DATE:
         return "DATE"
     if logical == LOGICAL_DATETIME:
+        # Preserve TZ polarity for CREATE — never collapse TIMESTAMPTZ → TIMESTAMP.
+        raw_u = raw.upper().replace("_", " ")
+        tz_tokens = (
+            "TIMESTAMPTZ",
+            "TIMESTAMP TZ",
+            "TIMESTAMP LTZ",
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+            "DATETIMEOFFSET",
+        )
+        ntz_tokens = (
+            "TIMESTAMP NTZ",
+            "TIMESTAMP WITHOUT TIME ZONE",
+            "DATETIME2",
+            "SMALLDATETIME",
+        )
+        if any(t in raw_u for t in tz_tokens) or raw_u.endswith(" WITH TIME ZONE"):
+            return "TIMESTAMPTZ"
+        if (
+            any(t in raw_u for t in ntz_tokens)
+            or raw_u.startswith("DATETIME(")
+            or raw_u == "TIMESTAMP NTZ"
+        ):
+            return "TIMESTAMP_NTZ"
         return "TIMESTAMP"
     if logical == LOGICAL_TIME:
         return "TIME"
@@ -965,14 +1172,91 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     propagated on engines that require it (PostgreSQL pgvector, Snowflake).
     Missing or oversized dimensions fall back to lossless text — never invent
     a default width such as 1536.
+
+    For datetime carriers, TZ polarity is preserved when the source declared it
+    (TIMESTAMPTZ vs TIMESTAMP / TIMESTAMP_NTZ) so create-new does not invent
+    the wrong clock semantics.
+
+    Nested ARRAY/STRUCT/MAP carriers are preserved on lakehouse engines
+    (Databricks, DuckDB, ClickHouse, Iceberg, BigQuery, Trino).
     """
     db = _normalize_dest_db(db_type)
+    nested = _nested_ddl_for_dest(db, inferred)
+    if nested:
+        return nested
     logical = normalize_logical_type(inferred)
     if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:
         return _decimal_ddl_for_dest(db, inferred)
     if logical == LOGICAL_VECTOR:
         return _vector_ddl_for_dest(db, inferred)
+    if logical == LOGICAL_DATETIME:
+        tz_ddl = _datetime_ddl_for_dest(db, inferred)
+        if tz_ddl:
+            return tz_ddl
     return DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
+
+
+# Destination DDL when source carrier is timezone-aware vs wall-clock NTZ.
+_TZ_AWARE_DDL: Final[dict[str, str]] = {
+    "postgresql": "TIMESTAMPTZ",
+    "redshift": "TIMESTAMPTZ",
+    "snowflake": "TIMESTAMP_TZ",
+    "mysql": "TIMESTAMP(6)",
+    "sqlserver": "DATETIMEOFFSET",
+    "oracle": "TIMESTAMP WITH TIME ZONE",
+    "bigquery": "TIMESTAMP",
+    "duckdb": "TIMESTAMPTZ",
+    "timescaledb": "timestamptz",
+}
+_TZ_NAIVE_DDL: Final[dict[str, str]] = {
+    "postgresql": "TIMESTAMP",
+    "redshift": "TIMESTAMP",
+    "snowflake": "TIMESTAMP_NTZ",
+    "mysql": "DATETIME(6)",
+    "sqlserver": "DATETIME2",
+    "oracle": "TIMESTAMP",
+    "bigquery": "DATETIME",
+    "duckdb": "TIMESTAMP",
+    "timescaledb": "timestamp",
+}
+
+
+def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
+    """Return TZ-aware or NTZ DDL when source polarity is knowable; else None."""
+    raw = (inferred or "").strip().upper().replace("_", " ")
+    if not raw:
+        return None
+    tz_tokens = (
+        "TIMESTAMPTZ",
+        "TIMESTAMP TZ",
+        "TIMESTAMP LTZ",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        "DATETIMEOFFSET",
+    )
+    ntz_tokens = (
+        "TIMESTAMP NTZ",
+        "TIMESTAMP WITHOUT TIME ZONE",
+        "DATETIME2",
+        "DATETIME(",
+        "SMALLDATETIME",
+    )
+    # Exact DATETIME (MySQL NTZ) — avoid matching DATETIMEOFFSET.
+    is_tz = any(t in raw for t in tz_tokens) or raw == "TIMESTAMP TZ" or raw.endswith(" WITH TIME ZONE")
+    is_ntz = (not is_tz) and (
+        any(t in raw for t in ntz_tokens)
+        or raw.startswith("DATETIME(")
+        or raw == "TIMESTAMP NTZ"
+        or raw == "TIMESTAMP_NTZ"
+        # Do NOT treat bare TIMESTAMP / DATETIME as NTZ — those are ambiguous
+        # logical aliases and must fall through to the destination platform
+        # default (e.g. PostgreSQL TIMESTAMPTZ) so greenfield create-new stays honest.
+    )
+    if is_tz:
+        return _TZ_AWARE_DDL.get(db) or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
+    if is_ntz:
+        return _TZ_NAIVE_DDL.get(db) or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
+    return None
 
 
 def decimal_scale_would_truncate(source_type: str | None, dest_db_type: str | None) -> bool:
@@ -1027,6 +1311,28 @@ def is_structural_type(inferred: str | None) -> bool:
 
 def is_binary_type(inferred: str | None) -> bool:
     return normalize_logical_type(inferred) == LOGICAL_BINARY
+
+
+# Declared conversions that must never soft-pass on head samples — body rows can
+# still lose fidelity (IEEE→fixed, scale collapse, time-of-day truncation).
+PRECISION_COLLAPSE_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset({
+    (LOGICAL_FLOAT, LOGICAL_DECIMAL),
+    (LOGICAL_FLOAT, LOGICAL_INTEGER),
+    (LOGICAL_DECIMAL, LOGICAL_INTEGER),
+    (LOGICAL_DATETIME, LOGICAL_DATE),
+})
+
+
+def is_precision_collapse_coercion(source_type: str, target_type: str) -> bool:
+    """True when source→target collapses precision even if samples appear clean.
+
+    Used by DDL compatibility, schema-drift, and integrity sample soft-pass so
+    Airbyte-style "head sample coerced → green" never hides float→decimal /
+    datetime→date fidelity loss.
+    """
+    src = normalize_logical_type(source_type)
+    tgt = normalize_logical_type(target_type)
+    return (src, tgt) in PRECISION_COLLAPSE_PAIRS
 
 
 def is_lossy_coercion(source_type: str, target_type: str) -> bool:

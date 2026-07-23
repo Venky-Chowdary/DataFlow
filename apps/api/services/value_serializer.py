@@ -27,6 +27,14 @@ from services.type_system import decimal_needs_scientific_wire
 # maps the sentinel back to Python None → destination SQL NULL.
 SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
+# Document field absent (Mongo/Dynamo schemaless) — distinct from explicit null.
+# Writers must omit the key rather than write NULL when this sentinel appears.
+DF_MISSING_SENTINEL = "__DF_MISSING__"
+
+
+def is_missing_sentinel(value: Any) -> bool:
+    return value == DF_MISSING_SENTINEL
+
 
 def safe_decimal_text(value: Decimal) -> str | None:
     """Serialize a Decimal per type_system DECIMAL wire policy.

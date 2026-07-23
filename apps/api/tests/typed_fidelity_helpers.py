@@ -712,15 +712,15 @@ def assert_redis_typed_fidelity(prefix: str) -> None:
 
 
 def assert_redshift_standin_typed_fidelity(table: str) -> None:
-    """PG stand-in with redshift DDL branch — TIMESTAMP not TIMESTAMPTZ."""
+    """PG stand-in with redshift DDL branch — preserve TIMESTAMPTZ when source is TZ-aware."""
     assert_pg_typed_fidelity(table, expect_float_ddl=True, expect_decimal_scale=True)
     row = read_pg_row(table, 1)
     types = row.pop("_pg_types")
     ts_ddl = (types.get("ts_utc") or "").lower()
-    # Redshift DDL map uses TIMESTAMP (no TZ). Stand-in must not invent timestamptz.
-    assert "timestamp" in ts_ddl, types.get("ts_utc")
-    assert "timestamptz" not in ts_ddl and "with time zone" not in ts_ddl, (
-        f"redshift stand-in used PG timestamptz: {types.get('ts_utc')}"
+    # Source seed is TIMESTAMPTZ; redshift create-new must keep TZ polarity
+    # (not silently collapse to TIMESTAMP).
+    assert "timestamptz" in ts_ddl or "with time zone" in ts_ddl, (
+        f"redshift stand-in lost TIMESTAMPTZ polarity: {types.get('ts_utc')}"
     )
 
 

@@ -6500,6 +6500,57 @@ button.df2-vd-assist-toggle:focus-visible {
   border: 1px solid #bfdbfe;
   background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
 }
+.df2-vd-fix-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.df2-vd-fix-actions .df2-btn {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+.df2-vd-blocker-fix-note {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: #475569;
+}
+.df2-vd-blocker-actions.df2-vd-fix-actions {
+  margin-top: 10px;
+}
+.df2-map-identity-banner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  color: #78350f;
+}
+.df2-map-identity-banner > .dt-nav-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.df2-map-identity-banner strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.df2-map-identity-banner p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.df2-map-identity-banner-hint {
+  margin-top: 6px !important;
+  color: #92400e;
+}
+.df2-validate-rail-primary-fix {
+  margin-top: 10px;
+  width: 100%;
+}
 .df2-vd-remediate-bar .df2-vd-cell-preview-hint {
   margin: 10px 0 0;
   font-size: 12px;

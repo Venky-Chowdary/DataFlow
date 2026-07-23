@@ -1,8 +1,11 @@
 """Kafka / Debezium topic reader — batch CDC envelopes into a ReadBatch matrix.
 
 Honest scope: Debezium JSON envelopes (``op`` + ``before``/``after``) and plain
-JSON object records. Requires ``kafka-python``. Durable offsets use the
-consumer group (auto-commit).
+JSON object records. Requires ``kafka-python``.
+
+Durable offsets use the consumer group with **commit-after-apply**: offsets from
+batch N are committed only when batch N+1 starts (or via ``commit_kafka_offsets``
+after the final checkpoint). Crash mid-write redelivers — at-least-once.
 """
 
 from __future__ import annotations
@@ -36,6 +39,32 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
     return f"{host}:{port}"
 
 
+def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> None:
+    """Commit previously applied offsets (call after durable checkpoint)."""
+    if not cursor:
+        return
+    pending = cursor.get("pending_offsets") or cursor.get("offsets")
+    if not pending:
+        return
+    topic_name = str(
+        cursor.get("topic")
+        or cfg.get("database")
+        or cfg.get("table")
+        or ""
+    ).strip()
+    group_id = str(cursor.get("group_id") or cfg.get("group_id") or "dataflow-kafka-source")
+    consumer = KafkaDebeziumConsumer({
+        "topic": topic_name or str((pending[0] or {}).get("topic") or "unknown"),
+        "bootstrap_servers": _bootstrap(cfg),
+        "group_id": group_id,
+        "auto_offset_reset": cfg.get("auto_offset_reset") or "earliest",
+    })
+    try:
+        consumer.commit_offsets(list(pending))
+    finally:
+        consumer.close()
+
+
 def read_topic_batch(
     *,
     cfg: dict[str, Any],
@@ -58,6 +87,8 @@ def read_topic_batch(
         or cfg.get("username")
         or "dataflow-kafka-source"
     )
+    # Commit offsets from the previously applied batch before polling more.
+    prior_pending = (kafka_cursor or {}).get("pending_offsets") or (kafka_cursor or {}).get("offsets")
     consumer = KafkaDebeziumConsumer({
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
@@ -68,6 +99,13 @@ def read_topic_batch(
         ).strip(),
     })
     try:
+        if prior_pending:
+            try:
+                consumer.commit_offsets(list(prior_pending))
+            except Exception:
+                # Resume still works from last durable commit; surface via empty batch later.
+                pass
+
         records: list[dict[str, Any]] = []
         polls = 0
         while len(records) < limit and polls < 5:
@@ -98,7 +136,13 @@ def read_topic_batch(
         ]
         total = known_total_rows if known_total_rows is not None else None
         batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
-        next_cursor = {"group_id": group_id} if rows else None
+        pending = consumer.pending_offsets()
+        next_cursor = {
+            "group_id": group_id,
+            "topic": topic_name,
+            "pending_offsets": pending,
+            "delivery": "at_least_once",
+        } if rows else None
         # Native types for schemaless absorb / Map honesty (pre-string samples).
         native_types: dict[str, str] = {}
         try:
@@ -133,8 +177,13 @@ def infer_topic_schema(
     """Poll a small sample and return ``(logical_schema, native_types, warning)``.
 
     Empty topics do **not** invent TEXT columns — Map/preflight must wait for samples.
+    Schema sampling uses an ephemeral group so it never advances the transfer cursor.
     """
-    batch, _ = read_topic_batch(cfg=cfg, topic=topic, limit=sample_limit)
+    sample_cfg = {
+        **cfg,
+        "group_id": f"dataflow-kafka-schema-sample-{topic or 'topic'}",
+    }
+    batch, _ = read_topic_batch(cfg=sample_cfg, topic=topic, limit=sample_limit)
     native = dict((batch.meta or {}).get("native_types") or {})
     if not batch.headers:
         return (

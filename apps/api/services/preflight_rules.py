@@ -68,9 +68,10 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "If the gate message names a missing privilege (INSERT, CREATE, ACL, IAM), "
             "grant that privilege to the connector user/role — do not only re-test connectivity. "
             "Open Connectors → Test to confirm login still works, then Re-validate. "
-            "If the message says privilege catalog unavailable, the engine could not read "
-            "grants (common on managed Kafka/S3 Object Ownership); connectivity is used as "
-            "a soft fallback — confirm IAM/ACL manually before Execute."
+            "If the message says privilege catalog unavailable, create-new is blocked "
+            "until grants are readable (or target an existing table). Append to an "
+            "existing table may still proceed with a connectivity warning — confirm "
+            "IAM/ACL manually before Execute."
         ),
         "examples": [
             "PostgreSQL: GRANT INSERT, UPDATE ON TABLE … TO role; GRANT CREATE ON SCHEMA …",

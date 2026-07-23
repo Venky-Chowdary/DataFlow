@@ -105,6 +105,11 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
                 "fieldType": p.get("fieldType") or "",
                 "label": p.get("label") or "",
                 "hasUniqueValue": bool(p.get("hasUniqueValue")),
+                "numberDisplayHint": str(
+                    p.get("numberDisplayHint")
+                    or (p.get("options") or {}).get("numberDisplayHint")
+                    or ""
+                ),
             }
         )
     return [p for p in props if p.get("name")]
@@ -125,33 +130,56 @@ def read_object(
         raise ValueError("HubSpot object/table name required")
 
     url = f"{url_base}/crm/v3/objects/{obj}"
-    params: dict[str, Any] = {"limit": limit}
-    if offset:
-        params["after"] = str(offset)
-
     # Ask for described properties so Map/preflight see the real field set.
+    prop_names: list[str] = []
+    schema_warnings: list[str] = []
     try:
         props = describe_properties(cfg, obj)
-        names = [p["name"] for p in props if p.get("name")][:200]
-        if names:
-            params["properties"] = ",".join(names)
+        prop_names = [p["name"] for p in props if p.get("name")]
+        if len(prop_names) > 200:
+            schema_warnings.append(
+                f"HubSpot Describe returned {len(prop_names)} properties — "
+                "requesting all names (API may page properties separately)"
+            )
     except Exception as exc:
         if is_auth_error(exc):
             raise
 
-
-    r = request(method="GET", url=url, token=access_token, params=params, timeout=60)
-    r.raise_for_status()
-    data = r.json()
-
-    results = data.get("results", [])
     records: list[dict[str, Any]] = []
-    for item in results:
-        rec: dict[str, Any] = {"id": item.get("id", "")}
-        rec.update(item.get("properties") or {})
-        records.append(rec)
+    after: str | None = str(offset) if offset else None
+    pages = 0
+    while len(records) < limit and pages < 50:
+        pages += 1
+        page_limit = min(100, limit - len(records))
+        params: dict[str, Any] = {"limit": page_limit}
+        if after:
+            # HubSpot expects the opaque cursor from paging.next.after — not a
+            # numeric row offset (passing integers silently skips / mis-pages).
+            params["after"] = after
+        if prop_names:
+            params["properties"] = ",".join(prop_names)
+
+        r = request(method="GET", url=url, token=access_token, params=params, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+
+        results = data.get("results", [])
+        for item in results:
+            rec: dict[str, Any] = {"id": item.get("id", "")}
+            rec.update(item.get("properties") or {})
+            records.append(rec)
+            if len(records) >= limit:
+                break
+
+        paging = (data.get("paging") or {}).get("next") or {}
+        next_after = paging.get("after")
+        if not next_after or not results:
+            break
+        after = str(next_after)
 
     batch = extract_records(records)
-    # HubSpot does not return a total count in the basic list response.
+    # HubSpot list responses do not always include a total; use fetched count.
     batch.total_rows = len(records)
+    if schema_warnings:
+        batch.meta = {**(batch.meta or {}), "schema_warnings": schema_warnings}
     return batch

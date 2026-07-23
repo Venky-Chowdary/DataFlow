@@ -151,7 +151,7 @@ def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
     return headers, rows[:100], len(objects)
 
 
-def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
+def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int, Any]:
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:
@@ -167,7 +167,7 @@ def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[lis
             val = slice_table.column(col)[i].as_py()
             row.append("" if val is None else cell_to_string(val))
         rows.append(row)
-    return headers, rows, row_count
+    return headers, rows, row_count, table.schema
 
 
 def store_upload(filename: str, content: bytes) -> dict:
@@ -179,6 +179,7 @@ def store_upload(filename: str, content: bytes) -> dict:
 
     headers: list[str] = []
     rows: list[list[str]] = []
+    arrow_schema: Any = None
 
     if fmt in {"csv", "unknown", "fixed_width"}:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
@@ -196,13 +197,18 @@ def store_upload(filename: str, content: bytes) -> dict:
 
         headers, rows, row_count = parse_excel_preview(content)
     elif fmt == "parquet":
-        headers, rows, row_count = _parse_parquet_preview(content)
+        headers, rows, row_count, arrow_schema = _parse_parquet_preview(content)
     else:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
         row_count = count_csv_rows(content, encoding)
         fmt = "csv"
 
-    columns = infer_columns_from_rows(headers, rows)
+    if arrow_schema is not None:
+        from services.arrow_schema import columns_from_arrow_schema
+
+        columns = columns_from_arrow_schema(arrow_schema)
+    else:
+        columns = infer_columns_from_rows(headers, rows)
     preview_rows = rows[:5]
     path = UPLOAD_DIR / f"{file_id}_{filename}"
     path.write_bytes(content)

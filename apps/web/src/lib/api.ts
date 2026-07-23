@@ -1638,6 +1638,8 @@ export async function mapTransferColumns(payload: {
   destination_db_type?: string;
   sync_mode?: string;
   schema_policy?: string;
+  /** null/omit = unknown; true = confirmed; false = will CREATE. */
+  destination_table_exists?: boolean | null;
 }): Promise<{
   mappings: Array<{
     source: string;

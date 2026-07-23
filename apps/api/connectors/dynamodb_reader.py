@@ -142,10 +142,14 @@ def _item_to_record(item: dict) -> dict[str, Any]:
     return out
 
 
-def infer_logical_from_native(value: Any) -> str:
-    """Classify a deserialized Dynamo value before stringification."""
+def infer_logical_from_native(value: Any) -> str | None:
+    """Classify a deserialized Dynamo value before stringification.
+
+    Explicit NULL / missing Python None do not cast a vote — returning ``None``
+    keeps null-only attributes from inventing VARCHAR.
+    """
     if value is DDB_EXPLICIT_NULL or value is None:
-        return "VARCHAR"
+        return None
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int) and not isinstance(value, bool):
@@ -289,6 +293,8 @@ def read_table_batch(
             if h not in rec:
                 continue
             lt = infer_logical_from_native(rec[h])
+            if not lt:
+                continue
             native_votes[h][lt] = native_votes[h].get(lt, 0) + 1
     native_types = {
         h: max(votes, key=votes.get) if votes else "VARCHAR"

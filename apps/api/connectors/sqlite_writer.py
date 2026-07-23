@@ -88,25 +88,78 @@ def _sqlite_upsert_batch(
     batch: list[tuple],
     conflict_cols: list[str],
 ) -> None:
-    """Delete rows matching conflict keys, then insert the deduplicated batch.
+    """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
-    Keeps the last occurrence of each conflict key so the final insert is unique.
+    Prefers ``INSERT … ON CONFLICT DO UPDATE WHERE`` when ``_df_lsn`` is present
+    so stale redelivery does not regress row state. Falls back to delete+insert
+    with an LSN filter when the conflict target is unavailable.
     """
-    indices = [target_cols.index(c) for c in conflict_cols]
-    deduped: dict[tuple, tuple] = {}
-    for row in batch:
-        key = tuple(row[i] for i in indices)
-        deduped[key] = row
-    rows = list(deduped.values())
+    from connectors.writer_common import (
+        DF_LSN_COL,
+        compare_lsn,
+        dedupe_rows_by_pk_and_lsn,
+        sqlite_lsn_update_guard_sql,
+    )
+
+    rows = dedupe_rows_by_pk_and_lsn(batch, conflict_cols, target_cols)
+    if not rows:
+        return
 
     table_quoted = quote_sql_identifier(table_name)
+    cols_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
+    placeholders = ", ".join("?" for _ in target_cols)
+    conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
+    update_cols = [c for c in target_cols if c not in conflict_cols]
+
+    if update_cols and DF_LSN_COL in target_cols:
+        where_sql = sqlite_lsn_update_guard_sql(table_name)
+        set_sql = ", ".join(
+            f'{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}'
+            for c in update_cols
+        )
+        insert_sql = (
+            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders}) "
+            f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql} WHERE {where_sql}"
+        )
+        try:
+            cur.executemany(insert_sql, rows)
+            return
+        except Exception:
+            # Missing UNIQUE on conflict cols — fall through to delete+insert.
+            pass
+
+    # delete+insert fallback: skip keys where existing LSN is newer/equal.
+    if DF_LSN_COL in target_cols and conflict_cols:
+        lsn_idx = target_cols.index(DF_LSN_COL)
+        key_indices = [target_cols.index(c) for c in conflict_cols]
+        keep: list[tuple] = []
+        for row in rows:
+            key = tuple(row[i] for i in key_indices)
+            where = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+            cur.execute(
+                f"SELECT {quote_sql_identifier(DF_LSN_COL)} FROM {table_quoted} WHERE {where}",
+                list(key),
+            )
+            existing = cur.fetchone()
+            if existing is not None and compare_lsn(row[lsn_idx], existing[0]) <= 0:
+                continue
+            keep.append(row)
+        rows = keep
+        if not rows:
+            return
+
+    indices = [target_cols.index(c) for c in conflict_cols]
+    deduped = {tuple(row[i] for i in indices): row for row in rows}
+    rows = list(deduped.values())
     col_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    placeholders = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped)
-    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({placeholders})"
+    del_placeholders = ", ".join(
+        "(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in deduped
+    )
+    delete_sql = f"DELETE FROM {table_quoted} WHERE ({col_sql}) IN ({del_placeholders})"
     delete_params = [v for key in deduped.keys() for v in key]
     cur.execute(delete_sql, delete_params)
 
-    insert_sql = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({', '.join('?' for _ in target_cols)})"
+    insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"
     cur.executemany(insert_sql, rows)
 
 

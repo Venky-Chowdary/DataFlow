@@ -525,12 +525,14 @@ export interface PreflightResult {
 export type ValidationActionKind =
   | "change_target_type"
   | "add_transform"
+  | "map_column"
   | "review_mappings"
   | "rerun_mapping"
   | "check_connection"
   | "normalize_control_chars"
   | "quarantine_and_rerun"
-  | "open_bad_data_fix";
+  | "open_bad_data_fix"
+  | "fix_source_keys";
 
 export interface ValidationSuggestedAction {
   kind: ValidationActionKind | string;
