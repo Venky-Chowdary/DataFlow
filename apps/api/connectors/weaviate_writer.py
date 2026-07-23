@@ -62,10 +62,13 @@ def _class_name(name: str) -> str:
 
 
 def _object_uuid(raw: str) -> str:
-    """Weaviate object ids must be UUID strings; map stable hashes deterministically."""
+    """Weaviate object ids must be UUID strings; map stable hashes deterministically.
+
+    Empty input raises — never uuid4(), which would duplicate under at-least-once retry.
+    """
     text = (raw or "").strip()
     if not text:
-        return str(uuid.uuid4())
+        raise ValueError("missing id — refuse random UUID (non-idempotent)")
     try:
         return str(uuid.UUID(text))
     except ValueError:
@@ -114,7 +117,8 @@ def build_weaviate_objects(
     """Map DataFlow vector rows to Weaviate batch objects (testable, no I/O).
 
     Returns ``(objects, rejected)``. Missing embeddings are rejected — never
-    fabricated as zero vectors.
+    fabricated as zero vectors. Missing ids → deterministic UUID over
+    source_id+chunk+content (retry-safe), else quarantine.
     """
     from services.vector_embedding import coerce_embedding
 
@@ -136,9 +140,25 @@ def build_weaviate_objects(
                 "policy": "quarantine",
             })
             continue
+        raw_id = cell_to_string(row.get("id") or "")
+        if not raw_id:
+            source = cell_to_string(row.get("source_id", ""))
+            chunk = int(row.get("chunk_index") or 0)
+            content = str(row.get("content") or "")
+            if not source and not content:
+                rejected.append({
+                    "row": "",
+                    "column": "id",
+                    "target": "id",
+                    "value": "",
+                    "reason": "missing id — refuse random UUID (non-idempotent)",
+                    "policy": "quarantine",
+                })
+                continue
+            raw_id = f"{source}\0{chunk}\0{content}"
         objects.append({
             "class": class_name,
-            "id": _object_uuid(cell_to_string(row.get("id") or "")),
+            "id": _object_uuid(raw_id),
             "properties": props,
             "vector": sanitize_json_value(vector),
         })
@@ -292,12 +312,36 @@ def write_mapped_rows(
             error=rejected[0].get("reason") or "all embeddings rejected",
             rejected_details=rejected,
         )
+    from connectors.writer_common import reject_on_strict_policy, transform_error_policy
+
+    policy = transform_error_policy(error_policy)
+    strict_error = reject_on_strict_policy(policy, rejected, "Weaviate")
+    if strict_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=class_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=strict_error,
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+        )
 
     inserted = 0
     try:
         session = _requests_session()
         hdrs = _headers(key)
-        if create_table:
+        class_resp = session.get(
+            f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10
+        )
+        if class_resp.status_code != 200:
+            if not create_table:
+                raise RuntimeError(
+                    f"Weaviate class '{class_name}' is missing and "
+                    "create_table is disabled"
+                )
             _ensure_class(session, base_url, class_name, hdrs)
 
         batch_size = 100
@@ -312,7 +356,35 @@ def write_mapped_rows(
             )
             if resp.status_code not in {200, 201}:
                 raise RuntimeError(f"Weaviate batch upsert failed: {resp.status_code} {resp.text}")
-            inserted += len(batch)
+            response_items = resp.json() if getattr(resp, "content", None) else []
+            if not isinstance(response_items, list) or len(response_items) != len(batch):
+                raise RuntimeError(
+                    "Weaviate returned incomplete per-object batch acknowledgement"
+                )
+            failures = [
+                item for item in response_items
+                if not isinstance(item, dict)
+                or (item.get("result") or {}).get("errors")
+                or str((item.get("result") or {}).get("status") or "").upper() == "FAILED"
+            ]
+            if failures:
+                for item in failures:
+                    if not isinstance(item, dict):
+                        continue
+                    rejected.append({
+                        "row": str(item.get("id") or ""),
+                        "column": "",
+                        "target": class_name,
+                        "value": "",
+                        "reason": str((item.get("result") or {}).get("errors") or item)[:500],
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    })
+                if policy == "fail":
+                    raise RuntimeError(
+                        f"Weaviate rejected {len(failures)} batch object(s); "
+                        "strict error policy blocks partial activation"
+                    )
+            inserted += len(batch) - len(failures)
             if on_checkpoint:
                 on_checkpoint((i // batch_size) + 1, (total + batch_size - 1) // batch_size, inserted)
     except Exception as exc:

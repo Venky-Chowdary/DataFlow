@@ -46,7 +46,8 @@ def _resolve_redis_key_id(
     )
     key_id = doc.get(id_col)
     if key_id is None or str(key_id).strip() == "":
-        return str(row_index), id_col
+        # Never invent batch-relative keys (prefix:0) — retries overwrite siblings.
+        return None, id_col
     return str(key_id), id_col
 
 
@@ -103,7 +104,14 @@ def write_mapped_rows(
                 doc, target_cols, conflict_columns=conflict, row_index=i
             )
             if key_id is None:
-                msg = f"Redis identity missing for conflict_columns={conflict}"
+                msg = (
+                    f"Redis identity missing for conflict_columns={conflict}"
+                    if conflict
+                    else (
+                        f"Redis identity missing for column `{id_col}` — "
+                        "refuse batch-index key fabrication"
+                    )
+                )
                 if policy == "fail":
                     return WriteResult(
                         ok=False,

@@ -136,7 +136,9 @@ export function TransferMapStep({
         ? `${destColumns.length} existing fields in ${targetDatabase}.${targetCollection}`
         : destTableExists === true
           ? `Existing table ${targetDatabase}.${targetCollection} — column metadata pending`
-          : `New fields in ${targetDatabase}.${targetCollection}`
+          : destTableExists === false
+            ? `New fields in ${targetDatabase}.${targetCollection}`
+            : `Confirming ${targetDatabase}.${targetCollection} on destination…`
     : destRouteSubtitle;
 
   const filterCounts = useMemo(
@@ -168,8 +170,9 @@ export function TransferMapStep({
     () => mergeMappingProof(mappingProof, columnMappings, {
       destColumns,
       destType: destDisplayType,
+      destTableExists: destKindMode === "database" ? destTableExists : false,
     }),
-    [mappingProof, columnMappings, destColumns, destDisplayType],
+    [mappingProof, columnMappings, destColumns, destDisplayType, destKindMode, destTableExists],
   );
 
   const jumpToSource = (source: string) => {
@@ -199,13 +202,15 @@ export function TransferMapStep({
             {columnMappings.length} mappings · {approvedCount} ready
             {mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}
             {llmUsed ? " · semantic engine" : ""}
-            {destColumns.length === 0 && !destSchemaLoading && destTableExists !== true
+            {destColumns.length === 0 && !destSchemaLoading && destTableExists === false
               ? " · create-new table"
               : destColumns.length === 0 && destTableExists === true
                 ? " · existing table (columns pending)"
-                : destColumns.length > 0
-                  ? ` · ${destColumns.length} dest columns`
-                  : ""}
+                : destColumns.length === 0 && !destSchemaLoading && destTableExists == null
+                  ? " · destination schema unknown"
+                  : destColumns.length > 0
+                    ? ` · ${destColumns.length} dest columns`
+                    : ""}
             {streamNames.length > 1 ? ` · ${streamNames.length} streams` : ""}
           </p>
         </div>
@@ -373,7 +378,9 @@ export function TransferMapStep({
             ? `${columnMappings.length} columns · match existing destination fields — wrong types fail preflight, not silently.`
             : destTableExists === true
               ? `${columnMappings.length} columns · existing destination table (reload columns to match DDL).`
-              : `${columnMappings.length} columns · create-new destination — fields CREATE on first write (no existing table required).`
+              : destTableExists === false
+                ? `${columnMappings.length} columns · create-new destination — fields CREATE on first write (no existing table required).`
+                : `${columnMappings.length} columns · destination schema not confirmed yet — retry Destination/Map before inventing create-new fields.`
         }
         ariaLabel="Full mapping table"
         className="df2-map-dialog"
@@ -383,7 +390,7 @@ export function TransferMapStep({
           </button>
         }
       >
-        {destColumns.length === 0 && !destSchemaLoading && destTableExists !== true && (
+        {destColumns.length === 0 && !destSchemaLoading && destTableExists === false && (
           <div className="df2-map-dialog-banner" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
@@ -399,6 +406,15 @@ export function TransferMapStep({
             <span>
               <strong>Existing table detected</strong>
               {" — column metadata is missing. Go back to Destination and re-select the table, then return to Map."}
+            </span>
+          </div>
+        )}
+        {destColumns.length === 0 && !destSchemaLoading && destTableExists == null && (
+          <div className="df2-map-dialog-banner" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Destination schema unknown</strong>
+              {" — could not confirm whether the table exists. Retry Destination/Map; do not treat this as create-new."}
             </span>
           </div>
         )}

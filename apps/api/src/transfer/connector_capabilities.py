@@ -26,7 +26,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "adls": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
+    "adls": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sqlserver": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},

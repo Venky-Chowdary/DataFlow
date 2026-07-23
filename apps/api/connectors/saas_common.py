@@ -117,7 +117,7 @@ def extract_records(records: list[dict[str, Any]]) -> ReadBatch:
         [cell_to_string(r.get(h), preserve_sql_null=True) for h in headers]
         for r in records
     ]
-    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
+    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
 
 
 def object_name(cfg: dict[str, Any], default: str) -> str:

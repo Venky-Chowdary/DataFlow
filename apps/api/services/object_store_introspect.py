@@ -128,6 +128,20 @@ def _sample_prefix_keys(keys: list[str], *, max_objects: int = _MAX_PREFIX_OBJEC
     return [data_keys[i] for i in sorted(picks)[:max_objects]]
 
 
+_OBJECT_LIST_SOFT_CAP = 2000
+
+
+def _list_truncation_meta(keys: list[str]) -> dict[str, Any]:
+    """Surface when listing hit the soft cap — never imply complete prefix coverage."""
+    listed = len(keys)
+    truncated = listed >= _OBJECT_LIST_SOFT_CAP
+    return {
+        "listed_count": listed,
+        "list_truncated": truncated,
+        "list_cap": _OBJECT_LIST_SOFT_CAP,
+    }
+
+
 def introspect_s3_object(
     cfg: dict[str, Any],
     *,
@@ -143,10 +157,12 @@ def introspect_s3_object(
 
     object_key = key or ""
     sampled_keys: list[str] = []
+    list_meta: dict[str, Any] = {}
     if object_key:
         sampled_keys = [object_key]
     else:
         keys = list_objects(cfg, bucket, prefix=prefix)
+        list_meta = _list_truncation_meta(keys)
         sampled_keys = _sample_prefix_keys(keys)
         if not sampled_keys:
             return {
@@ -155,6 +171,7 @@ def introspect_s3_object(
                 "columns": [],
                 "schema": {},
                 "objects": keys,
+                **list_meta,
             }
 
     per_object_limit = max(50, min(sample_limit, _ROWS_PER_OBJECT))
@@ -170,6 +187,7 @@ def introspect_s3_object(
     merged = merge_object_schemas(batches)
     return {
         **merged,
+        **list_meta,
         "object_key": sampled_keys[0],
         "object_keys": sampled_keys,
         "total_rows": total_rows,
@@ -192,10 +210,12 @@ def introspect_gcs_object(
 
     object_key = key or ""
     sampled_keys: list[str] = []
+    list_meta: dict[str, Any] = {}
     if object_key:
         sampled_keys = [object_key]
     else:
         keys = list_objects(cfg, bucket, prefix=prefix)
+        list_meta = _list_truncation_meta(keys)
         sampled_keys = _sample_prefix_keys(keys)
         if not sampled_keys:
             return {
@@ -204,6 +224,7 @@ def introspect_gcs_object(
                 "columns": [],
                 "schema": {},
                 "objects": keys,
+                **list_meta,
             }
 
     per_object_limit = max(50, min(sample_limit, _ROWS_PER_OBJECT))
@@ -219,6 +240,60 @@ def introspect_gcs_object(
     merged = merge_object_schemas(batches)
     return {
         **merged,
+        **list_meta,
+        "object_key": sampled_keys[0],
+        "object_keys": sampled_keys,
+        "total_rows": total_rows,
+        "tables": sampled_keys,
+    }
+
+
+def introspect_adls_object(
+    cfg: dict[str, Any],
+    *,
+    bucket: str,
+    key: str | None = None,
+    prefix: str = "",
+    sample_limit: int = 500,
+) -> dict[str, Any]:
+    from connectors.adls_reader import list_objects, read_object
+
+    if not bucket:
+        return {"ok": False, "error": "ADLS container required", "columns": [], "schema": {}}
+
+    object_key = key or ""
+    sampled_keys: list[str] = []
+    list_meta: dict[str, Any] = {}
+    if object_key:
+        sampled_keys = [object_key]
+    else:
+        keys = list_objects(cfg, bucket, prefix=prefix)
+        list_meta = _list_truncation_meta(keys)
+        sampled_keys = _sample_prefix_keys(keys)
+        if not sampled_keys:
+            return {
+                "ok": False,
+                "error": "No objects found under prefix",
+                "columns": [],
+                "schema": {},
+                "objects": keys,
+                **list_meta,
+            }
+
+    per_object_limit = max(50, min(sample_limit, _ROWS_PER_OBJECT))
+    batches: list[dict[str, Any]] = []
+    total_rows = 0
+    for ok_key in sampled_keys:
+        batch = read_object(cfg=cfg, bucket=bucket, key=ok_key, offset=0, limit=per_object_limit)
+        profiled = profile_object_batch(batch.headers, batch.rows)
+        profiled["total_rows"] = batch.total_rows
+        batches.append(profiled)
+        total_rows += int(batch.total_rows or 0)
+
+    merged = merge_object_schemas(batches)
+    return {
+        **merged,
+        **list_meta,
         "object_key": sampled_keys[0],
         "object_keys": sampled_keys,
         "total_rows": total_rows,

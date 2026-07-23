@@ -307,16 +307,39 @@ def introspect_endpoint(
 
 
 def _object_name_match(names: list[str] | None, target: str | None) -> str | None:
-    """Return the canonical listed name for ``target`` (case-insensitive), else None."""
+    """Return the canonical listed name for ``target`` (case-insensitive), else None.
+
+    Accepts bare ``jobs`` vs listed ``public.jobs`` / ``db.schema.jobs`` when the
+    match is unambiguous — operators often type the table leaf while SHOW TABLES
+    returns a qualified name (and vice versa).
+    """
     want = (target or "").strip()
     if not want:
         return None
+    want_l = want.lower()
+    want_leaf = want_l.split(".")[-1]
+    exact: list[str] = []
+    qualified: list[str] = []
+    leaf_only: list[str] = []
     for name in names or []:
         raw = (name or "").strip()
         if not raw or raw.startswith("("):
             continue
-        if raw == want or raw.lower() == want.lower():
-            return raw
+        raw_l = raw.lower()
+        if raw_l == want_l:
+            exact.append(raw)
+            continue
+        raw_leaf = raw_l.split(".")[-1]
+        if raw_l.endswith("." + want_l) or want_l.endswith("." + raw_l):
+            qualified.append(raw)
+        elif raw_leaf == want_leaf:
+            leaf_only.append(raw)
+    if exact:
+        return exact[0]
+    if len(qualified) == 1:
+        return qualified[0]
+    if len(leaf_only) == 1:
+        return leaf_only[0]
     return None
 
 
@@ -416,7 +439,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     f"{out.get('message', '')} · estimated_document_count failed "
                     f"(showing {len(records)}-row sample)"
                 ).strip(" ·")
-            out["table_exists"] = bool(columns)
+            # Empty collections still exist — never treat "no sample docs" as create-new.
+            out["table_exists"] = True
+            if not columns:
+                out["message"] = (
+                    f"{out.get('message', '')} · collection `{coll_name}` exists "
+                    f"but has no documents yet (schema pending until first write or sample)."
+                ).strip(" ·")
             return
 
         if fmt == "redis":
@@ -428,7 +457,14 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             out["columns"] = batch.headers
             out["schema"] = {c: "string" for c in batch.headers}
             out["row_estimate"] = (batch.total_rows or 0)
-            out["table_exists"] = (batch.total_rows or 0) > 0
+            # Redis namespaces are logical key prefixes — an empty SCAN is not
+            # proof the destination is missing (would falsely flip Map create-new).
+            out["table_exists"] = True
+            if not (batch.total_rows or 0):
+                out["message"] = (
+                    f"{out.get('message', '')} · no keys match `{pattern}`; "
+                    "Redis namespaces are logical prefixes, not tables."
+                ).strip(" ·")
             _attach_batch_sample_rows(out, batch)
             return
 
@@ -475,10 +511,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     out["schema"] = schema_map
                     out["row_estimate"] = estimate_item_count(cfg, table)
                     out["table_exists"] = True
-                except Exception:
+                except Exception as exc:
                     out["columns"] = []
                     out["schema"] = {}
-                    out["table_exists"] = False
+                    # Only ResourceNotFound means create-new; auth/throttle/outage → unknown.
+                    err_code = ""
+                    resp = getattr(exc, "response", None)
+                    if isinstance(resp, dict):
+                        err_code = str((resp.get("Error") or {}).get("Code") or "")
+                    if err_code == "ResourceNotFoundException" or "ResourceNotFoundException" in type(exc).__name__:
+                        out["table_exists"] = False
+                    else:
+                        out["table_exists"] = None
+                        out["sample_error"] = f"DynamoDB existence unknown: {exc}"
+                        out["message"] = (
+                            f"{out.get('message', '')} · DynamoDB describe failed: {exc}"
+                        ).strip(" ·")
                 # Always load a bounded item sample for Validate dry-run
                 # (describe_table alone previously left sample_data empty).
                 try:
@@ -499,16 +547,42 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             return
 
         if fmt == "elasticsearch":
-            from connectors.elasticsearch_reader import read_index_batch
+            from connectors.elasticsearch_reader import _client, read_index_batch
 
             index = endpoint.database or endpoint.table
             if index:
+                exists: bool | None = None
+                client = None
+                try:
+                    client = _client(cfg)
+                    exists = bool(client.indices.exists(index=index))
+                except Exception as exists_exc:
+                    out["message"] = (
+                        f"{out.get('message', '')} · Elasticsearch exists probe: {exists_exc}"
+                    ).strip(" ·")
+                    exists = None
+                finally:
+                    if client is not None:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
                 out["schema"] = {c: "string" for c in batch.headers}
                 out["row_estimate"] = (batch.total_rows or 0)
-                out["table_exists"] = (batch.total_rows or 0) > 0
+                # Empty indexes still exist — row count must not drive create-new.
+                if exists is True or (batch.headers and exists is not False):
+                    out["table_exists"] = True
+                elif exists is False and not batch.headers:
+                    out["table_exists"] = False
+                else:
+                    out["table_exists"] = exists
+                if exists is True and not (batch.total_rows or 0):
+                    out["message"] = (
+                        f"{out.get('message', '')} · index `{index}` exists but has no documents yet"
+                    ).strip(" ·")
                 _attach_batch_sample_rows(out, batch)
             return
 
@@ -564,10 +638,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     f"Table `{table}` not found — it will be created automatically on first write"
                 )
     except Exception as e:
-        # Soft-fail: still allow the wizard to continue with auto-create.
-        # Never flip a confirmed existence flag from the table list probe.
+        # Soft-fail: keep last-known existence. Never invent "missing → create-new"
+        # from a probe exception — unknown is safer than a false create promise.
         if out.get("table_exists") is not True:
-            out["table_exists"] = False
+            out["table_exists"] = None
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["message"] = f"{out.get('message', '')} · schema probe: {e}".strip(" ·")

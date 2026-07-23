@@ -164,31 +164,64 @@ def read_collection_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     known_total_rows: int | None = None,
+    cursor_primary_key: str | None = None,
 ) -> ReadBatch:
-    """Read documents where cursor_column > watermark — incremental sync."""
+    """Read documents where cursor_column > watermark — incremental sync.
+
+    When ``cursor_primary_key`` is set, uses lexicographic ``(cursor, pk)`` so
+    documents sharing a timestamp watermark are not skipped forever (Airbyte trap).
+    """
+    from bson.objectid import ObjectId
+
     client = _mongo_client(_connection_string(cfg))
     coll = client[database][collection]
     query: dict[str, Any] = {}
-    if cursor_after is not None and cursor_after != "":
-        from bson.objectid import ObjectId
+    sort_spec: list[tuple[str, int]] = [(cursor_column, 1)]
+    pk = (cursor_primary_key or "").strip()
+    use_composite = bool(pk and pk != cursor_column)
 
-        casted = _cast_cursor_value(cursor_after, cursor_type)
-        # _id is frequently an ObjectId in native MongoDB collections. When the
-        # cursor value is a 24-character hex string, compare it as an ObjectId
-        # so keyset pagination continues past the first batch.
+    def _as_mongo_cursor(raw: str, *, as_id: bool = False) -> Any:
+        casted = _cast_cursor_value(raw, cursor_type if not as_id else "STRING")
         if (
-            cursor_column == "_id"
+            as_id
             and isinstance(casted, str)
             and len(casted) == 24
             and ObjectId.is_valid(casted)
         ):
-            casted = ObjectId(casted)
-        query[cursor_column] = {"$gt": casted}
+            return ObjectId(casted)
+        if (
+            not as_id
+            and cursor_column == "_id"
+            and isinstance(casted, str)
+            and len(casted) == 24
+            and ObjectId.is_valid(casted)
+        ):
+            return ObjectId(casted)
+        return casted
+
+    if cursor_after is not None and cursor_after != "":
+        if use_composite and "|" in str(cursor_after):
+            cur_raw, pk_raw = str(cursor_after).split("|", 1)
+            casted = _as_mongo_cursor(cur_raw)
+            pk_casted = _as_mongo_cursor(pk_raw, as_id=(pk == "_id"))
+            query["$or"] = [
+                {cursor_column: {"$gt": casted}},
+                {cursor_column: casted, pk: {"$gt": pk_casted}},
+            ]
+            sort_spec = [(cursor_column, 1), (pk, 1)]
+        else:
+            casted = _as_mongo_cursor(str(cursor_after))
+            query[cursor_column] = {"$gt": casted}
+            if use_composite:
+                sort_spec = [(cursor_column, 1), (pk, 1)]
+    elif use_composite:
+        sort_spec = [(cursor_column, 1), (pk, 1)]
+
     if known_total_rows is not None:
         total = known_total_rows
     else:
         total = coll.count_documents(query)
-    cursor = coll.find(query).sort(cursor_column, 1).limit(limit)
+    cursor = coll.find(query).sort(sort_spec).limit(limit)
     docs = list(cursor)
     if not docs:
         return ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=total)

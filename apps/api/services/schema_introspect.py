@@ -112,7 +112,15 @@ def introspect_schema(
     auth_source: str = "",
     api_key: str = "",
 ) -> dict[str, Any]:
-    if db_type in ("generic_sql", "duckdb"):
+    if db_type in {
+        "generic_sql",
+        "duckdb",
+        "clickhouse",
+        "trino",
+        "presto",
+        "questdb",
+        "risingwave",
+    }:
         from connectors.generic_sql import introspect_table_schema
 
         cfg = {
@@ -124,7 +132,7 @@ def introspect_schema(
             "schema": schema,
             "connection_string": connection_string,
             "ssl": ssl,
-            "type": catalog_type or ("duckdb" if db_type == "duckdb" else ""),
+            "type": catalog_type or db_type,
         }
         return introspect_table_schema(cfg, table or "")
     if db_type == "postgresql" or db_type == "redshift":
@@ -261,6 +269,10 @@ def introspect_schema(
         return _introspect_object_store("gcs", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
         })
+    if db_type in ("adls", "azure_blob", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage"):
+        return _introspect_object_store("adls", host=host, database=database, table=table, schema=schema, **{
+            "username": username, "password": password, "connection_string": connection_string,
+        })
     if db_type == "redis":
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
     if db_type == "sqlite":
@@ -292,12 +304,15 @@ def _introspect_object_store(
     prefix = schema or ""
     try:
         from services.object_store_introspect import (
+            introspect_adls_object,
             introspect_gcs_object,
             introspect_s3_object,
         )
 
         if store_type == "gcs":
             result = introspect_gcs_object(cfg, bucket=bucket, key=key or None, prefix=prefix)
+        elif store_type == "adls":
+            result = introspect_adls_object(cfg, bucket=bucket, key=key or None, prefix=prefix)
         else:
             result = introspect_s3_object(cfg, bucket=bucket, key=key or None, prefix=prefix)
         if not result.get("ok"):
@@ -1836,9 +1851,36 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 )
 
             columns = []
+            # Document identity is first-class for upsert Map suggestions.
+            columns.append({
+                "name": "_id",
+                "inferred_type": "TEXT",
+                "nullable": False,
+                "semantic_role": "identity",
+                "source": "elasticsearch_meta",
+            })
             for name, info in props.items():
+                if not isinstance(info, dict):
+                    info = {"type": "text"}
                 es_type = info.get("type", "text")
                 mapped = _es_mapping_type(es_type)
+                # Nested / object mapping honesty — preserve structure carriers.
+                if es_type == "nested":
+                    mapped = "ARRAY<JSON>"
+                elif es_type == "object" or (not es_type and info.get("properties")):
+                    nested_props = info.get("properties") or {}
+                    if nested_props:
+                        parts = []
+                        for child, child_info in nested_props.items():
+                            if isinstance(child_info, dict):
+                                parts.append(
+                                    f"{child}:{_es_mapping_type(str(child_info.get('type') or 'text'))}"
+                                )
+                            else:
+                                parts.append(f"{child}:TEXT")
+                        mapped = f"STRUCT<{', '.join(parts)}>" if parts else "JSON"
+                    else:
+                        mapped = "JSON"
                 samples = samples_by_name.get(name, [])
                 semantic_role = None
                 if es_type == "date" or (es_type in ("text", "keyword") and samples):
@@ -1850,18 +1892,19 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                     mapped = inferred
                 elif es_type == "binary":
                     mapped = "BINARY"
-                elif es_type == "object":
-                    mapped = "JSON"
                 col_rec: dict[str, Any] = {
                     "name": name,
                     "inferred_type": mapped,
                     "nullable": True,
+                    "es_type": es_type or "object",
                 }
                 if semantic_role:
                     col_rec["semantic_role"] = semantic_role
                 columns.append(col_rec)
             # Dynamic fields present in docs but absent from index mapping.
             for name in dynamic_keys:
+                if name == "_id":
+                    continue
                 samples = samples_by_name.get(name, [])
                 intel = infer_column(samples, field_name=name) if samples else {"logical_type": "TEXT"}
                 columns.append({
@@ -1870,6 +1913,14 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                     "nullable": True,
                     "semantic_role": intel.get("semantic_role"),
                 })
+            # Also sample hit _id presence for operators mapping identity.
+            try:
+                resp = client.search(index=index, body={"size": 1, "query": {"match_all": {}}})
+                hits = resp.get("hits", {}).get("hits") or []
+                if hits and hits[0].get("_id") is not None:
+                    columns[0]["sample"] = str(hits[0].get("_id"))
+            except Exception:
+                pass
             return {"ok": True, "tables": [index], "columns": columns, "schema": index}
         finally:
             client.close()
@@ -1881,7 +1932,7 @@ def _es_mapping_type(es_type: str) -> str:
     t = (es_type or "text").lower()
     if t in ("long", "integer", "short", "byte"):
         return "INTEGER"
-    if t in ("float", "double"):
+    if t in ("float", "double", "half_float"):
         return "FLOAT"
     if t == "scaled_float":
         # Elasticsearch scaled_float is fixed-point-like — keep as DECIMAL.
@@ -1890,6 +1941,20 @@ def _es_mapping_type(es_type: str) -> str:
         return "BOOLEAN"
     if t == "date":
         return "DATE"
+    if t == "date_nanos":
+        return "TIMESTAMPTZ"
+    if t == "binary":
+        return "BINARY"
+    if t == "nested":
+        return "ARRAY<JSON>"
+    if t in {"object", "flattened"}:
+        return "JSON"
+    if t in {"keyword", "constant_keyword", "wildcard"}:
+        return "TEXT"
+    if t == "ip":
+        return "TEXT"
+    if t in {"geo_point", "geo_shape"}:
+        return "GEOGRAPHY"
     return "TEXT"
 
 

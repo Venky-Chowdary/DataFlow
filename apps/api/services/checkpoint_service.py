@@ -71,7 +71,11 @@ class Checkpoint:
             "file_offset": self.file_offset,
             "dynamodb_cursor": self.dynamodb_cursor,
             "es_search_after": self.es_search_after,
-            "redis_scan_state": self.redis_scan_state,
+            "redis_scan_state": (
+                self.redis_scan_state.to_dict()
+                if hasattr(self.redis_scan_state, "to_dict")
+                else self.redis_scan_state
+            ),
             "kafka_cursor": self.kafka_cursor,
             "checksum": self.checksum,
             "write_mode": self.write_mode,

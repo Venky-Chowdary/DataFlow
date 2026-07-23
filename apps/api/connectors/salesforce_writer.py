@@ -148,24 +148,40 @@ def write_mapped_rows(
 
             resp = request(method=method, url=endpoint, token=access, data=body, timeout=120)
             results = resp.json() if resp.content else []
-            if isinstance(results, list):
-                for idx, item in enumerate(results):
-                    if isinstance(item, dict) and item.get("success"):
-                        written += 1
-                        digest.update(str(item.get("id", idx)).encode())
-                    elif isinstance(item, dict):
-                        errs = item.get("errors") or [{"message": "unknown Salesforce error"}]
-                        msg = errs[0].get("message", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
-                        rejected_details.append({
-                            "row_index": i + idx,
-                            "reason": msg,
-                            "values": records[idx] if idx < len(records) else {},
-                        })
-                    else:
-                        written += 1
-            else:
-                written += len(records)
-                digest.update(str(len(records)).encode())
+            if not isinstance(results, list):
+                raise RuntimeError(
+                    "Salesforce returned no per-record result list — refusing to claim rows written"
+                )
+            if len(results) != len(records):
+                raise RuntimeError(
+                    f"Salesforce acknowledged {len(results)} of {len(records)} submitted records"
+                )
+            for idx, item in enumerate(results):
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        f"Salesforce returned invalid result for row {i + idx}"
+                    )
+                if item.get("success"):
+                    written += 1
+                    digest.update(str(item.get("id", idx)).encode())
+                else:
+                    errs = item.get("errors") or [{"message": "unknown Salesforce error"}]
+                    msg = errs[0].get("message", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
+                    rejected_details.append({
+                        "row_index": i + idx,
+                        "reason": msg,
+                        "values": records[idx] if idx < len(records) else {},
+                    })
+
+            batch_failures = sum(
+                1 for item in results
+                if isinstance(item, dict) and not item.get("success")
+            )
+            if batch_failures and policy == "fail":
+                raise RuntimeError(
+                    f"Salesforce rejected {batch_failures} record(s); "
+                    "strict error policy blocks partial activation"
+                )
 
             chunks += 1
             if on_checkpoint:
@@ -180,6 +196,23 @@ def write_mapped_rows(
             chunks_completed=chunks,
             error=humanize_http_error(exc, "salesforce"),
             rejected_details=rejected_details,
+            driver="salesforce",
+        )
+
+    if rejected_details and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=sobject,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Salesforce rejected {len(rejected_details)} record(s); "
+                "strict error policy blocks partial activation"
+            ),
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
             driver="salesforce",
         )
 

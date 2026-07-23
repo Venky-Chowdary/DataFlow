@@ -164,7 +164,27 @@ def write_mapped_rows(
         with conn.cursor() as cur:
             from psycopg2 import sql
 
-            _exec_schema_table(cur, schema or "public", table_name, dimension)
+            if create_table:
+                _exec_schema_table(cur, schema or "public", table_name, dimension)
+            else:
+                # Respect create_table=False — never contradict preflight deny-create.
+                cur.execute(
+                    "SELECT to_regclass(%s)",
+                    (f"{schema or 'public'}.{table_name}",),
+                )
+                if cur.fetchone()[0] is None:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema or "public",
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"pgvector destination {schema or 'public'}.{table_name} "
+                            "is missing and create_table is disabled"
+                        ),
+                    )
 
             schema_id = sql.Identifier(schema or "public")
             table_id = sql.Identifier(table_name)
@@ -188,6 +208,21 @@ def write_mapped_rows(
                 row = dict(row)
                 row["embedding"] = emb
                 valid_rows.append(row)
+            from connectors.writer_common import reject_on_strict_policy
+
+            strict_error = reject_on_strict_policy(error_policy, rejected_details, "pgvector")
+            if strict_error:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=strict_error,
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                )
             total = len(valid_rows)
             for i in range(0, total, batch_size):
                 batch = valid_rows[i : i + batch_size]

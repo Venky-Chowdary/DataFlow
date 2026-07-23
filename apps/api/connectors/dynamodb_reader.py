@@ -313,16 +313,23 @@ def read_table_batch(
 
     if total_rows is None:
         try:
-            total_rows = estimate_item_count(cfg, table)
+            approx = estimate_item_count(cfg, table)
         except Exception:
-            total_rows = offset + len(rows)
+            approx = None
+    else:
+        approx = total_rows
     next_key = resp.get("LastEvaluatedKey")
+    # DescribeTable.ItemCount is approximate — never use it as a hard Scan bound.
+    # LastEvaluatedKey is the sole completion authority for multi-page reads.
+    meta: dict[str, Any] = {"native_types": native_types}
+    if approx is not None:
+        meta["approx_item_count"] = int(approx)
     batch = ReadBatch(
         headers=headers,
         rows=rows,
         offset=offset,
-        total_rows=total_rows,
-        meta={"native_types": native_types},
+        total_rows=None,
+        meta=meta,
     )
     return batch, next_key
 

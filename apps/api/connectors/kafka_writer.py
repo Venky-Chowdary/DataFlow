@@ -34,6 +34,38 @@ def _bootstrap(host: str, port: int, connection_string: str) -> str:
     return f"{h}:{p}"
 
 
+def _json_schema_property_for_logical(logical: str | None) -> dict[str, Any]:
+    """Map DataFlow logical carriers to JSON Schema types for Registry honesty."""
+    from services.type_system import normalize_logical_type
+
+    raw = (logical or "string").strip()
+    upper = raw.upper()
+    if upper.startswith(("ARRAY<", "LIST<")):
+        return {"type": "array"}
+    if upper.startswith(("STRUCT<", "RECORD<", "MAP<", "JSON")):
+        return {"type": "object"}
+    kind = normalize_logical_type(raw)
+    if kind in {"integer"}:
+        return {"type": ["integer", "null"]}
+    if kind == "decimal":
+        # json_default emits exact Decimal text — Registry must match the wire,
+        # not claim IEEE number (float would silently lose precision).
+        return {
+            "type": ["string", "null"],
+            "pattern": r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$",
+            "contentMediaType": "application/x-decimal",
+        }
+    if kind == "float":
+        return {"type": ["number", "null"]}
+    if kind == "boolean":
+        return {"type": ["boolean", "null"]}
+    if kind in {"json", "array"}:
+        return {"type": ["object", "array", "null"]}
+    if kind == "binary":
+        return {"type": ["string", "null"], "contentEncoding": "base64"}
+    return {"type": ["string", "null"]}
+
+
 def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
     try:
         from kafka import KafkaProducer  # type: ignore
@@ -135,8 +167,23 @@ def write_mapped_rows(
     mappings = mappings or []
     column_types = column_types or {}
     topic = (table_name or database or "dataflow.events").strip()
+    mode = (write_mode or "append").strip().lower()
+    if mode not in {"append", "insert"}:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=topic,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Kafka destination supports append only; write_mode={mode!r} "
+                "does not provide destination upsert/update semantics."
+            ),
+            driver="kafka",
+        )
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -167,7 +214,10 @@ def write_mapped_rows(
 
         schema_obj = {
             "type": "object",
-            "properties": {c: {"type": "string"} for c in target_cols},
+            "properties": {
+                c: _json_schema_property_for_logical(logical_types[i] if i < len(logical_types) else "string")
+                for i, c in enumerate(target_cols)
+            },
         }
         try:
             registered_schema_id = register_json_schema(

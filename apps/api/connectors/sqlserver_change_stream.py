@@ -249,6 +249,15 @@ class SqlServerChangeTrackingCdc:
                         (self.version,),
                     )
                     rows = cur.fetchall() or []
+                    # TOP(batch_size) ordered only by version can end mid-version;
+                    # resuming at that version excludes remaining same-version rows.
+                    if len(rows) >= self.batch_size:
+                        raise RuntimeError(
+                            "SQL Server CT page reached batch_size; refusing to advance "
+                            "the change-tracking watermark because same-version rows "
+                            "could be skipped. Increase batch_size or enable compound "
+                            "CT+PK continuation."
+                        )
                     for ver, op, pk_val in rows:
                         next_version = max(next_version, int(ver or 0))
                         self._last_event_at = datetime.now(timezone.utc)
@@ -276,6 +285,8 @@ class SqlServerChangeTrackingCdc:
                             by_pk[str(rec.get(pk, ""))] = rec
                         inserts = [by_pk[k] for k in [r[pk] for r in inserts] if k in by_pk]
                         updates = [by_pk[k] for k in [r[pk] for r in updates] if k in by_pk]
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.warning("SQL Server CT poll failed for %s: %s", qualified, exc)
             return

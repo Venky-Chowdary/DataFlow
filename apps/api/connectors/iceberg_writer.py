@@ -293,6 +293,26 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
     if pa.types.is_floating(arrow_type):
         return float(value)
     if pa.types.is_integer(arrow_type):
+        from decimal import Decimal
+
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(
+                    f"cannot coerce non-integral float {value!r} to INTEGER "
+                    "without truncation"
+                )
+            return int(value)
+        if isinstance(value, Decimal):
+            if value != value.to_integral_value():
+                raise ValueError(
+                    f"cannot coerce non-integral decimal {value!r} to INTEGER "
+                    "without truncation"
+                )
+            return int(value)
         return int(value)
     if pa.types.is_boolean(arrow_type):
         if isinstance(value, bool):
@@ -348,26 +368,32 @@ def _write_data_file(
     types = column_types or {}
     warnings: list[str] = []
 
-    # Prefer Parquet when pyarrow is available
+    # Prefer Parquet when pyarrow is available. JSONL is only for missing pyarrow —
+    # typed conversion failures must not silently downgrade the physical format.
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
-
-        arrow_types = [_logical_to_arrow_type(types.get(c, "string"), pa) for c in columns]
-        schema = pa.schema([(c, t) for c, t in zip(columns, arrow_types)])
-        arrays = []
-        for c, at in zip(columns, arrow_types):
-            cells = [_coerce_arrow_cell(r.get(c), at, pa) for r in dict_rows]
-            arrays.append(pa.array(cells, type=at))
-        table = pa.Table.from_arrays(arrays, schema=schema)
-        rel = f"data/{file_id}.parquet"
-        path = data_dir.parent / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, path)
-        digest.update(path.read_bytes())
-        return rel, len(dict_rows), digest.hexdigest()[:16], warnings
-    except Exception as exc:
+    except ImportError as exc:
         warnings.append(f"parquet_unavailable_jsonl_fallback: {exc}")
+    else:
+        try:
+            arrow_types = [_logical_to_arrow_type(types.get(c, "string"), pa) for c in columns]
+            schema = pa.schema([(c, t) for c, t in zip(columns, arrow_types)])
+            arrays = []
+            for c, at in zip(columns, arrow_types):
+                cells = [_coerce_arrow_cell(r.get(c), at, pa) for r in dict_rows]
+                arrays.append(pa.array(cells, type=at))
+            table = pa.Table.from_arrays(arrays, schema=schema)
+            rel = f"data/{file_id}.parquet"
+            path = data_dir.parent / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, path)
+            digest.update(path.read_bytes())
+            return rel, len(dict_rows), digest.hexdigest()[:16], warnings
+        except Exception as exc:
+            raise ValueError(
+                f"Iceberg Parquet type conversion failed; refusing JSONL type downgrade: {exc}"
+            ) from exc
 
     rel = f"data/{file_id}.jsonl"
     path = data_dir.parent / rel
@@ -446,7 +472,31 @@ def write_mapped_rows(
         parts = table.split(".", 1)
         table_dir = root / parts[0] / parts[1]
         table = parts[1]
+    # Deny-create must not invent an empty Iceberg tree (Airbyte-style false provision).
+    if not table_dir.exists() and not create_table:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error="Iceberg table is missing and create_table is disabled",
+            driver="iceberg",
+        )
     meta_dir = table_dir / "metadata"
+    versions = sorted(meta_dir.glob("v*.metadata.json")) if meta_dir.is_dir() else []
+    if not create_table and not versions:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error="Iceberg table metadata is missing and create_table is disabled",
+            driver="iceberg",
+        )
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)

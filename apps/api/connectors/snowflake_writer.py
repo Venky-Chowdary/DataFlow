@@ -459,9 +459,9 @@ def _copy_into_table(cur, table_name: str, local_path: str, target_cols: list[st
                 SKIP_HEADER = 1
                 FIELD_OPTIONALLY_ENCLOSED_BY = '"'
                 NULL_IF = ('', 'NULL')
-                ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+                ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
             )
-            ON_ERROR = 'CONTINUE'
+            ON_ERROR = 'ABORT_STATEMENT'
             """
         )
         rows = cur.fetchall()
@@ -687,10 +687,12 @@ def write_mapped_rows(
                             "Please specify a user database (for example, DATAFLOW) in the connector."
                         )
                     db_q = quote_sql_identifier(sanitize_identifier(database, preserve_case=True))
-                    cur.execute(f"CREATE DATABASE IF NOT EXISTS {db_q}")
+                    if create_table:
+                        cur.execute(f"CREATE DATABASE IF NOT EXISTS {db_q}")
                     cur.execute(f"USE DATABASE {db_q}")
                 sch_q = quote_sql_identifier(sanitize_identifier(schema, preserve_case=True))
-                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
+                if create_table:
+                    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {sch_q}")
                 cur.execute(f"USE SCHEMA {sch_q}")
 
             # Bind to the real stored table name (case) before DDL/DML.
@@ -698,6 +700,19 @@ def write_mapped_rows(
             from connectors.sql_identifiers import snowflake_fold_identifier
 
             found = resolve_snowflake_table_name(cur, schema, table_name)
+            if found is None and not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Snowflake table {table_name!r} is missing and "
+                        "create_table is disabled"
+                    ),
+                )
             table_name = found if found is not None else snowflake_fold_identifier(table_name)
 
             if create_table:

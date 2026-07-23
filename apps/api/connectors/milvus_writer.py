@@ -130,14 +130,60 @@ def build_milvus_entities(
     vector_rows: list[dict[str, Any]],
     *,
     dimension: int,
-) -> list[dict[str, Any]]:
-    """Map DataFlow vector rows to Milvus upsert entities (testable, no I/O)."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Map DataFlow vector rows to Milvus upsert entities (testable, no I/O).
+
+    Returns ``(entities, rejected)``. Missing/mismatched embeddings and missing
+    stable ids are rejected — never fabricate zero vectors or ``"missing"`` ids.
+    """
+    import hashlib
+    import uuid
+
+    from services.vector_embedding import coerce_embedding
+
     entities: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     for row in vector_rows:
         meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
-        values = row.get("embedding") or [0.0] * dimension
+        values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
+        if err or values is None:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "embedding",
+                "target": "vector",
+                "value": "",
+                "reason": err or "invalid embedding",
+                "policy": "quarantine",
+            })
+            continue
+        raw_id = row.get("id")
+        if raw_id not in (None, ""):
+            raw_s = cell_to_string(raw_id)
+            if len(raw_s) > 64:
+                # Keep original as metadata; use collision-resistant digest as entity id.
+                digest = hashlib.sha256(raw_s.encode("utf-8")).hexdigest()
+                entity_id = digest[:64]
+                meta["source_entity_id"] = raw_s[:512]
+            else:
+                entity_id = raw_s
+        else:
+            source = cell_to_string(row.get("source_id", ""))
+            chunk = int(row.get("chunk_index") or 0)
+            content = str(row.get("content") or "")
+            if not source and not content:
+                rejected.append({
+                    "row": "",
+                    "column": "id",
+                    "target": "id",
+                    "value": "",
+                    "reason": "missing id — refuse fabricated 'missing' identity",
+                    "policy": "quarantine",
+                })
+                continue
+            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            entity_id = str(uuid.UUID(digest[:32]))
         entity: dict[str, Any] = {
-            "id": cell_to_string(row.get("id") or "")[:64] or "missing",
+            "id": entity_id,
             "vector": sanitize_json_value(values),
             "content": str(row.get("content") or "")[:65000],
             "source_id": cell_to_string(row.get("source_id", ""))[:256],
@@ -148,7 +194,7 @@ def build_milvus_entities(
             "element_type": str(meta.get("element_type") or row.get("element_type") or "")[:128],
         }
         entities.append(entity)
-    return entities
+    return entities, rejected
 
 
 def _has_collection(
@@ -354,15 +400,53 @@ def write_mapped_rows(
             dimension = len(row["embedding"])
             break
 
-    entities = build_milvus_entities(vector_rows, dimension=dimension)
+    entities, rejected = build_milvus_entities(vector_rows, dimension=dimension)
+    if not entities and rejected:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=db_name,
+            checksum="",
+            chunks_completed=0,
+            error=rejected[0].get("reason") or "all embeddings rejected",
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+        )
+    from connectors.writer_common import reject_on_strict_policy
+
+    strict_error = reject_on_strict_policy(error_policy, rejected, "Milvus")
+    if strict_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=db_name,
+            checksum="",
+            chunks_completed=0,
+            error=strict_error,
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+        )
+
     token = _auth_token(api_key=api_key, username=username, password=password)
     base_url = _base_url(host, port, ssl, connection_string)
     inserted = 0
     try:
         session = _requests_session()
         hdrs = _headers(token)
-        if create_table:
-            _ensure_collection(session, base_url, hdrs, collection, dimension, db_name=db_name)
+        collection_exists = _has_collection(
+            session, base_url, hdrs, collection, db_name=db_name
+        )
+        if not collection_exists:
+            if not create_table:
+                raise RuntimeError(
+                    f"Milvus collection '{collection}' is missing and "
+                    "create_table is disabled"
+                )
+            _ensure_collection(
+                session, base_url, hdrs, collection, dimension, db_name=db_name
+            )
 
         batch_size = 100
         total = len(entities)
@@ -395,6 +479,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=(inserted + 99) // 100,
             error=str(exc),
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
         )
 
     return WriteResult(
@@ -404,4 +490,7 @@ def write_mapped_rows(
         target_schema=db_name,
         checksum="",
         chunks_completed=(inserted + 99) // 100,
+        rejected_details=rejected,
+        rejected_rows=len(rejected),
+        warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
     )

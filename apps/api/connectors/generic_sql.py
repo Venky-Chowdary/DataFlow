@@ -693,9 +693,11 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
         "timestamptz" in raw_lower
         or "timestamp_tz" in raw_lower
         or "timestamp with time zone" in raw_lower
+        or "datetimeoffset" in raw_lower
         or raw_lower.endswith(" with time zone")
     ):
-        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql", "questdb"}:
+        # SQL Server DATETIMEOFFSET is TZ-aware — never bind as naive DATETIME2.
+        if db_type == "questdb":
             return _maybe_nullable(sa.DateTime())
         if db_type == "trino" and TrinoTimestamp is not None:
             return TrinoTimestamp(precision=3, timezone=True)
@@ -773,7 +775,16 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
             return postgresql.UUID()
         return _maybe_nullable(sa.String(36))
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
-        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto", "duckdb"):
+        # DuckDB advertises VARCHAR[] / JSON in type_system — honor that at bind time.
+        if db_type == "duckdb":
+            if t == LOGICAL_ARRAY:
+                import re
+
+                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
+                element = match.group(1).strip() if match else "string"
+                return sa.ARRAY(_sa_type_for_logical(element, dialect_name, db_type))
+            return sa.JSON()
+        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
@@ -887,11 +898,18 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
                 return tm
             return value
 
-        # DATETIME / TIMESTAMP — SQL Server DATETIME2 is naive UTC wall clock;
-        # Oracle / PG keep aware UTC.
+        # DATETIME2 (SQL Server) / QuestDB are naive wall clocks; DATETIMEOFFSET /
+        # TIMESTAMPTZ carriers must keep aware UTC (never strip offset silently).
+        raw_lower = (logical or "").lower()
+        is_tz_aware = (
+            "timestamptz" in raw_lower
+            or "datetimeoffset" in raw_lower
+            or "timestamp_tz" in raw_lower
+            or "timestamp with time zone" in raw_lower
+        )
         use_naive = (
-            db_type in {"questdb", "sqlserver", "mssql"}
-            or dialect_name == "mssql"
+            not is_tz_aware
+            and (db_type in {"questdb", "sqlserver", "mssql"} or dialect_name == "mssql")
         )
         if isinstance(coerced, datetime):
             return _naive_utc(coerced) if use_naive else _ensure_utc(coerced)
@@ -910,9 +928,23 @@ def _to_sa_value(value: Any, logical: str, sa_type: Any = None, dialect_name: st
         return value
 
     if t == LOGICAL_INTEGER:
+        if isinstance(value, bool):
+            return int(value)
         if isinstance(value, int):
             return value
-        if isinstance(value, (float, Decimal)):
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(
+                    f"cannot coerce non-integral float {value!r} to INTEGER "
+                    "without truncation"
+                )
+            return int(value)
+        if isinstance(value, Decimal):
+            if value != value.to_integral_value():
+                raise ValueError(
+                    f"cannot coerce non-integral decimal {value!r} to INTEGER "
+                    "without truncation"
+                )
             return int(value)
         if isinstance(value, str):
             try:
@@ -1310,13 +1342,41 @@ def _read_table_raw(
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
     from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import quote_char_for
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
-    sql = f"SELECT * FROM {qualified}"
-    if offset > 0:
-        sql += f" LIMIT {limit} OFFSET {offset}"
+    base = f"SELECT * FROM {qualified}"
+    dialect_l = (dialect or "ansi").lower()
+    is_mssql = dialect_l in {
+        "mssql",
+        "sqlserver",
+        "microsoft_sql_server",
+        "azure_sql_database",
+        "synapse_analytics",
+        "azure_synapse_dedicated",
+        "azure_synapse_serverless",
+        "google_cloud_sql_sql_server",
+        "amazon_rds_sql_server",
+    }
+    # Discover columns so we can ORDER BY the first one — bare LIMIT/OFFSET is
+    # non-deterministic and silently duplicates/skips rows across pages.
+    probe_sql = f"SELECT TOP 0 * FROM {qualified}" if is_mssql else f"{base} LIMIT 0"
+    probe = conn.execute(sa.text(probe_sql))
+    headers = list(probe.keys())
+    if not headers:
+        return [], []
+    q = quote_char_for(dialect) or '"'
+    if q == "[":
+        order_col = f"[{str(headers[0]).replace(']', ']]')}]"
     else:
-        sql += f" LIMIT {limit}"
+        order_col = quote_sql_identifier(headers[0], q)
+    if is_mssql:
+        sql = (
+            f"{base} ORDER BY {order_col} "
+            f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
+        )
+    else:
+        sql = f"{base} ORDER BY {order_col} LIMIT {int(limit)} OFFSET {int(offset)}"
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
     rows = [[cell_to_string(value, preserve_sql_null=True) for value in row] for row in result.fetchall()]
@@ -1329,14 +1389,15 @@ def _count_table_raw(
     schema: str | None,
     *,
     dialect: str = "ansi",
-) -> int:
+) -> int | None:
     from connectors.sql_identifiers import quote_table_ref
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     try:
-        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar() or 0
+        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()
     except Exception:
-        return 0
+        # Never fabricate len(rows) as cardinality — that stops streaming after page one.
+        return None
 
 
 def read_table_batch(
@@ -1382,11 +1443,12 @@ def read_table_batch(
                     columns = selected_cols = list(table_obj.c)
 
                 stmt = sa.select(*selected_cols)
-                if offset > 0:
-                    order_col = selected_cols[0]
-                    stmt = stmt.order_by(order_col).offset(offset).limit(limit)
-                else:
-                    stmt = stmt.limit(limit)
+                # Stable order from page 0 — unordered OFFSET pages skip/duplicate under concurrent writes.
+                pk_cols = [c for c in table_obj.primary_key.columns] if table_obj.primary_key is not None else []
+                order_cols = list(pk_cols) if pk_cols else [selected_cols[0]] if selected_cols else []
+                if order_cols:
+                    stmt = stmt.order_by(*order_cols)
+                stmt = stmt.offset(offset).limit(limit)
 
                 fetched = conn.execute(stmt).fetchall()
                 headers = [c.name for c in selected_cols]
@@ -1400,7 +1462,7 @@ def read_table_batch(
                             sa.select(sa.func.count()).select_from(table_obj)
                         ).scalar()
                     except Exception:
-                        total = len(rows)
+                        total = None
             except Exception:
                 # Engines like RisingWave/QuestDB have incomplete pg_catalog reflection.
                 headers, rows = _read_table_raw(
@@ -1410,8 +1472,6 @@ def read_table_batch(
                     total = known_total_rows
                 else:
                     total = _count_table_raw(conn, table, schema_name, dialect=_dialect_key(cfg))
-                    if not total:
-                        total = len(rows)
 
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
@@ -1434,8 +1494,13 @@ def read_table_cursor_batch(
     type: str = "",
     columns: list[str] | None = None,
     limit: int = 20_000,
+    cursor_primary_key: str | None = None,
 ) -> ReadBatch:
-    """Cursor/keyset pagination for incremental and streaming transfers."""
+    """Cursor/keyset pagination for incremental and streaming transfers.
+
+    Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
+    timestamp ties are not skipped forever (parity with PG/MySQL).
+    """
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
@@ -1460,13 +1525,36 @@ def read_table_cursor_batch(
             else:
                 columns = selected_cols = list(table_obj.c)
 
+            pk = (cursor_primary_key or "").strip()
+            pk_col = table_obj.c[pk] if pk and pk != cursor_column and pk in table_obj.c else None
+
             stmt = sa.select(*selected_cols)
             if cursor_after:
-                # Cast the cursor string to the reflected column type so numeric and
-                # date/timestamp cursors compare correctly.
-                marker = sa.cast(sa.literal(cursor_after), cursor_col.type)
-                stmt = stmt.where(cursor_col > marker)
-            stmt = stmt.order_by(cursor_col).limit(limit)
+                if pk_col is not None:
+                    if "|" in str(cursor_after):
+                        cur_val, pk_val = str(cursor_after).split("|", 1)
+                    else:
+                        cur_val, pk_val = cursor_after, ""
+                    cur_marker = sa.cast(sa.literal(cur_val), cursor_col.type)
+                    pk_marker = sa.cast(sa.literal(pk_val), pk_col.type)
+                    # Row-value ``(a,b) > (x,y)`` is not portable (SQL Server).
+                    # Expand to OR/AND so composite watermarks resume correctly.
+                    stmt = stmt.where(
+                        sa.or_(
+                            cursor_col > cur_marker,
+                            sa.and_(cursor_col == cur_marker, pk_col > pk_marker),
+                        )
+                    )
+                    stmt = stmt.order_by(cursor_col, pk_col).limit(limit)
+                else:
+                    marker = sa.cast(sa.literal(cursor_after), cursor_col.type)
+                    stmt = stmt.where(cursor_col > marker)
+                    stmt = stmt.order_by(cursor_col).limit(limit)
+            else:
+                if pk_col is not None:
+                    stmt = stmt.order_by(cursor_col, pk_col).limit(limit)
+                else:
+                    stmt = stmt.order_by(cursor_col).limit(limit)
 
             fetched = conn.execute(stmt).fetchall()
             headers = [c.name for c in selected_cols]
@@ -1764,6 +1852,20 @@ def write_mapped_rows(
                 conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
                 conn.commit()
                 table_exists = False
+
+            if not table_exists and not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema_name or (cfg.get("database") or ""),
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Destination table '{table_name}' is missing and "
+                        "create_table is disabled"
+                    ),
+                )
 
             if create_table and not table_exists:
                 try:

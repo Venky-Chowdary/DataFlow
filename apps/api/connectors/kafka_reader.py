@@ -87,8 +87,8 @@ def read_topic_batch(
         or cfg.get("username")
         or "dataflow-kafka-source"
     )
-    # Commit offsets from the previously applied batch before polling more.
-    prior_pending = (kafka_cursor or {}).get("pending_offsets") or (kafka_cursor or {}).get("offsets")
+    # Durable commits happen only after destination apply (stream.commit_kafka_offsets).
+    # Never commit prior pending offsets here — prefetch can race ahead of sink durability.
     consumer = KafkaDebeziumConsumer({
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
@@ -99,13 +99,6 @@ def read_topic_batch(
         ).strip(),
     })
     try:
-        if prior_pending:
-            try:
-                consumer.commit_offsets(list(prior_pending))
-            except Exception:
-                # Resume still works from last durable commit; surface via empty batch later.
-                pass
-
         records: list[dict[str, Any]] = []
         polls = 0
         while len(records) < limit and polls < 5:
@@ -137,12 +130,19 @@ def read_topic_batch(
         total = known_total_rows if known_total_rows is not None else None
         batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
         pending = consumer.pending_offsets()
-        next_cursor = {
-            "group_id": group_id,
-            "topic": topic_name,
-            "pending_offsets": pending,
-            "delivery": "at_least_once",
-        } if rows else None
+        # Emit a continuation cursor whenever offsets were consumed — including
+        # tombstone / decode-skip batches that produce no output rows. Without
+        # this, those offsets never checkpoint and the consumer re-reads forever.
+        next_cursor = (
+            {
+                "group_id": group_id,
+                "topic": topic_name,
+                "pending_offsets": pending,
+                "delivery": "at_least_once",
+            }
+            if pending
+            else None
+        )
         # Native types for schemaless absorb / Map honesty (pre-string samples).
         native_types: dict[str, str] = {}
         try:
@@ -174,11 +174,47 @@ def infer_topic_schema(
     *,
     sample_limit: int = 50,
 ) -> tuple[dict[str, str], dict[str, str], str]:
-    """Poll a small sample and return ``(logical_schema, native_types, warning)``.
+    """Resolve topic field types from Schema Registry first, else poll samples.
 
-    Empty topics do **not** invent TEXT columns — Map/preflight must wait for samples.
+    Empty topics do **not** invent TEXT columns when no registry contract exists.
     Schema sampling uses an ephemeral group so it never advances the transfer cursor.
     """
+    registry = str(cfg.get("schema_registry_url") or "").strip()
+    if registry and topic:
+        from connectors.confluent_schema_registry import (
+            SchemaRegistryError,
+            fetch_latest_subject_schema,
+            schema_map_from_registry_doc,
+        )
+
+        # Confluent TopicNameStrategy subjects — try value then topic bare.
+        subjects = [f"{topic}-value", topic, f"{topic}-key"]
+        last_err = ""
+        for subject in subjects:
+            try:
+                doc = fetch_latest_subject_schema(registry, subject)
+                schema_map = schema_map_from_registry_doc(doc)
+                if schema_map:
+                    return (
+                        schema_map,
+                        dict(schema_map),
+                        f"Schema from Registry subject {subject} "
+                        f"(schemaType={doc.get('schemaType') or 'AVRO'})",
+                    )
+            except SchemaRegistryError as exc:
+                last_err = str(exc)
+                continue
+            except Exception as exc:
+                last_err = str(exc)
+                continue
+        # Registry configured but no usable subject — fall through to samples with warning.
+        registry_warning = (
+            f"Schema Registry configured but no usable subject for topic {topic}"
+            + (f": {last_err}" if last_err else "")
+        )
+    else:
+        registry_warning = ""
+
     sample_cfg = {
         **cfg,
         "group_id": f"dataflow-kafka-schema-sample-{topic or 'topic'}",
@@ -186,13 +222,12 @@ def infer_topic_schema(
     batch, _ = read_topic_batch(cfg=sample_cfg, topic=topic, limit=sample_limit)
     native = dict((batch.meta or {}).get("native_types") or {})
     if not batch.headers:
-        return (
-            {},
-            {},
-            "Kafka topic has no samples yet; field types are unknown until messages arrive.",
+        warning = registry_warning or (
+            "Kafka topic has no samples yet; field types are unknown until messages arrive."
         )
+        return {}, {}, warning
     if native:
-        return {h: native.get(h, "TEXT") for h in batch.headers}, native, ""
+        return {h: native.get(h, "TEXT") for h in batch.headers}, native, registry_warning
     # Fallback: infer from string matrix
     try:
         from services.file_parser import FileParser
@@ -200,6 +235,6 @@ def infer_topic_schema(
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
         inferred = FileParser.infer_schema(records) if records else {}
         schema = {h: inferred.get(h, "TEXT") for h in batch.headers}
-        return schema, schema, ""
+        return schema, schema, registry_warning
     except Exception:
-        return {h: "TEXT" for h in batch.headers}, {}, ""
+        return {h: "TEXT" for h in batch.headers}, {}, registry_warning

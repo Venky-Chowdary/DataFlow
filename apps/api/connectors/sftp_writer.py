@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,18 @@ def write_mapped_rows(
         error_policy=policy,
         preserve_case=True,
     )
+    if transform_errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+        )
 
     directory, filename = split_remote_path(cfg.path)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
@@ -139,8 +152,27 @@ def write_mapped_rows(
                             sftp.stat(current)
                         except Exception:
                             sftp.mkdir(current)
-            with sftp.file(cfg.path, "wb") as f:
-                f.write(body)
+            # Atomic replace: write temp then rename so consumers never see a
+            # truncated artifact after a mid-upload disconnect.
+            temp_path = f"{cfg.path}.dataflow-{uuid.uuid4().hex}.tmp"
+            try:
+                with sftp.file(temp_path, "wb") as f:
+                    f.write(body)
+                    f.flush()
+                if hasattr(sftp, "posix_rename"):
+                    sftp.posix_rename(temp_path, cfg.path)
+                else:
+                    try:
+                        sftp.remove(cfg.path)
+                    except Exception:
+                        pass
+                    sftp.rename(temp_path, cfg.path)
+            except Exception:
+                try:
+                    sftp.remove(temp_path)
+                except Exception:
+                    pass
+                raise
         finally:
             sftp.close()
             transport.close()

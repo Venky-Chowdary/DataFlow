@@ -95,8 +95,12 @@ def build_pinecone_vectors(
     """Map DataFlow vector rows to Pinecone upsert vectors (testable, no I/O).
 
     Returns ``(vectors, rejected)``. Missing/mismatched embeddings are rejected
-    — never replaced with fabricated zero vectors.
+    — never replaced with fabricated zero vectors. Missing ids → deterministic
+    hash over source_id+chunk+content (retry-safe), else quarantine — never
+    empty-string ids that collide under at-least-once upsert.
     """
+    import hashlib
+
     from services.vector_embedding import coerce_embedding
 
     vectors: list[dict[str, Any]] = []
@@ -128,8 +132,28 @@ def build_pinecone_vectors(
                 "policy": "quarantine",
             })
             continue
+        raw_id = row.get("id")
+        if raw_id not in (None, ""):
+            vector_id = cell_to_string(raw_id)
+        else:
+            source = cell_to_string(row.get("source_id", ""))
+            chunk = int(row.get("chunk_index") or 0)
+            content = str(row.get("content") or "")
+            if not source and not content:
+                rejected.append({
+                    "row": "",
+                    "column": "id",
+                    "target": "id",
+                    "value": "",
+                    "reason": "missing id — refuse empty vector identity (non-idempotent)",
+                    "policy": "quarantine",
+                })
+                continue
+            vector_id = hashlib.sha256(
+                f"{source}\0{chunk}\0{content}".encode("utf-8")
+            ).hexdigest()
         vectors.append({
-            "id": cell_to_string(row.get("id") or ""),
+            "id": vector_id,
             "values": sanitize_json_value(values),
             "metadata": clean_meta,
         })
@@ -272,6 +296,21 @@ def write_mapped_rows(
             chunks_completed=0,
             error=rejected[0].get("reason") or "all embeddings rejected",
             rejected_details=rejected,
+        )
+    from connectors.writer_common import reject_on_strict_policy
+
+    strict_error = reject_on_strict_policy(error_policy, rejected, "Pinecone")
+    if strict_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=target,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=strict_error,
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
         )
     inserted = 0
     try:

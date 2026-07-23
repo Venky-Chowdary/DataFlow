@@ -1275,7 +1275,12 @@ class UniversalTransferEngine:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
-            if requires_upsert(effective_sync) and conflict_columns:
+            if requires_upsert(effective_sync):
+                if not conflict_columns:
+                    raise ValueError(
+                        f"Sync mode `{effective_sync}` requires primary_key for upsert; "
+                        "refuse silent insert fallback (set primary_key on the stream contract)"
+                    )
                 write_mode = "upsert"
 
             activation_notes: list[str] = []

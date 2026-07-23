@@ -1580,7 +1580,9 @@ export function ValidateDashboard({
               <span>
                 {mappingProofSummary.destMode === "create_new"
                   ? "Create-new — DDL on first write"
-                  : "Matched to destination schema"}
+                  : mappingProofSummary.destMode === "schema_pending"
+                    ? "Schema pending — confirm destination before create-new"
+                    : "Matched to destination schema"}
                 {" · "}
                 every pair has confidence evidence and fidelity risks
               </span>

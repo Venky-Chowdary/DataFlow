@@ -107,6 +107,10 @@ def detect_format(filename: str, content: bytes) -> str:
         return "jsonl"
     if lower.endswith(".parquet"):
         return "parquet"
+    if lower.endswith(".avro"):
+        return "avro"
+    if lower.endswith(".orc"):
+        return "orc"
     if lower.endswith((".txt", ".dat")):
         return "fixed_width"
     if content[:1] == b"{" or content[:1] == b"[":
@@ -121,7 +125,12 @@ def detect_format(filename: str, content: bytes) -> str:
 
 
 def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
-    lines = content.decode("utf-8", errors="replace").strip().splitlines()
+    try:
+        lines = content.decode("utf-8").strip().splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"JSONL is not valid UTF-8 ({exc}); refuse silent byte replacement"
+        ) from exc
     objects = []
     for line in lines:
         line = line.strip()
@@ -130,7 +139,18 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
         objects.append(json.loads(line))
     if not objects:
         raise ValueError("JSONL must contain at least one JSON object per line")
-    headers = list(objects[0].keys())
+    if not all(isinstance(item, dict) for item in objects):
+        raise ValueError("JSONL must contain one JSON object per line")
+
+    # Union keys across all lines — sparse late fields must appear in Map/Validate.
+    headers: list[str] = []
+    seen: set[str] = set()
+    for item in objects:
+        for key in item:
+            if key not in seen:
+                seen.add(key)
+                headers.append(key)
+
     rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in objects]
     return headers, rows, len(objects)
 
@@ -180,6 +200,7 @@ def store_upload(filename: str, content: bytes) -> dict:
     headers: list[str] = []
     rows: list[list[str]] = []
     arrow_schema: Any = None
+    columns_override: list | None = None
 
     if fmt in {"csv", "unknown", "fixed_width"}:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
@@ -198,6 +219,26 @@ def store_upload(filename: str, content: bytes) -> dict:
         headers, rows, row_count = parse_excel_preview(content)
     elif fmt == "parquet":
         headers, rows, row_count, arrow_schema = _parse_parquet_preview(content)
+    elif fmt in {"avro", "orc"}:
+        # Native parse — never mislabel binary Avro/ORC as CSV.
+        parsed = FileParser.parse_avro(content) if fmt == "avro" else FileParser.parse_orc(content)
+        if not parsed.success:
+            raise ValueError(parsed.error or f"{fmt.upper()} upload parse failed")
+        headers = list(parsed.columns or [])
+        rows = [
+            [cell_to_string(rec.get(h) if isinstance(rec, dict) else rec) for h in headers]
+            for rec in (parsed.data or [])[:100]
+        ]
+        row_count = int(parsed.row_count or len(parsed.data or []))
+        if parsed.column_meta:
+            columns_override = parsed.column_meta
+        elif parsed.schema_map:
+            columns_override = [
+                {"name": name, "inferred_type": typ}
+                for name, typ in parsed.schema_map.items()
+            ]
+        else:
+            columns_override = None
     else:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
         row_count = count_csv_rows(content, encoding)
@@ -207,6 +248,8 @@ def store_upload(filename: str, content: bytes) -> dict:
         from services.arrow_schema import columns_from_arrow_schema
 
         columns = columns_from_arrow_schema(arrow_schema)
+    elif columns_override is not None:
+        columns = columns_override
     else:
         columns = infer_columns_from_rows(headers, rows)
     preview_rows = rows[:5]
@@ -296,7 +339,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
 
     if fmt == "csv":
         import csv
-        with open(path, "r", encoding=encoding, errors="replace") as f:
+        with open(path, "r", encoding=encoding) as f:
             reader = csv.reader(f, delimiter=delimiter)
             headers = next(reader, [])
             chunk = []
@@ -311,15 +354,18 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
         import json
         from services.json_tabular import extract_json_records
 
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         records = extract_json_records(data)
         if not records:
             return
-        headers = list(records[0].keys())
-        for item in records[:50]:
+        # Union keys across the full document — never freeze to first 50 records.
+        headers: list[str] = []
+        seen: set[str] = set()
+        for item in records:
             for k in item.keys():
-                if k not in headers:
+                if k not in seen:
+                    seen.add(k)
                     headers.append(k)
         for i in range(0, len(records), chunk_size):
             batch = records[i : i + chunk_size]
@@ -327,16 +373,30 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             yield headers, rows
     elif fmt == "jsonl":
         import json
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            chunk = []
-            headers = None
+        # Two-pass: union sparse keys across the whole file, then project rows.
+        headers: list[str] = []
+        seen: set[str] = set()
+        with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 obj = json.loads(line)
-                if headers is None:
-                    headers = list(obj.keys())
+                if not isinstance(obj, dict):
+                    raise ValueError("JSONL must contain one JSON object per line")
+                for k in obj.keys():
+                    if k not in seen:
+                        seen.add(k)
+                        headers.append(k)
+        if not headers:
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            chunk = []
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
                 row = [cell_to_string(obj.get(h, "")) for h in headers]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
@@ -344,6 +404,11 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                     chunk = []
             if chunk:
                 yield headers, chunk
+    elif fmt in {"parquet", "avro", "orc", "excel"}:
+        raise ValueError(
+            f"{fmt.upper()} cannot use the legacy CSV chunker; route this upload "
+            "through the native file-stream transfer engine."
+        )
     else:
         # Fallback to full load then chunk
         from services.csv_profiler import parse_csv_full
@@ -363,6 +428,9 @@ class ParseResult:
     file_type: str = ""
     ocr_used: bool = False
     ocr_page_count: int = 0
+    # Native writer schema when available (Avro/Parquet) — not sample-inferred.
+    schema_map: dict | None = None
+    column_meta: list | None = None
 
 
 class FileParser:
@@ -543,9 +611,20 @@ class FileParser:
                     continue
                 try:
                     record = json.loads(line)
-                    if isinstance(record, dict):
-                        records.append(record)
-                        columns.update(record.keys())
+                    if not isinstance(record, dict):
+                        return ParseResult(
+                            success=False,
+                            data=[],
+                            columns=[],
+                            row_count=0,
+                            error=(
+                                f"JSONL line {line_num} must be a JSON object; "
+                                "scalar records are not supported"
+                            ),
+                            file_type="jsonl",
+                        )
+                    records.append(record)
+                    columns.update(record.keys())
                 except json.JSONDecodeError as e:
                     return ParseResult(
                         success=False,
@@ -579,7 +658,22 @@ class FileParser:
         """Parse CSV/TSV file content — auto-detects delimiter and encoding."""
         try:
             if isinstance(content, bytes):
-                text = content.decode("utf-8", errors="replace").lstrip("\ufeff")
+                # Strict decode — errors="replace" silently corrupts bytes into
+                # U+FFFD and looks like a successful faithful ingest.
+                try:
+                    text = content.decode("utf-8").lstrip("\ufeff")
+                except UnicodeDecodeError as exc:
+                    return ParseResult(
+                        success=False,
+                        data=[],
+                        columns=[],
+                        row_count=0,
+                        error=(
+                            f"CSV is not valid UTF-8 ({exc}); refuse silent "
+                            "byte replacement — re-encode or declare the source encoding"
+                        ),
+                        file_type="csv",
+                    )
             else:
                 text = content.lstrip("\ufeff")
             if not text.strip():
@@ -639,10 +733,21 @@ class FileParser:
             for batch in iter_excel_batches(content, chunk_size=5000):
                 if not columns and batch:
                     columns = list(batch[0].keys())
+                # Non-streaming Excel must not silently truncate — same honesty bar
+                # as Parquet/Avro/ORC/XML (partial success looks like a full ingest).
+                if len(records) + len(batch) > max_rows:
+                    return ParseResult(
+                        success=False,
+                        data=[],
+                        columns=[],
+                        row_count=len(records) + len(batch),
+                        error=(
+                            f"Excel contains more than {max_rows:,} rows; "
+                            "use streaming ingest."
+                        ),
+                        file_type="excel",
+                    )
                 records.extend(batch)
-                if len(records) >= max_rows:
-                    records = records[:max_rows]
-                    break
             if not columns:
                 return ParseResult(
                     success=False,
@@ -677,7 +782,20 @@ class FileParser:
             import pyarrow.parquet as pq
 
             table = pq.read_table(io.BytesIO(content))
-            df = table.to_pandas().head(max_rows)
+            total_rows = int(table.num_rows)
+            if total_rows > max_rows:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=total_rows,
+                    error=(
+                        f"Parquet contains {total_rows:,} rows, exceeding the "
+                        f"{max_rows:,}-row non-streaming limit; use streaming ingest."
+                    ),
+                    file_type="parquet",
+                )
+            df = table.to_pandas()
             records = df.to_dict(orient="records")
             columns = [str(c) for c in df.columns.tolist()]
             for rec in records:
@@ -690,7 +808,7 @@ class FileParser:
                 success=True,
                 data=records,
                 columns=columns,
-                row_count=len(records),
+                row_count=total_rows,
                 file_type="parquet",
             )
         except ImportError:
@@ -702,7 +820,8 @@ class FileParser:
         except Exception as exc:
             return ParseResult(
                 success=False, data=[], columns=[], row_count=0,
-                error=f"Parquet parse error: {exc}", file_type="parquet",
+                error=f"Parquet parse error: {exc}",
+                file_type="parquet",
             )
 
     @staticmethod
@@ -712,21 +831,48 @@ class FileParser:
 
             import fastavro
 
+            from services.avro_schema import columns_from_avro_schema, schema_map_from_avro
+
             reader = fastavro.reader(io.BytesIO(content))
+            writer_schema = getattr(reader, "writer_schema", None) or getattr(reader, "schema", None)
+            schema_map = schema_map_from_avro(writer_schema) if writer_schema else {}
+            column_meta = columns_from_avro_schema(writer_schema) if writer_schema else []
             records = []
-            columns: list[str] = []
+            seen_keys: set[str] = set(schema_map.keys())
             for i, record in enumerate(reader):
                 if i >= max_rows:
-                    break
-                if not columns and isinstance(record, dict):
-                    columns = sorted(record.keys())
+                    return ParseResult(
+                        success=False,
+                        data=[],
+                        columns=[],
+                        row_count=i + 1,
+                        error=(
+                            f"Avro contains more than {max_rows:,} rows; "
+                            "use the native streaming ingest path."
+                        ),
+                        file_type="avro",
+                        schema_map=schema_map or None,
+                        column_meta=column_meta or None,
+                    )
+                if not isinstance(record, dict):
+                    record = {"value": record}
+                for k in record.keys():
+                    name = str(k)
+                    if name not in seen_keys:
+                        seen_keys.add(name)
+                        schema_map.setdefault(name, "TEXT")
                 records.append(record)
+            columns = list(schema_map.keys()) if schema_map else sorted(seen_keys)
+            if not columns and records and isinstance(records[0], dict):
+                columns = sorted(records[0].keys())
             return ParseResult(
                 success=True,
                 data=records,
                 columns=columns,
                 row_count=len(records),
                 file_type="avro",
+                schema_map=schema_map or None,
+                column_meta=column_meta or None,
             )
         except ImportError:
             return ParseResult(
@@ -747,22 +893,36 @@ class FileParser:
 
             import pyarrow.orc as orc
 
+            from services.arrow_schema import columns_from_arrow_schema, schema_from_arrow
+
             table = orc.read_table(io.BytesIO(content))
-            df = table.to_pandas().head(max_rows)
-            columns = [str(c) for c in df.columns.tolist()]
-            records = df.to_dict(orient="records")
-            for rec in records:
-                for k, v in list(rec.items()):
-                    if hasattr(v, "item"):
-                        rec[k] = v.item()
-                    elif v != v:  # NaN
-                        rec[k] = None
+            schema_map = schema_from_arrow(table.schema)
+            column_meta = columns_from_arrow_schema(table.schema)
+            total_rows = int(table.num_rows)
+            if total_rows > max_rows:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=total_rows,
+                    error=(
+                        f"ORC contains {total_rows:,} rows, exceeding the "
+                        f"{max_rows:,}-row non-streaming limit; use streaming ingest."
+                    ),
+                    file_type="orc",
+                    schema_map=schema_map or None,
+                    column_meta=column_meta or None,
+                )
+            records = table.to_pylist()
+            columns = list(schema_map.keys()) if schema_map else [str(c) for c in table.column_names]
             return ParseResult(
                 success=True,
                 data=records,
                 columns=columns,
-                row_count=len(records),
+                row_count=total_rows,
                 file_type="orc",
+                schema_map=schema_map or None,
+                column_meta=column_meta or None,
             )
         except ImportError:
             return ParseResult(
@@ -784,13 +944,36 @@ class FileParser:
             text = content.decode("utf-8") if isinstance(content, bytes) else content
             root = xmltodict.parse(text)
 
-            records = FileParser._extract_xml_records(root)
+            records, selected_path, ambiguity = FileParser._extract_xml_records(root)
+            if ambiguity:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error=ambiguity,
+                    file_type="xml",
+                )
             if not records:
                 if isinstance(root, dict):
                     records = [dict(root)]
                 else:
                     records = [{"value": root}]
-            records = records[:max_rows]
+            # Non-streaming XML must not silently truncate — that looks like a
+            # successful full transfer of only the first max_rows records.
+            if len(records) > max_rows:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=len(records),
+                    error=(
+                        f"XML contains {len(records):,} records, exceeding the "
+                        f"{max_rows:,}-row non-streaming limit; select a smaller "
+                        "record set or use streaming XML ingest."
+                    ),
+                    file_type="xml",
+                )
             columns: list[str] = []
             seen = set()
             for rec in records:
@@ -804,6 +987,12 @@ class FileParser:
                 columns=columns,
                 row_count=len(records),
                 file_type="xml",
+                schema_map={c: "TEXT" for c in columns} if selected_path else None,
+                column_meta=(
+                    [{"name": c, "inferred_type": "TEXT", "source": "xml", "path": selected_path} for c in columns]
+                    if selected_path
+                    else None
+                ),
             )
         except ImportError:
             return ParseResult(
@@ -818,30 +1007,72 @@ class FileParser:
             )
 
     @staticmethod
-    def _extract_xml_records(node: Any, depth: int = 0) -> list[dict] | None:
-        """Recursively find the first list of objects inside an XML dict and flatten each."""
-        if depth > 4:
-            return None
+    def _discover_xml_collections(
+        node: Any,
+        *,
+        depth: int = 0,
+        path: str = "",
+    ) -> list[tuple[str, list[dict]]]:
+        """Find all repeating list-of-object collections under an XML dict."""
+        if depth > 4 or not isinstance(node, dict):
+            return []
+        found: list[tuple[str, list[dict]]] = []
+        for key, value in node.items():
+            child_path = f"{path}/{key}" if path else str(key)
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                found.append((child_path, [FileParser._flatten_xml_item(item) for item in value]))
+            elif isinstance(value, dict):
+                found.extend(
+                    FileParser._discover_xml_collections(value, depth=depth + 1, path=child_path)
+                )
+        return found
+
+    @staticmethod
+    def _extract_xml_records(node: Any, depth: int = 0) -> tuple[list[dict] | None, str | None, str | None]:
+        """Return ``(records, selected_path, ambiguity_error)``.
+
+        Multiple sibling repeating collections → fail closed (never pick one silently).
+        """
+        del depth  # discovery walks with its own depth
         if isinstance(node, list):
-            records = [FileParser._flatten_xml_item(item) for item in node if isinstance(item, (dict, str, int, float, bool))]
-            return records if any(isinstance(item, dict) for item in node) else None
-        if isinstance(node, dict):
-            # Direct list of dicts under a key is the most common shape.
-            for value in node.values():
-                if isinstance(value, list) and value and isinstance(value[0], dict):
-                    return [FileParser._flatten_xml_item(item) for item in value]
-            # Otherwise recurse through nested dicts.
-            for value in node.values():
-                found = FileParser._extract_xml_records(value, depth + 1)
-                if found:
-                    return found
-            # Single-record XMLs: a single child dict becomes one row.
-            if len(node) == 1:
-                value = list(node.values())[0]
-                if isinstance(value, dict):
-                    return [FileParser._flatten_xml_item(value)]
-            return [FileParser._flatten_xml_item(node)]
-        return None
+            records = [
+                FileParser._flatten_xml_item(item)
+                for item in node
+                if isinstance(item, (dict, str, int, float, bool))
+            ]
+            if any(isinstance(item, dict) for item in node):
+                return records, "root[]", None
+            return None, None, None
+
+        if not isinstance(node, dict):
+            return None, None, None
+
+        collections = FileParser._discover_xml_collections(node)
+        if len(collections) > 1:
+            # Prefer the shallowest path; if multiple at same depth, refuse.
+            depths = [(p.count("/"), p, rows) for p, rows in collections]
+            min_depth = min(d for d, _, _ in depths)
+            top = [(p, rows) for d, p, rows in depths if d == min_depth]
+            if len(top) > 1:
+                paths = ", ".join(p for p, _ in top)
+                return (
+                    None,
+                    None,
+                    f"XML has multiple repeating record collections ({paths}). "
+                    "Select a record path — refuse silent partial ingest.",
+                )
+            path, rows = top[0]
+            return rows, path, None
+        if len(collections) == 1:
+            path, rows = collections[0]
+            return rows, path, None
+
+        # Single-record XMLs: a single child dict becomes one row.
+        if len(node) == 1:
+            value = list(node.values())[0]
+            if isinstance(value, dict):
+                return [FileParser._flatten_xml_item(value)], list(node.keys())[0], None
+        return [FileParser._flatten_xml_item(node)], None, None
 
     @staticmethod
     def _flatten_xml_item(item: Any) -> dict:
@@ -879,7 +1110,20 @@ class FileParser:
             decoded = raw_bytes
             try:
                 content = decoded.decode("utf-8")
-            except UnicodeDecodeError:
+            except UnicodeDecodeError as exc:
+                # Text tabular formats must not silently latin-1 mojibake.
+                if file_type in {"csv", "tsv", "json", "jsonl", "xml", "fixed_width"}:
+                    return ParseResult(
+                        success=False,
+                        data=[],
+                        columns=[],
+                        row_count=0,
+                        error=(
+                            f"File is not valid UTF-8 ({exc}); refuse silent "
+                            "latin-1 fallback — re-encode or declare the source encoding"
+                        ),
+                        file_type=file_type,
+                    )
                 content = decoded.decode("latin-1")
 
         if file_type == "json":

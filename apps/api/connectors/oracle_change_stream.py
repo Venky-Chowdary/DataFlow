@@ -259,7 +259,17 @@ class OracleFlashbackCdc:
                         {"start_scn": self.scn + 1, "end_scn": head_scn, "lim": self.batch_size},
                     )
                     cols = [d[0] for d in (cur.description or [])]
-                    for row in cur.fetchall() or []:
+                    rows = cur.fetchall() or []
+                    # Full page without compound SCN+PK continuation would advance
+                    # the watermark to head_scn and silently skip remaining changes.
+                    if len(rows) >= self.batch_size:
+                        raise RuntimeError(
+                            "Oracle Flashback CDC page reached batch_size; refusing to "
+                            "advance the SCN watermark because remaining changes could "
+                            "be skipped. Use a smaller change window or enable compound "
+                            "SCN+PK continuation."
+                        )
+                    for row in rows:
                         rec = {cols[i]: row[i] for i in range(len(cols))}
                         op = rec.pop("DF_OP", None) or rec.pop("df_op", None) or "U"
                         scn_val = rec.pop("DF_SCN", None) or rec.pop("df_scn", None) or head_scn
@@ -274,7 +284,10 @@ class OracleFlashbackCdc:
                             inserts.append(clean)
                         else:
                             updates.append(clean)
+                    # Incomplete page means the SCN window was fully drained.
                     self.scn = max(next_scn, head_scn)
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.warning("Oracle flashback poll failed for %s: %s", self.table, exc)
             return

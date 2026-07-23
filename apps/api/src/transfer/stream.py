@@ -69,7 +69,9 @@ _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
     "sqlserver", "oracle",
     "s3", "gcs", "adls", "sftp", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
-    "iceberg", "kafka", "salesforce", "hubspot",
+    "iceberg", "kafka",
+    # Salesforce and HubSpot paginate with opaque cursors / capped OFFSET — do not
+    # claim resumable numeric-offset streaming until continuation state is wired.
 })
 
 
@@ -111,6 +113,7 @@ def _read_batch_impl(
     es_search_after: list | None = None,
     redis_scan_state=None,
     kafka_cursor: dict | None = None,
+    cursor_primary_key: str | None = None,
 ):
     if src_type == "postgresql" or src_type == "redshift":
         from connectors.postgresql_reader import (
@@ -134,6 +137,7 @@ def _read_batch_impl(
                 cursor_after=cursor_after,
                 columns=columns,
                 limit=limit,
+                cursor_primary_key=cursor_primary_key,
             )
         return read_table_batch(
             host=cfg["host"],
@@ -168,6 +172,7 @@ def _read_batch_impl(
                 cursor_after=cursor_after,
                 columns=columns,
                 limit=limit,
+                cursor_primary_key=cursor_primary_key,
             )
         return read_table_batch(
             host=cfg["host"],
@@ -201,6 +206,7 @@ def _read_batch_impl(
                 columns=columns,
                 limit=limit,
                 known_total_rows=known_total_rows,
+                cursor_primary_key=cursor_primary_key,
             )
         return read_collection_batch(
             cfg=cfg,
@@ -233,6 +239,7 @@ def _read_batch_impl(
                 cursor_after=cursor_after,
                 columns=columns,
                 limit=limit,
+                cursor_primary_key=cursor_primary_key,
             )
         return read_table_batch(
             host=cfg["host"],
@@ -251,8 +258,27 @@ def _read_batch_impl(
             known_total_rows=known_total_rows,
         )
     if src_type == "bigquery":
-        from connectors.bigquery_reader import read_table_batch
+        from connectors.bigquery_reader import read_table_batch, read_table_cursor_batch
 
+        if cursor_column:
+            return read_table_cursor_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 443),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "dataflow"),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=cfg.get("ssl", False),
+                warehouse=cfg.get("warehouse", ""),
+                table=table,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+                columns=columns,
+                limit=limit,
+                service_account=cfg.get("service_account", ""),
+                cursor_primary_key=cursor_primary_key,
+            )
         return read_table_batch(
             host=cfg["host"],
             port=int(cfg.get("port") or 443),
@@ -361,6 +387,7 @@ def _read_batch_impl(
                 cursor_after=cursor_after,
                 columns=columns,
                 limit=limit,
+                cursor_primary_key=cursor_primary_key,
             )
         return read_table_batch(
             host=cfg["host"],
@@ -886,11 +913,24 @@ def stream_database_transfer(
     incremental = requires_incremental(effective_sync)
     cursor_source_col = contract.cursor_field if contract else ""
     pk_target_cols: list[str] = []
+    cursor_pk_source = ""
     if contract and contract.primary_key:
+        pk_source_cols = contract.primary_key_columns()
         pk_target_cols = [
-            map_source_to_target(col, mappings) for col in contract.primary_key_columns()
+            map_source_to_target(col, mappings) for col in pk_source_cols
         ]
+        # Tie-break incremental watermarks with a stable source PK (Airbyte gap).
+        if incremental and cursor_source_col:
+            cursor_pk_source = next(
+                (p for p in pk_source_cols if p and p != cursor_source_col),
+                pk_source_cols[0] if pk_source_cols else "",
+            )
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    if requires_upsert(effective_sync) and not pk_target_cols:
+        raise ValueError(
+            f"Sync mode `{effective_sync}` requires primary_key for upsert; "
+            "refuse silent insert fallback (set primary_key on the stream contract)"
+        )
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     if resuming and write_mode == "insert":
@@ -1001,9 +1041,10 @@ def stream_database_transfer(
         )
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Chunked writes would overwrite the same key and silently lose data.
-    # Force a single chunk so all rows are written once.
-    if dest_type in ("s3", "gcs", "adls") and sample_probe.total_rows:
-        chunk_size = max(1, sample_probe.total_rows)
+    # Always force a single shot — gating on truthy total_rows failed open after
+    # honesty waves set total_rows=None for unknown cardinality.
+    if dest_type in ("s3", "gcs", "adls"):
+        chunk_size = max(1, int(sample_probe.total_rows or 10_000_000))
 
     def _batch_limit(offset: int = 0, *, default: int = chunk_size) -> int:
         if limit > 0:
@@ -1138,7 +1179,8 @@ def stream_database_transfer(
 
     ddl_log: list[str] = [
         f"STREAM {src_type}.{table} → {dest_type}.{dest_table} "
-        f"({total_rows:,} rows est., {chunks} batches, sync={effective_sync})"
+        f"({('unknown' if total_rows is None else f'{total_rows:,}')} rows est., "
+        f"{chunks} batches, sync={effective_sync})"
     ]
     if incremental and watermark:
         ddl_log.append(f"INCREMENTAL cursor {cursor_source_col} > {watermark}")
@@ -1180,12 +1222,12 @@ def stream_database_transfer(
         nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor
         if limit > 0 and fetch_offset >= limit:
             return None
-        if total_rows is not None and fetch_offset >= total_rows:
+        if total_rows is not None and fetch_offset >= total_rows and src_type != "dynamodb":
             return None
         batch_limit = _batch_limit(fetch_offset)
         if last_batch is not None and len(last_batch.rows) < chunk_size:
             if (
-                src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb")
+                src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb", "bigquery")
                 and (incremental or use_keyset)
             ) or src_type in ("elasticsearch", "redis", "kafka"):
                 return None
@@ -1223,7 +1265,10 @@ def stream_database_transfer(
                 )
             )
             return batch
-        elif incremental and cursor_source_col and src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb"):
+        elif incremental and cursor_source_col and (
+            src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb", "bigquery")
+            or resolve_driver_type(src_type) == "generic_sql"
+        ):
             batch, _ = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -1237,6 +1282,7 @@ def stream_database_transfer(
                     cursor_after=fetch_cursor,
                     cursor_type=column_types.get(cursor_source_col, "VARCHAR"),
                     known_total_rows=total_rows,
+                    cursor_primary_key=cursor_pk_source or None,
                 )
             )
             return batch
@@ -1293,7 +1339,7 @@ def stream_database_transfer(
                 )
             )
             return batch
-        elif fetch_offset >= total_rows:
+        elif total_rows is not None and fetch_offset >= total_rows:
             return None
         else:
             batch, extra = _unwrap_read(
@@ -1432,7 +1478,9 @@ def stream_database_transfer(
 
         batch_max = None
         if incremental and cursor_source_col:
-            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+            batch_max = max_cursor_value(
+                batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
+            )
 
         write_kwargs: dict[str, Any] = {}
         if dest_type == "snowflake":
@@ -1565,7 +1613,9 @@ def stream_database_transfer(
         nonlocal fetch_cursor, fetch_offset
         batch = _filter_batch(batch)
         if incremental and cursor_source_col and batch.rows:
-            batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+            batch_max = max_cursor_value(
+                batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
+            )
             if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
                 fetch_cursor = batch_max
         dispatcher.submit(idx, batch, _process_db_chunk)
@@ -1577,7 +1627,9 @@ def stream_database_transfer(
         if batch:
             batch = _filter_batch(batch)
             if incremental and cursor_source_col and batch.rows:
-                batch_max = max_cursor_value(batch.rows, batch.headers, cursor_source_col)
+                batch_max = max_cursor_value(
+                batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
+            )
                 if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
                     fetch_cursor = batch_max
             _apply_result(first_idx, _process_db_chunk(first_idx, batch))
@@ -2068,7 +2120,10 @@ def stream_scd2_mirror_transfer(
                     map_source_to_target(col, mappings) for col in contract.primary_key_columns()
                 ]
             else:
-                conflict_columns = [target_cols[0]]
+                raise ValueError(
+                    "SCD2 requires an explicit primary_key on the stream contract; "
+                    "refuse inventing a conflict key from the first mapped column"
+                )
             written_total = 0
             updated_total = 0
             active_rows = 0

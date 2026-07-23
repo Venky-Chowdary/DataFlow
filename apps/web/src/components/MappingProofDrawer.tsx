@@ -110,10 +110,17 @@ export function buildClientMappingProof(
   opts: {
     destColumns?: string[];
     destType?: string;
+    /** null/undefined = unknown; only false means confirmed create-new. */
+    destTableExists?: boolean | null;
   } = {},
 ): MappingProof {
   const destCols = opts.destColumns ?? [];
-  const destMode = destCols.length === 0 ? "create_new" : "match_existing";
+  const destMode =
+    destCols.length > 0 || opts.destTableExists === true
+      ? "match_existing"
+      : opts.destTableExists === false
+        ? "create_new"
+        : "schema_pending";
   const rows: MappingProofRow[] = mappings.map((m) => {
     let conf = m.confidence;
     if (destMode === "create_new") conf = Math.min(conf, CREATE_NEW_CAP);
@@ -147,9 +154,11 @@ export function buildClientMappingProof(
     const schema =
       destMode === "create_new"
         ? `CREATE column \`${m.target}\` as ${m.destType || m.inferredType || "VARCHAR"}`
-        : exists
-          ? `MATCH existing \`${m.target}\` (${m.destType || m.inferredType || "VARCHAR"})`
-          : `ADD new column \`${m.target}\` as ${m.destType || m.inferredType || "VARCHAR"}`;
+        : destMode === "schema_pending"
+          ? `PENDING confirm destination for \`${m.target}\` (${m.destType || m.inferredType || "VARCHAR"})`
+          : exists
+            ? `MATCH existing \`${m.target}\` (${m.destType || m.inferredType || "VARCHAR"})`
+            : `ADD new column \`${m.target}\` as ${m.destType || m.inferredType || "VARCHAR"}`;
 
     return {
       source: m.source,
@@ -215,12 +224,24 @@ export function buildClientMappingProof(
 export function mergeMappingProof(
   mappingProof: MappingProof | null | undefined,
   mappings: EditableMapping[],
-  opts: { destColumns?: string[]; destType?: string } = {},
+  opts: {
+    destColumns?: string[];
+    destType?: string;
+    destTableExists?: boolean | null;
+  } = {},
 ): MappingProof {
   const client = buildClientMappingProof(mappings, opts);
   if (!mappingProof?.mappings?.length) return client;
   const bySource = new Map(mappings.map((m) => [m.source, m]));
-  const createNew = mappingProof.dest_mode === "create_new" || (opts.destColumns?.length ?? 0) === 0;
+  // Empty dest columns alone must NOT force create-new when the table exists or is unknown.
+  const createNew =
+    opts.destTableExists === false
+    || (mappingProof.dest_mode === "create_new" && opts.destTableExists !== true && (opts.destColumns?.length ?? 0) === 0);
+  const destMode = createNew
+    ? "create_new"
+    : (opts.destColumns?.length ?? 0) > 0 || opts.destTableExists === true
+      ? "match_existing"
+      : client.dest_mode;
   const mergedRows = mappingProof.mappings.map((row) => {
     const live = bySource.get(row.source);
     if (!live) return row;
@@ -260,6 +281,7 @@ export function mergeMappingProof(
   });
   return {
     ...mappingProof,
+    dest_mode: destMode,
     destination_db_type: mappingProof.destination_db_type || opts.destType || "",
     mappings: mergedRows,
     summary: {
@@ -457,7 +479,9 @@ export function MappingProofDrawer({
   const modeLabel =
     proof.dest_mode === "create_new"
       ? "Create-new table — columns CREATE on first write"
-      : "Match existing destination schema";
+      : proof.dest_mode === "schema_pending"
+        ? "Destination schema pending — confirm table before create-new"
+        : "Match existing destination schema";
 
   const summary = proof.summary;
   const exactCount = (proof.mappings ?? []).filter((r) => r.match_quality === "exact_name").length;
@@ -465,8 +489,18 @@ export function MappingProofDrawer({
     <div className="df2-map-proof">
       <div className="df2-map-proof-hero" aria-label="Mapping proof summary">
         <div className="df2-map-proof-hero-mode">
-          <span className={`df2-badge ${proof.dest_mode === "create_new" ? "df2-badge-warn" : "df2-badge-live"}`}>
-            {proof.dest_mode === "create_new" ? "Create new" : "Match existing"}
+          <span className={`df2-badge ${
+            proof.dest_mode === "create_new"
+              ? "df2-badge-warn"
+              : proof.dest_mode === "schema_pending"
+                ? "df2-badge-run"
+                : "df2-badge-live"
+          }`}>
+            {proof.dest_mode === "create_new"
+              ? "Create new"
+              : proof.dest_mode === "schema_pending"
+                ? "Schema pending"
+                : "Match existing"}
           </span>
           {(proof.summary?.cdc_detected || (proof.sync_mode || "").toLowerCase().includes("cdc")) && (
             <span className="df2-badge df2-badge-info df2-badge-xs">CDC · at-least-once</span>

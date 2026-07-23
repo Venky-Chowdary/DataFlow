@@ -23,7 +23,7 @@ from connectors.mongodb_common import _mongo_client
 from connectors.mongodb_reader import (
     _connection_string,
     _serialize,
-    read_collection_batch,
+    read_collection_cursor_batch,
 )
 from services.cdc_engine import ChangeBatch
 
@@ -168,29 +168,52 @@ class MongodbChangeStreamCdc:
         except Exception:
             start_token = None
 
-        offset = 0
+        last_id: str | None = None
+        legacy_offset: int | None = None
         if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
-            offset = int(self.resume_token.get("offset") or 0)
+            raw_last = self.resume_token.get("last_id")
+            if raw_last not in (None, ""):
+                last_id = str(raw_last)
+            else:
+                # Pre-Wave Y offset tokens — honor once, then switch to _id keyset.
+                legacy_offset = int(self.resume_token.get("offset") or 0)
             start_token = self.resume_token.get("token") or start_token
         while True:
-            batch = read_collection_batch(
-                cfg=self.cfg,
-                database=self.db_name,
-                collection=self.collection,
-                columns=self.columns,
-                offset=offset,
-                limit=self.batch_size,
-            )
+            if legacy_offset is not None:
+                from connectors.mongodb_reader import read_collection_batch
+
+                batch = read_collection_batch(
+                    cfg=self.cfg,
+                    database=self.db_name,
+                    collection=self.collection,
+                    columns=self.columns,
+                    offset=legacy_offset,
+                    limit=self.batch_size,
+                )
+                legacy_offset = None
+            else:
+                # _id keyset is delete-safe; SKIP/LIMIT is not under concurrent deletes.
+                batch = read_collection_cursor_batch(
+                    cfg=self.cfg,
+                    database=self.db_name,
+                    collection=self.collection,
+                    cursor_column="_id",
+                    cursor_after=last_id,
+                    cursor_type="STRING",
+                    columns=self.columns,
+                    limit=self.batch_size,
+                )
             if not batch.rows:
                 break
             records = [_doc_to_record(dict(zip(batch.headers, row)), self.columns) for row in batch.rows]
-            offset += len(batch.rows)
+            if "_id" in batch.headers:
+                last_id = str(batch.rows[-1][batch.headers.index("_id")])
             # Persist snapshot progress + change-stream handoff on every batch.
             yield ChangeBatch(
                 inserts=records,
                 resume_token={
                     "phase": "snapshot",
-                    "offset": offset,
+                    "last_id": last_id,
                     "token": start_token,
                     "collection": self.collection,
                 },

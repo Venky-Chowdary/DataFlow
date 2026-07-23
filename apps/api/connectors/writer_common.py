@@ -442,6 +442,20 @@ def transform_error_policy(policy: str | None = None) -> str:
     return selected if selected in VALID_ERROR_POLICIES else "quarantine"
 
 
+def reject_on_strict_policy(
+    policy: str | None,
+    rejected_details: list[dict[str, Any]] | None,
+    label: str,
+) -> str | None:
+    """Return an error message when strict mode must refuse a partial write."""
+    if transform_error_policy(policy) == "fail" and rejected_details:
+        return (
+            f"{label} rejected {len(rejected_details)} row(s); "
+            "strict error policy blocks partial write"
+        )
+    return None
+
+
 _VALIDATION_MODE_POLICIES = {
     "maximum": "fail",
     "strict": "fail",

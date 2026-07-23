@@ -455,7 +455,7 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists !== true && (
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
           <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
             <DtIcon name="sparkle" size={16} />
             <span>
@@ -471,6 +471,15 @@ export function ColumnReviewPanel({
             <span>
               <strong>Existing destination table</strong>
               {" — confirmed on the server, but column metadata did not load. Retry Destination/Map before treating this as create-new."}
+            </span>
+          </div>
+        )}
+        {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
+          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Destination schema unknown</strong>
+              {" — existence not confirmed. Retry Destination/Map; DataFlow will not invent create-new fields yet."}
             </span>
           </div>
         )}

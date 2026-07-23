@@ -197,6 +197,7 @@ def write_mapped_rows(
     mappings: list[dict],
     column_types: dict[str, str],
     on_checkpoint: Any | None = None,
+    error_policy: str | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     """Send the mapped rows as an email with a CSV/JSON attachment."""
@@ -243,7 +244,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
-    policy = transform_error_policy(None)
+    policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -254,6 +255,18 @@ def write_mapped_rows(
         error_policy=policy,
         preserve_case=True,
     )
+    if transform_errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+        )
 
     rejected_rows = max(
         _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),

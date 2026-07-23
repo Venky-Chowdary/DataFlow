@@ -127,8 +127,13 @@ def read_table_cursor_batch(
     cursor_after: str | None = None,
     columns: list[str] | None = None,
     limit: int = 500,
+    cursor_primary_key: str | None = None,
 ) -> ReadBatch:
-    """Read rows where cursor_column > watermark — for incremental sync."""
+    """Read rows where cursor_column > watermark — for incremental sync.
+
+    Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
+    timestamp ties are not skipped forever.
+    """
     del schema
     table_ref = quote_table_ref(table, dialect="mysql")
     cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True), "`")
@@ -151,15 +156,37 @@ def read_table_cursor_batch(
                 base = f"SELECT {col_list} FROM {table_ref}"
             else:
                 base = f"SELECT * FROM {table_ref}"
+            pk = (cursor_primary_key or "").strip()
+            pk_q = (
+                quote_sql_identifier(require_safe_identifier(pk, preserve_case=True), "`")
+                if pk and pk != cursor_column
+                else ""
+            )
             if cursor_after:
-                query = f"{base} WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s"
-                cur.execute(query, (cursor_after, limit))
+                if pk_q:
+                    query = (
+                        f"{base} WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
+                        f"ORDER BY {cursor_q}, {pk_q} LIMIT %s"
+                    )
+                    if "|" in str(cursor_after):
+                        cur_val, pk_val = str(cursor_after).split("|", 1)
+                    else:
+                        cur_val, pk_val = cursor_after, ""
+                    cur.execute(query, (cur_val, pk_val, limit))
+                else:
+                    query = f"{base} WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s"
+                    cur.execute(query, (cursor_after, limit))
             else:
-                query = f"{base} ORDER BY {cursor_q} LIMIT %s"
+                if pk_q:
+                    query = f"{base} ORDER BY {cursor_q}, {pk_q} LIMIT %s"
+                else:
+                    query = f"{base} ORDER BY {cursor_q} LIMIT %s"
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
             rows = [[_cell(v) for v in row] for row in fetched]
-            return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=len(rows))
+            # Keyset pages are not a cardinality bound — page length must never
+            # trip stream early-stop (fetch_offset >= total_rows).
+            return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
         conn.close()

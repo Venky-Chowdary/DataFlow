@@ -46,7 +46,7 @@ def test_snapshot_reads_collection_batch(base_cfg: dict) -> None:
     batch.headers = ["_id", "amount"]
     batch.total_rows = 2
 
-    with patch("connectors.mongodb_change_stream.read_collection_batch") as mock_read:
+    with patch("connectors.mongodb_change_stream.read_collection_cursor_batch") as mock_read:
         mock_read.return_value = batch
         changes = list(reader.snapshot())
 
@@ -55,8 +55,39 @@ def test_snapshot_reads_collection_batch(base_cfg: dict) -> None:
     assert isinstance(changes[0], ChangeBatch)
     assert len(changes[0].inserts) == 2
     assert changes[0].inserts[0] == {"_id": "1", "amount": "100.00"}
+    assert changes[0].resume_token["last_id"] == "2"
     assert changes[1].resume_token is not None
     mock_read.assert_called_once()
+    kwargs = mock_read.call_args.kwargs
+    assert kwargs["cursor_column"] == "_id"
+    assert kwargs["cursor_after"] is None
+
+
+def test_snapshot_resume_uses_id_keyset_not_offset(base_cfg: dict) -> None:
+    reader = MongodbChangeStreamCdc(
+        base_cfg,
+        collection="orders",
+        primary_key="_id",
+        columns=["_id", "amount"],
+        resume_token={
+            "phase": "snapshot",
+            "last_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "token": {"_data": "tok"},
+            "collection": "orders",
+        },
+    )
+    batch = MagicMock()
+    batch.rows = [["bbbbbbbbbbbbbbbbbbbbbbbb", "9"]]
+    batch.headers = ["_id", "amount"]
+
+    with patch("connectors.mongodb_change_stream.read_collection_cursor_batch") as mock_read:
+        mock_read.return_value = batch
+        changes = list(reader.snapshot())
+
+    assert changes[0].resume_token["last_id"] == "bbbbbbbbbbbbbbbbbbbbbbbb"
+    kwargs = mock_read.call_args.kwargs
+    assert kwargs["cursor_after"] == "aaaaaaaaaaaaaaaaaaaaaaaa"
+    assert "offset" not in kwargs
 
 
 def _change_events():

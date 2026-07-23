@@ -28,9 +28,13 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
     if value is None:
         return None
     upper = source_type.upper()
-    if upper in {"DECIMAL", "NUMERIC"}:
+    # Advertise numeric DDL as DynamoDB N — never silently store typed numbers as S.
+    if upper in {
+        "DECIMAL", "NUMERIC", "NUMBER", "INTEGER", "BIGINT", "SMALLINT",
+        "TINYINT", "FLOAT", "DOUBLE", "REAL", "INT", "INT64", "FLOAT64",
+    }:
         try:
-            return Decimal(value)
+            return Decimal(str(value))
         except Exception:
             return value
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
@@ -107,6 +111,19 @@ def write_mapped_rows(
         preserve_case=True,
         error_policy=policy,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d["row"] for d in rejected_details}),
+            rejected_details=rejected_details[:100],
+        )
 
     client = boto3_client("dynamodb", cfg)
     if create_table:
@@ -123,11 +140,53 @@ def write_mapped_rows(
 
     written = 0
     batch_size = 25
-    chunks = max(1, (len(mapped_rows) + batch_size - 1) // batch_size)
+    # Filter out rows with incomplete Dynamo key components before BatchWrite.
+    valid_rows: list[list[Any]] = []
+    for row_idx, row in enumerate(mapped_rows):
+        key_ok = True
+        for key_col, attr_type in key_types.items():
+            if key_col not in target_cols:
+                continue
+            i = target_cols.index(key_col)
+            value = row[i] if i < len(row) else None
+            if value is None or (attr_type == "S" and str(value).strip() == ""):
+                key_ok = False
+                detail = {
+                    "row": row_idx + 1,
+                    "column": key_col,
+                    "target": key_col,
+                    "value": "" if value is None else str(value)[:120],
+                    "reason": (
+                        f"DynamoDB key attribute `{key_col}` missing/empty — "
+                        "refuse silent empty-string identity collapse"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "chars": [],
+                }
+                rejected_details.append(detail)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=host or "",
+                        checksum="",
+                        chunks_completed=0,
+                        error=detail["reason"],
+                        rejected_rows=len({d["row"] for d in rejected_details}),
+                        rejected_details=rejected_details[:100],
+                    )
+                break
+        if key_ok:
+            valid_rows.append(row)
+
+    chunks = max(1, (len(valid_rows) + batch_size - 1) // batch_size) if valid_rows else 1
 
     try:
-        for chunk_idx in range(chunks):
-            slice_rows = mapped_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
+        for chunk_idx in range(0 if not valid_rows else chunks):
+            if not valid_rows:
+                break
+            slice_rows = valid_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
             for row in slice_rows:
                 item = {}
@@ -160,8 +219,8 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table,
             target_schema=endpoint or region,
-            checksum=row_checksum(mapped_rows, target_cols),
-            chunks_completed=chunks,
+            checksum=row_checksum(valid_rows, target_cols),
+            chunks_completed=chunks if valid_rows else 0,
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=rejected_details[:100],

@@ -308,29 +308,57 @@ def clear_watermark(cursor_key: str) -> dict[str, Any]:
     }
 
 
-def max_cursor_value(rows: list[list[str]], headers: list[str], cursor_column: str) -> str | None:
-    """Find maximum cursor value using typed watermark comparator."""
+def max_cursor_value(
+    rows: list[list[str]],
+    headers: list[str],
+    cursor_column: str,
+    cursor_primary_key: str | None = None,
+) -> str | None:
+    """Find maximum cursor value using typed watermark comparator.
+
+    When ``cursor_primary_key`` is set, returns a composite ``cursor|pk`` watermark
+    so peer rows sharing a timestamp are not skipped on the next incremental poll.
+    """
     if not cursor_column or not rows:
         return None
     try:
         idx = headers.index(cursor_column)
     except ValueError:
         return None
-    values = [rows[i][idx] for i in range(len(rows)) if idx < len(rows[i]) and rows[i][idx]]
-    if not values:
-        return None
-    from services.cdc_engine import infer_watermark_type, max_watermark
+    pk = (cursor_primary_key or "").strip()
+    pk_idx: int | None = None
+    if pk and pk != cursor_column:
+        try:
+            pk_idx = headers.index(pk)
+        except ValueError:
+            pk_idx = None
 
-    str_values = [str(v) for v in values]
-    wm_type = infer_watermark_type(str_values)
-    return max_watermark(str_values, wm_type)
+    if pk_idx is None:
+        values = [rows[i][idx] for i in range(len(rows)) if idx < len(rows[i]) and rows[i][idx]]
+        if not values:
+            return None
+        from services.cdc_engine import infer_watermark_type, max_watermark
+
+        str_values = [str(v) for v in values]
+        wm_type = infer_watermark_type(str_values)
+        return max_watermark(str_values, wm_type)
+
+    best: str | None = None
+    for row in rows:
+        if idx >= len(row) or not row[idx]:
+            continue
+        pk_val = row[pk_idx] if pk_idx < len(row) else ""
+        cand = f"{row[idx]}|{pk_val}"
+        if best is None or compare_cursor_values(cand, best) > 0:
+            best = cand
+    return best
 
 
 def compare_cursor_values(a: str | None, b: str | None) -> int:
     """Compare two cursor values using the same typed watermark logic.
 
     Returns -1 if a < b, 0 if equal, 1 if a > b.  None is treated as less
-    than any value.
+    than any value. Composite ``cursor|pk`` watermarks compare lexicographically.
     """
     if a is None and b is None:
         return 0
@@ -338,10 +366,20 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
         return -1
     if b is None:
         return 1
+    sa, sb = str(a), str(b)
+    if "|" in sa and "|" in sb:
+        a_cur, a_pk = sa.split("|", 1)
+        b_cur, b_pk = sb.split("|", 1)
+        base = compare_cursor_values(a_cur, b_cur)
+        if base != 0:
+            return base
+        if a_pk == b_pk:
+            return 0
+        return 1 if a_pk > b_pk else -1
     from services.cdc_engine import compare_watermarks, infer_watermark_type
 
-    wm_type = infer_watermark_type([str(a), str(b)])
-    return compare_watermarks(str(a), str(b), wm_type)
+    wm_type = infer_watermark_type([sa, sb])
+    return compare_watermarks(sa, sb, wm_type)
 
 
 def requires_incremental(sync_mode: str) -> bool:

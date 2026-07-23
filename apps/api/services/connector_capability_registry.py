@@ -966,11 +966,16 @@ def recommended_batch_size(key: str) -> int:
 
 
 STRUCTURED_FILE_FORMATS: set[str] = {
-    "csv", "tsv", "parquet", "avro", "excel", "xlsx", "xls", "ods", "feather", "arrow", "ipc", "orc"
+    # Only formats with complete parse + stream support. Feather/Arrow/IPC stay
+    # out until native ingest exists — catalog must not claim structured fidelity.
+    "csv", "tsv", "parquet", "avro", "excel", "xlsx", "xls", "ods", "orc",
 }
 
+# Detected as file formats in some catalogs but not yet parse/stream-ready.
+UNIMPLEMENTED_FILE_FORMATS: set[str] = {"feather", "arrow", "ipc", "protobuf"}
+
 SEMI_STRUCTURED_FILE_FORMATS: set[str] = {
-    "json", "jsonl", "ndjson", "xml", "yaml", "yml", "toml", "bson", "msgpack", "protobuf"
+    "json", "jsonl", "ndjson", "xml", "yaml", "yml", "toml", "bson", "msgpack",
 }
 
 
@@ -997,6 +1002,11 @@ def classify_payload(
 
     src_key = _normalize_connector_id(source_format)
     tgt_key = _normalize_connector_id(target_format)
+    if src_key in UNIMPLEMENTED_FILE_FORMATS or tgt_key in UNIMPLEMENTED_FILE_FORMATS:
+        return {
+            "shape": "unstructured",
+            "note": "File format not yet parse/stream ready — refuse structured fidelity claims",
+        }
     if src_key in STRUCTURED_FILE_FORMATS or tgt_key in STRUCTURED_FILE_FORMATS:
         return {"shape": "structured", "note": "Tabular file payload with rows and columns"}
     if src_key in SEMI_STRUCTURED_FILE_FORMATS or tgt_key in SEMI_STRUCTURED_FILE_FORMATS:

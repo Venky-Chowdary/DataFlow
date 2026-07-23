@@ -122,6 +122,19 @@ def write_mapped_rows(
         preserve_case=True,
         error_policy=policy,
     )
+    if errors and policy == "fail":
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=index,
+            target_schema=host or "localhost",
+            checksum="",
+            chunks_completed=0,
+            error=f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=rejected_details[:100],
+        )
 
     conflict = [c for c in (conflict_columns or []) if c]
     mode = (write_mode or "insert").lower()
@@ -129,7 +142,22 @@ def write_mapped_rows(
 
     client = _client(cfg)
     try:
-        if create_table and not client.indices.exists(index=index):
+        index_exists = bool(client.indices.exists(index=index))
+        if not index_exists and not create_table:
+            # Clusters with action.auto_create_index would otherwise invent the index.
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=index,
+                target_schema=host or "localhost",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Elasticsearch index {index!r} is missing and "
+                    "create_table is disabled"
+                ),
+            )
+        if create_table and not index_exists:
             # Use one shard and zero replicas for predictable test/CI behavior
             # and to avoid blowing through small cluster shard limits.
             client.indices.create(
@@ -155,6 +183,9 @@ def write_mapped_rows(
             action: dict[str, Any] = {"_index": index, "_source": source}
             if doc_id is not None:
                 action["_id"] = str(doc_id)
+                # Insert/append must not silently overwrite existing docs (index vs create).
+                if mode in {"insert", "append", "create"}:
+                    action["_op_type"] = "create"
             elif requires_identity:
                 identity_missing += 1
                 continue

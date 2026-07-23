@@ -22,6 +22,10 @@ def read_object(
     )
 
 
+# Bound object-prefix listing so introspect cannot pretend a huge bucket is fully scanned.
+_OBJECT_LIST_CAP = 2000
+
+
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
     client = boto3_client("s3", cfg)
     keys: list[str] = []
@@ -29,4 +33,6 @@ def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix or ""):
         for item in page.get("Contents") or []:
             keys.append(item["Key"])
-    return keys[:100]
+            if len(keys) >= _OBJECT_LIST_CAP:
+                return keys
+    return keys

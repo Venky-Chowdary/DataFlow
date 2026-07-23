@@ -1223,10 +1223,23 @@ export function TransferPage({
       }
       const columns = destination.columns ?? [];
       const schema = destination.schema ?? {};
-      const want = targetCollection.trim().toLowerCase();
-      const listed = (destination.objects ?? []).some(
-        (o) => (o.name || "").trim().toLowerCase() === want,
-      );
+      const want = targetCollection.trim();
+      const wantL = want.toLowerCase();
+      const wantLeaf = wantL.split(".").pop() || wantL;
+      const listed = (destination.objects ?? []).some((o) => {
+        const raw = (o.name || "").trim();
+        if (!raw) return false;
+        const rawL = raw.toLowerCase();
+        const rawLeaf = rawL.split(".").pop() || rawL;
+        return (
+          rawL === wantL
+          || rawLeaf === wantL
+          || wantLeaf === rawL
+          || rawL.endsWith(`.${wantL}`)
+          || wantL.endsWith(`.${rawL}`)
+          || rawLeaf === wantLeaf
+        );
+      });
       // Probe list / columns win over a soft-fail "missing" flag (MySQL jobs bug).
       let resolvedExists: boolean | null;
       if (listed || destination.table_exists === true || columns.length > 0) {
@@ -1236,9 +1249,20 @@ export function TransferPage({
       } else {
         resolvedExists = null;
       }
+      // Never demote a confirmed table to "missing" on a flaky empty re-probe —
+      // that falsely flips Map into the create-new ribbon.
+      if (destTableExists === true && resolvedExists === false && columns.length === 0) {
+        resolvedExists = true;
+      } else if (destTableExists === true && resolvedExists == null) {
+        resolvedExists = true;
+      } else if (destColumns.length > 0 && resolvedExists == null) {
+        resolvedExists = true;
+      }
       // Never wipe a known schema with an empty probe when the table still exists —
       // that falsely flips Map into "create-new" / identity 93% mode.
-      const keepPrior = columns.length === 0 && resolvedExists !== false;
+      const keepPrior =
+        columns.length === 0
+        && (resolvedExists !== false || destTableExists === true || destColumns.length > 0);
       const nextColumns = keepPrior ? destColumns : columns;
       const nextSchema = keepPrior ? destSchemaMap : schema;
       setDestColumns(nextColumns);
@@ -3513,12 +3537,20 @@ export function TransferPage({
         ? `Fetching existing schema from DynamoDB table ${targetCollection || targetDb}`
         : destColumns.length > 0
           ? `Existing DynamoDB table schema — ${destColumns.length} attributes introspected`
-          : `Items will be written to DynamoDB table ${targetCollection || targetDb || "table"}`
+          : destTableExists === false
+            ? `DynamoDB table ${targetCollection || targetDb || "table"} will be created on first write`
+            : destTableExists === true
+              ? `Existing DynamoDB table ${targetCollection || targetDb} — attribute metadata pending`
+              : `Confirming DynamoDB table ${targetCollection || targetDb || "table"}…`
       : destSchemaLoading
       ? `Fetching existing schema from ${destType} connector`
       : destColumns.length > 0
-        ? `Existing ${destType} collection schema — ${destColumns.length} fields introspected`
-        : `New schema will be created in ${targetDb}.${targetCollection || "collection"}`;
+        ? `Existing ${destType} schema — ${destColumns.length} fields introspected`
+        : destTableExists === false
+          ? `New schema will be created in ${targetDb}.${targetCollection || "collection"}`
+          : destTableExists === true
+            ? `Existing ${destType} table ${targetDb}.${targetCollection} — column metadata pending`
+            : `Confirming whether ${targetDb}.${targetCollection || "table"} already exists…`;
   const mapSourceColumnCount = columnMappings.length || analysis?.columns.length || currentSourceColumns.length;
 
   const effectiveMappingProof = useMemo(
@@ -3526,8 +3558,9 @@ export function TransferPage({
       mergeMappingProof(mappingProof, columnMappings, {
         destColumns,
         destType: destKindMode === "file_export" ? exportFormat : destType,
+        destTableExists: destKindMode === "database" ? destTableExists : false,
       }),
-    [mappingProof, columnMappings, destColumns, destKindMode, exportFormat, destType],
+    [mappingProof, columnMappings, destColumns, destKindMode, exportFormat, destType, destTableExists],
   );
   const mappingProofSummary = useMemo(() => {
     if (!columnMappings.length) return null;

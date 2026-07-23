@@ -2,6 +2,9 @@
 
 Reads from Neo4j 4.x/5.x via the transactional Cypher HTTP endpoint.
 Configuration uses host, port, username/password, and database.
+
+Nodes are projected with stable identity (elementId + labels + properties) —
+never collapse a graph node into an anonymous property bag (Airbyte-class gap).
 """
 
 from __future__ import annotations
@@ -43,21 +46,91 @@ def _run_cypher(url: str, username: str, password: str, statement: str, timeout:
     return body
 
 
+def _node_record_from_row(row: list[Any]) -> dict[str, Any]:
+    """Map ``[elementId, labels, properties]`` (or legacy node dict) to a flat record."""
+    if len(row) >= 3 and isinstance(row[2], dict) and not (
+        isinstance(row[0], dict) and "properties" in row[0]
+    ):
+        element_id, labels, props = row[0], row[1], row[2]
+        record = dict(props) if isinstance(props, dict) else {"value": props}
+        record["_neo4j_element_id"] = element_id
+        if isinstance(labels, list):
+            record["_neo4j_labels"] = json.dumps(labels, default=json_default)
+        else:
+            record["_neo4j_labels"] = cell_to_string(labels)
+        return record
+
+    # Legacy / ad-hoc: single node dict from RETURN n (REST graph or properties map).
+    if len(row) == 1 and isinstance(row[0], dict):
+        value = row[0]
+        if "properties" in value:
+            record = dict(value.get("properties") or {})
+            meta = value.get("meta") or {}
+            if value.get("elementId") is not None:
+                record["_neo4j_element_id"] = value.get("elementId")
+            elif meta.get("id") is not None:
+                record["_neo4j_element_id"] = meta.get("id")
+            elif value.get("id") is not None:
+                record["_neo4j_element_id"] = value.get("id")
+            labels = value.get("labels") or meta.get("labels")
+            if labels is not None:
+                record["_neo4j_labels"] = (
+                    json.dumps(labels, default=json_default)
+                    if isinstance(labels, list)
+                    else cell_to_string(labels)
+                )
+            return record
+        return dict(value)
+
+    # Scalar / multi-column projection — preserve column values as-is via caller.
+    return {}
+
+
 def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
     results = (body or {}).get("results") or []
     if not results:
         return [], []
     result = results[0]
-    columns = result.get("columns") or []
+    columns = [str(c) for c in (result.get("columns") or [])]
     data = result.get("data") or []
+
+    # Identity-aware projection: elementId / labels / properties.
+    if columns == ["_neo4j_element_id", "_neo4j_labels", "props"] or (
+        len(columns) == 3
+        and columns[0] in {"_neo4j_element_id", "elementId(n)", "elementId"}
+    ):
+        records: list[dict[str, Any]] = []
+        for item in data:
+            row = item.get("row") or []
+            records.append(_node_record_from_row(row))
+        headers: list[str] = []
+        seen: set[str] = set()
+        for preferred in ("_neo4j_element_id", "_neo4j_labels"):
+            if any(preferred in r for r in records):
+                seen.add(preferred)
+                headers.append(preferred)
+        for rec in records:
+            for k in rec.keys():
+                if k not in seen:
+                    seen.add(k)
+                    headers.append(k)
+        matrix = [[cell_to_string(rec.get(h)) for h in headers] for rec in records]
+        return headers, matrix
+
+    # Generic column projection (custom Cypher).
     rows: list[list[str]] = []
     for item in data:
         row = item.get("row") or []
-        # Each row entry may be a node dict (when RETURN n) or scalar/dict.
         flat_row = []
         for value in row:
             if isinstance(value, dict) and "properties" in value:
-                flat_row.append(json.dumps(value["properties"], default=json_default))
+                # Honest: serialize full node envelope including identity when present.
+                envelope = {
+                    "_neo4j_element_id": value.get("elementId") or (value.get("meta") or {}).get("id"),
+                    "_neo4j_labels": value.get("labels") or (value.get("meta") or {}).get("labels"),
+                    **(value.get("properties") or {}),
+                }
+                flat_row.append(json.dumps(envelope, default=json_default))
             else:
                 flat_row.append(cell_to_string(value))
         rows.append(flat_row)
@@ -106,13 +179,24 @@ def read_object(
     username = merged.get("username") or ""
     password = merged.get("password") or ""
     label = (object or "").strip()
+    # Deterministic order + identity columns — SKIP/LIMIT alone is not resume-safe.
     if label:
         quoted = label.replace("`", "\\`")
-        statement = f"MATCH (n:`{quoted}`) RETURN n SKIP {offset} LIMIT {limit}"
+        statement = (
+            f"MATCH (n:`{quoted}`) "
+            f"RETURN elementId(n) AS _neo4j_element_id, labels(n) AS _neo4j_labels, properties(n) AS props "
+            f"ORDER BY elementId(n) "
+            f"SKIP {int(offset)} LIMIT {int(limit)}"
+        )
     else:
-        statement = f"MATCH (n) RETURN n SKIP {offset} LIMIT {limit}"
+        statement = (
+            "MATCH (n) "
+            "RETURN elementId(n) AS _neo4j_element_id, labels(n) AS _neo4j_labels, properties(n) AS props "
+            "ORDER BY elementId(n) "
+            f"SKIP {int(offset)} LIMIT {int(limit)}"
+        )
     body = _run_cypher(url, username, password, statement)
     headers, rows = _extract_rows(body)
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=len(rows))
-
-
+    # A page size is not a table total — keep continuation open until a short
+    # or empty page establishes end-of-source (same honesty as Influx).
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=None)

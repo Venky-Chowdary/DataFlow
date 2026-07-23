@@ -32,13 +32,13 @@ def test_es_bulk_errors_materialize_rejected_details_and_fail_strict():
                 connection_string="",
                 ssl=False,
                 table_name="events",
-                headers=["id", "amt"],
-                data_rows=[["bad-1", "x"]],
+                headers=["id", "note"],
+                data_rows=[["bad-1", "hello"]],
                 mappings=[
                     {"source": "id", "target": "_id", "transform": "direct"},
-                    {"source": "amt", "target": "amt", "transform": "direct"},
+                    {"source": "note", "target": "note", "transform": "direct"},
                 ],
-                column_types={"id": "TEXT", "amt": "TEXT"},
+                column_types={"id": "TEXT", "note": "TEXT"},
                 create_table=False,
                 error_policy="fail",
             )
