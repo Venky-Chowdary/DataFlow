@@ -86,6 +86,7 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
+            _mark_table_listed_if_present(out, endpoint.table)
             _attach_db_sample(out, endpoint)
         return out
 
@@ -146,6 +147,7 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
+            _mark_table_listed_if_present(out, endpoint.table)
             _attach_db_sample(out, endpoint)
         return out
 
@@ -166,6 +168,7 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
+            _mark_table_listed_if_present(out, endpoint.table)
             _attach_db_sample(out, endpoint)
         return out
 
@@ -188,6 +191,7 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
+            _mark_table_listed_if_present(out, endpoint.table)
             _attach_db_sample(out, endpoint)
         return out
 
@@ -204,6 +208,7 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
+            _mark_table_listed_if_present(out, endpoint.table)
             _attach_db_sample(out, endpoint)
         return out
 
@@ -299,6 +304,33 @@ def introspect_endpoint(
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
+
+
+def _object_name_match(names: list[str] | None, target: str | None) -> str | None:
+    """Return the canonical listed name for ``target`` (case-insensitive), else None."""
+    want = (target or "").strip()
+    if not want:
+        return None
+    for name in names or []:
+        raw = (name or "").strip()
+        if not raw or raw.startswith("("):
+            continue
+        if raw == want or raw.lower() == want.lower():
+            return raw
+    return None
+
+
+def _listed_object_names(out: dict) -> list[str]:
+    return [str(o.get("name") or "") for o in (out.get("objects") or []) if isinstance(o, dict)]
+
+
+def _mark_table_listed_if_present(out: dict, table: str | None) -> str | None:
+    """If probe already listed ``table``, mark exists=True before schema sample."""
+    canonical = _object_name_match(_listed_object_names(out), table)
+    if canonical:
+        out["table_exists"] = True
+        out["message"] = out.get("message") or f"Found existing table `{canonical}`"
+    return canonical
 
 
 def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 100) -> None:
@@ -484,15 +516,32 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         if not table:
             out["table_exists"] = False
             return
-        schema_map = _introspect_table_schema(fmt, cfg, table, [])
+        listed = _mark_table_listed_if_present(out, table) or _object_name_match(
+            _listed_object_names(out), table
+        )
+        # Prefer the case-correct name from SHOW TABLES / information_schema list.
+        resolve_table = listed or table
+        schema_map = _introspect_table_schema(fmt, cfg, resolve_table, [])
+        if not schema_map and listed and listed != table:
+            schema_map = _introspect_table_schema(fmt, cfg, table, [])
         if schema_map:
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map
             out["table_exists"] = True
-            out["message"] = out.get("message") or f"Found existing table `{table}`"
+            out["message"] = out.get("message") or f"Found existing table `{resolve_table}`"
             # Schema-only is not enough for Validate dry-run — fetch a bounded
             # sample so Transfer Studio can run transform integrity checks.
-            _attach_sql_sample_rows(out, endpoint, cfg, fmt, table, sample_limit)
+            _attach_sql_sample_rows(out, endpoint, cfg, fmt, resolve_table, sample_limit)
+        elif listed or out.get("table_exists") is True:
+            # Table is on the probe list but column metadata failed (permissions,
+            # transient error, case fold). Do NOT tell the operator it is missing.
+            out["table_exists"] = True
+            out["columns"] = out.get("columns") or []
+            out["schema"] = out.get("schema") or {}
+            out["message"] = (
+                f"Table `{resolve_table}` exists on the destination, but column "
+                f"metadata could not be loaded — mapping will use source types until retry."
+            )
         else:
             # Missing object: wording depends on whether this endpoint is a source
             # (Transfer Studio introspect) or a destination (create-on-write is OK).
@@ -516,7 +565,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 )
     except Exception as e:
         # Soft-fail: still allow the wizard to continue with auto-create.
-        out["table_exists"] = False
+        # Never flip a confirmed existence flag from the table list probe.
+        if out.get("table_exists") is not True:
+            out["table_exists"] = False
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["message"] = f"{out.get('message', '')} · schema probe: {e}".strip(" ·")
@@ -671,10 +722,22 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
         if db == "mongodb":
             plan["auto_create"].append(f"MongoDB collection `{destination.database or 'test_db'}.{target}`")
         else:
-            from services.dialect_profiles import default_schema_for
+            from services.dialect_profiles import default_schema_for, uses_schema
 
-            sch = destination.schema or default_schema_for(db) or ""
-            plan["auto_create"].append(f"{db} table `{sch}.{target}` with typed columns (CREATE IF NOT EXISTS)")
+            # MySQL/MariaDB: database is the namespace — never show empty `.jobs`.
+            if uses_schema(db):
+                sch = destination.schema or default_schema_for(db) or ""
+                qual = f"{sch}.{target}" if sch else target
+            else:
+                db_name = destination.database or dest_info.get("schema") or ""
+                qual = f"{db_name}.{target}" if db_name else target
+            # Only advertise CREATE when the destination table is actually missing.
+            if dest_info.get("table_exists"):
+                plan["auto_create"].append(f"{db} table `{qual}` (existing — append/map to current columns)")
+            else:
+                plan["auto_create"].append(
+                    f"{db} table `{qual}` with typed columns (CREATE IF NOT EXISTS)"
+                )
         for col in columns:
             plan["type_mappings"].append({
                 "column": col,

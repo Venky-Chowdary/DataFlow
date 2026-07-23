@@ -644,7 +644,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
 
         conn = get_connection(
             host=kwargs.get("host", ""),
-            port=int(kwargs.get("port", 3306)),
+            port=int(kwargs.get("port", 3306) or 3306),
             database=kwargs.get("database", ""),
             username=kwargs.get("username", ""),
             password=kwargs.get("password", ""),
@@ -652,17 +652,45 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             ssl=kwargs.get("ssl", False),
         )
         with conn.cursor() as cur:
+            # MySQL has no separate schema layer — database is the namespace.
+            # Prefer explicit database, then schema field (UI sometimes fills it),
+            # then the session default.
+            db_name = (kwargs.get("database") or kwargs.get("schema") or "").strip()
+            if not db_name:
+                cur.execute("SELECT DATABASE()")
+                row = cur.fetchone()
+                db_name = (row[0] if row else None) or ""
+            if not db_name:
+                return {
+                    "ok": False,
+                    "error": "MySQL database name is required for schema introspection",
+                    "columns": [],
+                    "tables": [],
+                }
             cur.execute(
                 """
                 SELECT table_name FROM information_schema.tables
                 WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                ORDER BY table_name LIMIT 100
+                ORDER BY table_name LIMIT 200
                 """,
-                (kwargs.get("database", ""),),
+                (db_name,),
             )
             tables = [r[0] for r in cur.fetchall()]
             columns: list[dict] = []
-            target = table or (tables[0] if tables else None)
+            # Case-insensitive match — Linux MySQL is case-sensitive for table
+            # filesystem names but operators often type lowercase.
+            requested = (table or "").strip()
+            target = None
+            if requested:
+                for name in tables:
+                    if name == requested or name.lower() == requested.lower():
+                        target = name
+                        break
+                if target is None:
+                    # Table might exist but sit outside the LIMIT 200 list — probe directly.
+                    target = requested
+            else:
+                target = tables[0] if tables else None
             if target:
                 cur.execute(
                     """
@@ -671,18 +699,32 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position
                     """,
-                    (kwargs.get("database", ""), target),
+                    (db_name, target),
                 )
-                for name, dtype, nullable in cur.fetchall():
+                rows = cur.fetchall()
+                if not rows and target != requested:
+                    cur.execute(
+                        """
+                        SELECT column_name, column_type, is_nullable
+                        FROM information_schema.columns
+                        WHERE table_schema = %s AND LOWER(table_name) = LOWER(%s)
+                        ORDER BY ordinal_position
+                        """,
+                        (db_name, requested or target),
+                    )
+                    rows = cur.fetchall()
+                for name, dtype, nullable in rows:
                     columns.append({
                         "name": name,
                         "inferred_type": _mysql_to_logical(dtype),
                         "nullable": nullable == "YES",
                     })
-                if target:
-                    columns = _refine_columns_by_samples(conn, columns, target, kwargs.get("database", ""), quote_char="`")
+                if columns:
+                    columns = _refine_columns_by_samples(
+                        conn, columns, target, db_name, quote_char="`"
+                    )
         conn.close()
-        return {"ok": True, "tables": tables, "columns": columns, "schema": kwargs.get("database", "")}
+        return {"ok": True, "tables": tables, "columns": columns, "schema": db_name}
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
     except Exception as exc:

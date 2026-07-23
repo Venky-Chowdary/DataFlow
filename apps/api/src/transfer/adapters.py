@@ -426,7 +426,13 @@ def _introspect_table_schema(
     info = introspect_schema(
         db_type,
         host=cfg.get("host", ""),
-        port=int(cfg.get("port", 5432) or 5432),
+        port=int(cfg.get("port") or (
+            3306 if db_type == "mysql" else
+            1433 if db_type == "sqlserver" else
+            1521 if db_type == "oracle" else
+            5439 if db_type == "redshift" else
+            5432
+        )),
         database=cfg.get("database", ""),
         username=cfg.get("username", ""),
         password=cfg.get("password", ""),

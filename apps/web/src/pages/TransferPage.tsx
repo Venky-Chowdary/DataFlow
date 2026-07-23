@@ -1214,11 +1214,23 @@ export function TransferPage({
       }
       const columns = destination.columns ?? [];
       const schema = destination.schema ?? {};
-      const exists = destination.table_exists ?? (columns.length > 0);
+      const want = targetCollection.trim().toLowerCase();
+      const listed = (destination.objects ?? []).some(
+        (o) => (o.name || "").trim().toLowerCase() === want,
+      );
+      // Probe list / columns win over a soft-fail "missing" flag (MySQL jobs bug).
+      let resolvedExists: boolean | null;
+      if (listed || destination.table_exists === true || columns.length > 0) {
+        resolvedExists = true;
+      } else if (destination.table_exists === false) {
+        resolvedExists = false;
+      } else {
+        resolvedExists = null;
+      }
       setDestColumns(columns);
       setDestSchemaMap(schema);
-      setDestTableExists(exists);
-      if (!exists && lastNewTableToastRef.current !== tableKey) {
+      setDestTableExists(resolvedExists);
+      if (resolvedExists === false && lastNewTableToastRef.current !== tableKey) {
         lastNewTableToastRef.current = tableKey;
         toast({
           title: "New table will be created",
@@ -1226,19 +1238,20 @@ export function TransferPage({
           tone: "info",
         });
       }
-      return { columns, schema, tableExists: exists };
+      return { columns, schema, tableExists: resolvedExists === true };
     } catch (e) {
       if (gen !== destSchemaGenRef.current) {
         return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
       }
       // Keep last-known schema on transient errors so the demo does not blank out.
-      setDestTableExists(false);
+      // Do not force "table missing" — unknown is safer than a false create promise.
+      setDestTableExists(null);
       toast({
         title: "Could not read destination schema",
-        message: e instanceof Error ? e.message : "Continuing — table will be created on first write if missing.",
+        message: e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.",
         tone: "warning",
       });
-      return { columns: destColumns, schema: destSchemaMap, tableExists: false };
+      return { columns: destColumns, schema: destSchemaMap, tableExists: destTableExists ?? false };
     } finally {
       if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
@@ -4419,6 +4432,7 @@ export function TransferPage({
                 id="dest-col"
                 className="df2-input"
                 value={targetCollection}
+                aria-busy={destSchemaLoading || undefined}
                 onChange={(e) => {
                   // Do not blank schema on every keystroke — debounce reload keeps last columns
                   // until the new table probe returns (avoids demo flicker).
@@ -4461,16 +4475,35 @@ export function TransferPage({
             {destDriverType !== "mongodb" && destDriverType !== "dynamodb" && (
               <div
                 className={`df2-dest-target-status${
-                  destTableExists === true ? " is-existing" : destTableExists === false ? " is-create" : ""
+                  destSchemaLoading
+                    ? " is-loading"
+                    : destTableExists === true
+                      ? " is-existing"
+                      : destTableExists === false
+                        ? " is-create"
+                        : ""
                 }`}
                 aria-live="polite"
+                role="status"
               >
-                {destTableExists === true ? (
+                {destSchemaLoading ? (
+                  <>
+                    <Spinner size="sm" label="Analyzing destination schema" />
+                    <p>
+                      <strong>Checking destination…</strong> Looking up{" "}
+                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>{" "}
+                      and loading column types for mapping.
+                    </p>
+                  </>
+                ) : destTableExists === true ? (
                   <>
                     <DtIcon name="database" size={14} />
                     <p>
                       <strong>Existing table detected.</strong> New rows will <strong>append</strong> by default.
                       Open Advanced settings to switch to overwrite or incremental sync.
+                      {destColumns.length > 0 ? (
+                        <> · {destColumns.length} columns loaded.</>
+                      ) : null}
                     </p>
                   </>
                 ) : destTableExists === false ? (
@@ -4678,7 +4711,7 @@ export function TransferPage({
             }}
           />
 
-          {destKindMode === "database" && destColumns.length > 0 && (
+          {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
             <div className="df2-dest-schema-preview">
               <StructurePreview
                 columns={destColumns}
@@ -4687,11 +4720,6 @@ export function TransferPage({
                 subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection} — mapping will align to these columns`}
               />
             </div>
-          )}
-          {destKindMode === "database" && destSchemaLoading && (
-            <p className="df2-label-hint df2-dest-schema-loading">
-              <Spinner size="sm" /> Fetching existing schema from destination…
-            </p>
           )}
 
           {transferPlan && (

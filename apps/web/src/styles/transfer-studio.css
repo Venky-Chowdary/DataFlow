@@ -2335,6 +2335,26 @@ th.df2-type-string .df2-type-badge {
   color: #2563eb;
 }
 
+.df2-dest-target-status.is-loading {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
+.df2-dest-target-status.is-loading .dt-brand-loader,
+.df2-dest-target-status.is-loading svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #0f766e;
+}
+
+.df2-dest-target-status code {
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.06);
+}
+
 /* Step 4 — validate: preflight scrolls inside panel */
 .df2-validate-step > .df2-card-body {
   display: flex;
