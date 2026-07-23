@@ -6,9 +6,11 @@ import logging
 import os
 import resource
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 # Ensure the API root (parent of the `src` package) is first on sys.path so the
 # `services` intelligence package resolves to `apps/api/services`, not an
@@ -143,6 +145,64 @@ from services.checkpoint_service import (
 )
 
 logger = logging.getLogger("dataflow.transfer")
+
+
+@contextmanager
+def _reconcile_phase_heartbeat(
+    mongo: Any,
+    job_id: str,
+    *,
+    processed: int,
+    total: int,
+    interval_s: float = 8.0,
+) -> Iterator[None]:
+    """Hold progress at 99% and keep live UI messaging fresh during reconcile.
+
+    Reconciliation can take minutes on large tables (COUNT + checksum queries).
+    Without heartbeats the theater freezes on the last write event and looks stuck.
+    """
+    mongo.update_job_status(
+        job_id,
+        "running",
+        phase="reconcile",
+        progress_pct=99,
+        records_processed=processed,
+        total_rows=total,
+        message=(
+            "All rows written — reconciling destination "
+            f"({processed:,} rows: counts + checksum proof)…"
+        ),
+    )
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _pulse() -> None:
+        while not stop.wait(interval_s):
+            elapsed = int(time.monotonic() - started)
+            mongo.update_job_status(
+                job_id,
+                "running",
+                phase="reconcile",
+                progress_pct=99,
+                records_processed=processed,
+                total_rows=total,
+                message=(
+                    f"Reconciling data ({elapsed}s) — verifying row counts "
+                    f"and checksums for {processed:,} rows…"
+                ),
+            )
+
+    thread = threading.Thread(
+        target=_pulse,
+        name=f"reconcile-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
 
 
 def _compare_and_publish_load_history(
@@ -1538,23 +1598,23 @@ class UniversalTransferEngine:
                 mongo.update_job_status(job_id, "failed", error=f"Unknown destination: {request.destination.kind}", phase="failed")
                 return TransferResult(success=False, error=f"Unknown destination kind: {request.destination.kind}", job_id=job_id)
 
-            mongo.update_job_status(
-                job_id, "running", phase="reconcile",
-                progress_pct=compute_transfer_progress_pct(phase="reconcile") or 99,
-                message="Running reconciliation…",
-            )
-
-            recon = run_reconciliation(
-                endpoint=request.destination,
-                records=records,
-                columns=columns,
-                rows_written=rows_written,
-                writer_checksum=dest_summary.get("checksum", ""),
-                dest_summary=dest_summary,
-                mappings=mappings,
-                source_schema=schema,
-                validation_mode=request.validation_mode,
-            )
+            with _reconcile_phase_heartbeat(
+                mongo,
+                job_id,
+                processed=int(rows_written or 0),
+                total=int(rows_written or 0),
+            ):
+                recon = run_reconciliation(
+                    endpoint=request.destination,
+                    records=records,
+                    columns=columns,
+                    rows_written=rows_written,
+                    writer_checksum=dest_summary.get("checksum", ""),
+                    dest_summary=dest_summary,
+                    mappings=mappings,
+                    source_schema=schema,
+                    validation_mode=request.validation_mode,
+                )
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id, "failed",
@@ -2004,23 +2064,23 @@ class UniversalTransferEngine:
                     limit=request.limit,
                 )
 
-            mongo.update_job_status(
-                job_id, "running", phase="reconcile",
-                progress_pct=compute_transfer_progress_pct(phase="reconcile") or 99,
-                message="Running reconciliation…",
-            )
-
-            recon = run_reconciliation(
-                endpoint=request.destination,
-                records=[],
-                columns=columns,
-                rows_written=rows_written,
-                writer_checksum=dest_summary.get("checksum", ""),
-                dest_summary=dest_summary,
-                mappings=mappings,
-                source_schema=schema,
-                validation_mode=request.validation_mode,
-            )
+            with _reconcile_phase_heartbeat(
+                mongo,
+                job_id,
+                processed=int(rows_written or 0),
+                total=int(rows_written or 0),
+            ):
+                recon = run_reconciliation(
+                    endpoint=request.destination,
+                    records=[],
+                    columns=columns,
+                    rows_written=rows_written,
+                    writer_checksum=dest_summary.get("checksum", ""),
+                    dest_summary=dest_summary,
+                    mappings=mappings,
+                    source_schema=schema,
+                    validation_mode=request.validation_mode,
+                )
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id, "failed",
@@ -2372,23 +2432,23 @@ class UniversalTransferEngine:
                 source_filter=request.source_filter,
             )
 
-            mongo.update_job_status(
-                job_id, "running", phase="reconcile",
-                progress_pct=compute_transfer_progress_pct(phase="reconcile") or 99,
-                message="Running reconciliation…",
-            )
-
-            recon = run_reconciliation(
-                endpoint=request.destination,
-                records=[],
-                columns=columns,
-                rows_written=rows_written,
-                writer_checksum=dest_summary.get("checksum", ""),
-                dest_summary=dest_summary,
-                mappings=mappings,
-                source_schema=schema,
-                validation_mode=request.validation_mode,
-            )
+            with _reconcile_phase_heartbeat(
+                mongo,
+                job_id,
+                processed=int(rows_written or 0),
+                total=int(rows_written or 0),
+            ):
+                recon = run_reconciliation(
+                    endpoint=request.destination,
+                    records=[],
+                    columns=columns,
+                    rows_written=rows_written,
+                    writer_checksum=dest_summary.get("checksum", ""),
+                    dest_summary=dest_summary,
+                    mappings=mappings,
+                    source_schema=schema,
+                    validation_mode=request.validation_mode,
+                )
             if not recon.get("passed"):
                 mongo.update_job_status(
                     job_id, "failed",

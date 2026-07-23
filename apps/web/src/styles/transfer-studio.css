@@ -4952,6 +4952,27 @@ th.df2-type-string .df2-type-badge {
 .df2-theater-v3-bar.is-stalled .df2-theater-v3-bar-shimmer {
   animation-duration: 0.8s;
 }
+.df2-theater-v3-bar.is-reconcile .df2-theater-v3-bar-fill {
+  background: linear-gradient(90deg, #0f766e, #14b8a6, #0d9488);
+}
+.df2-theater-v3-bar.is-reconcile .df2-theater-v3-bar-shimmer {
+  animation-duration: 1.6s;
+}
+.df2-theater-v3-ring.is-reconcile .fill {
+  stroke: #0d9488;
+}
+.df2-theater-v3-chunk.is-reconcile {
+  color: #0f766e;
+  background: #f0fdfa;
+  border-color: #99f6e4;
+}
+.df2-theater-v3-progress-block.is-reconciling .df2-theater-v3-progress-copy h3 {
+  color: #0f766e;
+}
+.df2-theater-v3-bar-legend-note {
+  color: #0f766e;
+  font-weight: 700;
+}
 @keyframes df2-theater-shimmer {
   100% { transform: translateX(100%); }
 }

@@ -62,18 +62,46 @@ const PHASES = [
 ];
 
 const PHASE_LABELS: Record<string, string> = {
+  queued: "Queued",
+  reading: "Read",
+  writing: "Write",
   preflight: "Gates",
   extract: "Extract",
   transform: "Transform",
   load: "Load",
   reconcile: "Reconcile",
+  completed: "Done",
 };
 
 function phaseIndex(phase?: string, status?: string): number {
   if (isJobSuccess(status)) return 5;
   if (status === "failed" || status === "cancelled") return -1;
-  const idx = PHASES.findIndex((p) => p.id === (phase || "queued"));
+  const normalized =
+    phase === "load" || phase === "writing" ? "writing"
+    : phase === "extract" || phase === "reading" ? "reading"
+    : phase === "reconciling" || phase === "verification" ? "reconcile"
+    : phase;
+  const idx = PHASES.findIndex((p) => p.id === (normalized || "queued"));
   return idx >= 0 ? idx : 0;
+}
+
+/** True when writes are done and the engine is proving the load (or about to). */
+function isReconcilePhase(job: JobProgress): boolean {
+  const phase = (job.phase || "").toLowerCase();
+  if (phase === "reconcile" || phase === "reconciling" || phase === "verification") {
+    return true;
+  }
+  const total = job.total_rows ?? 0;
+  const processed = job.records_processed ?? 0;
+  if (total > 0 && processed >= total && !isJobTerminal(job.status) && !isJobSuccess(job.status)) {
+    // All rows reported written but job still running — reconcile owns the last percent.
+    return true;
+  }
+  const phases = job.phases || [];
+  if (phases.some((p) => p.name === "reconcile" && p.status === "active")) {
+    return true;
+  }
+  return false;
 }
 
 function formatDuration(ms: number): string {
@@ -333,12 +361,15 @@ export function JobTheaterView({
 }: JobTheaterViewProps) {
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
-  const currentPhase = phaseIndex(job.phase, job.status);
   const isFailed = job.status === "failed";
   const isCancelled = job.status === "cancelled";
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const reconciling = isRunning && isReconcilePhase(job);
+  const currentPhase = reconciling
+    ? PHASES.findIndex((p) => p.id === "reconcile")
+    : phaseIndex(job.phase, job.status);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
@@ -373,14 +404,19 @@ export function JobTheaterView({
     : null;
   const capacityFailure = isDestinationCapacityFailure(failureHint, job.error || job.message);
 
-  // Prefer row-derived progress when we have a denominator — never let phase
-  // theater (old 90% caps) outrun actual rows written.
+  // Prefer row-derived progress while writing. Once reconcile starts (or all rows
+  // are written), hold 99% — never imply "done" until status is terminal success.
   const reportedPct = job.progress_pct ?? 0;
   const derivedPct = total > 0 ? (processed / Math.max(total, 1)) * 100 : null;
   const indeterminate = Boolean((job as { progress_indeterminate?: boolean }).progress_indeterminate) && !(total > 0);
-  const rawProgress = derivedPct != null
-    ? derivedPct
-    : (indeterminate ? Math.min(reportedPct || 5, 5) : reportedPct);
+  let rawProgress: number;
+  if (reconciling) {
+    rawProgress = Math.max(reportedPct || 99, 99);
+  } else if (derivedPct != null) {
+    rawProgress = derivedPct;
+  } else {
+    rawProgress = indeterminate ? Math.min(reportedPct || 5, 5) : reportedPct;
+  }
   const progress = isComplete
     ? 100
     : Math.min(99, Math.max(isRunning ? 1 : 0, Math.round(rawProgress)));
@@ -420,12 +456,22 @@ export function JobTheaterView({
 
   const timelinePhases = useMemo(() => {
     if (job.phases?.length) {
-      return job.phases.map((phase: JobPhase) => ({
-        id: phase.name,
-        label: PHASE_LABELS[phase.name] ?? phase.name,
-        state: phase.status,
-        elapsedMs: typeof phase.elapsed_ms === "number" ? phase.elapsed_ms : null,
-      }));
+      return job.phases.map((phase: JobPhase) => {
+        let state = phase.status;
+        // If writes finished but phase list lags, force Reconcile active for honesty.
+        if (reconciling && phase.name === "reconcile" && state !== "done" && state !== "failed") {
+          state = "active";
+        }
+        if (reconciling && (phase.name === "load" || phase.name === "transform") && state === "active") {
+          state = "done";
+        }
+        return {
+          id: phase.name,
+          label: PHASE_LABELS[phase.name] ?? phase.name,
+          state,
+          elapsedMs: typeof phase.elapsed_ms === "number" ? phase.elapsed_ms : null,
+        };
+      });
     }
 
     return PHASES.map((phase, i) => {
@@ -435,18 +481,46 @@ export function JobTheaterView({
         : "pending";
       return { id: phase.id, label: phase.label, state, elapsedMs: null as number | null };
     });
-  }, [job.phases, isFailed, isCancelled, currentPhase, isComplete]);
+  }, [job.phases, isFailed, isCancelled, currentPhase, isComplete, reconciling]);
 
   const activePhase = timelinePhases.find((p) => p.state === "active");
-  const phaseLabel = activePhase?.label
-    || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed" : "Queued");
+  const phaseLabel = reconciling
+    ? "Reconcile"
+    : activePhase?.label
+      || (isComplete ? "Done" : isCancelled ? "Cancelled" : isFailed ? "Failed" : "Queued");
+
+  const headline = isQuarantine
+    ? "Completed with quarantine"
+    : isComplete
+      ? "Transfer complete"
+      : isCancelled
+        ? "Transfer cancelled"
+        : isFailed
+          ? "Transfer failed"
+          : indeterminate
+            ? "Streaming changes"
+            : reconciling
+              ? "Reconciling data"
+              : "Transferring data";
+
+  const statusCopy = (() => {
+    if (!isRunning) return "Job finished";
+    if (reconciling) {
+      const msg = (job.message || "").trim();
+      if (msg && !/^writing batch/i.test(msg)) return msg;
+      return "All rows written — verifying destination row counts and checksums. This can take a few minutes on large loads.";
+    }
+    if (job.message) return job.message;
+    if (indeterminate) return `${phaseLabel} — ${processed.toLocaleString()} change(s) applied…`;
+    return `${phaseLabel} — ${processed.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""} rows…`;
+  })();
 
   const eta = useMemo(() => {
     const rps = displayRps;
-    if (!isRunning || rps <= 0 || total <= processed) return null;
+    if (!isRunning || reconciling || rps <= 0 || total <= processed) return null;
     const secs = Math.ceil((total - processed) / rps);
     return secs < 60 ? `${secs}s` : `${Math.ceil(secs / 60)}m`;
-  }, [isRunning, displayRps, total, processed]);
+  }, [isRunning, reconciling, displayRps, total, processed]);
 
   const slowSnowflakeTip =
     destType === "snowflake"
@@ -653,9 +727,9 @@ export function JobTheaterView({
         </div>
       )}
 
-      <div className="df2-theater-v3-progress-block">
+      <div className={`df2-theater-v3-progress-block${reconciling ? " is-reconciling" : ""}`}>
         <div className="df2-theater-v3-progress-top">
-          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : ""}`} aria-hidden>
+          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}`} aria-hidden>
             <svg viewBox="0 0 56 56">
               <circle cx="28" cy="28" r="24" className="track" />
               <circle
@@ -667,40 +741,45 @@ export function JobTheaterView({
                 transform="rotate(-90 28 28)"
               />
             </svg>
-            <strong>{indeterminate && isRunning ? "…" : `${progress}%`}</strong>
+            <strong>{indeterminate && isRunning && !reconciling ? "…" : `${progress}%`}</strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
-            <h3>{isQuarantine ? "Completed with quarantine" : isComplete ? "Transfer complete" : isCancelled ? "Transfer cancelled" : isFailed ? "Transfer failed" : indeterminate ? "Streaming changes" : "Transferring data"}</h3>
-            <p title={job.message || phaseLabel}>
-              {job.message || (isRunning
-                ? (indeterminate
-                  ? `${phaseLabel} — ${processed.toLocaleString()} change(s) applied…`
-                  : `${phaseLabel} — ${processed.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""} rows…`)
-                : "Job finished")}
-            </p>
+            <h3>{headline}</h3>
+            <p title={statusCopy}>{statusCopy}</p>
             <div className="df2-theater-v3-progress-tags">
-              <span className="df2-theater-v3-chunk">
-                <DtIcon name="activity" size={11} /> {phaseLabel}
+              <span className={`df2-theater-v3-chunk${reconciling ? " is-reconcile" : ""}`}>
+                <DtIcon name={reconciling ? "shield" : "activity"} size={11} /> {phaseLabel}
               </span>
-              {job.chunk_current != null && job.chunk_total != null && job.chunk_total > 0 && (
+              {!reconciling && job.chunk_current != null && job.chunk_total != null && job.chunk_total > 0 && (
                 <span className="df2-theater-v3-chunk">
                   <DtIcon name="database" size={11} /> Batch {job.chunk_current}/{job.chunk_total}
                 </span>
               )}
-              {stalled && isRunning && (
+              {reconciling && (
+                <span className="df2-theater-v3-chunk is-working is-reconcile">
+                  <Spinner size="sm" label="" /> Verifying fidelity…
+                </span>
+              )}
+              {stalled && isRunning && !reconciling && (
                 <span className="df2-theater-v3-chunk is-working">
                   <Spinner size="sm" label="" /> Writing large batch…
+                </span>
+              )}
+              {stalled && reconciling && (
+                <span className="df2-theater-v3-chunk is-working is-reconcile">
+                  Still reconciling — large destinations can take a few minutes
                 </span>
               )}
             </div>
           </div>
         </div>
         <div
-          className={`df2-theater-v3-bar ${isRunning ? "is-live" : ""} ${stalled && isRunning ? "is-stalled" : ""} ${isFailed ? "is-failed" : ""}`}
+          className={`df2-theater-v3-bar ${isRunning ? "is-live" : ""} ${stalled && isRunning ? "is-stalled" : ""} ${reconciling ? "is-reconcile" : ""} ${isFailed ? "is-failed" : ""}`}
           role="progressbar"
           aria-valuenow={progress}
           aria-valuemin={0}
           aria-valuemax={100}
+          aria-label={reconciling ? "Reconciling destination data" : "Transfer progress"}
         >
           <div className="df2-theater-v3-bar-fill" style={{ width: `${Math.min(progress, 100)}%` }}>
             {isRunning && <span className="df2-theater-v3-bar-shimmer" aria-hidden />}
@@ -709,6 +788,7 @@ export function JobTheaterView({
         <div className="df2-theater-v3-bar-legend">
           <span>{processed.toLocaleString()} rows</span>
           {total > 0 && <span>{total.toLocaleString()} total</span>}
+          {reconciling && <span className="df2-theater-v3-bar-legend-note">99% reserved for reconcile proof</span>}
         </div>
       </div>
 
