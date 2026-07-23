@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
+import { useMemo } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import type { PreflightResult } from "../../lib/types";
+import { buildDisplayBlockers, buildExecutiveSummary } from "../../lib/validateIssueGrouping";
 
 interface ValidateActionsRailProps {
   preflight: PreflightResult | null;
@@ -51,9 +53,14 @@ export function ValidateActionsRail({
   const confidenceBand = preflight?.proof_bundle?.confidence_band?.toUpperCase() || "MEDIUM";
   const qualityGrade = preflight?.proof_bundle?.quality_grade?.toUpperCase() || "GOOD";
   const proofWarnings = preflight?.proof_bundle?.transfer_decision?.warnings || [];
-  const firstBlocker = preflight?.blockers?.[0];
-  const firstBlockerMessage = firstBlocker?.message;
-  const firstBlockerFix = firstBlocker?.guidance?.fix;
+  const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
+  const displayBlockers = useMemo(
+    () => (preflight ? buildDisplayBlockers(preflight) : []),
+    [preflight],
+  );
+  const firstBlocker = displayBlockers[0];
+  const firstBlockerMessage = firstBlocker?.impact || firstBlocker?.message;
+  const firstBlockerFix = firstBlocker?.fix;
 
   return (
     <aside className="df2-validate-rail" aria-label="Validation actions">
@@ -98,6 +105,12 @@ export function ValidateActionsRail({
             <p>
               <strong>{preflight.passed_count}/{preflight.total_gates}</strong> checks · {proofDecision.toUpperCase()}
             </p>
+            {executiveSummary && (
+              <p className="df2-validate-rail-outcome">{executiveSummary.railLine}</p>
+            )}
+            {executiveSummary?.readinessCaption && (
+              <p className="df2-validate-rail-hint">{executiveSummary.readinessCaption}</p>
+            )}
             {passed && (
               <p className="df2-validate-rail-hint">
                 Review every gate card on the left — rules, duration, and blockers — then Execute.
@@ -109,7 +122,7 @@ export function ValidateActionsRail({
               </p>
             )}
 
-            {(preflight.proof_bundle || preflight.blockers.length > 0) && (
+            {(preflight.proof_bundle || displayBlockers.length > 0) && (
               <div className="df2-validate-rail-details-body">
                 {preflight.proof_bundle && (
                   <div className="df2-validate-rail-metrics">
@@ -131,27 +144,25 @@ export function ValidateActionsRail({
                     </span>
                   </div>
                 )}
-                {preflight.blockers.length > 0 && (
+                {displayBlockers.length > 0 && (
                   <ul className="df2-validate-rail-blockers">
-                    {preflight.blockers.slice(0, 4).map((b) => {
-                      const details = b.details || {};
-                      const issueTexts = Array.isArray(details.issue_texts)
-                        ? (details.issue_texts as string[])
-                        : Array.isArray(details.errors)
-                          ? (details.errors as unknown[]).map((e) =>
-                              typeof e === "string" ? e : String((e as { message?: string })?.message ?? e),
-                            )
-                          : [];
-                      return (
-                        <li key={b.id}>
-                          {b.message}
-                          {issueTexts.slice(0, 3).map((issue) => (
+                    {displayBlockers.slice(0, 4).map((item) => (
+                      <li key={item.key}>
+                        <strong>{item.title}</strong>
+                        {item.impact || item.message}
+                        {item.gateChips && item.gateChips.length > 0 && (
+                          <span className="df2-validate-rail-issue">
+                            Affects: {item.gateChips.map((c) => c.label).join(" · ")}
+                          </span>
+                        )}
+                        {item.kind === "blocker" && item.source && Array.isArray(item.source.details?.issue_texts) && (
+                          (item.source.details.issue_texts as string[]).slice(0, 2).map((issue) => (
                             <span key={issue} className="df2-validate-rail-issue">{issue}</span>
-                          ))}
-                          {b.guidance?.fix && <span className="df2-validate-rail-fix">Fix: {b.guidance.fix}</span>}
-                        </li>
-                      );
-                    })}
+                          ))
+                        )}
+                        {item.fix && <span className="df2-validate-rail-fix">Fix: {item.fix}</span>}
+                      </li>
+                    ))}
                   </ul>
                 )}
                 {proofDecision === "review" && (proofWarnings.length > 0 || proofReason) && (

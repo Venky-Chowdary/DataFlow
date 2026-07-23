@@ -15,7 +15,15 @@ import {
   CORE_ENGINE_GATE_IDS,
   GATE_CATALOG,
   gateCatalogEntry,
+  gateLabel,
 } from "../../lib/preflightGates";
+import {
+  buildDisplayBlockers,
+  buildExecutiveSummary,
+  findDuplicateKeyRoot,
+  partitionCoercionColumns,
+  partitionExplainIssues,
+} from "../../lib/validateIssueGrouping";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
@@ -277,10 +285,12 @@ const ACTION_ICON: Record<string, string> = {
 function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAllConversions, setShowAllConversions] = useState(false);
+  const [showIsoNormalize, setShowIsoNormalize] = useState(false);
   // Clean string→typed conversions (severity ok) stay collapsed by default so
   // Strip/Quarantine are not buried — detail is one click away.
-  const actionable = columns.filter((c) => c.severity === "block" || c.severity === "warn");
-  const clean = columns.filter((c) => c.severity === "ok");
+  // ISO timestamp wire-normalize warns are grouped (not six separate dramas).
+  const { isoNormalize, otherActionable, clean } = partitionCoercionColumns(columns);
+  const actionable = [...otherActionable, ...(showIsoNormalize ? isoNormalize : [])];
   const visible = showAllConversions ? columns : actionable;
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -293,18 +303,21 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
   if (columns.length === 0) return null;
 
   return (
-    <div className={`df2-vd-coerce${actionable.length === 0 ? " is-clean" : ""}`}>
+    <div className={`df2-vd-coerce${otherActionable.length === 0 && isoNormalize.length === 0 ? " is-clean" : ""}`}>
       <div className="df2-vd-coerce-head">
-        <DtIcon name={actionable.length ? "scan" : "check"} size={15} />
+        <DtIcon name={otherActionable.length ? "scan" : "check"} size={15} />
         <strong>Type coercion preview</strong>
         <span>
-          {actionable.length > 0
-            ? `${actionable.length} column${actionable.length === 1 ? "" : "s"} need review`
+          {otherActionable.length > 0
+            ? `${otherActionable.length} column${otherActionable.length === 1 ? "" : "s"} need review`
             : `${clean.length} column${clean.length === 1 ? "" : "s"} convert cleanly on the sample`}
-          {clean.length > 0 && actionable.length > 0
+          {isoNormalize.length > 0
+            ? ` · ${isoNormalize.length} timestamp normalize (informational)`
+            : ""}
+          {clean.length > 0 && otherActionable.length > 0
             ? ` · ${clean.length} convert cleanly`
             : ""}
-          {actionable.length > 0 ? " — expand a row for offending values / wire form." : "."}
+          {otherActionable.length > 0 ? " — expand a row for offending values / wire form." : "."}
         </span>
         {clean.length > 0 && (
           <button
@@ -316,10 +329,36 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
           </button>
         )}
       </div>
-      {visible.length === 0 ? (
+      {isoNormalize.length > 0 && !showAllConversions && (
+        <div className="df2-vd-iso-group" role="status">
+          <div className="df2-vd-iso-group-head">
+            <DtIcon name="activity" size={14} />
+            <strong>Timestamp normalize at write</strong>
+            <span>{isoNormalize.length} column{isoNormalize.length === 1 ? "" : "s"} · no data loss expected</span>
+          </div>
+          <p className="df2-vd-iso-group-note">ISO-8601 → destination TIMESTAMP bind</p>
+          <div className="df2-vd-chip-row">
+            {isoNormalize.map((col) => (
+              <span key={`${col.source}-${col.target}`} className="df2-vd-chip is-static">{col.source}</span>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm"
+            onClick={() => setShowIsoNormalize((v) => !v)}
+          >
+            {showIsoNormalize ? "Hide per-column normalize rows" : "Show per-column normalize rows"}
+          </button>
+        </div>
+      )}
+      {visible.length === 0 && isoNormalize.length === 0 ? (
         <p className="df2-vd-coerce-empty-hint">
           No blocking coercions. Use <strong>Show all type conversions</strong> to inspect
           raw → destination wire forms (for example ISO timestamps → DATETIME).
+        </p>
+      ) : visible.length === 0 ? (
+        <p className="df2-vd-coerce-empty-hint">
+          No blocking coercions — timestamp normalize notes are informational above.
         </p>
       ) : (
       <div className="df2-vd-coerce-table-wrap">
@@ -833,6 +872,17 @@ export function ValidateDashboard({
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
   const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
 
+  const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
+  const duplicateRoot = useMemo(() => findDuplicateKeyRoot(preflight), [preflight]);
+  const displayBlockers = useMemo(
+    () => (preflight ? buildDisplayBlockers(preflight) : []),
+    [preflight],
+  );
+  const explainParts = useMemo(
+    () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
+    [explain],
+  );
+
   // While validating: all gates pending/queued — never fake a green "pass" mid-flight.
   // After results: reveal in order using real duration_ms.
   const statusForGate = (
@@ -1064,9 +1114,7 @@ export function ValidateDashboard({
               {running
                 ? "Engine running G1–G8…"
                 : preflight
-                  ? preflight.passed
-                    ? "Ready to transfer"
-                    : "Action needed before transfer"
+                  ? executiveSummary?.title ?? (preflight.passed ? "Ready to transfer" : "Action needed before transfer")
                   : "Run validation to check this route"}
             </h3>
           </div>
@@ -1077,6 +1125,26 @@ export function ValidateDashboard({
             <span className="df2-vd-count skip"><strong>{skippedCount}</strong> skipped</span>
             <span className="df2-vd-count total"><strong>{totalGates}</strong> total rules</span>
           </div>
+
+          {!running && preflight && executiveSummary && !preflight.passed && (
+            <div className="df2-vd-exec-summary" role="alert">
+              <p className="df2-vd-exec-summary-sub">{executiveSummary.subtitle}</p>
+              {executiveSummary.untilLines.length > 0 && (
+                <div className="df2-vd-exec-until">
+                  <span className="df2-vd-exec-until-label">Cannot execute until</span>
+                  <ul>
+                    {executiveSummary.untilLines.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <p className="df2-vd-readiness-caption">{executiveSummary.readinessCaption}</p>
+            </div>
+          )}
+          {!running && preflight?.passed && executiveSummary && (
+            <p className="df2-vd-readiness-caption">{executiveSummary.readinessCaption}</p>
+          )}
 
           {!running && preflight && (qualityGrade || confidenceBand) && (
             <div className="df2-vd-proof-chips" aria-label="Proof grade">
@@ -1514,10 +1582,12 @@ export function ValidateDashboard({
                 <strong>Explain &amp; fix with AI</strong>
                 <span>
                   {assistExpanded
-                    ? "Plain-language explanation with one-click fixes."
+                    ? (executiveSummary?.aiPromptHint
+                      || "Plain-language explanation with one-click fixes.")
                     : explain
                       ? "Analysis ready — open to review suggested fixes."
-                      : "Open to analyze this validation result."}
+                      : executiveSummary?.aiPromptHint
+                        || "Open to analyze this validation result."}
                 </span>
               </span>
               <span className={`df2-vd-assist-chevron${assistExpanded ? " is-open" : ""}`} aria-hidden>
@@ -1637,32 +1707,114 @@ export function ValidateDashboard({
                       ))}
                     </div>
                   )}
-                  {(explain.issues?.length ?? 0) > 0 && (
+                  {(explainParts && (
+                    (explainParts.blockers.length > 0)
+                    || (explainParts.warnings.length > 0)
+                    || explainParts.isoGroup
+                    || (proofWarnings.length > 0)
+                  )) && (
                     <div className="df2-vd-explain-issues" aria-label="Validation issues">
-                      <span className="df2-vd-assist-actions-title">Issues</span>
-                      <ul>
-                        {explain.issues.map((issue, i) => (
-                          <li key={`${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
-                            <strong>{issue.title}</strong>
-                            <span className="df2-vd-explain-gate">{issue.gate}</span>
-                            {issue.what && <p>{issue.what}</p>}
-                            {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
-                            {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
-                            {issue.columns?.length > 0 && (
-                              <div className="df2-vd-chip-row">
-                                {issue.columns.slice(0, 8).map((col) => (
-                                  <span key={col} className="df2-vd-chip is-static">{col}</span>
-                                ))}
-                              </div>
+                      {explainParts.blockers.length > 0 && (
+                        <>
+                          <span className="df2-vd-assist-actions-title">Blockers</span>
+                          <ul>
+                            {explainParts.blockers.map((issue, i) => (
+                              <li key={`block-${issue.gate}-${issue.title}-${i}`} className="sev-block">
+                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
+                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                  {gateLabel(issue.gate)}
+                                  <code>{issue.gate}</code>
+                                </span>
+                                {issue.what && <p>{issue.what}</p>}
+                                {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
+                                {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
+                                {issue.columns?.length > 0 && (
+                                  <div className="df2-vd-chip-row">
+                                    {issue.columns.slice(0, 8).map((col) => (
+                                      <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                      {(explainParts.isoGroup || explainParts.warnings.length > 0 || proofWarnings.length > 0) && (
+                        <>
+                          <span className="df2-vd-assist-actions-title">Warnings</span>
+                          <ul className="df2-vd-explain-warnings">
+                            {explainParts.isoGroup && (
+                              <li className="sev-warning df2-vd-iso-issue">
+                                <strong>{explainParts.isoGroup.title}</strong>
+                                <span className="df2-vd-explain-gate is-muted">{explainParts.isoGroup.subtitle}</span>
+                                <p>{explainParts.isoGroup.wireNote}</p>
+                                {explainParts.isoGroup.columns.length > 0 && (
+                                  <div className="df2-vd-chip-row">
+                                    {explainParts.isoGroup.columns.map((col) => (
+                                      <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
                             )}
-                          </li>
-                        ))}
-                      </ul>
+                            {explainParts.warnings.map((issue, i) => (
+                              <li key={`warn-${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
+                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
+                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                  {gateLabel(issue.gate)}
+                                  <code>{issue.gate}</code>
+                                </span>
+                                {issue.what && <p>{issue.what}</p>}
+                                {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
+                                {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
+                                {issue.columns?.length > 0 && (
+                                  <div className="df2-vd-chip-row">
+                                    {issue.columns.slice(0, 8).map((col) => (
+                                      <span key={col} className="df2-vd-chip is-static">{col}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                            {proofWarnings.map((w, i) => (
+                              <li key={`proof-warn-${i}`} className="sev-warning">
+                                <strong>Proof warning</strong>
+                                <p>{w}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
                     </div>
                   )}
-                  {(explain.column_fixes?.length ?? 0) > 0 && (
+                  {(explain.column_fixes?.length ?? 0) > 0 && (() => {
+                    const isoFixRe = /ISO timestamps?/i;
+                    const actionableFixes = explain.column_fixes.filter(
+                      (fix) => !(fix.failed === 0 && isoFixRe.test(fix.suggested_fix || "")),
+                    );
+                    const isoFixes = explain.column_fixes.filter(
+                      (fix) => fix.failed === 0 && isoFixRe.test(fix.suggested_fix || ""),
+                    );
+                    if (actionableFixes.length === 0 && isoFixes.length === 0) return null;
+                    return (
                     <div className="df2-vd-column-fixes" aria-label="Column fixes">
                       <span className="df2-vd-assist-actions-title">Column fixes</span>
+                      {isoFixes.length > 0 && (
+                        <div className="df2-vd-iso-group" role="status">
+                          <div className="df2-vd-iso-group-head">
+                            <DtIcon name="activity" size={14} />
+                            <strong>Timestamp normalize</strong>
+                            <span>{isoFixes.length} column{isoFixes.length === 1 ? "" : "s"} · informational</span>
+                          </div>
+                          <div className="df2-vd-chip-row">
+                            {isoFixes.map((fix) => (
+                              <span key={fix.column} className="df2-vd-chip is-static">{fix.column}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {actionableFixes.length > 0 && (
                       <div className="df2-vd-column-fixes-table-wrap">
                         <table className="df2-vd-column-fixes-table">
                           <thead>
@@ -1675,7 +1827,7 @@ export function ValidateDashboard({
                             </tr>
                           </thead>
                           <tbody>
-                            {explain.column_fixes.map((fix) => (
+                            {actionableFixes.map((fix) => (
                               <tr key={`${fix.column}-${fix.target ?? ""}`} className={`sev-${fix.severity}`}>
                                 <td>
                                   <strong>{fix.column}</strong>
@@ -1713,8 +1865,10 @@ export function ValidateDashboard({
                           </tbody>
                         </table>
                       </div>
+                      )}
                     </div>
-                  )}
+                    );
+                  })()}
                   {explain.suggested_actions.length > 0 && (
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
@@ -1897,27 +2051,66 @@ export function ValidateDashboard({
         </div>
       )}
 
-      {preflight && preflight.blockers.length > 0 && !running && (
+      {preflight && displayBlockers.length > 0 && !running && (
         <div className="df2-vd-blockers">
           <div className="df2-vd-blockers-head">
             <DtIcon name="alert" size={15} />
             <strong>Fix before Run</strong>
-            <span>{preflight.blockers.length}</span>
+            <span>{displayBlockers.length}</span>
           </div>
           <p className="df2-vd-blocker-precaution">
             Schema mismatches, bad data, and type hazards are blocked here on purpose.
-            Resolve each item below (why + fix), re-validate, then Execute — Run should
+            Resolve each root cause below (why + fix), re-validate, then Execute — Run should
             only surface operational issues like timeouts or connectivity.
+            {duplicateRoot
+              ? " Duplicate identity keys may fail several gates; they are grouped as one cause here while each gate card below still records its own check."
+              : ""}
           </p>
           <ul>
-            {preflight.blockers.map((b) => {
+            {displayBlockers.map((item) => {
+              if (item.kind === "duplicate_root") {
+                return (
+                  <li key={item.key} className="df2-vd-blocker-root">
+                    <strong>{item.title}</strong>
+                    {item.impact && <span className="df2-vd-blocker-impact">{item.impact}</span>}
+                    <span>{item.message}</span>
+                    {item.gateChips && item.gateChips.length > 0 && (
+                      <div className="df2-vd-root-gates" aria-label="Affected checks">
+                        <span className="df2-vd-root-gates-label">Affected checks</span>
+                        <div className="df2-vd-chip-row">
+                          {item.gateChips.map((chip) => (
+                            <span key={chip.id} className="df2-vd-chip is-static" title={chip.id}>
+                              {chip.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {item.issues && item.issues.length > 0 && (
+                      <ul className="df2-vd-blocker-issues">
+                        {item.issues.slice(0, 4).map((issue) => (
+                          <li key={issue}>{issue}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {item.fix && (
+                      <span className="df2-vd-blocker-fix">
+                        <DtIcon name="check" size={12} /> {item.fix}
+                      </span>
+                    )}
+                    {item.why && <span className="df2-vd-blocker-why">{item.why}</span>}
+                  </li>
+                );
+              }
+
+              const b = item.source!;
               const issues = issueTextsFromDetails(b.details);
               const blockingCols = (preflight.coercion_report?.columns ?? []).filter((c) => c.severity === "block");
               const showIssueList = issues.length > 0 && !(b.id.includes("dry_run") && blockingCols.length > 0);
               return (
-                <li key={b.id}>
-                  <strong>{metaForGate(b.id).label}</strong>
-                  <span>{b.message}</span>
+                <li key={item.key}>
+                  <strong>{item.title}</strong>
+                  <span>{item.message}</span>
                   {showIssueList && (
                     <ul className="df2-vd-blocker-issues">
                       {issues.slice(0, 6).map((issue) => (
@@ -1958,13 +2151,13 @@ export function ValidateDashboard({
                       </div>
                     </div>
                   )}
-                  {b.guidance?.fix && (
+                  {item.fix && (
                     <span className="df2-vd-blocker-fix">
-                      <DtIcon name="check" size={12} /> {b.guidance.fix}
+                      <DtIcon name="check" size={12} /> {item.fix}
                     </span>
                   )}
-                  {b.guidance?.why && !b.id.includes("dry_run") && (
-                    <span className="df2-vd-blocker-why">{b.guidance.why}</span>
+                  {item.why && !b.id.includes("dry_run") && (
+                    <span className="df2-vd-blocker-why">{item.why}</span>
                   )}
                   {(encodingBlocks || hasEncodingIssue) && (b.id.includes("dry_run") || /format-control|replacement character/i.test(b.message)) && (
                     <div className="df2-vd-blocker-actions">
